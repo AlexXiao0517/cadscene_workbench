@@ -22,6 +22,15 @@
 
   function setMessage(text) { $("#portalMessage").textContent = text; }
 
+  function updateSelectedFileStatus(kind, required) {
+    const file = $(`#portal${kind[0].toUpperCase()}${kind.slice(1)}`).files[0];
+    setFileStatus(
+      kind,
+      file ? "已选择，等待上传" + `：${file.name}` : (required ? "尚未选择" : "不上传也可使用 SfM 工作流"),
+      0,
+    );
+  }
+
   async function postJson(path, payload) {
     const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const result = await response.json().catch(() => ({}));
@@ -96,6 +105,11 @@
   }
 
   $("#portalForm").addEventListener("submit", submit);
+  ["video", "cad", "srt"].forEach((kind) => {
+    $(`#portal${kind[0].toUpperCase()}${kind.slice(1)}`).addEventListener("change", () => {
+      updateSelectedFileStatus(kind, kind !== "srt");
+    });
+  });
   $("#portalEnter").addEventListener("click", () => {
     const mode = debugEnabled && $("#portalModeOverride").value ? $("#portalModeOverride").value : state.mode;
     const target = new URL("/apps/web_camera_viewer/", window.location.origin);

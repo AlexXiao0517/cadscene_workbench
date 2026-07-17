@@ -43,6 +43,13 @@ def test_portal_uses_existing_upload_apis_and_viewer_route() -> None:
         assert route in script
 
 
+def test_portal_shows_selected_files_before_uploading() -> None:
+    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
+
+    assert 'addEventListener("change", () => {' in script
+    assert '"已选择，等待上传"' in script
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
