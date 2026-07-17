@@ -6,6 +6,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_workflow_routing_documentation_describes_all_three_modes() -> None:
+    text = (ROOT / "docs/workflow_routing.md").read_text(encoding="utf-8")
+
+    assert all(mode in text for mode in ("sfm_only", "srt_sfm_fused", "srt_full_pose"))
+
+
 def test_portal_marks_video_and_cad_required_but_srt_optional() -> None:
     html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
 
