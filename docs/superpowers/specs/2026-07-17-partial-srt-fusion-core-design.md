@@ -24,16 +24,17 @@ Stage 6A 的 parser/capability 模块是唯一 SRT 文本解析入口；6B-1 不
 每个 SfM 注册 pose 使用 `frame_index` 对应视频时间。优先级如下：
 
 1. 若可从视频解封装获得该帧 PTS，`frame_time_sec = pts_sec * time_scale + time_offset_sec`；
-2. 仅在视频为恒定帧率且 PTS 不可用时，使用 `frame_index / video_fps * time_scale + time_offset_sec`；
-3. `time_scale` 默认 `1.0`，`time_offset_sec` 默认 `0.0`；本阶段不自动估计它们。
+2. 首选来源是 `02_sfm/frame_timestamps.csv` 中 run_sfm 抽帧阶段保存的 PTS；旧 run 缺失该文件时，通过视频解封装或 `ffprobe` 获取 PTS；
+3. 仅在已确认视频为恒定帧率且 PTS 不可用时，使用 `frame_index / video_fps * time_scale + time_offset_sec`；
+4. `time_scale` 默认 `1.0`，`time_offset_sec` 默认 `0.0`；本阶段不自动估计它们。
 
-SRT 使用 cue start/end 时间而非记录序号。位置和高度在合法相邻 entry 之间线性插值；覆盖区间外、空洞超过阈值、缺字段或重复时间的采样标记为无效，绝不外推为有效 GPS。
+SRT 使用 cue start/end 时间而非记录序号。位置和高度仅在间隔不超过 `max_interpolation_gap_sec` 的合法相邻 entry 之间线性插值；覆盖区间外、SRT 大空洞、缺字段或重复时间的采样标记为无效，绝不外推为有效 GPS。残差平滑还要求窗口内至少有 `min_smoothing_support` 个有效约束；空洞帧仅使用 metric SfM，降低 `fusion_confidence`，且不得跨空洞平滑。
 
 高度字段始终保留 `rel_alt`、`abs_alt`、`selected_height`、`height_source`：默认 `auto` 优先 `rel_alt`，否则使用 `abs_alt - first_valid_abs_alt`，两者都不可用时不伪造高度。高度只表示局部变化，绝不等同于 CAD 的 `z=0`。
 
 ## 坐标与数学约定
 
-有效 WGS84 `(lat, lon, selected_height)` 先转 ECEF，再以首个有效 GPS 为 ENU 原点，得到 `(east_m, north_m, up_m)`；禁止直接把经纬度差视为米。
+水平坐标和 Up 必须分离处理。`lat/lon` 使用一个固定的 ECEF 参考高度（默认首个有效 `abs_alt`；若不存在则 `0.0`）计算 ECEF，并以首个有效 GPS 的同一参考高度建立 ENU 水平原点，得到 `east_m/north_m`；不得把 `rel_alt` 当作 WGS84 椭球高。`up_m` 单独使用 `rel_alt - first_rel_alt`，否则使用 `abs_alt - first_abs_alt`。输出和报告必须记录 `horizontal_coordinate_source`、`ecef_reference_height_source` 和 `up_height_source`；禁止直接把经纬度差视为米。
 
 对共同有效帧估计：
 
@@ -46,9 +47,9 @@ SRT 使用 cue start/end 时间而非记录序号。位置和高度在合法相�
 - 使用固定 RANSAC 随机种子；
 - 检查去重后点集的 rank、中心化奇异值、XY/3D baseline、线性与平面退化。
 
-退化检查不能只看样本数。若轨迹近静止、近纯旋转、有效空间 baseline 太短，或奇异值表明约束不能稳定确定所需自由度，CLI 必须失败，不能输出虚假的高置信 Sim3 或 fused trajectory。
+退化检查不能只看样本数。拒绝条件为 rank 小于 2、近静止、近直线、有效空间 baseline 太短或独立位置过少。普通无人机近水平飞行常见的 rank=2 且非共线轨迹允许融合，但必须标记 `vertical_observability=low`，并降低高度相关的 confidence 组成项。CLI 必须拒绝真正退化的输入，不能输出虚假的高置信 Sim3 或 fused trajectory。
 
-Sim3 拟合按 `vertical_weight` 加权：XY 残差与 Z 残差分别统计，同时将高度分量乘以该权重进入 RANSAC 评分和残差计算。默认 `vertical_weight=0.5`，避免低变化或高噪声高度主导估计。
+标准 Umeyama Sim3 始终在原始三维欧氏坐标中估计，不得通过预先缩放 z 执行加权 Umeyama。`vertical_weight` 只用于 RANSAC 内点评分、残差组合和模型选择；XY 与 Z 残差始终分别统计。默认 `vertical_weight=0.5`，避免低变化或高噪声高度主导评分。加权非线性 refinement 留到后续阶段。
 
 ### 相机旋转约定
 
@@ -78,17 +79,17 @@ Sim3 拟合按 `vertical_weight` 加权：XY 残差与 Z 残差分别统计，�
 
 `02_srt/srt_frame_samples.csv` 最少含：
 
-`frame_index, frame_time_sec, pts_time_sec, srt_time_sec, latitude, longitude, rel_alt, abs_alt, selected_height, height_source, gps_valid, height_valid, interpolated, source_entry_before, source_entry_after`
+`frame_index, frame_time_sec, pts_time_sec, timestamp_source, srt_time_sec, latitude, longitude, rel_alt, abs_alt, selected_height, height_source, gps_valid, height_valid, interpolated, source_entry_before, source_entry_after`
 
 `02_srt/srt_trajectory.json` 保存 ENU 原点、所有有效 SRT 样本、原始高度字段和轨迹统计；`srt_sync_stats.json`、`srt_sync_report.md` 记录同步源、`time_scale`、offset、时长差、重叠率和 warning。
 
-`02_fusion/camera_trajectory_fused.json` 与既有 trajectory loader 兼容，保留 `fps`、尺寸、intrinsics 和 poses。顶层 `meta` 至少含 `trajectory_mode=srt_sfm_fused`、`coordinate_system=local_enu`、position/orientation source、height source、SRT origin、完整 Sim3、同步参数和 `vertical_weight`。每个 pose 保留旧字段，并可追加 `srt_valid`、`srt_interpolated`、`srt_residual_m`、`fusion_confidence` 与 `fusion_confidence_components`。
+`02_fusion/camera_trajectory_fused.json` 与既有 trajectory loader 兼容，保留 `fps`、尺寸、intrinsics 和 poses。顶层 `meta` 至少含 `trajectory_mode=srt_sfm_fused`、`coordinate_system=local_enu`、`horizontal_datum=WGS84`、ENU origin、`up_axis=ENU_up`、`up_source`、`absolute_elevation_available`、position/orientation source、height source、SRT origin、完整 Sim3、同步参数、`vertical_weight` 和 `vertical_observability`。每个 pose 保留旧字段，并可追加 `srt_valid`、`srt_interpolated`、`srt_residual_m`、`fusion_confidence` 与 `fusion_confidence_components`。
 
 `02_fusion/fused_camera_path.csv` 输出 `frame_index,x,y,z,yaw,pitch,roll,fov,trajectory_source,srt_valid,srt_residual_m,fusion_confidence`。`trajectory_comparison.csv` 同时包含 transformed SfM、raw/interpolated SRT、fused 位置、XY/Z residual 和 confidence。报告必须中文；诊断图可选，且不接入正式前端。
 
 ## 默认参数与失败条件
 
-默认参数放入单一 `FusionConfig`，不散落硬编码：`time_scale=1.0`、`time_offset_sec=0.0`、`smoothing_method=rolling_median`、`smoothing_window_sec=2.0`、`vertical_weight=0.5`、固定 `ransac_seed`、最少共同帧、最小 XY baseline、最小时间重叠、GPS/高度有效率、空间去重距离、RANSAC 阈值、合理 scale 区间、最大 GPS 速度与最大高度跳变。
+默认参数放入单一 `FusionConfig`，不散落硬编码：`time_scale=1.0`、`time_offset_sec=0.0`、`max_interpolation_gap_sec`、`min_smoothing_support`、`smoothing_method=rolling_median`、`smoothing_window_sec=2.0`、`vertical_weight=0.5`、固定 `ransac_seed`、最少共同帧、最小 XY baseline、最小时间重叠、GPS/高度有效率、空间去重距离、RANSAC 阈值、合理 scale 区间、最大 GPS 速度与最大高度跳变。
 
 以下情形明确失败并建议“当前 partial-SRT 不适合融合，可回退到 sfm_only”：无有效 GPS、缺少可用高度（非 `height-source=sfm` 时）、共同帧不足、重叠不足、去重样本不足、rank/奇异值/空间 baseline 退化、速度或跳变后没有足够样本、Sim3/RANSAC 失败、scale 异常、NaN/Inf 或输出 schema 不兼容。CLI 不静默回退。
 
@@ -102,7 +103,7 @@ CLI 仅写 `02_srt/` 和 `02_fusion/`，不覆盖 `02_sfm/`。现有 `align_to_c
 
 合成测试必须覆盖：
 
-1. PTS 优先同步、恒定帧率回退、非整数 FPS、time scale/offset、覆盖外无效；
+1. 优先读取 `02_sfm/frame_timestamps.csv` 保存的 PTS；旧 run 缺失该文件时，确认 CFR 后才允许 `frame_index/fps` 回退，否则通过视频解封装或 `ffprobe` 获取 PTS；同时覆盖非整数 FPS、time scale/offset、插值最大间隔和覆盖外无效；
 2. WGS84→ENU 数值合理、相对高度选择；
 3. 已知 Sim3 恢复，固定 seed 可复现，XY/Z 残差单独输出；
 4. rank/奇异值、短 baseline、线性/平面退化、纯旋转明确拒绝；
