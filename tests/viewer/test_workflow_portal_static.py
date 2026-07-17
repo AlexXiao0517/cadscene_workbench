@@ -43,3 +43,11 @@ def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     assert "interface_only" in script
     assert "trajectoryWorkflowLoaded" in script
     assert "正在确认轨迹工作模式" in script
+
+
+def test_viewer_manifest_fetch_failure_falls_back_to_ready_sfm_only() -> None:
+    script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert 'trajectory_mode: "sfm_only"' in script
+    assert 'implementation_status: "ready"' in script
+    assert "trajectoryWorkflowLoaded = true" in script

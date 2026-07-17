@@ -84,16 +84,17 @@
     if (!dataset) return;
     try {
       const response = await fetch(`/api/workflow/dataset-manifest?dataset=${encodeURIComponent(dataset)}`, { cache: "no-store" });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
-      trajectoryWorkflow = payload?.manifest?.workflow || null;
-      trajectoryWorkflowLoaded = true;
-      renderTrajectoryWorkflow(trajectoryWorkflow);
-      pollJobStatus();
-      loadKeyframePlan();
+      trajectoryWorkflow = payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" };
     } catch (error) {
-      // Preserve legacy compatibility when a manifest is unavailable.
+      // Preserve legacy dataset/run URLs when a manifest is unavailable.
+      trajectoryWorkflow = { trajectory_mode: "sfm_only", implementation_status: "ready" };
     }
+    trajectoryWorkflowLoaded = true;
+    renderTrajectoryWorkflow(trajectoryWorkflow);
+    pollJobStatus();
+    loadKeyframePlan();
   }
 
   let uploadRunId = runId || `import_${uploadTimestamp()}`;
