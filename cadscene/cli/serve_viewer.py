@@ -333,6 +333,18 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             runner: JobRunner = self.server.job_runner
             if route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
+                try:
+                    manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                except FileNotFoundError:
+                    # Preserve legacy direct-run compatibility for no-SRT datasets.
+                    manifest = {}
+                workflow = manifest.get("workflow") or {}
+                if workflow.get("implementation_status") == "interface_only":
+                    self._json_response(
+                        HTTPStatus.CONFLICT,
+                        {"error": "SRT 轨迹功能待启用，当前模式不能启动处理流程。"},
+                    )
+                    return
                 result = runner.start_stage(dataset, run_id, stage, payload.get("options") or {})
                 result = {"ok": True, **result}
             elif route == "/api/workflow/cancel":

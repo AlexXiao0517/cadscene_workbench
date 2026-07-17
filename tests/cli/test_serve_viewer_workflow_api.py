@@ -73,6 +73,59 @@ def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_run_stage_api_rejects_interface_only_trajectory_before_starting_job(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "data/demo/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset": "demo",
+                "workflow": {
+                    "trajectory_mode": "srt_sfm_fused",
+                    "implementation_status": "interface_only",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "runs/demo/blocked"
+    (run_dir / "02_sfm").mkdir(parents=True)
+    (run_dir / "02_sfm/camera_trajectory.json").write_text("{}", encoding="utf-8")
+    (run_dir / "02_sfm/sparse_points.ply").write_text("ply\n", encoding="utf-8")
+    (run_dir / "01_keyframes").mkdir()
+    (run_dir / "01_keyframes/camera_track_manual.json").write_text(
+        '{"keyframes":[{"frame":0,"source":"manual_anchor","camera":{}},{"frame":10,"source":"manual_anchor","camera":{}}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "data/demo/demo.mp4").write_bytes(b"video")
+    (tmp_path / "data/demo/cad").mkdir()
+    (tmp_path / "data/demo/cad/design.json").write_text("{}", encoding="utf-8")
+    configs = tmp_path / "configs/datasets"
+    configs.mkdir(parents=True)
+    (configs / "demo.yaml").write_text(
+        "dataset_name: demo\nvideo_path: data/demo/demo.mp4\ncad_dir: data/demo/cad\ncad_scale: 1.0\norigin_xy: [0, 0]\n",
+        encoding="utf-8",
+    )
+    pipeline = tmp_path / "configs/pipelines"
+    pipeline.mkdir()
+    (pipeline / "sfm_overlay_existing_sfm.yaml").write_text("stages: {}\n", encoding="utf-8")
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        status, payload = _post(
+            port,
+            "/api/workflow/run-stage",
+            {"dataset": "demo", "runId": "blocked", "stage": "alignment", "options": {}},
+        )
+
+        assert status == 409
+        assert "待启用" in payload["error"]
+        assert not (tmp_path / "runs/demo/blocked/job_status.json").exists()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_dataset_manifest_api_preserves_no_srt_workflow_defaults(tmp_path: Path) -> None:
     port = _free_port()
     server = _start_server(tmp_path, port)

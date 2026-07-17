@@ -22,6 +22,7 @@
   const title = document.querySelector("#workflowTaskTitle");
   const trajectoryModeLabel = document.querySelector("#workflowTrajectoryMode");
   let trajectoryWorkflow = null;
+  let trajectoryWorkflowLoaded = !dataset;
   let selectedWorkflowStage = null;
   let latestJobStatus = null;
   let workflowSuggestions = [];
@@ -64,6 +65,21 @@
     return trajectoryWorkflow?.implementation_status === "interface_only";
   }
 
+  function trajectoryWorkflowActionsAreBlocked() {
+    return !trajectoryWorkflowLoaded || isInterfaceOnlyTrajectoryWorkflow();
+  }
+
+  function blockTrajectoryWorkflowActionsUntilResolved() {
+    if (!trajectoryWorkflowActionsAreBlocked()) return;
+    const explanation = isInterfaceOnlyTrajectoryWorkflow()
+      ? "当前 SRT 轨迹功能待启用，不能启动处理流程。"
+      : "正在确认轨迹工作模式，请稍候。";
+    document.querySelectorAll("[data-job-action], #workflowGenerateKeyframes, #workflowContinueKeyframes, #workflowFinishKeyframes, #workflowFinishQuality, #workflowReturnKeyframes").forEach((button) => {
+      button.disabled = true;
+      button.title = explanation;
+    });
+  }
+
   async function loadManifestBackedTrajectoryWorkflow() {
     if (!dataset) return;
     try {
@@ -71,7 +87,10 @@
       if (!response.ok) return;
       const payload = await response.json();
       trajectoryWorkflow = payload?.manifest?.workflow || null;
+      trajectoryWorkflowLoaded = true;
       renderTrajectoryWorkflow(trajectoryWorkflow);
+      pollJobStatus();
+      loadKeyframePlan();
     } catch (error) {
       // Preserve legacy compatibility when a manifest is unavailable.
     }
@@ -281,7 +300,7 @@
     }
     runningStage = isRunning ? operation : null;
     document.querySelectorAll("[data-job-action]").forEach((button) => {
-      button.disabled = isRunning || isInterfaceOnlyTrajectoryWorkflow();
+      button.disabled = isRunning || trajectoryWorkflowActionsAreBlocked();
     });
     const cancel = document.querySelector("#workflowCancel");
     if (cancel) cancel.hidden = !isRunning;
@@ -498,6 +517,9 @@
   }
 
   async function runStage(stage) {
+    if (!trajectoryWorkflowLoaded) {
+      throw new Error("正在确认轨迹工作模式，请稍候。");
+    }
     if (isInterfaceOnlyTrajectoryWorkflow()) {
       throw new Error("轨迹功能尚未启用，当前模式不能启动处理流程。");
     }
@@ -543,8 +565,8 @@
     const completed = Number(keyframePlan?.completed_count || 0);
     const total = Array.isArray(keyframePlan?.frames) ? keyframePlan.frames.length : 0;
     if (alignmentButton) alignmentButton.textContent = keyframePlan ? "重新路线拟合" : "路线拟合";
-    if (continueButton) continueButton.disabled = isInterfaceOnlyTrajectoryWorkflow() || keyframeSaveInFlight || !keyframePlan || pending === 0;
-    if (finishButton) finishButton.disabled = isInterfaceOnlyTrajectoryWorkflow() || keyframeSaveInFlight || !keyframePlan || pending > 0;
+    if (continueButton) continueButton.disabled = trajectoryWorkflowActionsAreBlocked() || keyframeSaveInFlight || !keyframePlan || pending === 0;
+    if (finishButton) finishButton.disabled = trajectoryWorkflowActionsAreBlocked() || keyframeSaveInFlight || !keyframePlan || pending > 0;
     if (planStatus) {
       planStatus.textContent = keyframePlan
         ? `计划：已完成 ${completed}/${total}，待标定 ${pending}。待标定帧不会计入人工关键帧。`
@@ -922,6 +944,7 @@
   }
   loadWorkflowSuggestions();
   loadDatasetManifestForUpload();
+  blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
   const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());

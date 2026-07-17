@@ -41,3 +41,5 @@ def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
     assert "interface_only" in script
+    assert "trajectoryWorkflowLoaded" in script
+    assert "正在确认轨迹工作模式" in script
