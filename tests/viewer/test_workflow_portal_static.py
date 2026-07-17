@@ -50,6 +50,15 @@ def test_portal_shows_selected_files_before_uploading() -> None:
     assert '"已选择，等待上传"' in script
 
 
+def test_portal_passes_manifest_resource_paths_to_existing_viewer() -> None:
+    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
+
+    assert 'target.searchParams.set("video", state.manifest.video.url)' in script
+    assert 'target.searchParams.set("cad", state.manifest.cad.url)' in script
+    assert 'target.searchParams.set("cadScale", String(state.manifest.defaults.cad_scale))' in script
+    assert 'target.searchParams.set("originXY", state.manifest.defaults.origin_xy.join(","))' in script
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 

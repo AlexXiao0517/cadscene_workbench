@@ -116,6 +116,10 @@
     target.searchParams.set("dataset", state.dataset);
     target.searchParams.set("runId", state.runId);
     target.searchParams.set("trajectoryMode", mode);
+    target.searchParams.set("video", state.manifest.video.url);
+    target.searchParams.set("cad", state.manifest.cad.url);
+    target.searchParams.set("cadScale", String(state.manifest.defaults.cad_scale));
+    target.searchParams.set("originXY", state.manifest.defaults.origin_xy.join(","));
     if (debugEnabled) target.searchParams.set("debug", "1");
     window.location.assign(target.toString());
   });
