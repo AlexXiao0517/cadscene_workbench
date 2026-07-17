@@ -19,7 +19,7 @@
 
 ---
 
-### 任务 1：建立 SRT 解析和能力检测契约
+### Task 1：建立 SRT 解析和能力检测契约
 
 **文件：**
 - 新建：`cadscene/srt/__init__.py`
@@ -69,7 +69,7 @@ def test_drone_attitude_without_gimbal_is_partial():
 
 预期：所有 SRT fixture 测试通过，包括 malformed、GPS 缺失和视频时长不一致 warning。
 
-### 任务 2：持久化 SRT 分析并扩展 manifest
+### Task 2：持久化 SRT 分析并扩展 manifest
 
 **文件：**
 - 修改：`cadscene/workflow/data_import.py`
@@ -107,7 +107,7 @@ def test_srt_import_writes_analysis_and_manifest(tmp_path: Path):
 
 预期：manifest、路径安全、缺失 SRT 默认值与失败隔离测试通过。
 
-### 任务 3：扩展 server SRT API 与 workflow 状态
+### Task 3：扩展 server SRT API 与 workflow 状态
 
 **文件：**
 - 修改：`cadscene/cli/serve_viewer.py`
@@ -153,7 +153,7 @@ def test_srt_analysis_api_returns_json_and_bad_extension_is_rejected(tmp_path: P
 
 预期：上传、分析读取、错误 JSON、原 API 兼容和无 SRT 状态测试通过。
 
-### 任务 4：实现独立上传 portal 与 viewer 模式提示
+### Task 4：实现独立上传 portal 与 viewer 模式提示
 
 **文件：**
 - 新建：`apps/workflow_portal/index.html`
@@ -198,7 +198,7 @@ def test_existing_viewer_has_manifest_backed_interface_only_copy():
 
 预期：两个脚本无语法错误，静态约束测试通过。
 
-### 任务 5：完善用户文档与回归验证
+### Task 5：完善用户文档与回归验证
 
 **文件：**
 - 新建：`docs/workflow_routing.md`
