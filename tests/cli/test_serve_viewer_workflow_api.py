@@ -73,6 +73,30 @@ def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_dataset_manifest_api_preserves_no_srt_workflow_defaults(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        status, _ = _post(port, "/api/workflow/create-dataset", {"dataset": "demo"})
+        assert status == 200
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/api/workflow/dataset-manifest?dataset=demo")
+        response = conn.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        conn.close()
+
+        assert response.status == 200
+        assert payload["manifest"]["srt"]["status"] == "missing"
+        assert payload["manifest"]["workflow"] == {
+            "trajectory_mode": "sfm_only",
+            "debug_override": None,
+            "implementation_status": "ready",
+        }
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_run_stage_api_accepts_alignment_stage_for_route_fitting(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs/demo/r-align"
     (run_dir / "02_sfm").mkdir(parents=True)

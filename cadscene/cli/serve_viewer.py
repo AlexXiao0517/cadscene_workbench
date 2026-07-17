@@ -18,9 +18,11 @@ from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggesti
 from cadscene.workflow.data_import import (
     create_dataset,
     import_cad,
+    import_srt,
     import_video,
     list_datasets,
     load_dataset_manifest,
+    load_srt_analysis,
     slugify_dataset_name,
 )
 from cadscene.workflow.keyframe_plan import create_keyframe_plan, keyframe_plan_path, load_keyframe_plan, write_keyframe_plan
@@ -176,6 +178,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             message = "CAD 已准备，等待视频"
         else:
             message = "等待上传视频和 CAD assets"
+        trajectory_mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
+        if not failed and trajectory_mode == "srt_sfm_fused":
+            message = "SRT/SfM fusion functionality pending activation"
+        elif not failed and trajectory_mode == "srt_full_pose":
+            message = "SRT full-pose functionality pending activation"
         JobStatusStore(run_dir / "job_status.json", run_id=run_id).update_stage(
             "upload",
             status="failed" if failed else ("success" if ready else "pending"),
@@ -183,6 +190,25 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             message=message,
             error=message if failed else None,
         )
+
+    @staticmethod
+    def _srt_api_payload(dataset: str, manifest: dict, analysis: dict) -> dict:
+        srt = manifest.get("srt") or {}
+        mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
+        if mode == "srt_sfm_fused":
+            message = "SRT/SfM fusion functionality pending activation"
+        elif mode == "srt_full_pose":
+            message = "SRT full-pose functionality pending activation"
+        else:
+            message = "SRT analysis is available; SfM-only workflow remains active"
+        return {
+            "ok": True,
+            "dataset": dataset,
+            "srt_status": str(srt.get("status", "missing")),
+            "trajectory_mode": mode,
+            "analysis": analysis,
+            "message": message,
+        }
 
     def _set_upload_progress(self, dataset: str, run_id: str, message: str) -> None:
         if not run_id:
@@ -234,6 +260,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/create-dataset",
             "/api/workflow/upload-video",
             "/api/workflow/upload-cad",
+            "/api/workflow/upload-srt",
         }
         allowed_routes = {
             "/api/workflow/ignore-suggestion",
@@ -265,7 +292,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 )
                 self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
                 return
-            if route in {"/api/workflow/upload-video", "/api/workflow/upload-cad"}:
+            if route in {"/api/workflow/upload-video", "/api/workflow/upload-cad", "/api/workflow/upload-srt"}:
                 dataset = slugify_dataset_name(self._query_value("dataset", required=True))
                 run_id = self._query_value("runId") or self._query_value("run_id")
                 if run_id and not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
@@ -274,6 +301,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 try:
                     if route.endswith("upload-video"):
                         manifest = import_video(self.server.root_dir, dataset, filename, stream)
+                    elif route.endswith("upload-srt"):
+                        manifest = import_srt(self.server.root_dir, dataset, filename, stream)
                     else:
                         manifest = import_cad(
                             self.server.root_dir,
@@ -285,7 +314,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 finally:
                     stream.close()
                 self._update_upload_status(dataset, run_id, manifest)
-                self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
+                if route.endswith("upload-srt"):
+                    analysis = load_srt_analysis(self.server.root_dir, dataset)
+                    self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
+                else:
+                    self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
                 return
             payload = self._read_json_body()
             dataset, run_id = self._workflow_identity(payload)
@@ -359,6 +392,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/keyframe-plan",
             "/api/workflow/dataset-manifest",
             "/api/workflow/list-datasets",
+            "/api/workflow/srt-analysis",
         }
         if parsed.path not in api_routes:
             return super().do_GET()
@@ -376,6 +410,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"ok": True, "manifest": load_dataset_manifest(self.server.root_dir, dataset)},
                 )
+                return
+            if parsed.path == "/api/workflow/srt-analysis":
+                dataset = slugify_dataset_name((query.get("dataset") or [""])[0])
+                manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                analysis = load_srt_analysis(self.server.root_dir, dataset)
+                self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
                 return
             payload = {
                 "dataset": (query.get("dataset") or [""])[0],
@@ -400,6 +440,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.OK, result)
         except (ValueError, KeyError, TypeError) as exc:
             self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except FileNotFoundError as exc:
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
