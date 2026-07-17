@@ -1,0 +1,2 @@
+this is not an SRT subtitle stream
+and it contains no DJI metadata
