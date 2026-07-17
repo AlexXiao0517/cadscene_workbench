@@ -105,6 +105,9 @@ def _with_defaults(defaults: Mapping[str, Any], value: Any) -> dict[str, Any]:
 def _ensure_srt_workflow(manifest: dict[str, Any]) -> bool:
     srt = _with_defaults(_default_srt(), manifest.get("srt"))
     workflow = _with_defaults(_default_workflow(), manifest.get("workflow"))
+    workflow["implementation_status"] = (
+        "ready" if workflow.get("trajectory_mode") == "sfm_only" else "interface_only"
+    )
     changed = manifest.get("srt") != srt or manifest.get("workflow") != workflow
     manifest["srt"] = srt
     manifest["workflow"] = workflow

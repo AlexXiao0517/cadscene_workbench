@@ -1,5 +1,6 @@
 """Dependency-free parser for incremental DJI-style SRT telemetry blocks."""
 
+import codecs
 import re
 from typing import Any, BinaryIO
 
@@ -26,6 +27,7 @@ _ALIASES = {
     "droneyaw": "drone_yaw", "dronepitch": "drone_pitch", "droneroll": "drone_roll",
     "aircraftyaw": "drone_yaw", "aircraftpitch": "drone_pitch", "aircraftroll": "drone_roll",
 }
+_READ_CHUNK_SIZE = 64 * 1024
 
 
 def _seconds(value: str) -> float:
@@ -52,15 +54,52 @@ def _parse_values(text: str) -> dict[str, float]:
     return values
 
 
-def _parse_records(text: str) -> list[SrtRecord]:
+def _parse_record_block(block: str) -> SrtRecord | None:
+    timecode = _TIMECODE.search(block)
+    if timecode is None:
+        return None
+    values = _parse_values(block[timecode.end():])
+    if not values:
+        return None
+    return SrtRecord(_seconds(timecode.group("start")), _seconds(timecode.group("end")), **values)
+
+
+def _parse_records(stream: BinaryIO) -> list[SrtRecord]:
+    """Decode and aggregate SRT blocks without reading the complete stream."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     records: list[SrtRecord] = []
-    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
-        timecode = _TIMECODE.search(block)
-        if timecode is None:
-            continue
-        values = _parse_values(block[timecode.end():])
-        if values:
-            records.append(SrtRecord(_seconds(timecode.group("start")), _seconds(timecode.group("end")), **values))
+    block_lines: list[str] = []
+    pending = ""
+
+    def finish_block() -> None:
+        if not block_lines:
+            return
+        record = _parse_record_block("\n".join(block_lines))
+        block_lines.clear()
+        if record is not None:
+            records.append(record)
+
+    def consume_line(line: str) -> None:
+        if line.strip():
+            block_lines.append(line.rstrip("\r"))
+        else:
+            finish_block()
+
+    while True:
+        raw = stream.read(_READ_CHUNK_SIZE)
+        if not raw:
+            break
+        pending += decoder.decode(raw, final=False) if isinstance(raw, bytes) else str(raw)
+        lines = pending.split("\n")
+        pending = lines.pop()
+        for line in lines:
+            consume_line(line)
+
+    pending += decoder.decode(b"", final=True)
+    if pending:
+        consume_line(pending)
+    finish_block()
     return records
 
 
@@ -69,9 +108,7 @@ def analyze_srt_stream(
 ) -> dict[str, Any]:
     """Parse ``stream`` and return a stable, JSON-ready capability analysis."""
 
-    raw = stream.read()
-    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-    records = _parse_records(text)
+    records = _parse_records(stream)
     analysis = detect_trajectory_capability(records, video_duration_sec)
     analysis["source_file"] = source_file
     analysis["records"] = [record.to_dict() for record in records]

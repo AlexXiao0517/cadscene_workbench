@@ -225,7 +225,7 @@ def test_manifest_schema_and_dataset_listing(tmp_path: Path) -> None:
     assert [item["dataset"] for item in list_datasets(tmp_path)] == ["one", "two"]
 
 
-def test_load_manifest_deep_normalizes_and_persists_legacy_srt_workflow(tmp_path: Path) -> None:
+def test_load_manifest_normalizes_legacy_srt_workflow_to_interface_only(tmp_path: Path) -> None:
     manifest_path = tmp_path / "data/legacy/dataset_manifest.json"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(
@@ -255,10 +255,29 @@ def test_load_manifest_deep_normalizes_and_persists_legacy_srt_workflow(tmp_path
     assert manifest["workflow"] == {
         "trajectory_mode": "srt_sfm_fused",
         "debug_override": None,
-        "implementation_status": "ready",
+        "implementation_status": "interface_only",
     }
     assert persisted["srt"] == manifest["srt"]
     assert persisted["workflow"] == manifest["workflow"]
+
+
+@pytest.mark.parametrize("status", [None, "ready", "unknown"])
+def test_srt_modes_never_normalize_to_ready_even_with_invalid_status(tmp_path: Path, status: str | None) -> None:
+    manifest_path = tmp_path / "data/legacy/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset": "legacy",
+                "workflow": {"trajectory_mode": "srt_full_pose", "implementation_status": status},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = load_dataset_manifest(tmp_path, "legacy")
+
+    assert manifest["workflow"]["implementation_status"] == "interface_only"
 
 
 def test_list_datasets_deep_normalizes_absent_srt_and_partial_workflow(tmp_path: Path) -> None:

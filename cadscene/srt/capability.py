@@ -21,9 +21,16 @@ def _value(record: SrtRecord | Mapping[str, Any], field: str) -> Any:
 def _valid(record: SrtRecord | Mapping[str, Any], field: str) -> bool:
     value = _value(record, field)
     try:
-        return value is not None and isfinite(float(value))
+        number = float(value)
     except (TypeError, ValueError):
         return False
+    if not isfinite(number):
+        return False
+    if field == "latitude":
+        return -90.0 <= number <= 90.0
+    if field == "longitude":
+        return -180.0 <= number <= 180.0
+    return True
 
 
 def detect_trajectory_capability(

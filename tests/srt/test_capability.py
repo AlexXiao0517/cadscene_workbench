@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 from cadscene.srt.capability import detect_trajectory_capability
@@ -33,6 +34,33 @@ def test_missing_gps_is_sfm_only_with_warning():
 
     assert analysis["detected_mode"] == "sfm_only"
     assert any("GPS" in warning for warning in analysis["warnings"])
+
+
+def test_non_geographic_gps_values_never_enable_srt_trajectory_modes():
+    records = [
+        {"latitude": 91.0, "longitude": 120.0, "altitude": 50.0},
+        {"latitude": 30.0, "longitude": 181.0, "altitude": 50.0},
+    ]
+
+    analysis = detect_trajectory_capability(records)
+
+    assert analysis["coverage"]["latitude"] == 0.5
+    assert analysis["coverage"]["longitude"] == 0.5
+    assert analysis["detected_mode"] == "sfm_only"
+
+
+def test_srt_analysis_reads_stream_in_bounded_chunks():
+    class BoundedReadStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            assert size > 0, "analyze_srt_stream must not issue an unbounded read"
+            return super().read(min(size, 17))
+
+    stream = BoundedReadStream((FIXTURES / "full_pose_example.srt").read_bytes())
+
+    analysis = analyze_srt_stream(stream, "full_pose_example.srt")
+
+    assert analysis["detected_mode"] == "srt_full_pose"
+    assert len(analysis["records"]) == 2
 
 
 def test_partial_metadata_is_fused_but_not_full_pose():

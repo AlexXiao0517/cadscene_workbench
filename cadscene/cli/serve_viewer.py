@@ -339,7 +339,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     # Preserve legacy direct-run compatibility for no-SRT datasets.
                     manifest = {}
                 workflow = manifest.get("workflow") or {}
-                if workflow.get("implementation_status") == "interface_only":
+                trajectory_mode = str(workflow.get("trajectory_mode", "sfm_only"))
+                if trajectory_mode in {"srt_sfm_fused", "srt_full_pose"} or workflow.get("implementation_status") == "interface_only":
                     self._json_response(
                         HTTPStatus.CONFLICT,
                         {"error": "SRT 轨迹功能待启用，当前模式不能启动处理流程。"},
