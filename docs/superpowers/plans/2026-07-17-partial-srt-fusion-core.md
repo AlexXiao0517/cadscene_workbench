@@ -31,7 +31,7 @@
 - Test: `tests/sfm/test_reconstruction.py`
 
 **接口：**
-- 产生 `frame_timestamps.csv`，字段：`frame_index,pts_time_sec,timestamp_source`。
+- 产生 `frame_timestamps.csv`，字段：`source_frame_index,extracted_index,image_name,pts_time_sec,timestamp_source,cfr_confirmed`；SRT 同步必须使用原视频 `source_frame_index`。
 - 产生 `FrameSrtSample`：帧时间、SRT 时间、lat/lon、rel/abs/selected height、有效性、插值来源。
 - 公开 `load_frame_timestamps(path)`, `resolve_frame_times(...)`, `sample_srt_at_frames(...)`。
 
@@ -39,7 +39,7 @@
 
 ```python
 def test_pts_timestamp_has_priority_over_cfr_fallback() -> None:
-    times = resolve_frame_times([0, 10], fps=29.97, pts_by_frame={0: 0.0, 10: 0.401})
+    times = resolve_frame_times([0, 10], fps=29.97, pts_by_source_frame={0: 0.0, 10: 0.401})
     assert times[10].time_sec == 0.401
     assert times[10].source == "pts_csv"
 
@@ -64,7 +64,7 @@ class FrameTime:
     source: str  # pts_csv | demux_pts | cfr_fps
 
 def resolve_frame_times(frames, *, fps, pts_by_frame=None, time_scale=1.0, time_offset_sec=0.0):
-    # pts_by_frame 优先；没有时仅由已确认的 CFR 调用方传入 fps 回退。
+    # source_frame_index 的 PTS 优先；没有时仅 cfr_confirmed=True 才允许 fps 回退。
     ...
 
 def sample_srt_at_frames(records, *, frame_times, max_interpolation_gap_sec):
@@ -72,7 +72,7 @@ def sample_srt_at_frames(records, *, frame_times, max_interpolation_gap_sec):
     ...
 ```
 
-在抽帧阶段写入 `02_sfm/frame_timestamps.csv`。如果抽帧后端无法提供 PTS，则写明来源并让 CLI 在旧 run 中走解封装/CFR 检查分支。
+在抽帧阶段写入 `02_sfm/frame_timestamps.csv`。如果抽帧后端无法提供 PTS，则写明来源并让 CLI 在旧 run 中走解封装/CFR 检查分支；未确认 CFR 的 run 不得按 `frame_index/fps` 伪造时间。
 
 - [ ] **Step 4：验证通过**
 
@@ -104,7 +104,7 @@ def test_east_north_uses_fixed_ecef_reference_and_rel_alt_only_controls_up() -> 
     points, meta = build_local_enu(samples_with_rel_alt())
     assert points[0].east_m == pytest.approx(0.0)
     assert points[1].up_m == pytest.approx(3.0)
-    assert meta["ecef_reference_height_source"] == "first_abs_alt"
+    assert meta["ecef_reference_height_source"] == "first_abs_alt_unverified"
     assert meta["up_source"] == "rel_alt_relative"
 ```
 
@@ -122,8 +122,8 @@ def geodetic_to_ecef(latitude_deg: float, longitude_deg: float, ellipsoid_height
     ...
 
 def build_local_enu(samples, *, height_source: str = "auto"):
-    # lat/lon 使用固定参考高度；up 用 rel_alt-first_rel_alt 或 abs_alt-first_abs_alt。
-    # 返回 horizontal_datum、enu_origin、up_axis、up_source、absolute_elevation_available。
+    # lat/lon 使用 fixed ECEF reference height（zero | first_abs_alt_unverified | verified_ellipsoid_height）；
+    # up 用 rel_alt-first_rel_alt 或 abs_alt-first_abs_alt，绝不将逐帧高度带入 ECEF。
     ...
 ```
 
@@ -231,7 +231,11 @@ def test_srt_jump_is_not_copied_to_fused_position() -> None:
 
 def test_non_identity_sim3_rotation_preserves_camera_projection() -> None:
     new_quat = rotate_cam_from_world_quat(old_quat, rotation_z_90())
-    assert np.allclose(quat_wxyz_to_matrix(new_quat) @ transformed_world_point, old_matrix @ old_world_point)
+    x_new = scale * rotation_z_90() @ x_old + translation
+    c_new = scale * rotation_z_90() @ c_old + translation
+    uv_old = project_normalized(old_matrix @ (x_old - c_old))
+    uv_new = project_normalized(quat_wxyz_to_matrix(new_quat) @ (x_new - c_new))
+    assert np.allclose(uv_new, uv_old)
 ```
 
 - [ ] **Step 2：验证失败**
@@ -309,7 +313,7 @@ parser.add_argument("--min-smoothing-support", type=int, default=3)
 parser.add_argument("--vertical-weight", type=float, default=0.5)
 ```
 
-显式 `--trajectory/--srt/--video` 优先；否则安全读取 dataset manifest。失败不创建 fused JSON。报告以中文写入，并包含 PTS 来源、水平/Up datum、样本去重数、inlier 比例、XY/Z/combined 残差、baseline、低置信区间、warnings 和限制。
+显式 `--trajectory/--srt/--video` 优先；否则安全读取 dataset manifest。所有成功产物使用原子写入；失败不创建 fused JSON，但允许原子写入失败报告和质量统计。报告以中文写入，并包含 PTS 来源、水平/Up datum、样本去重数、inlier 比例、XY/Z/combined 残差、baseline、低置信区间、warnings 和限制。
 
 - [ ] **Step 4：验证通过**
 
@@ -366,7 +370,7 @@ python scripts/check_no_project_dependency.py
 python -m cadscene.cli.fuse_srt_sfm --help
 ```
 
-预期：聚焦融合测试通过；全量测试仅允许已记录的 `project/tests` 旧依赖收集错误，其他测试不得新增失败；独立性检查和 CLI help 通过。
+预期：仓库跟踪的完整测试全部通过；本地 `project/` 必须由 pytest 配置排除，不能再以收集错误作为验收例外；独立性检查和 CLI help 通过。
 
 - [ ] **Step 5：真实数据 smoke（不提交数据）**
 
@@ -385,3 +389,4 @@ git push -u origin feature/partial-srt-fusion-core
 - 设计要求对应：Task 1（PTS、同步空洞）、Task 2（水平/Up）、Task 3（质量、退化、标准 Sim3）、Task 4（融合和方向）、Task 5（CLI/报告）、Task 6（CAD/no-SRT 回归/真实 smoke）。
 - 无第二 SRT parser、无前端/Job Runner正式接入、无 GPS→CAD 自动投影。
 - 所有新增行为先有失败测试，再实现、验证和提交。
+- RANSAC 的加权残差单位为米：`e_xy = ||(p_srt-p_metric)[:2]||`，`e_z = abs((p_srt-p_metric)[2])`，`e_weighted_m = sqrt(e_xy**2 + (vertical_weight*e_z)**2)`；`e_weighted_m <= ransac_inlier_threshold_m` 才是内点。标准 Umeyama 仍使用未缩放的原始三维点。
