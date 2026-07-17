@@ -412,7 +412,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 )
                 return
             if parsed.path == "/api/workflow/srt-analysis":
-                dataset = slugify_dataset_name((query.get("dataset") or [""])[0])
+                dataset = slugify_dataset_name(self._query_value("dataset", required=True))
                 manifest = load_dataset_manifest(self.server.root_dir, dataset)
                 analysis = load_srt_analysis(self.server.root_dir, dataset)
                 self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))

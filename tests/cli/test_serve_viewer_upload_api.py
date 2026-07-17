@@ -311,6 +311,19 @@ def test_srt_analysis_api_returns_json_and_bad_extension_is_rejected(tmp_path: P
         server.wait(timeout=5)
 
 
+def test_srt_analysis_api_requires_a_nonblank_dataset_query(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        for route in ("/api/workflow/srt-analysis", "/api/workflow/srt-analysis?dataset="):
+            status, payload = _json_request(port, "GET", route)
+            assert status == 400
+            assert payload == {"error": "missing query parameter: dataset"}
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_upload_srt_full_pose_stays_interface_only_without_starting_algorithms(tmp_path: Path) -> None:
     port = _free_port()
     server = _start_server(tmp_path, port)

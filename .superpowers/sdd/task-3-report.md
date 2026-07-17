@@ -45,3 +45,12 @@ The warning is the pre-existing `fontTools.misc.py23` deprecation warning.
 No fusion or pose algorithm is started by these APIs. Full runtime-suite
 verification was intentionally not run; this task's requested focused API
 verification passed.
+
+## Reviewer P2 follow-up
+
+`GET /api/workflow/srt-analysis` now requires a nonblank `dataset` query
+parameter. Regression coverage verifies both the absent query and
+`?dataset=` return JSON `400` with exactly
+`{"error": "missing query parameter: dataset"}`. Before the validation
+change, the new test observed the incorrect JSON `404`; after the minimal
+change, the focused CLI API suites reported `17 passed, 1 warning`.
