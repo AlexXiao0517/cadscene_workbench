@@ -22,3 +22,8 @@ SRT 是可选输入。系统只解析 DJI 风格字幕中的位置、 高度和�
 分析结果保存为 `srt_analysis.json` 和 `srt_analysis_report.md`，包含检测模式、每个字段的覆盖率、完整姿态共同覆盖率、云台/飞行器姿态来源和警告。结果仅说明“元数据字段足以进入哪种接口分支”，不说明坐标系、时间同步、测量精度、云台安装误差或与 CAD 的一致性。
 
 目前只有 `sfm_only` 为 `ready`。`srt_sfm_fused` 与 `srt_full_pose` 均为 `interface_only`：系统可以显示检测结果，但不会执行融合或 SRT 直接姿态路线。任何精度结论必须来自既有 SfM-CAD 对齐和质量诊断，而不是 SRT 检测标签。
+# Stage 6B-1 补充：Partial-SRT 融合核心
+
+`sfm_only` 仍是稳定可用流程。`srt_sfm_fused` 现在具有实验性后端融合 CLI：它仍需要 SfM、PTS 时间同步、质量门控和人工关键帧到 CAD 的对齐；正式 Job Runner 路由尚未接入。`srt_full_pose` 仍为 `interface_only`。
+
+Partial-SRT 融合不会把普通 SRT 当作 CAD 绝对高程真值：East/North 使用 WGS84 局部 ENU，Up 单独记录为 `rel_alt` 或 `abs_alt` 的相对变化。融合失败时应明确回退 `sfm_only`，而不是写出伪造轨迹。`fusion_confidence` 只表示内部一致性，不代表绝对定位精度。

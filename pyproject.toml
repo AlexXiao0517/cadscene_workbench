@@ -34,3 +34,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["cadscene*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["project"]
