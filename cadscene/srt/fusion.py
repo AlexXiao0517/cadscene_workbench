@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -29,6 +30,141 @@ class Sim3Fit:
     def transform(self, points: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
         array = as_points(points, name="points")
         return self.scale * (array @ self.rotation.T) + self.translation
+
+
+@dataclass(frozen=True)
+class PositionFusionResult:
+    metric_positions: np.ndarray
+    fused_positions: np.ndarray
+    residuals: np.ndarray
+    fusion_confidence: np.ndarray
+    smoothing_support: np.ndarray
+
+
+def quat_wxyz_to_matrix(quaternion: Sequence[float]) -> np.ndarray:
+    w, x, y, z = (float(value) for value in quaternion)
+    norm = float(np.sqrt(w * w + x * x + y * y + z * z))
+    if norm <= 1e-12:
+        raise ValueError("camera quaternion has zero norm")
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _matrix_to_quat_wxyz(matrix: np.ndarray) -> np.ndarray:
+    rotation = np.asarray(matrix, dtype=np.float64)
+    if rotation.shape != (3, 3):
+        raise ValueError("rotation must have shape (3, 3)")
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        root = np.sqrt(trace + 1.0) * 2.0
+        quat = np.array([0.25 * root, (rotation[2, 1] - rotation[1, 2]) / root, (rotation[0, 2] - rotation[2, 0]) / root, (rotation[1, 0] - rotation[0, 1]) / root])
+    else:
+        index = int(np.argmax(np.diag(rotation)))
+        if index == 0:
+            root = np.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2.0
+            quat = np.array([(rotation[2, 1] - rotation[1, 2]) / root, 0.25 * root, (rotation[0, 1] + rotation[1, 0]) / root, (rotation[0, 2] + rotation[2, 0]) / root])
+        elif index == 1:
+            root = np.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2.0
+            quat = np.array([(rotation[0, 2] - rotation[2, 0]) / root, (rotation[0, 1] + rotation[1, 0]) / root, 0.25 * root, (rotation[1, 2] + rotation[2, 1]) / root])
+        else:
+            root = np.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2.0
+            quat = np.array([(rotation[1, 0] - rotation[0, 1]) / root, (rotation[0, 2] + rotation[2, 0]) / root, (rotation[1, 2] + rotation[2, 1]) / root, 0.25 * root])
+    return quat / np.linalg.norm(quat)
+
+
+def rotate_cam_from_world_quat(quaternion_wxyz: Sequence[float], sim3_rotation: np.ndarray) -> list[float]:
+    """Transform R_cw after X_new=s R_sim3 X_old+t: R_cw_new=R_cw_old R_sim3^T."""
+
+    rotation = np.asarray(sim3_rotation, dtype=np.float64)
+    if rotation.shape != (3, 3) or not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6):
+        raise ValueError("sim3_rotation must be an orthonormal 3x3 matrix")
+    return [float(value) for value in _matrix_to_quat_wxyz(quat_wxyz_to_matrix(quaternion_wxyz) @ rotation.T)]
+
+
+def fuse_positions(
+    metric_positions: Sequence[Sequence[float]] | np.ndarray,
+    *,
+    frame_times_sec: Sequence[float] | np.ndarray,
+    srt_positions: Sequence[Sequence[float]] | np.ndarray,
+    srt_valid: Sequence[bool] | np.ndarray,
+    smoothing_window_sec: float = 2.0,
+    min_smoothing_support: int = 3,
+) -> PositionFusionResult:
+    """Apply bounded-window median SRT residuals without spanning invalid holes."""
+
+    metric = as_points(metric_positions, name="metric_positions")
+    srt = as_points(srt_positions, name="srt_positions")
+    times = np.asarray(frame_times_sec, dtype=np.float64)
+    valid = np.asarray(srt_valid, dtype=bool)
+    if srt.shape != metric.shape or times.shape != (len(metric),) or valid.shape != (len(metric),):
+        raise ValueError("metric/SRT positions, frame times and validity must have matching lengths")
+    if not np.isfinite(times).all() or smoothing_window_sec <= 0.0 or min_smoothing_support < 1:
+        raise ValueError("frame times must be finite; smoothing parameters must be positive")
+    residual = srt - metric
+    fused = metric.copy()
+    confidence = np.full(len(metric), 0.2, dtype=np.float64)
+    support = np.zeros(len(metric), dtype=np.int64)
+    half_window = float(smoothing_window_sec) / 2.0
+    for index in range(len(metric)):
+        if not valid[index]:
+            continue
+        left = index
+        while left > 0 and valid[left - 1]:
+            left -= 1
+        right = index
+        while right + 1 < len(metric) and valid[right + 1]:
+            right += 1
+        window = np.arange(left, right + 1)
+        window = window[np.abs(times[window] - times[index]) <= half_window]
+        support[index] = len(window)
+        if len(window) < min_smoothing_support:
+            confidence[index] = 0.45
+            continue
+        correction = np.median(residual[window], axis=0)
+        fused[index] = metric[index] + correction
+        confidence[index] = min(0.9, 0.5 + 0.1 * len(window))
+    return PositionFusionResult(metric, fused, residual, confidence, support)
+
+
+def build_fused_trajectory_json(
+    raw_trajectory: dict,
+    position_result: PositionFusionResult,
+    *,
+    sim3_rotation: np.ndarray,
+    coordinate_meta: dict,
+) -> dict:
+    """Preserve the legacy trajectory schema while adding fusion provenance."""
+
+    output = deepcopy(raw_trajectory)
+    registered = [pose for pose in output.get("poses", []) if pose.get("registered", True)]
+    if len(registered) != len(position_result.fused_positions):
+        raise ValueError("registered poses do not match fused position count")
+    for index, pose in enumerate(registered):
+        pose["center"] = [float(value) for value in position_result.fused_positions[index]]
+        pose["cam_from_world_quat_wxyz"] = rotate_cam_from_world_quat(pose["cam_from_world_quat_wxyz"], sim3_rotation)
+        pose["srt_valid"] = bool(position_result.smoothing_support[index] > 0)
+        pose["srt_residual_m"] = float(np.linalg.norm(position_result.residuals[index]))
+        pose["fusion_confidence"] = float(position_result.fusion_confidence[index])
+        pose["fusion_confidence_components"] = {
+            "srt_valid": bool(position_result.smoothing_support[index] > 0),
+            "smoothing_support": int(position_result.smoothing_support[index]),
+        }
+    output["meta"] = {
+        **dict(output.get("meta") or {}),
+        **coordinate_meta,
+        "trajectory_mode": "srt_sfm_fused",
+        "position_source": "sfm_shape_plus_srt_low_frequency",
+        "orientation_source": "sfm",
+        "fusion_confidence_note": "Internal consistency only; not an absolute positioning accuracy probability.",
+    }
+    return output
 
 
 def weighted_error_m(residual: np.ndarray, vertical_weight: float) -> np.ndarray:
