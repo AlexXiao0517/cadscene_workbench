@@ -95,3 +95,37 @@ existing `fontTools` deprecation warning.
 ## Commit
 
 `b70dca0` — `Add conservative SRT capability detection`
+
+## Review-fix addendum
+
+### Findings addressed
+
+1. Full-pose classification now requires at least 80% *complete same-record*
+   observations. Each qualifying observation contains finite latitude,
+   longitude, altitude, gimbal yaw, gimbal pitch, and gimbal roll. Marginal
+   per-field coverage alone cannot yield `srt_full_pose`.
+2. DJI bracket aliases `rel_alt`, `abs_alt`, `gb_yaw`, `gb_pitch`, and
+   `gb_roll` are normalized to the existing altitude/gimbal schema fields.
+
+### RED
+
+After adding two regression tests, the focused command failed as expected:
+
+```text
+python -m pytest tests/srt/test_capability.py -v
+2 failed, 6 passed
+```
+
+The failures showed `srt_full_pose` for an input with only 40% complete pose
+records and `sfm_only` for the short DJI aliases.
+
+### GREEN
+
+```text
+python -m pytest tests/srt/test_capability.py -v
+8 passed in 0.02s
+git diff --check
+```
+
+Both commands exited zero. This addendum changed only the SRT classifier,
+parser alias map, synthetic alias fixture, focused tests, and this report.

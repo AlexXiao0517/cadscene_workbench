@@ -1,6 +1,7 @@
 """Decide how safely SRT metadata can assist trajectory reconstruction."""
 
 from collections.abc import Mapping, Sequence
+from math import isfinite
 from typing import Any
 
 from .schema import SrtRecord
@@ -17,6 +18,14 @@ def _value(record: SrtRecord | Mapping[str, Any], field: str) -> Any:
     return getattr(record, field, None) if isinstance(record, SrtRecord) else record.get(field)
 
 
+def _valid(record: SrtRecord | Mapping[str, Any], field: str) -> bool:
+    value = _value(record, field)
+    try:
+        return value is not None and isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def detect_trajectory_capability(
     records: Sequence[SrtRecord | Mapping[str, Any]], video_duration_sec: float | None = None
 ) -> dict[str, Any]:
@@ -30,7 +39,7 @@ def detect_trajectory_capability(
     total = len(records)
     tracked = _POSITION_FIELDS + ("altitude",) + _GIMBAL_FIELDS + _DRONE_FIELDS
     coverage = {
-        field: (sum(_value(record, field) is not None for record in records) / total if total else 0.0)
+        field: (sum(_valid(record, field) for record in records) / total if total else 0.0)
         for field in tracked
     }
     fields = {field: coverage[field] > 0.0 for field in tracked}
@@ -57,12 +66,17 @@ def detect_trajectory_capability(
         warnings.append("Altitude coverage is insufficient for SRT trajectory fusion.")
 
     gimbal_complete = all(coverage[field] >= _MIN_COVERAGE for field in _GIMBAL_FIELDS)
+    full_pose_coverage = (
+        sum(all(_valid(record, field) for field in _POSITION_FIELDS + ("altitude",) + _GIMBAL_FIELDS) for record in records) / total
+        if total
+        else 0.0
+    )
     drone_present = any(fields[field] for field in _DRONE_FIELDS)
     gimbal_present = any(fields[field] for field in _GIMBAL_FIELDS)
     if drone_present and not gimbal_complete:
         warnings.append("Drone attitude is not camera/gimbal attitude; full pose is unavailable.")
 
-    if trajectory_ready and gimbal_complete:
+    if trajectory_ready and gimbal_complete and full_pose_coverage >= _MIN_COVERAGE:
         mode = "srt_full_pose"
     elif trajectory_ready:
         mode = "srt_sfm_fused"
@@ -82,6 +96,7 @@ def detect_trajectory_capability(
         "detected_mode": mode,
         "fields": fields,
         "coverage": coverage,
+        "full_pose_coverage": full_pose_coverage,
         "attitude_sources": {"gimbal": gimbal_present, "drone": drone_present},
         "warnings": warnings,
     }

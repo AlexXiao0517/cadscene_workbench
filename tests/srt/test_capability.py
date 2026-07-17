@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from cadscene.srt.capability import detect_trajectory_capability
 from cadscene.srt.parser import analyze_srt_stream
 
 
@@ -53,3 +54,26 @@ def test_duration_mismatch_adds_warning_without_changing_full_pose():
 
     assert analysis["detected_mode"] == "srt_full_pose"
     assert any("duration" in warning.lower() for warning in analysis["warnings"])
+
+
+def test_marginal_attitude_coverage_without_cooccurring_pose_is_not_full_pose():
+    records = [
+        {"latitude": 30.0, "longitude": 120.0, "altitude": 50.0, "gimbal_yaw": 1.0, "gimbal_pitch": 2.0, "gimbal_roll": 3.0},
+        {"latitude": 30.1, "longitude": 120.1, "altitude": 50.1, "gimbal_yaw": 1.0, "gimbal_pitch": 2.0, "gimbal_roll": 3.0},
+        {"latitude": 30.2, "longitude": 120.2, "altitude": 50.2, "gimbal_yaw": 1.0, "gimbal_pitch": 2.0},
+        {"latitude": 30.3, "longitude": 120.3, "altitude": 50.3, "gimbal_yaw": 1.0, "gimbal_roll": 3.0},
+        {"latitude": 30.4, "longitude": 120.4, "altitude": 50.4, "gimbal_pitch": 2.0, "gimbal_roll": 3.0},
+    ]
+
+    analysis = detect_trajectory_capability(records)
+
+    assert analysis["coverage"]["gimbal_yaw"] == 0.8
+    assert analysis["detected_mode"] == "srt_sfm_fused"
+
+
+def test_dji_rel_alt_and_gb_attitude_aliases_produce_full_pose():
+    analysis = analyze("dji_short_aliases.srt")
+
+    assert analysis["detected_mode"] == "srt_full_pose"
+    assert analysis["fields"]["altitude"] is True
+    assert analysis["fields"]["yaw"] is True

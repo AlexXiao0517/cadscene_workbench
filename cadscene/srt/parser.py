@@ -19,8 +19,9 @@ _TEXT_VALUE = re.compile(
 )
 _ALIASES = {
     "latitude": "latitude", "lat": "latitude", "longitude": "longitude", "longtitude": "longitude", "lon": "longitude", "lng": "longitude",
-    "altitude": "altitude", "alt": "altitude", "height": "altitude", "relativealtitude": "altitude",
+    "altitude": "altitude", "alt": "altitude", "height": "altitude", "relativealtitude": "altitude", "relalt": "altitude", "absalt": "altitude",
     "gimbalyaw": "gimbal_yaw", "gimbalpitch": "gimbal_pitch", "gimbalroll": "gimbal_roll",
+    "gbyaw": "gimbal_yaw", "gbpitch": "gimbal_pitch", "gbroll": "gimbal_roll",
     "camerayaw": "gimbal_yaw", "camerapitch": "gimbal_pitch", "cameraroll": "gimbal_roll",
     "droneyaw": "drone_yaw", "dronepitch": "drone_pitch", "droneroll": "drone_roll",
     "aircraftyaw": "drone_yaw", "aircraftpitch": "drone_pitch", "aircraftroll": "drone_roll",
