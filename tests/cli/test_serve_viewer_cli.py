@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import socket
+import subprocess
+import sys
+import time
+import json
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from cadscene.cli import serve_viewer
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def test_serve_viewer_help_runs() -> None:
+    result = subprocess.run([sys.executable, "-m", "cadscene.cli.serve_viewer", "--help"], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert "--port" in result.stdout
+
+
+def test_viewer_server_exclusively_owns_its_port() -> None:
+    server_class = getattr(serve_viewer, "ViewerHTTPServer", ThreadingHTTPServer)
+    first = server_class(("127.0.0.1", 0), serve_viewer.RangeRequestHandler)
+    host, port = first.server_address
+    try:
+        with pytest.raises(OSError):
+            second = server_class((host, port), serve_viewer.RangeRequestHandler)
+            second.server_close()
+    finally:
+        first.server_close()
+
+
+def test_serve_viewer_serves_index_and_supports_range() -> None:
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "cadscene.cli.serve_viewer", "--bind", "127.0.0.1", "--port", str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 8
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=1)
+                conn.request("GET", "/apps/web_camera_viewer/index.html")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8", errors="ignore")
+                conn.close()
+                if resp.status == 200:
+                    break
+            except Exception as exc:  # pragma: no cover - diagnostic aid on slow CI
+                last_error = exc
+                time.sleep(0.1)
+        else:
+            raise AssertionError(f"server did not respond: {last_error}")
+
+        assert "sourceVideo" in body
+        assert "sceneContainer" in body
+        conn = HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", "/apps/web_camera_viewer/index.html", headers={"Range": "bytes=0-15"})
+        range_resp = conn.getresponse()
+        data = range_resp.read()
+        conn.close()
+
+        assert range_resp.status == 206
+        assert len(data) == 16
+        assert range_resp.getheader("Accept-Ranges") == "bytes"
+
+        conn = HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", "/apps/web_camera_viewer/vendor/three.min.js")
+        js_resp = conn.getresponse()
+        js_body = js_resp.read(64).decode("utf-8", errors="ignore")
+        conn.close()
+
+        assert js_resp.status == 200
+        assert "javascript" in (js_resp.getheader("Content-Type") or "").lower()
+        assert "THREE" in js_body or "three" in js_body.lower()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_serve_viewer_extra_root_serves_named_mount(tmp_path: Path) -> None:
+    legacy_root = tmp_path / "legacy_root"
+    legacy_root.mkdir()
+    (legacy_root / "hello.txt").write_text("legacy-data", encoding="utf-8")
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cadscene.cli.serve_viewer",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--extra-root",
+            f"legacy={legacy_root}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=1)
+                conn.request("GET", "/legacy/hello.txt")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8", errors="ignore")
+                conn.close()
+                if resp.status == 200:
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("extra-root server did not respond")
+
+        assert body == "legacy-data"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_serve_viewer_writes_ignored_suggestion_inside_run(tmp_path: Path) -> None:
+    (tmp_path / "runs" / "demo" / "r1").mkdir(parents=True)
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cadscene.cli.serve_viewer",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--root",
+            str(tmp_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                body = json.dumps(
+                    {
+                        "dataset": "demo",
+                        "run_id": "r1",
+                        "frame_index": 600,
+                        "reason": "用户确认无需补帧",
+                    }
+                ).encode("utf-8")
+                conn = HTTPConnection("127.0.0.1", port, timeout=1)
+                conn.request(
+                    "POST",
+                    "/api/workflow/ignore-suggestion",
+                    body=body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+                )
+                response = conn.getresponse()
+                response.read()
+                conn.close()
+                if response.status == 200:
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("workflow API did not respond")
+
+        output = tmp_path / "runs" / "demo" / "r1" / "04_quality" / "ignored_suggestions.json"
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["ignored"][0]["frame_index"] == 600
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()

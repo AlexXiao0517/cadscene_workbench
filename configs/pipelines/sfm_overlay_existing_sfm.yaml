@@ -1,0 +1,90 @@
+pipeline_name: sfm_overlay_existing_sfm
+version: v0.1-sfm-workbench
+
+stages:
+  alignment:
+    enabled: true
+    output_subdir: 03_alignment
+    inputs:
+      trajectory: "${dataset.trajectory_path}"
+      web_camera_track: "${dataset.default_track}"
+      cad_dir: "${dataset.cad_dir}"
+    params:
+      cad_scale: "${dataset.cad_scale}"
+      origin_xy: "${dataset.origin_xy}"
+      fov: 70.0
+      fov_from: trajectory
+      frontend_track_step: 60
+      frame_step: 1
+
+  quality:
+    enabled: true
+    output_subdir: 04_quality
+    inputs:
+      sfm_camera_path: "${run.03_alignment.sfm_camera_path}"
+      alignment: "${run.03_alignment.alignment}"
+      web_camera_track: "${dataset.default_track}"
+      trajectory: "${dataset.trajectory_path}"
+      cad_dir: "${dataset.cad_dir}"
+    params:
+      cad_scale: "${dataset.cad_scale}"
+      origin_xy: "${dataset.origin_xy}"
+      quality_mode: qa
+      max_suggestions: 10
+      min_suggestion_gap: 40
+      suggestion_risk_threshold: 0.65
+      no_suggestion_samples: true
+
+  viewer_scene:
+    enabled: true
+    output_subdir: 05_viewer_scene
+    inputs:
+      sparse_ply: "${dataset.sparse_ply_path}"
+      trajectory: "${dataset.trajectory_path}"
+      alignment: "${run.03_alignment.alignment}"
+      sfm_camera_path: "${run.03_alignment.sfm_camera_path}"
+      quality_timeline: "${run.04_quality.quality_timeline}"
+      suggestions: "${run.04_quality.keyframe_suggestions}"
+    params:
+      cad_scale: "${dataset.cad_scale}"
+      origin_xy: "${dataset.origin_xy}"
+      max_points: 250000
+      point_sample_mode: uniform
+      voxel_size: 0.15
+
+  road_surface:
+    enabled: true
+    output_subdir: 06_road_surface
+    inputs:
+      sparse_ply: "${dataset.sparse_ply_path}"
+      trajectory: "${dataset.trajectory_path}"
+      alignment: "${run.03_alignment.alignment}"
+      sfm_camera_path: "${run.03_alignment.sfm_camera_path}"
+      web_camera_track: "${dataset.default_track}"
+      cad_dir: "${dataset.cad_dir}"
+    params:
+      cad_scale: "${dataset.cad_scale}"
+      origin_xy: "${dataset.origin_xy}"
+      max_points: 120000
+      point_sample_mode: voxel
+      voxel_size: 0.5
+      station_bin_m: 20
+      road_corridor_width: 15
+      export_viewer_scene: true
+
+  render:
+    enabled: true
+    output_subdir: 08_render
+    inputs:
+      video: "${dataset.video_path}"
+      cad_dir: "${dataset.cad_dir}"
+      sfm_camera_path: "${run.03_alignment.sfm_camera_path}"
+    params:
+      cad_scale: "${dataset.cad_scale}"
+      origin_xy: "${dataset.origin_xy}"
+      debug_scale: 1.0
+      overlay_linewidth: 3
+      overlay_alpha: 0.88
+      faded_overlay: true
+      max_distance_m: 900
+      fade_start_m: 250

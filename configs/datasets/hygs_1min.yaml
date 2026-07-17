@@ -1,0 +1,19 @@
+dataset_name: hygs_1min
+version: v0.1-sfm-workbench
+
+video_path: data/hygs_1min/hygs_1min.mp4
+cad_dir: data/hygs_1min/cad
+cad_scale: 0.06
+origin_xy:
+  - 567747.5756295
+  - 3330464.2234675
+
+default_track: data/hygs_1min/camera_track_240f_kf.json
+
+trajectory_path: null
+sparse_ply_path: null
+
+fps: 25.0
+frame_range:
+  start_frame: 0
+  end_frame: 1500

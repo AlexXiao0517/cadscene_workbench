@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>虚拟相机 CAD 叠加查看器</title>
+    <link rel="stylesheet" href="./style.css?v=20260713-design-json-render2" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>虚拟相机 CAD 叠加查看器</h1>
+          <p>航拍视频、CAD 投影叠加与第三人称虚拟相机调试。</p>
+        </div>
+        <div class="status-strip">
+          <span id="loadStatus">正在加载资源…</span>
+          <span id="drawStatus">尚未投影</span>
+          <span id="fallbackStatus">诊断启动中</span>
+        </div>
+      </header>
+
+      <section class="workflow-bar" id="workflowBar" aria-label="产品工作流">
+        <ol class="workflow-steps" id="workflowSteps">
+          <li data-stage="upload"><span>1</span>上传数据</li>
+          <li data-stage="sfm"><span>2</span>SfM重建</li>
+          <li data-stage="keyframes"><span>3</span>关键帧标定</li>
+          <li data-stage="quality"><span>4</span>质量检测</li>
+          <li data-stage="render"><span>5</span>渲染导出</li>
+        </ol>
+        <div class="workflow-task" id="workflowPanel">
+          <div class="workflow-task-head">
+            <strong id="workflowTaskTitle">当前任务：上传数据</strong>
+            <span><span id="workflowJobState">等待状态</span> <button id="workflowCancel" type="button" hidden>取消任务</button></span>
+          </div>
+          <progress id="workflowProgress" max="1" value="0"></progress>
+          <p id="workflowMessage">选择数据或打开已有 run。</p>
+          <div class="workflow-stage-panel active" data-stage="upload">
+            <div class="workflow-actions">
+              <label class="file-button">上传视频<input id="workflowVideoInput" type="file" accept=".mp4,.mov,.avi,.mkv,video/*" /></label>
+              <label class="file-button">上传 CAD<input id="workflowCadInput" type="file" accept=".dxf,.dwg" /></label>
+              <progress id="workflowUploadProgress" max="1" value="0"></progress>
+            </div>
+            <span class="workflow-stage-note" id="workflowUploadStatus">等待选择视频和 CAD</span>
+            <span class="workflow-stage-note" id="workflowCadStatus">未选择 CAD</span>
+            <details class="workflow-upload-advanced dev-only-control">
+              <summary>高级设置</summary>
+              <div class="workflow-upload-settings">
+                <label>数据集 <input id="workflowDatasetName" type="text" maxlength="80" placeholder="自动生成" /></label>
+                <label>CAD scale <input id="workflowCadScale" type="number" min="0.000001" step="0.01" value="0.06" /></label>
+                <label>Origin X <input id="workflowOriginX" type="number" step="0.0001" value="567747.5756295" /></label>
+                <label>Origin Y <input id="workflowOriginY" type="number" step="0.0001" value="3330464.2234675" /></label>
+                <label class="file-button">导入兼容 assets<input id="workflowAdvancedCadInput" type="file" accept=".json,.zip" /></label>
+              </div>
+            </details>
+          </div>
+          <div class="workflow-stage-panel" data-stage="sfm">
+            <div class="workflow-actions">
+              <button id="workflowStartSfm" data-job-action type="button">开始 SfM 重建</button>
+            </div>
+            <span class="workflow-stage-note" id="workflowSfmStatus">等待 SfM 任务</span>
+            <div class="workflow-stage-note" id="workflowSfmRuntimeSummary">
+              后端：<span id="workflowSfmBackend">自动检测</span>
+              · 设备：<span id="workflowSfmDevice">自动检测</span>
+              · 阶段：<span id="workflowSfmSubstage">等待</span>
+              · 已用：<span id="workflowSfmElapsed">0 秒</span>
+            </div>
+            <details class="workflow-upload-advanced dev-only-control">
+              <summary>SfM 高级设置</summary>
+              <div class="workflow-upload-settings">
+                <label>后端
+                  <select id="workflowSfmBackendSelect">
+                    <option value="auto">自动</option>
+                    <option value="colmap_cli">COLMAP CLI</option>
+                    <option value="pycolmap" selected>pycolmap</option>
+                  </select>
+                </label>
+                <label>设备
+                  <select id="workflowSfmDeviceSelect">
+                    <option value="auto">自动</option>
+                    <option value="cuda">CUDA</option>
+                    <option value="cpu" selected>CPU</option>
+                  </select>
+                </label>
+                <label>GPU index <input id="workflowSfmGpuIndex" type="number" min="0" step="1" value="0" /></label>
+                <label><input id="workflowSfmNoCpuFallback" type="checkbox" /> 禁止 CPU 回退</label>
+              </div>
+            </details>
+          </div>
+          <div class="workflow-stage-panel" data-stage="keyframes">
+            <div class="workflow-actions">
+              <button id="workflowRunAlignment" data-job-action type="button">路线拟合</button>
+              <label>关键帧间隔
+                <select id="workflowKeyframeStep">
+                  <option value="120">120 帧 · 稳健</option>
+                  <option value="180">180 帧 · 平衡</option>
+                  <option value="240">240 帧 · 省力</option>
+                </select>
+              </label>
+              <button id="workflowGenerateKeyframes" type="button">生成关键帧计划</button>
+              <button id="workflowContinueKeyframes" type="button">继续未完成标定</button>
+              <button id="workflowFinishKeyframes" type="button">完成关键帧标定</button>
+            </div>
+            <span class="workflow-stage-note" id="workflowKeyframePlanStatus">尚未生成关键帧计划</span>
+          </div>
+          <div class="workflow-stage-panel" data-stage="quality">
+            <div class="workflow-actions">
+              <button id="workflowRunQuality" data-job-action type="button">运行质量检测</button>
+              <button id="workflowRerunQuality" data-job-action type="button">重新检测</button>
+              <button id="workflowFinishQuality" type="button">完成质量检测</button>
+              <button id="workflowReturnKeyframes" type="button">返回关键帧标定</button>
+            </div>
+          </div>
+          <div class="workflow-stage-panel" data-stage="render">
+            <div class="workflow-actions">
+              <button id="workflowRender" data-job-action type="button">渲染视频</button>
+              <button id="workflowPreviewRender" type="button" disabled>预览视频</button>
+              <a id="workflowDownloadRender" class="workflow-link" href="#" download>下载结果</a>
+            </div>
+          </div>
+        </div>
+      </section>
+      <details class="workflow-log" id="workflowLog">
+        <summary>任务日志（最近 30 行）</summary>
+        <pre id="workflowLogContent">暂无日志</pre>
+      </details>
+      <dialog id="workflowRenderPreviewDialog" class="workflow-render-preview">
+        <div class="workflow-render-preview-head">
+          <strong>CAD 叠加视频预览</strong>
+          <button id="workflowCloseRenderPreview" type="button" aria-label="关闭预览">关闭</button>
+        </div>
+        <video id="workflowRenderPreviewVideo" controls playsinline></video>
+      </dialog>
+
+      <section class="workspace">
+        <section class="view-column">
+          <div class="view-header">
+            <h2>主视频视图</h2>
+            <span id="videoInfo">视频：等待加载</span>
+          </div>
+          <div class="video-stage">
+            <div class="video-layer">
+              <video id="sourceVideo" controls muted playsinline></video>
+              <canvas id="overlayCanvas"></canvas>
+            </div>
+          </div>
+          <div class="quality-timeline" id="qualityTimelineWrap">
+            <div class="quality-timeline-head">
+              <span>质量时间轴</span>
+              <span id="qualityTimelineSummary" class="quality-timeline-summary">未加载质量数据</span>
+            </div>
+            <canvas id="qualityTimelineCanvas" title="点击进度条跳转到对应帧"></canvas>
+            <div id="qualityTimelineTip" class="quality-timeline-tip" hidden></div>
+            <div class="quality-legend">
+              <span><i class="q-dot q-low"></i>低风险</span>
+              <span><i class="q-dot q-medium"></i>中风险</span>
+              <span><i class="q-dot q-high"></i>高风险</span>
+              <span><i class="q-dot q-anchor"></i>人工关键帧</span>
+              <span><i class="q-dot q-suggest"></i>建议补帧</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-column">
+          <div class="view-header">
+            <h2>第三人称 3D 视图</h2>
+            <span>旋转 / 平移 / 缩放观察</span>
+          </div>
+          <div id="sceneContainer" class="scene-stage">
+            <canvas id="fallbackSceneCanvas"></canvas>
+            <div id="sceneHint" class="scene-hint">正在加载 CAD 预览…</div>
+            <div id="sfmSceneTip" class="sfm-scene-tip" hidden></div>
+          </div>
+          <div class="sfm-panel" id="sfmPanel">
+            <div class="sfm-panel-head">
+              <span>SfM 诊断场景（点云 + 双轨迹 + 建议）</span>
+              <label class="file-button">
+                导入 SfM 场景
+                <input id="importSfmScene" type="file" accept="application/json,.json" />
+              </label>
+            </div>
+            <div class="sfm-toggles">
+              <label><input type="checkbox" id="sfmShowPoints" checked /> SfM 点云</label>
+              <label><input type="checkbox" id="sfmShowGlobal" checked /> 原始 SfM 轨迹</label>
+              <label><input type="checkbox" id="sfmShowAnchored" checked /> 锚定后轨迹</label>
+              <label><input type="checkbox" id="sfmShowFrustum" checked /> 相机视锥</label>
+              <label><input type="checkbox" id="sfmShowSuggestions" checked /> 建议补帧标记</label>
+              <label><input type="checkbox" id="sfmFollowOnPlay" /> 播放时跟随无人机</label>
+              <label><input type="checkbox" id="sfmUseSfmPose" /> 跟随原始 SfM 轨迹（纯 SfM 叠加）</label>
+            </div>
+            <div class="sfm-row">
+              <label>点大小 <input type="range" id="sfmPointSize" min="0.5" max="12" step="0.5" value="3" /></label>
+              <label>颜色模式
+                <select id="sfmColorMode">
+                  <option value="rgb">RGB</option>
+                  <option value="height">高度</option>
+                  <option value="single">单色</option>
+                </select>
+              </label>
+            </div>
+            <div class="sfm-info" id="sfmInfo">未加载 SfM 场景（用「导入 SfM 场景」或 URL 参数 sfmScene=）</div>
+            <div class="sfm-info" id="sfmFrameInfo"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="control-panel">
+        <div class="panel-title">
+          <h2>虚拟 UAV 相机</h2>
+          <div class="button-row">
+            <button id="resetCamera" type="button">重置相机</button>
+            <button id="addKeyframe" type="button">添加/更新关键帧</button>
+            <button id="deleteKeyframe" type="button">删除关键帧</button>
+            <button id="previousKeyframe" type="button">上一关键帧</button>
+            <button id="nextKeyframe" type="button">下一关键帧</button>
+            <button id="translateMode" type="button">平移</button>
+            <button id="rotateMode" type="button">旋转</button>
+            <button id="toggleGizmo" type="button">隐藏 Gizmo</button>
+            <button id="toggleCadText" type="button">隐藏标注</button>
+            <button id="exportCamera" type="button">导出相机轨迹</button>
+            <label class="file-button dev-only-control">
+              导入相机轨迹
+              <input id="importCamera" type="file" accept="application/json,.json" />
+            </label>
+            <label class="file-button dev-only-control">
+              导入质量建议
+              <input id="importSuggestions" type="file" accept="application/json,.json" />
+            </label>
+          </div>
+        </div>
+        <div class="track-strip">
+          <span id="timeStatus">时间：0.000 秒</span>
+          <span id="frameStatus">帧：0</span>
+          <span id="keyframeStatus">关键帧：0</span>
+          <span id="currentKeyframeStatus">当前：无关键帧</span>
+          <label class="frame-jump">
+            <span>帧号</span>
+            <input id="frameInput" type="number" min="0" step="1" placeholder="270" />
+          </label>
+          <button id="goToFrame" type="button">跳转到帧</button>
+          <span id="reviewStatus" class="workflow-hidden-control">审核：未加载</span>
+          <button id="acceptPrediction" class="workflow-hidden-control" type="button">确认预测</button>
+          <button id="saveAdjustedKeyframe" class="workflow-hidden-control" type="button">保存微调关键帧</button>
+          <button id="rejectReview" class="workflow-hidden-control" type="button">拒绝</button>
+          <button id="viewCurrentSuggestion" type="button" title="查看当前建议帧" aria-label="查看当前建议帧" disabled>暂无建议</button>
+          <button id="ignoreCurrentSuggestion" type="button" disabled>忽略当前建议</button>
+        </div>
+        <div id="cameraControls" class="controls-grid"></div>
+      </section>
+    </main>
+
+    <script src="./paths.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./vendor/three.min.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./vendor/controls/OrbitControls.global.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./vendor/controls/TransformControls.global.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
+    <script src="./video_display_transform.js?v=20260715-stage5b"></script>
+    <script src="./viewer_legacy.js?v=20260715-cad-primary-focus"></script>
+    <script src="./workflow.js?v=20260715-cad-fit-low-parallax"></script>
+    <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
+  </body>
+</html>

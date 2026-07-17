@@ -1,0 +1,30 @@
+pipeline_name: sfm_overlay
+version: v0.1-sfm-workbench
+stages:
+  segmentation:
+    enabled: true
+    output_subdir: 01_segmentation
+  sfm:
+    enabled: true
+    output_subdir: 02_sfm
+  alignment:
+    enabled: true
+    output_subdir: 03_alignment
+  quality:
+    enabled: true
+    output_subdir: 04_quality
+  viewer_scene:
+    enabled: true
+    output_subdir: 05_viewer_scene
+  road_surface:
+    enabled: true
+    output_subdir: 06_road_surface
+  keyframe_ablation:
+    enabled: true
+    output_subdir: 07_keyframe_ablation
+    params:
+      demo_interval: 240
+  render:
+    enabled: true
+    output_subdir: 08_render
+

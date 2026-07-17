@@ -1,0 +1,87 @@
+# Legacy reference project
+/project/
+
+# Local tool caches, raw captures, and ad-hoc workspace artifacts
+/.agents/
+/.codex/
+/.local/
+/dji/
+/work/
+
+# User datasets and generated runs
+/data/
+/runs/
+/out/
+/outputs/
+/dji/
+
+# Uploaded and generated media
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.m4v
+*.webm
+*.mpg
+*.mpeg
+*.srt
+*.SRT
+*.dwg
+*.dxf
+*.ply
+*.las
+*.laz
+*.db
+*.sqlite
+*.sqlite3
+database.db
+
+# Model weights and large binaries
+*.pt
+*.pth
+*.pkl
+*.ckpt
+*.onnx
+*.engine
+/models/
+/weights/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+~$*

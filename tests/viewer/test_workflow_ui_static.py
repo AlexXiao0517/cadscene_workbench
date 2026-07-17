@@ -1,0 +1,444 @@
+﻿from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+
+
+APP = Path("apps/web_camera_viewer")
+
+
+def _read(name: str) -> str:
+    return (APP / name).read_text(encoding="utf-8")
+
+
+def test_workflow_ui_keeps_legacy_dual_view_root_and_panels() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+
+    assert 'class="workspace"' in html
+    assert 'id="sourceVideo"' in html
+    assert 'id="sceneContainer"' in html
+    assert 'id="cameraControls"' in html
+    assert "grid-template-columns:" in css
+    assert ".workspace" in css
+    assert "workflow-wizard-page" not in html
+
+
+def test_three_panel_is_visible_and_not_replaced_by_workflow() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+
+    assert 'id="sceneContainer" class="scene-stage"' in html
+    assert 'id="workflowPanel"' in html
+    assert "display: none" not in css[css.find(".scene-stage") : css.find(".scene-stage") + 180]
+
+
+def test_workflow_contains_steps_controls_and_keyframe_intervals() -> None:
+    combined = _read("index.html") + _read("workflow.js")
+
+    for text in ("上传数据", "SfM重建", "关键帧标定", "质量检测", "渲染导出"):
+        assert text in combined
+    for stage in ("upload", "sfm", "keyframes", "quality", "render"):
+        assert f'data-stage="{stage}"' in combined
+    for value in ("120", "180", "240"):
+        assert value in combined
+    for button_id in (
+        "workflowStartSfm",
+        "workflowRunAlignment",
+        "workflowRender",
+        "workflowGenerateKeyframes",
+        "viewCurrentSuggestion",
+        "ignoreCurrentSuggestion",
+    ):
+        assert button_id in combined
+    assert "workflowEnterKeyframes" not in combined
+
+
+def test_workflow_polls_job_status_and_handles_ignored_suggestions() -> None:
+    script = _read("workflow.js")
+
+    assert "job_status.json" in script
+    assert "setInterval" in script
+    assert "1000" in script
+    assert "ignored_suggestions.json" in script
+    assert "ignore-suggestion" in script
+    assert "selectedWorkflowStage" in script
+    assert "renderWorkflowPanel" in script
+    assert "if (!selectedWorkflowStage)" in script
+    assert "renderWorkflowPanel(payload.current_stage" not in script
+    assert "nextStageAfterSuccess" in script
+    assert 'sfm: "keyframes"' in script
+    assert "detectWorkflowStageFromArtifacts" in script
+    assert "02_sfm/camera_trajectory.json" in script
+    assert "02_sfm/sparse_points.ply" in script
+    assert "workflowSfmStatus" in script
+    assert "已完成首帧标定后点击「路线拟合」" in script
+    assert "CAD-aligned 点云" in script
+    assert "不适合三维重建" in script
+    assert "明显平移" in script
+    assert "suitable_for_3d" in script
+    assert "next_step_recommendation" in script
+    assert "SfM 注册失败" in script
+    assert 'if (sfmSuitable === false) return "sfm"' in script
+
+
+def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> None:
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "cadsceneReloadQualityArtifacts" in workflow
+    assert "cadsceneReloadQualityArtifacts" in viewer
+    assert "operation" in workflow and '"quality"' in workflow
+    assert "cadsceneQualityArtifactsLoaded" in workflow
+    assert 'fetch(path, { cache: "no-store" })' in viewer
+
+
+def test_ignored_suggestions_are_forwarded_to_the_legacy_timeline_and_scene() -> None:
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "cadsceneSetIgnoredSuggestions" in workflow
+    assert "cadsceneSetIgnoredSuggestions" in viewer
+    assert "visibleQualitySuggestions" in viewer
+    assert "qualityMarkerHits" in viewer
+
+
+def test_workflow_buttons_call_real_runner_and_quality_saves_track_first() -> None:
+    script = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "/api/workflow/run-stage" in script
+    assert "/api/workflow/save-camera-track" in script
+    assert "/api/workflow/cancel" in script
+    assert "/api/workflow/job-log" in script
+    assert "updateMockStage" not in script
+    save_index = script.index("/api/workflow/save-camera-track")
+    alignment_index = script.index('runStage("alignment"')
+    quality_function = script.index("async function startQualityStage()")
+    quality_save_index = script.index("await saveCurrentCameraTrack()", quality_function)
+    quality_index = script.index('runStage("quality"', quality_function)
+    assert save_index < alignment_index
+    assert quality_save_index < quality_index
+    assert "keyframePlan.pending_count" in script[quality_function:quality_index]
+    assert "cadsceneGetCameraTrack" in viewer
+    assert "window.cadsceneGetCameraTrack()" in script
+    assert "/api/workflow/sfm-camera-init" in script
+    assert "cadsceneApplyCameraParameters" in viewer
+    assert "window.cadsceneApplyCameraParameters" in script
+    assert "safe_fields" in viewer
+
+
+def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:
+    script = _read("workflow.js")
+
+    assert 'querySelector("#addKeyframe")' in script
+    assert 'querySelector("#deleteKeyframe")' in script
+    assert "async function persistEditedCameraTrack" in script
+    assert "await saveCurrentCameraTrack()" in script
+    assert "persistEditedCameraTrack({ advancePlan: true })" in script
+    assert 'querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack())' in script
+
+
+def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function persistEditedCameraTrack")
+    end = script.index("async function cancelRunningJob", start)
+    persist = script[start:end]
+
+    assert "keyframeSaveInFlight" in script
+    assert "await saveCurrentCameraTrack" in persist
+    assert "jumpToNextPendingKeyframe" in persist
+    assert "计划关键帧已全部完成" in persist
+
+
+def test_render_saves_frontend_track_before_refitting_and_rendering() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function startRenderStage")
+    end = script.index("async function cancelRunningJob", start)
+    render = script[start:end]
+
+    assert render.index("await saveCurrentCameraTrack") < render.index('runStage("render")')
+
+
+def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
+    script = _read("workflow.js")
+
+    assert 'operation === "alignment"' in script
+    assert "runningStage = isRunning ? operation" in script
+
+
+def test_sfm_completion_auto_initializes_fov_without_enter_keyframes_button() -> None:
+    script = _read("workflow.js")
+
+    assert "applySfmCameraInitializationOnce" in script
+    assert "maybeAutoApplySfmCameraInit();" in script
+    assert 'querySelector("#workflowEnterKeyframes")' not in script
+    assert "进入/继续关键帧标定" not in _read("index.html")
+
+
+def test_sfm_fov_is_applied_after_the_legacy_viewer_has_loaded_the_saved_track() -> None:
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "cadsceneViewerReady" in workflow
+    assert "cadsceneViewerReady" in viewer
+    assert "cadsceneSfmCameraInit:v2" in workflow
+    assert "Array.isArray(appliedFields)" in workflow
+
+
+def test_workflow_prefers_sfm_artifacts_over_stale_failed_job_stage_and_restores_manual_track() -> None:
+    workflow = _read("workflow.js")
+    paths = _read("paths.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "detectWorkflowStageFromArtifacts()" in workflow
+    assert "latestJobStatus?.status !== \"running\"" in workflow
+    assert '"01_keyframes", "camera_track_manual.json"' in paths
+    assert "trackFallbacks" in paths
+    assert "TRACK_FALLBACKS" in viewer
+    assert "loadTrackFromPaths" in viewer
+
+
+def test_route_fitting_lives_in_keyframe_stage_not_quality_stage() -> None:
+    html = _read("index.html")
+    keyframe_start = html.index('class="workflow-stage-panel" data-stage="keyframes"')
+    quality_start = html.index('class="workflow-stage-panel" data-stage="quality"')
+    render_start = html.index('class="workflow-stage-panel" data-stage="render"')
+    keyframes = html[keyframe_start:quality_start]
+    quality = html[quality_start:render_start]
+
+    assert "路线拟合" in keyframes
+    assert 'id="workflowRunAlignment"' in keyframes
+    assert "路线拟合" not in quality
+    assert "运行质量检测" in quality
+
+
+def test_keyframe_plan_is_created_after_initial_route_fit_and_can_continue_pending_work() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+    keyframe_start = html.index('class="workflow-stage-panel" data-stage="keyframes"')
+    quality_start = html.index('class="workflow-stage-panel" data-stage="quality"')
+    keyframes = html[keyframe_start:quality_start]
+
+    assert keyframes.index('id="workflowRunAlignment"') < keyframes.index('id="workflowKeyframeStep"')
+    assert 'id="workflowContinueKeyframes"' in keyframes
+    assert "/api/workflow/generate-keyframe-plan" in script
+    assert "loadKeyframePlan" in script
+    assert "jumpToNextPendingKeyframe" in script
+    assert "Stage 4A mock" not in script
+
+
+def test_keyframe_plan_shows_progress_without_counting_pending_frames_as_manual_anchors() -> None:
+    html = _read("index.html")
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert 'id="workflowKeyframePlanStatus"' in html
+    assert "计划：已完成" in workflow
+    assert "待标定" in workflow
+    assert "继续未完成标定" in html
+    assert "人工关键帧：${manualKeyframes().length}" in viewer
+
+
+def test_completed_keyframe_plan_refits_then_opens_quality_with_a_return_path() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+    quality_start = html.index('class="workflow-stage-panel" data-stage="quality"')
+    render_start = html.index('class="workflow-stage-panel" data-stage="render"')
+
+    assert "startAlignmentStage" in script[script.index("async function finishKeyframePlan"):]
+    assert "cadscenePostAlignmentStage" in script
+    assert 'id="workflowReturnKeyframes"' in html[quality_start:render_start]
+    assert 'setWorkflowStage("keyframes")' in script
+
+
+def test_workflow_has_compact_log_and_cancel_controls() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+
+    assert 'id="workflowCancel"' in html
+    assert 'id="workflowLog"' in html
+    assert "<details" in html
+    assert "max-height:" in css[css.index(".workflow-log") :]
+
+
+def test_workflow_log_does_not_overlay_the_video_or_three_view() -> None:
+    css = _read("style.css")
+    log_rule = css[css.index(".workflow-log {") : css.index(".workflow-log summary")]
+
+    assert "position: static;" in log_rule
+    assert "position: fixed;" not in log_rule
+
+
+def test_workflow_upload_combines_cad_selection_and_parse() -> None:
+    html = _read("index.html")
+
+    assert ">上传 CAD<" in html
+    assert ">解析 CAD<" not in html
+    assert 'id="workflowParseCad"' not in html
+
+
+def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+
+    for control_id in (
+        "workflowDatasetName",
+        "workflowCadScale",
+        "workflowOriginX",
+        "workflowOriginY",
+        "workflowUploadProgress",
+        "workflowUploadStatus",
+    ):
+        assert f'id="{control_id}"' in html
+    upload_start = html.index('class="workflow-stage-panel active" data-stage="upload"')
+    upload_end = html.index('class="workflow-stage-panel" data-stage="sfm"')
+    upload_panel = html[upload_start:upload_end]
+    advanced_start = upload_panel.index('class="workflow-upload-advanced dev-only-control"')
+    advanced = upload_panel[advanced_start:]
+    for control_id in ("workflowDatasetName", "workflowCadScale", "workflowOriginX", "workflowOriginY"):
+        assert f'id="{control_id}"' in advanced
+    assert 'id="workflowAdvancedCadInput"' in advanced
+    assert ".json,.zip" in advanced
+    product_cad = upload_panel[upload_panel.index('id="workflowCadInput"') - 100 : upload_panel.index('id="workflowCadInput"') + 120]
+    assert ".dxf,.dwg" in product_cad
+    assert ".json" not in product_cad and ".zip" not in product_cad
+    assert "/api/workflow/create-dataset" in script
+    assert "/api/workflow/upload-video" in script
+    assert "/api/workflow/upload-cad" in script
+    assert "/api/workflow/dataset-manifest" in script
+    assert "XMLHttpRequest" in script
+    assert "xhr.upload.addEventListener" in script
+    assert "（本地预览）" not in script
+    assert "deriveDatasetFromVideo" in script
+    assert "import_" in script
+    assert 'params.get("debug") === "1"' in script
+    assert ".dev-only-control" in _read("style.css")
+
+
+def test_workflow_panel_does_not_duplicate_legacy_keyframe_controls() -> None:
+    html = _read("index.html")
+    workflow = html[html.index('id="workflowBar"') : html.index('<section class="workspace">')]
+
+    assert "上一关键帧" not in workflow
+    assert "下一关键帧" not in workflow
+    assert "保存当前关键帧" not in workflow
+    assert 'id="previousKeyframe"' in html
+    assert 'id="nextKeyframe"' in html
+    assert 'id="addKeyframe"' in html
+
+
+def test_quality_panel_only_contains_pipeline_level_actions() -> None:
+    html = _read("index.html")
+    start = html.index('class="workflow-stage-panel" data-stage="quality"')
+    end = html.index('class="workflow-stage-panel" data-stage="render"')
+    quality = html[start:end]
+
+    assert "运行质量检测" in quality
+    assert "重新检测" in quality
+    assert "路线拟合" not in quality
+    assert "查看建议补帧" not in quality
+    assert "忽略当前建议" not in quality
+
+
+def test_quality_can_finish_into_render_and_dormant_review_controls_are_hidden() -> None:
+    html = _read("index.html")
+    workflow = _read("workflow.js")
+    quality_start = html.index('class="workflow-stage-panel" data-stage="quality"')
+    render_start = html.index('class="workflow-stage-panel" data-stage="render"')
+    quality = html[quality_start:render_start]
+
+    assert 'id="workflowFinishQuality"' in quality
+    assert 'setWorkflowStage("render")' in workflow
+    for control_id in ("reviewStatus", "acceptPrediction", "saveAdjustedKeyframe", "rejectReview"):
+        assert f'id="{control_id}"' in html
+    assert html.count("workflow-hidden-control") >= 4
+
+
+def test_render_panel_refreshes_output_after_render_job_success() -> None:
+    script = _read("workflow.js")
+
+    assert "refreshRenderOutputState" in script
+    assert 'operation === "render"' in script or 'operation !== "render"' in script
+    assert 'method: "HEAD"' in script
+    assert 'cache: "no-store"' in script
+
+
+def test_render_preview_uses_in_page_dialog_instead_of_new_window() -> None:
+    html = _read("index.html")
+    source = _read("workflow.js")
+
+    assert 'id="workflowRenderPreviewDialog"' in html
+    assert 'id="workflowRenderPreviewVideo"' in html
+    assert "showModal" in source
+    assert "window.open(renderPath" not in source
+
+
+def test_render_log_updates_visible_frame_progress() -> None:
+    source = _read("workflow.js")
+
+    assert "updateRenderProgressFromLog" in source
+    assert r"\[render\]\s+frame" in source
+    assert "正在渲染" in source
+    assert "renderProgressState" in source
+    assert 'operation === "render"' in source
+
+
+def test_suggestion_actions_live_in_bottom_uav_controls() -> None:
+    html = _read("index.html")
+    workflow_end = html.index('<section class="workspace">')
+    controls = html[html.index('<section class="control-panel">') :]
+
+    assert "查看当前建议帧" not in html[:workflow_end]
+    assert 'id="viewCurrentSuggestion"' in controls
+    assert 'id="ignoreCurrentSuggestion"' in controls
+    assert "查看当前建议帧" in controls
+    assert "忽略当前建议" in controls
+
+
+def test_development_import_buttons_are_hidden_without_debug_mode() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+
+    assert html.count("dev-only-control") >= 2
+    assert ".dev-only-control" in _read("style.css")
+    assert "debug=1" in script
+    assert "is-debug-visible" in script
+
+
+def test_workflow_task_has_stable_compact_height() -> None:
+    css = _read("style.css")
+    task_rule = css[css.index(".workflow-task {") : css.index(".workflow-task-head")]
+
+    assert "height:" in task_rule or ("min-height:" in task_rule and "max-height:" in task_rule)
+    assert "overflow:" in task_rule
+
+
+def test_only_active_workflow_stage_panel_is_visible() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+
+    assert html.count("workflow-stage-panel") == 5
+    assert ".workflow-stage-panel {" in css
+    assert "display: none;" in css[css.index(".workflow-stage-panel {") :]
+    active_rule = css[css.index(".workflow-stage-panel.active") :]
+    assert "display: block;" in active_rule
+
+
+def test_workflow_uses_no_frontend_build_chain() -> None:
+    root = Path(".")
+
+    assert not (root / "package.json").exists()
+    assert not (root / "node_modules").exists()
+    assert not (APP / "node_modules").exists()
+
+
+def test_workflow_javascript_is_valid() -> None:
+    result = subprocess.run(
+        ["node", "--check", str(APP / "workflow.js")],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

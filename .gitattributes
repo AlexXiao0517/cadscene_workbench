@@ -1,0 +1,42 @@
+# Normalized source and documentation text
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Windows-native scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Large or non-text project artifacts
+*.mp4 binary
+*.mov binary
+*.avi binary
+*.mkv binary
+*.m4v binary
+*.webm binary
+*.mpg binary
+*.mpeg binary
+*.srt binary
+*.SRT binary
+*.dwg binary
+*.dxf binary
+*.ply binary
+*.las binary
+*.laz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.pt binary
+*.pth binary
+*.pkl binary
+*.ckpt binary
+*.onnx binary
+*.engine binary
