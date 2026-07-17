@@ -11,11 +11,20 @@ import ezdxf
 from cadscene.workflow.data_import import (
     create_dataset,
     import_cad,
+    import_srt,
     import_video,
     list_datasets,
     load_dataset_manifest,
+    load_srt_analysis,
     slugify_dataset_name,
 )
+
+
+SRT_FIXTURES = Path(__file__).parents[1] / "fixtures" / "srt"
+
+
+def _srt_stream(name: str) -> io.BytesIO:
+    return io.BytesIO((SRT_FIXTURES / name).read_bytes())
 
 
 def test_legacy_data_import_audit_is_documented() -> None:
@@ -63,6 +72,52 @@ def test_dataset_name_is_slugified_and_dataset_is_created(tmp_path: Path) -> Non
     assert manifest["status"] == "incomplete"
     assert manifest["defaults"]["cad_scale"] == 0.06
     assert (tmp_path / "data/user-dataset-01/dataset_manifest.json").exists()
+    assert manifest["srt"]["status"] == "missing"
+    assert manifest["workflow"] == {
+        "trajectory_mode": "sfm_only",
+        "debug_override": None,
+        "implementation_status": "ready",
+    }
+
+
+def test_srt_import_writes_analysis_and_manifest(tmp_path: Path) -> None:
+    import_video(tmp_path, "demo", "clip.mp4", io.BytesIO(b"video"))
+
+    manifest = import_srt(tmp_path, "demo", "partial.srt", _srt_stream("no_attitude_partial.srt"))
+    saved = load_dataset_manifest(tmp_path, "demo")
+    analysis = load_srt_analysis(tmp_path, "demo")
+
+    assert manifest["workflow"]["trajectory_mode"] == "srt_sfm_fused"
+    assert saved["srt"]["status"] == "partial"
+    assert saved["srt"]["path"] == "data/demo/telemetry/partial.srt"
+    assert analysis["detected_mode"] == "srt_sfm_fused"
+    assert (tmp_path / "data/demo/srt_analysis.json").exists()
+    assert (tmp_path / "data/demo/srt_analysis_report.md").exists()
+
+
+def test_srt_rejects_unsafe_path_and_unsupported_extension(tmp_path: Path) -> None:
+    create_dataset(tmp_path, "demo")
+
+    with pytest.raises(ValueError, match="unsafe filename"):
+        import_srt(tmp_path, "demo", "../escape.srt", _srt_stream("no_attitude_partial.srt"))
+    with pytest.raises(ValueError, match="unsupported SRT extension"):
+        import_srt(tmp_path, "demo", "telemetry.txt", _srt_stream("no_attitude_partial.srt"))
+
+
+def test_srt_analysis_failure_preserves_ready_video_and_cad(tmp_path: Path, monkeypatch) -> None:
+    import_video(tmp_path, "demo", "clip.mp4", io.BytesIO(b"video"))
+    import_cad(tmp_path, "demo", "design.json", io.BytesIO(b'{"layers":[]}'))
+    def fail_analysis(*args, **kwargs):
+        raise RuntimeError("bad telemetry")
+
+    monkeypatch.setattr("cadscene.workflow.data_import.analyze_srt_stream", fail_analysis)
+
+    manifest = import_srt(tmp_path, "demo", "broken.srt", _srt_stream("no_attitude_partial.srt"))
+
+    assert manifest["video"]["original_name"] == "clip.mp4"
+    assert manifest["cad"]["status"] == "ready"
+    assert manifest["srt"]["status"] == "failed"
+    assert manifest["workflow"]["trajectory_mode"] == "sfm_only"
 
 
 def test_video_import_streams_to_dataset_and_updates_manifest(tmp_path: Path) -> None:
@@ -168,6 +223,69 @@ def test_manifest_schema_and_dataset_listing(tmp_path: Path) -> None:
     assert set(manifest) >= {"dataset", "created_at", "video", "cad", "defaults", "status", "warnings"}
     assert manifest["defaults"]["origin_xy"] == [3.0, 4.0]
     assert [item["dataset"] for item in list_datasets(tmp_path)] == ["one", "two"]
+
+
+def test_load_manifest_deep_normalizes_and_persists_legacy_srt_workflow(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "data/legacy/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset": "legacy",
+                "srt": {"status": "partial"},
+                "workflow": {"trajectory_mode": "srt_sfm_fused"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = load_dataset_manifest(tmp_path, "legacy")
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["srt"] == {
+        "status": "partial",
+        "path": None,
+        "analysis_json": None,
+        "analysis_report": None,
+        "original_name": None,
+        "coverage": {},
+        "attitude_sources": {"gimbal": False, "drone": False},
+        "warnings": [],
+    }
+    assert manifest["workflow"] == {
+        "trajectory_mode": "srt_sfm_fused",
+        "debug_override": None,
+        "implementation_status": "ready",
+    }
+    assert persisted["srt"] == manifest["srt"]
+    assert persisted["workflow"] == manifest["workflow"]
+
+
+def test_list_datasets_deep_normalizes_absent_srt_and_partial_workflow(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "data/partial/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps({"dataset": "partial", "workflow": {"debug_override": "sfm_only"}}),
+        encoding="utf-8",
+    )
+
+    manifest = list_datasets(tmp_path)[0]
+
+    assert manifest["srt"] == {
+        "status": "missing",
+        "path": None,
+        "analysis_json": None,
+        "analysis_report": None,
+        "original_name": None,
+        "coverage": {},
+        "attitude_sources": {"gimbal": False, "drone": False},
+        "warnings": [],
+    }
+    assert manifest["workflow"] == {
+        "trajectory_mode": "sfm_only",
+        "debug_override": "sfm_only",
+        "implementation_status": "ready",
+    }
 
 
 def test_import_rejects_path_traversal_and_unsupported_extensions(tmp_path: Path) -> None:

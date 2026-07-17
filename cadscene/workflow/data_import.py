@@ -14,6 +14,7 @@ from typing import Any, BinaryIO, Callable, Mapping
 from cadscene.cad.dwg_converter import convert_dwg
 from cadscene.cad.importer import import_dxf
 from cadscene.cad.loader import detect_road_centerline
+from cadscene.srt import analyze_srt_stream
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
@@ -60,6 +61,57 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _atomic_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _default_srt() -> dict[str, Any]:
+    return {
+        "status": "missing",
+        "path": None,
+        "analysis_json": None,
+        "analysis_report": None,
+        "original_name": None,
+        "coverage": {},
+        "attitude_sources": {"gimbal": False, "drone": False},
+        "warnings": [],
+    }
+
+
+def _default_workflow() -> dict[str, Any]:
+    return {
+        "trajectory_mode": "sfm_only",
+        "debug_override": None,
+        "implementation_status": "ready",
+    }
+
+
+def _with_defaults(defaults: Mapping[str, Any], value: Any) -> dict[str, Any]:
+    merged = dict(defaults)
+    if not isinstance(value, Mapping):
+        return merged
+    for key, item in value.items():
+        default = defaults.get(key)
+        if isinstance(default, Mapping) and isinstance(item, Mapping):
+            merged[key] = _with_defaults(default, item)
+        else:
+            merged[key] = item
+    return merged
+
+
+def _ensure_srt_workflow(manifest: dict[str, Any]) -> bool:
+    srt = _with_defaults(_default_srt(), manifest.get("srt"))
+    workflow = _with_defaults(_default_workflow(), manifest.get("workflow"))
+    changed = manifest.get("srt") != srt or manifest.get("workflow") != workflow
+    manifest["srt"] = srt
+    manifest["workflow"] = workflow
+    return changed
+    return manifest
+
+
 def _default_manifest(dataset: str, cad_scale: float, origin_xy: tuple[float, float]) -> dict[str, Any]:
     timestamp = _now_iso()
     return {
@@ -80,6 +132,8 @@ def _default_manifest(dataset: str, cad_scale: float, origin_xy: tuple[float, fl
             "cad_scale": float(cad_scale),
             "origin_xy": [float(origin_xy[0]), float(origin_xy[1])],
         },
+        "srt": _default_srt(),
+        "workflow": _default_workflow(),
         "status": "incomplete",
         "warnings": [],
     }
@@ -109,6 +163,7 @@ def create_dataset(
     path = dataset_dir / "dataset_manifest.json"
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+        _ensure_srt_workflow(manifest)
         manifest["defaults"] = {
             "cad_scale": float(cad_scale),
             "origin_xy": [float(origin_xy[0]), float(origin_xy[1])],
@@ -124,7 +179,10 @@ def load_dataset_manifest(root: str | Path, dataset: str) -> dict[str, Any]:
     path = _manifest_path(root, dataset)
     if not path.exists():
         raise FileNotFoundError(f"dataset manifest not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    if _ensure_srt_workflow(manifest):
+        _atomic_json(path, manifest)
+    return manifest
 
 
 def list_datasets(root: str | Path) -> list[dict[str, Any]]:
@@ -134,7 +192,9 @@ def list_datasets(root: str | Path) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
     for path in sorted(data_root.glob("*/dataset_manifest.json")):
         try:
-            manifests.append(json.loads(path.read_text(encoding="utf-8-sig")))
+            manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+            _ensure_srt_workflow(manifest)
+            manifests.append(manifest)
         except (OSError, json.JSONDecodeError):
             continue
     return manifests
@@ -183,6 +243,125 @@ def import_video(root: str | Path, dataset: str, filename: str, stream: BinaryIO
     }
     _atomic_json(manifest_path, _refresh_status(manifest))
     return manifest
+
+
+def _srt_status(mode: str) -> str:
+    return "full" if mode == "srt_full_pose" else "partial"
+
+
+def _srt_report(analysis: Mapping[str, Any]) -> str:
+    warnings = analysis.get("warnings", [])
+    lines = [
+        "# SRT analysis",
+        "",
+        f"- Source: {analysis.get('source_file', '')}",
+        f"- Trajectory mode: {analysis.get('detected_mode', 'sfm_only')}",
+        f"- Full-pose coverage: {analysis.get('full_pose_coverage', 0.0)}",
+        "",
+        "## Warnings",
+        "",
+    ]
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- None")
+    return "\n".join(lines) + "\n"
+
+
+def _failed_srt_manifest(
+    root: str | Path,
+    destination: Path,
+    name: str,
+    analysis_json: Path,
+    analysis_report: Path,
+    error: Exception,
+) -> dict[str, Any]:
+    warning = f"SRT analysis failed: {error}"
+    failure = {
+        "source_file": name,
+        "detected_mode": "sfm_only",
+        "fields": {},
+        "coverage": {},
+        "attitude_sources": {"gimbal": False, "drone": False},
+        "warnings": [warning],
+        "error": str(error),
+    }
+    _atomic_json(analysis_json, failure)
+    _atomic_text(analysis_report, _srt_report(failure))
+    return {
+        "status": "failed",
+        "path": _relative(root, destination),
+        "analysis_json": _relative(root, analysis_json),
+        "analysis_report": _relative(root, analysis_report),
+        "original_name": name,
+        "coverage": {},
+        "attitude_sources": {"gimbal": False, "drone": False},
+        "warnings": [warning],
+    }
+
+
+def import_srt(
+    root: str | Path,
+    dataset: str,
+    filename: str,
+    stream: BinaryIO,
+    video_duration_sec: float | None = None,
+) -> dict[str, Any]:
+    """Persist and conservatively analyse an optional SRT upload."""
+
+    name = _safe_filename(filename)
+    if Path(name).suffix.lower() != ".srt":
+        raise ValueError("unsupported SRT extension")
+    dataset_dir, slug = _safe_dataset_dir(root, dataset, create=True)
+    manifest_path = dataset_dir / "dataset_manifest.json"
+    if not manifest_path.exists():
+        create_dataset(root, slug)
+    manifest = load_dataset_manifest(root, slug)
+    destination = dataset_dir / "telemetry" / name
+    analysis_json = dataset_dir / "srt_analysis.json"
+    analysis_report = dataset_dir / "srt_analysis_report.md"
+    _copy_stream(stream, destination)
+    try:
+        with destination.open("rb") as saved_stream:
+            analysis = analyze_srt_stream(saved_stream, name, video_duration_sec=video_duration_sec)
+        _atomic_json(analysis_json, analysis)
+        _atomic_text(analysis_report, _srt_report(analysis))
+    except Exception as exc:
+        manifest["srt"] = _failed_srt_manifest(
+            root, destination, name, analysis_json, analysis_report, exc
+        )
+        manifest["workflow"] = _default_workflow()
+        _atomic_json(manifest_path, _refresh_status(manifest))
+        return manifest
+
+    mode = str(analysis["detected_mode"])
+    manifest["srt"] = {
+        "status": _srt_status(mode),
+        "path": _relative(root, destination),
+        "analysis_json": _relative(root, analysis_json),
+        "analysis_report": _relative(root, analysis_report),
+        "original_name": name,
+        "coverage": analysis["coverage"],
+        "attitude_sources": analysis["attitude_sources"],
+        "warnings": analysis["warnings"],
+    }
+    manifest["workflow"] = {
+        "trajectory_mode": mode,
+        "debug_override": None,
+        "implementation_status": "ready" if mode == "sfm_only" else "interface_only",
+    }
+    _atomic_json(manifest_path, _refresh_status(manifest))
+    return manifest
+
+
+def load_srt_analysis(root: str | Path, dataset: str) -> dict[str, Any]:
+    """Load the persisted SRT analysis for a dataset."""
+
+    dataset_dir, _ = _safe_dataset_dir(root, dataset)
+    path = dataset_dir / "srt_analysis.json"
+    if not path.exists():
+        raise FileNotFoundError(f"SRT analysis not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def _zip_member_path(dataset_dir: Path, member_name: str) -> Path:
