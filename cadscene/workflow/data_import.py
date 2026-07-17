@@ -104,7 +104,14 @@ def _with_defaults(defaults: Mapping[str, Any], value: Any) -> dict[str, Any]:
 
 def _ensure_srt_workflow(manifest: dict[str, Any]) -> bool:
     srt = _with_defaults(_default_srt(), manifest.get("srt"))
-    workflow = _with_defaults(_default_workflow(), manifest.get("workflow"))
+    legacy_srt_mode = {
+        "partial": "srt_sfm_fused",
+        "full": "srt_full_pose",
+    }.get(srt.get("status"))
+    workflow_source = manifest.get("workflow")
+    if not isinstance(workflow_source, Mapping) and legacy_srt_mode is not None:
+        workflow_source = {"trajectory_mode": legacy_srt_mode}
+    workflow = _with_defaults(_default_workflow(), workflow_source)
     workflow["implementation_status"] = (
         "ready" if workflow.get("trajectory_mode") == "sfm_only" else "interface_only"
     )

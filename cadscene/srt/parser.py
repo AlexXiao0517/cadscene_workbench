@@ -2,6 +2,7 @@
 
 import codecs
 import re
+import warnings
 from typing import Any, BinaryIO
 
 from .capability import detect_trajectory_capability
@@ -28,6 +29,12 @@ _ALIASES = {
     "aircraftyaw": "drone_yaw", "aircraftpitch": "drone_pitch", "aircraftroll": "drone_roll",
 }
 _READ_CHUNK_SIZE = 64 * 1024
+# These caps keep malformed uploads from retaining data proportional to stream size.
+# Oversized unterminated lines and blocks are discarded with a RuntimeWarning; parsing
+# resumes at the next newline or blank-line block separator, respectively.
+_MAX_PENDING_CHARS = _READ_CHUNK_SIZE
+_MAX_BLOCK_CHARS = 4 * _READ_CHUNK_SIZE
+_MAX_BLOCK_LINES = 4096
 
 
 def _seconds(value: str) -> float:
@@ -65,39 +72,73 @@ def _parse_record_block(block: str) -> SrtRecord | None:
 
 
 def _parse_records(stream: BinaryIO) -> list[SrtRecord]:
-    """Decode and aggregate SRT blocks without reading the complete stream."""
+    """Decode SRT incrementally, discarding malformed oversized lines or blocks."""
 
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     records: list[SrtRecord] = []
     block_lines: list[str] = []
+    block_chars = 0
     pending = ""
+    discarding_unterminated_line = False
+    discarding_block = False
 
     def finish_block() -> None:
+        nonlocal block_chars
         if not block_lines:
             return
         record = _parse_record_block("\n".join(block_lines))
         block_lines.clear()
+        block_chars = 0
         if record is not None:
             records.append(record)
 
     def consume_line(line: str) -> None:
+        nonlocal block_chars, discarding_block
         if line.strip():
-            block_lines.append(line.rstrip("\r"))
+            if discarding_block:
+                return
+            line = line.rstrip("\r")
+            if len(line) > _MAX_PENDING_CHARS:
+                warnings.warn("discarding oversized SRT line", RuntimeWarning, stacklevel=2)
+                return
+            if len(block_lines) >= _MAX_BLOCK_LINES or block_chars + len(line) > _MAX_BLOCK_CHARS:
+                block_lines.clear()
+                block_chars = 0
+                discarding_block = True
+                warnings.warn("discarding oversized SRT block", RuntimeWarning, stacklevel=2)
+                return
+            block_lines.append(line)
+            block_chars += len(line)
         else:
             finish_block()
+            discarding_block = False
+
+    def consume_text(text: str) -> None:
+        nonlocal pending, discarding_unterminated_line
+        if discarding_unterminated_line:
+            newline = text.find("\n")
+            if newline < 0:
+                return
+            text = text[newline + 1 :]
+            discarding_unterminated_line = False
+        pending += text
+        lines = pending.split("\n")
+        pending = lines.pop()
+        for line in lines:
+            consume_line(line)
+        if len(pending) > _MAX_PENDING_CHARS:
+            pending = ""
+            discarding_unterminated_line = True
+            warnings.warn("discarding oversized unterminated SRT line", RuntimeWarning, stacklevel=2)
 
     while True:
         raw = stream.read(_READ_CHUNK_SIZE)
         if not raw:
             break
-        pending += decoder.decode(raw, final=False) if isinstance(raw, bytes) else str(raw)
-        lines = pending.split("\n")
-        pending = lines.pop()
-        for line in lines:
-            consume_line(line)
+        consume_text(decoder.decode(raw, final=False) if isinstance(raw, bytes) else str(raw))
 
-    pending += decoder.decode(b"", final=True)
-    if pending:
+    consume_text(decoder.decode(b"", final=True))
+    if pending and not discarding_unterminated_line:
         consume_line(pending)
     finish_block()
     return records

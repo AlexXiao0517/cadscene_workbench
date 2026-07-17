@@ -261,6 +261,31 @@ def test_load_manifest_normalizes_legacy_srt_workflow_to_interface_only(tmp_path
     assert persisted["workflow"] == manifest["workflow"]
 
 
+@pytest.mark.parametrize(
+    ("srt_status", "expected_mode"),
+    [("partial", "srt_sfm_fused"), ("full", "srt_full_pose")],
+)
+def test_load_manifest_infers_interface_only_workflow_from_legacy_srt_status(
+    tmp_path: Path, srt_status: str, expected_mode: str
+) -> None:
+    manifest_path = tmp_path / "data/legacy/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps({"dataset": "legacy", "srt": {"status": srt_status}}),
+        encoding="utf-8",
+    )
+
+    manifest = load_dataset_manifest(tmp_path, "legacy")
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["workflow"] == {
+        "trajectory_mode": expected_mode,
+        "debug_override": None,
+        "implementation_status": "interface_only",
+    }
+    assert persisted["workflow"] == manifest["workflow"]
+
+
 @pytest.mark.parametrize("status", [None, "ready", "unknown"])
 def test_srt_modes_never_normalize_to_ready_even_with_invalid_status(tmp_path: Path, status: str | None) -> None:
     manifest_path = tmp_path / "data/legacy/dataset_manifest.json"

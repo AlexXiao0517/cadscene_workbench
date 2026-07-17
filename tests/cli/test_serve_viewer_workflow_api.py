@@ -73,17 +73,14 @@ def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
-def test_run_stage_api_rejects_legacy_ready_srt_trajectory_before_starting_job(tmp_path: Path) -> None:
+def test_run_stage_api_blocks_legacy_srt_manifest_without_workflow_before_starting_job(tmp_path: Path) -> None:
     manifest_path = tmp_path / "data/demo/dataset_manifest.json"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(
         json.dumps(
             {
                 "dataset": "demo",
-                "workflow": {
-                    "trajectory_mode": "srt_sfm_fused",
-                    "implementation_status": "ready",
-                },
+                "srt": {"status": "partial"},
             }
         ),
         encoding="utf-8",
