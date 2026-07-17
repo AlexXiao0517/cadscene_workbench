@@ -659,6 +659,20 @@ button.is-active {
   color: var(--accent-2);
 }
 
+.workflow-trajectory-mode {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflow-trajectory-mode.interface-only {
+  border-color: #b07d35;
+  color: #ffd08a;
+}
+
 #qualityTimelineCanvas {
   display: block;
   width: 100%;

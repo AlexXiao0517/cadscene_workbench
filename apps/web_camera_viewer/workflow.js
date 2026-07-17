@@ -20,6 +20,8 @@
   const message = document.querySelector("#workflowMessage");
   const stateLabel = document.querySelector("#workflowJobState");
   const title = document.querySelector("#workflowTaskTitle");
+  const trajectoryModeLabel = document.querySelector("#workflowTrajectoryMode");
+  let trajectoryWorkflow = null;
   let selectedWorkflowStage = null;
   let latestJobStatus = null;
   let workflowSuggestions = [];
@@ -34,6 +36,45 @@
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
     return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  }
+
+  function renderTrajectoryWorkflow(workflow) {
+    if (!trajectoryModeLabel) return;
+    const mode = String(workflow?.trajectory_mode || "sfm_only");
+    const implementation = String(workflow?.implementation_status || "ready");
+    const copy = {
+      sfm_only: "轨迹模式：仅 SfM（可用）",
+      srt_sfm_fused: "轨迹模式：SRT + SfM（功能待启用）",
+      srt_full_pose: "轨迹模式：SRT 完整姿态（功能待启用）",
+    };
+    trajectoryModeLabel.hidden = false;
+    trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
+    trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
+    if (implementation !== "interface_only") return;
+    const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
+    trajectoryModeLabel.title = explanation;
+    document.querySelectorAll("[data-job-action], #workflowGenerateKeyframes, #workflowContinueKeyframes, #workflowFinishKeyframes, #workflowFinishQuality, #workflowReturnKeyframes").forEach((button) => {
+      button.disabled = true;
+      button.title = explanation;
+    });
+    if (message) message.textContent = explanation;
+  }
+
+  function isInterfaceOnlyTrajectoryWorkflow() {
+    return trajectoryWorkflow?.implementation_status === "interface_only";
+  }
+
+  async function loadManifestBackedTrajectoryWorkflow() {
+    if (!dataset) return;
+    try {
+      const response = await fetch(`/api/workflow/dataset-manifest?dataset=${encodeURIComponent(dataset)}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      trajectoryWorkflow = payload?.manifest?.workflow || null;
+      renderTrajectoryWorkflow(trajectoryWorkflow);
+    } catch (error) {
+      // Preserve legacy compatibility when a manifest is unavailable.
+    }
   }
 
   let uploadRunId = runId || `import_${uploadTimestamp()}`;
@@ -240,7 +281,7 @@
     }
     runningStage = isRunning ? operation : null;
     document.querySelectorAll("[data-job-action]").forEach((button) => {
-      button.disabled = isRunning;
+      button.disabled = isRunning || isInterfaceOnlyTrajectoryWorkflow();
     });
     const cancel = document.querySelector("#workflowCancel");
     if (cancel) cancel.hidden = !isRunning;
@@ -457,6 +498,9 @@
   }
 
   async function runStage(stage) {
+    if (isInterfaceOnlyTrajectoryWorkflow()) {
+      throw new Error("轨迹功能尚未启用，当前模式不能启动处理流程。");
+    }
     if (!dataset || !runId) {
       throw new Error("请先通过 URL 指定 dataset 和 runId。");
     }
@@ -499,8 +543,8 @@
     const completed = Number(keyframePlan?.completed_count || 0);
     const total = Array.isArray(keyframePlan?.frames) ? keyframePlan.frames.length : 0;
     if (alignmentButton) alignmentButton.textContent = keyframePlan ? "重新路线拟合" : "路线拟合";
-    if (continueButton) continueButton.disabled = keyframeSaveInFlight || !keyframePlan || pending === 0;
-    if (finishButton) finishButton.disabled = keyframeSaveInFlight || !keyframePlan || pending > 0;
+    if (continueButton) continueButton.disabled = isInterfaceOnlyTrajectoryWorkflow() || keyframeSaveInFlight || !keyframePlan || pending === 0;
+    if (finishButton) finishButton.disabled = isInterfaceOnlyTrajectoryWorkflow() || keyframeSaveInFlight || !keyframePlan || pending > 0;
     if (planStatus) {
       planStatus.textContent = keyframePlan
         ? `计划：已完成 ${completed}/${total}，待标定 ${pending}。待标定帧不会计入人工关键帧。`
@@ -878,6 +922,7 @@
   }
   loadWorkflowSuggestions();
   loadDatasetManifestForUpload();
+  loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
   const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
   if (stageOrder.includes(restoredWorkflowStage)) {

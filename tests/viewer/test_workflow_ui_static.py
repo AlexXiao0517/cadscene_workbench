@@ -278,6 +278,18 @@ def test_workflow_upload_combines_cad_selection_and_parse() -> None:
     assert 'id="workflowParseCad"' not in html
 
 
+def test_viewer_displays_manifest_backed_trajectory_mode_without_replacing_layout() -> None:
+    html = _read("index.html")
+    workflow = _read("workflow.js")
+
+    assert 'id="workflowTrajectoryMode"' in html
+    assert "dataset-manifest" in workflow
+    assert "interface_only" in workflow
+    assert "isInterfaceOnlyTrajectoryWorkflow" in workflow
+    assert "轨迹功能尚未启用" in workflow
+    assert 'class="workspace"' in html
+
+
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:
     html = _read("index.html")
     script = _read("workflow.js")
