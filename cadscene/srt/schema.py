@@ -17,6 +17,8 @@ class SrtRecord:
     latitude: float | None = None
     longitude: float | None = None
     altitude: float | None = None
+    rel_alt: float | None = None
+    abs_alt: float | None = None
     gimbal_yaw: float | None = None
     gimbal_pitch: float | None = None
     gimbal_roll: float | None = None

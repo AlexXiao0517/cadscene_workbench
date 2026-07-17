@@ -15,7 +15,11 @@ _MIN_TRAJECTORY_RECORDS = 2
 
 
 def _value(record: SrtRecord | Mapping[str, Any], field: str) -> Any:
-    return getattr(record, field, None) if isinstance(record, SrtRecord) else record.get(field)
+    value = getattr(record, field, None) if isinstance(record, SrtRecord) else record.get(field)
+    if field != "altitude" or value is not None:
+        return value
+    values = (getattr(record, "rel_alt", None), getattr(record, "abs_alt", None)) if isinstance(record, SrtRecord) else (record.get("rel_alt"), record.get("abs_alt"))
+    return next((candidate for candidate in values if candidate is not None), None)
 
 
 def _valid(record: SrtRecord | Mapping[str, Any], field: str) -> bool:

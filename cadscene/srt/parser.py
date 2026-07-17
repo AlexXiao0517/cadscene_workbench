@@ -14,14 +14,16 @@ _TIMECODE = re.compile(
 )
 _BRACKET_VALUE = re.compile(r"\[\s*(?P<key>[^:\]]+)\s*:\s*(?P<value>[^\]]+)\]")
 _TEXT_VALUE = re.compile(
-    r"(?P<key>latitude|longitude|longtitude|altitude|height|"
+    r"(?P<key>latitude|longitude|longtitude|altitude|height|relative[_ ]?altitude|absolute[_ ]?altitude|rel[_ ]?alt|abs[_ ]?alt|"
     r"gimbal[_ ]?(?:yaw|pitch|roll)|drone[_ ]?(?:yaw|pitch|roll)|"
     r"aircraft[_ ]?(?:yaw|pitch|roll))\s*[:=]\s*(?P<value>[-+]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 _ALIASES = {
     "latitude": "latitude", "lat": "latitude", "longitude": "longitude", "longtitude": "longitude", "lon": "longitude", "lng": "longitude",
-    "altitude": "altitude", "alt": "altitude", "height": "altitude", "relativealtitude": "altitude", "relalt": "altitude", "absalt": "altitude",
+    "altitude": "altitude", "alt": "altitude", "height": "altitude",
+    "relativealtitude": "rel_alt", "relalt": "rel_alt",
+    "absolutealtitude": "abs_alt", "absalt": "abs_alt",
     "gimbalyaw": "gimbal_yaw", "gimbalpitch": "gimbal_pitch", "gimbalroll": "gimbal_roll",
     "gbyaw": "gimbal_yaw", "gbpitch": "gimbal_pitch", "gbroll": "gimbal_roll",
     "camerayaw": "gimbal_yaw", "camerapitch": "gimbal_pitch", "cameraroll": "gimbal_roll",

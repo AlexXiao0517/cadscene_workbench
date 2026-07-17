@@ -43,3 +43,14 @@ def test_parse_records_discards_oversized_unseparated_block_without_retaining_st
         assert parser._parse_records(stream) == []
     assert stream.reads == 20
     assert max(seen_block_lengths, default=0) <= parser._MAX_BLOCK_CHARS
+
+
+def test_parser_keeps_relative_and_absolute_altitude_distinct() -> None:
+    record = parser._parse_record_block(
+        "1\n00:00:00,000 --> 00:00:00,100\n"
+        "[latitude: 30.0] [longitude: 120.0] [rel_alt: 12.5] [abs_alt: 86.0]\n"
+    )
+
+    assert record is not None
+    assert record.rel_alt == 12.5
+    assert record.abs_alt == 86.0
