@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from math import isfinite
 from typing import Mapping, Sequence
@@ -31,6 +32,34 @@ class FrameSrtSample:
     interpolated: bool
     source_entry_before: int | None
     source_entry_after: int | None
+    rel_alt: float | None = None
+    abs_alt: float | None = None
+
+
+def load_frame_timestamps(path: str) -> list[FrameTimestamp]:
+    """Load the persisted SfM frame-time table without renumbering source frames."""
+
+    with open(path, encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"source_frame_index", "extracted_index", "image_name", "pts_time_sec", "timestamp_source", "cfr_confirmed"}
+        if not required.issubset(reader.fieldnames or set()):
+            raise ValueError("frame_timestamps.csv is missing required columns")
+        rows: list[FrameTimestamp] = []
+        for row in reader:
+            pts = row.get("pts_time_sec", "").strip()
+            if not pts:
+                continue
+            rows.append(
+                FrameTimestamp(
+                    source_frame_index=int(row["source_frame_index"]),
+                    extracted_index=int(row["extracted_index"]),
+                    image_name=row["image_name"],
+                    pts_time_sec=float(pts),
+                    timestamp_source=row["timestamp_source"],
+                    cfr_confirmed=row["cfr_confirmed"].strip().lower() == "true",
+                )
+            )
+    return rows
 
 
 def resolve_frame_timestamps(
@@ -87,7 +116,18 @@ def _valid_gps(record: SrtRecord) -> bool:
 
 
 def _valid_height(record: SrtRecord) -> bool:
-    return record.altitude is not None and isfinite(float(record.altitude))
+    return any(
+        value is not None and isfinite(float(value))
+        for value in (record.rel_alt, record.abs_alt, record.altitude)
+    )
+
+
+def _interpolate_optional(before: SrtRecord, after: SrtRecord, field: str, alpha: float) -> float | None:
+    first = getattr(before, field, None)
+    second = getattr(after, field, None)
+    if first is None or second is None or not isfinite(float(first)) or not isfinite(float(second)):
+        return None
+    return (1.0 - alpha) * float(first) + alpha * float(second)
 
 
 def sample_srt_at_frames(
@@ -126,7 +166,11 @@ def sample_srt_at_frames(
         height_valid = _valid_height(before_record) and _valid_height(after_record)
         latitude = (1.0 - alpha) * float(before_record.latitude) + alpha * float(after_record.latitude) if gps_valid else None
         longitude = (1.0 - alpha) * float(before_record.longitude) + alpha * float(after_record.longitude) if gps_valid else None
-        altitude = (1.0 - alpha) * float(before_record.altitude) + alpha * float(after_record.altitude) if height_valid else None
+        altitude = _interpolate_optional(before_record, after_record, "altitude", alpha)
+        if altitude is None:
+            altitude = _interpolate_optional(before_record, after_record, "rel_alt", alpha)
+        if altitude is None:
+            altitude = _interpolate_optional(before_record, after_record, "abs_alt", alpha)
         out.append(
             FrameSrtSample(
                 frame,
@@ -139,6 +183,8 @@ def sample_srt_at_frames(
                 bool(before_index != after_index),
                 before_index,
                 after_index,
+                _interpolate_optional(before_record, after_record, "rel_alt", alpha),
+                _interpolate_optional(before_record, after_record, "abs_alt", alpha),
             )
         )
     return out
