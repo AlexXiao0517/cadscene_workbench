@@ -578,7 +578,7 @@
     }
   }
 
-  async function loadKeyframePlan() {
+  async function loadKeyframePlan({ suppressErrors = true } = {}) {
     if (!dataset || !runId) return null;
     try {
       const response = await fetch(
@@ -594,6 +594,7 @@
       }
     } catch (error) {
       keyframePlan = null;
+      if (!suppressErrors) throw error;
     }
     updateKeyframePlanUi();
     return keyframePlan;
@@ -612,21 +613,30 @@
   }
 
   async function generateKeyframePlan() {
-    if (!alignmentArtifactReady) {
-      throw new Error("请先完成首帧/初始关键帧的路线拟合，再生成关键帧计划。");
+    const planStatus = document.querySelector("#workflowKeyframePlanStatus");
+    try {
+      // 路线拟合可能刚在另一次任务轮询中完成，不能用页面加载时的旧状态阻断用户。
+      await refreshAlignmentArtifactState();
+      if (!alignmentArtifactReady) {
+        throw new Error("请先完成首帧/初始关键帧的路线拟合，再生成关键帧计划。");
+      }
+      await saveCurrentCameraTrack();
+      const intervalFrames = Number(document.querySelector("#workflowKeyframeStep")?.value || 180);
+      await apiPost("/api/workflow/generate-keyframe-plan", {
+        dataset,
+        runId,
+        intervalFrames,
+      });
+      // 以服务端实际落盘的计划为准；该回读也会立刻刷新质量时间轴中的紫色计划标记。
+      await loadKeyframePlan({ suppressErrors: false });
+      if (!keyframePlan) throw new Error("关键帧计划已提交，但未能读取保存结果，请刷新页面后重试。");
+      const pending = Number(keyframePlan.pending_count || 0);
+      message.textContent = `已生成 ${intervalFrames} 帧间隔的关键帧计划：${pending} 个待标定帧。`;
+      jumpToNextPendingKeyframe();
+    } catch (error) {
+      if (planStatus) planStatus.textContent = `关键帧计划生成失败：${error.message}`;
+      throw error;
     }
-    await saveCurrentCameraTrack();
-    const intervalFrames = Number(document.querySelector("#workflowKeyframeStep")?.value || 180);
-    const result = await apiPost("/api/workflow/generate-keyframe-plan", {
-      dataset,
-      runId,
-      intervalFrames,
-    });
-    keyframePlan = result.plan;
-    updateKeyframePlanUi();
-    const pending = Number(keyframePlan.pending_count || 0);
-    message.textContent = `已生成 ${intervalFrames} 帧间隔的关键帧计划：${pending} 个待标定帧。`;
-    jumpToNextPendingKeyframe();
   }
 
   async function finishKeyframePlan() {

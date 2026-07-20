@@ -228,6 +228,19 @@ def test_keyframe_plan_is_created_after_initial_route_fit_and_can_continue_pendi
     assert "Stage 4A mock" not in script
 
 
+def test_generating_keyframe_plan_refreshes_route_fit_and_timeline_from_saved_plan() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function generateKeyframePlan()")
+    end = script.index("async function finishKeyframePlan()", start)
+    generate = script[start:end]
+
+    # 路线拟合刚完成时，浏览器中的 readiness 不能成为阻断计划生成的旧状态。
+    assert "await refreshAlignmentArtifactState();" in generate
+    # 生成接口成功后必须从实际保存的 artifact 回读，确保质量时间轴拿到同一份计划数据。
+    assert "await loadKeyframePlan({ suppressErrors: false });" in generate
+    assert "关键帧计划生成失败" in generate
+
+
 def test_keyframe_plan_shows_progress_without_counting_pending_frames_as_manual_anchors() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
