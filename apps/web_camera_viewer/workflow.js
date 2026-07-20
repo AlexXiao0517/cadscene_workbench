@@ -80,12 +80,42 @@
     });
   }
 
+  function ensureManifestViewerPaths(manifest) {
+    if (!dataset || !runId) return false;
+    const videoUrl = String(manifest?.video?.url || "");
+    const cadUrl = String(manifest?.cad?.url || "");
+    if (!videoUrl && !cadUrl) return false;
+
+    const target = new URL(window.location.href);
+    let changed = false;
+    if (!target.searchParams.get("video") && videoUrl) {
+      target.searchParams.set("video", videoUrl);
+      changed = true;
+    }
+    if (!target.searchParams.get("cad") && cadUrl) {
+      target.searchParams.set("cad", cadUrl);
+      changed = true;
+    }
+    const defaults = manifest?.defaults || {};
+    if (!target.searchParams.get("cadScale") && Number.isFinite(Number(defaults.cad_scale))) {
+      target.searchParams.set("cadScale", String(defaults.cad_scale));
+      changed = true;
+    }
+    if (!target.searchParams.get("originXY") && Array.isArray(defaults.origin_xy) && defaults.origin_xy.length >= 2) {
+      target.searchParams.set("originXY", defaults.origin_xy.slice(0, 2).join(","));
+      changed = true;
+    }
+    if (changed) window.location.replace(target.toString());
+    return changed;
+  }
+
   async function loadManifestBackedTrajectoryWorkflow() {
     if (!dataset) return;
     try {
       const response = await fetch(`/api/workflow/dataset-manifest?dataset=${encodeURIComponent(dataset)}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
+      if (ensureManifestViewerPaths(payload?.manifest)) return;
       trajectoryWorkflow = payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" };
     } catch (error) {
       // Preserve legacy dataset/run URLs when a manifest is unavailable.

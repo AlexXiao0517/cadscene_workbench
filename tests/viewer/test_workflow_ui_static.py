@@ -241,6 +241,15 @@ def test_generating_keyframe_plan_refreshes_route_fit_and_timeline_from_saved_pl
     assert "关键帧计划生成失败" in generate
 
 
+def test_viewer_recovers_manifest_video_and_cad_paths_for_direct_dataset_run_urls() -> None:
+    script = _read("workflow.js")
+
+    assert "function ensureManifestViewerPaths" in script
+    assert 'target.searchParams.set("video", videoUrl);' in script
+    assert 'target.searchParams.set("cad", cadUrl);' in script
+    assert "window.location.replace(target.toString());" in script
+
+
 def test_keyframe_plan_shows_progress_without_counting_pending_frames_as_manual_anchors() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
