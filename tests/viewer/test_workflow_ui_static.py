@@ -389,6 +389,15 @@ def test_quality_can_finish_into_render_and_dormant_review_controls_are_hidden()
     assert html.count("workflow-hidden-control") >= 4
 
 
+def test_sfm_workflow_reenables_finish_quality_after_manifest_mode_is_confirmed() -> None:
+    script = _read("workflow.js")
+
+    assert "function refreshSupplementalWorkflowActionAvailability" in script
+    assert 'document.querySelector("#workflowFinishQuality")' in script
+    assert "refreshSupplementalWorkflowActionAvailability(isRunning);" in script
+    assert "refreshSupplementalWorkflowActionAvailability();" in script
+
+
 def test_render_panel_refreshes_output_after_render_job_success() -> None:
     script = _read("workflow.js")
 

@@ -56,7 +56,6 @@
   }
 
   function renderTrajectoryWorkflow(workflow) {
-    if (!trajectoryModeLabel) return;
     const mode = String(workflow?.trajectory_mode || "sfm_only");
     const implementation = String(workflow?.implementation_status || "ready");
     const copy = {
@@ -65,9 +64,11 @@
       srt_full_pose: "轨迹模式：SRT 完整姿态（功能待启用）",
       pure_rotation: "轨迹模式：悬停旋转（实验）",
     };
-    trajectoryModeLabel.hidden = false;
-    trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
-    trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
+    if (trajectoryModeLabel) {
+      trajectoryModeLabel.hidden = false;
+      trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
+      trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
+    }
     document.querySelector("#sfmPanel")?.toggleAttribute("hidden", mode === "pure_rotation");
     applyPureRotationWorkflowLayout(mode);
     if (mode === "pure_rotation") {
@@ -76,9 +77,12 @@
         setWorkflowStage(await detectWorkflowStageFromArtifacts());
       }, 0);
     }
-    if (implementation !== "interface_only") return;
+    if (implementation !== "interface_only") {
+      refreshSupplementalWorkflowActionAvailability();
+      return;
+    }
     const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
-    trajectoryModeLabel.title = explanation;
+    if (trajectoryModeLabel) trajectoryModeLabel.title = explanation;
     document.querySelectorAll("[data-job-action], #workflowGenerateKeyframes, #workflowContinueKeyframes, #workflowFinishKeyframes, #workflowFinishQuality, #workflowReturnKeyframes").forEach((button) => {
       button.disabled = true;
       button.title = explanation;
@@ -541,6 +545,17 @@
     return !trajectoryWorkflowLoaded || isInterfaceOnlyTrajectoryWorkflow();
   }
 
+  function refreshSupplementalWorkflowActionAvailability(isRunning = false) {
+    const blocked = Boolean(isRunning) || trajectoryWorkflowActionsAreBlocked();
+    const generate = document.querySelector("#workflowGenerateKeyframes");
+    const finishQuality = document.querySelector("#workflowFinishQuality");
+    const returnKeyframes = document.querySelector("#workflowReturnKeyframes");
+    if (generate) generate.disabled = blocked;
+    if (finishQuality) finishQuality.disabled = blocked;
+    if (returnKeyframes) returnKeyframes.disabled = blocked;
+    if (!blocked) updateKeyframePlanUi();
+  }
+
   function blockTrajectoryWorkflowActionsUntilResolved() {
     if (!trajectoryWorkflowActionsAreBlocked()) return;
     const explanation = isInterfaceOnlyTrajectoryWorkflow()
@@ -866,6 +881,7 @@
     document.querySelectorAll("[data-job-action]").forEach((button) => {
       button.disabled = isRunning || trajectoryWorkflowActionsAreBlocked();
     });
+    refreshSupplementalWorkflowActionAvailability(isRunning);
     const cancel = document.querySelector("#workflowCancel");
     if (cancel) cancel.hidden = !isRunning;
     const reloadKey = `cadsceneJobReload:${dataset}:${runId}`;
