@@ -28,3 +28,10 @@ Stage 6A 提供上传入口和自动轨迹工作流路由。它先保存并检�
 # Stage 6B-1：Partial-SRT 融合核心
 
 `srt_sfm_fused` 现有独立命令行融合核心，尚未接入正式 Job Runner。它通过 PTS 优先的帧时间表将 SRT 映射到 SfM 注册帧，在局部 ENU 中估计 SfM→SRT Sim3，再以 SRT 低频残差修正 SfM 位置；相机旋转始终来自 SfM。输出仍需进入既有人工关键帧与 `align_to_cad` 流程，不能把 SRT 默认视为高精度轨迹真值或 CAD 绝对高程。
+
+接口层现按轨迹几何区分两条离线路径：
+
+- `rank>=2`：继续使用标准 SfM→SRT 三维 Sim3 融合核心；
+- `rank=1`：可使用 schema v2 人工 solve/validate 姿态先验运行 Rank-1 SfM→CAD constrained solver，SRT 只提供沿程尺度和低频沿程约束。
+
+Rank-1 求解器目前只有独立 CLI 与合成验证，尚未接入正式 UI、Job Runner 或自动 workflow 路由。因此 `srt_sfm_fused` 在产品清单中仍保持 `interface_only`，不能宣称普通用户流程已完整可用。
