@@ -12,6 +12,13 @@ from typing import Sequence
 
 import numpy as np
 
+from cadscene.alignment.orientation_prior import (
+    OrientationPriorPackage,
+    PriorQualificationConfig,
+    qualify_orientation_prior,
+)
+from cadscene.sfm.trajectory import SfmTrajectory
+
 
 @dataclass(frozen=True)
 class Rank1Config:
@@ -27,6 +34,7 @@ class Rank1Config:
     max_scale: float = 1e6
     max_solve_rotation_disagreement_deg: float = 5.0
     max_translation_spread_m: float = 2.0
+    min_direction_angle_deg: float = 20.0
     smoothing_window_sec: float = 2.0
     min_smoothing_support: int = 3
 
@@ -53,6 +61,20 @@ class AlongTrackScaleFit:
     rmse_along_track_residual_m: float
     p90_along_track_residual_m: float
     scale_consistency: float
+
+
+@dataclass(frozen=True)
+class Rank1Transform:
+    scale: float
+    rotation_cad_from_sfm: np.ndarray
+    translation_cad_from_sfm: np.ndarray
+    solve_frame_indices: tuple[int, ...]
+    rotation_disagreement_deg: float
+    translation_spread_m: float
+
+    def apply_points(self, points: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+        values = _points(points, "points")
+        return self.scale * (values @ self.rotation_cad_from_sfm.T) + self.translation_cad_from_sfm
 
 
 def _points(values: Sequence[Sequence[float]] | np.ndarray, name: str) -> np.ndarray:
@@ -188,4 +210,106 @@ def estimate_along_track_scale(
         rmse_along_track_residual_m=float(np.sqrt(np.mean(abs_residual**2))),
         p90_along_track_residual_m=float(np.quantile(abs_residual, 0.9)),
         scale_consistency=consistency,
+    )
+
+
+def _proper_rotation(rotation: np.ndarray, name: str) -> np.ndarray:
+    value = np.asarray(rotation, dtype=np.float64)
+    if value.shape != (3, 3) or not np.isfinite(value).all():
+        raise ValueError(f"{name} must be a finite 3x3 rotation")
+    if not np.allclose(value.T @ value, np.eye(3), atol=1e-6) or not np.isclose(np.linalg.det(value), 1.0, atol=1e-6):
+        raise ValueError(f"{name} must be orthogonal with determinant +1")
+    return value
+
+
+def _rotation_angle_deg(first: np.ndarray, second: np.ndarray) -> float:
+    relative = first @ second.T
+    cosine = float(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def _mean_rotation(rotations: Sequence[np.ndarray]) -> np.ndarray:
+    accumulator = np.sum(np.asarray(rotations, dtype=np.float64), axis=0)
+    u, _singular, vt = np.linalg.svd(accumulator)
+    result = u @ vt
+    if np.linalg.det(result) < 0.0:
+        u[:, -1] *= -1.0
+        result = u @ vt
+    return _proper_rotation(result, "averaged solve rotation")
+
+
+def solve_rank1_transform(
+    trajectory: SfmTrajectory,
+    scale_fit: AlongTrackScaleFit,
+    sfm_primary_direction: Sequence[float] | np.ndarray,
+    priors: Sequence[OrientationPriorPackage],
+    config: Rank1Config = Rank1Config(),
+) -> Rank1Transform:
+    """Recover SfM→CAD pose from qualified manual solve anchors only."""
+
+    if not config.min_scale <= scale_fit.scale <= config.max_scale:
+        raise ValueError("Rank-1 scale is non-positive or out of range")
+    sfm_direction = np.asarray(sfm_primary_direction, dtype=np.float64)
+    if sfm_direction.shape != (3,) or not np.isfinite(sfm_direction).all() or np.linalg.norm(sfm_direction) <= 1e-12:
+        raise ValueError("SfM primary direction must be a finite non-zero 3-vector")
+    sfm_direction /= np.linalg.norm(sfm_direction)
+    solve_priors = [prior for prior in priors if prior.solver_role == "solve"]
+    if not solve_priors:
+        raise ValueError("Rank-1 alignment requires a qualified solve prior")
+
+    frame_to_index = {int(frame): index for index, frame in enumerate(trajectory.frames)}
+    candidates: list[np.ndarray] = []
+    source_centers: list[np.ndarray] = []
+    for prior in solve_priors:
+        frame = int(prior.source_frame_index)
+        if frame not in frame_to_index:
+            raise ValueError(f"solve prior frame {frame} is not registered in SfM trajectory")
+        pose_index = frame_to_index[frame]
+        r_cam_from_sfm = trajectory.query(frame)[1]
+        candidate = _proper_rotation(
+            np.asarray(prior.rotation_cad_from_camera) @ r_cam_from_sfm,
+            f"solve rotation at frame {frame}",
+        )
+        d_cad = candidate @ sfm_direction
+        qualification = qualify_orientation_prior(
+            prior,
+            d_cad,
+            PriorQualificationConfig(min_direction_angle_deg=config.min_direction_angle_deg),
+        )
+        if not qualification.accepted:
+            reasons = ", ".join(qualification.rejection_reasons)
+            raise ValueError(f"solve prior at frame {frame} is not qualified ({reasons})")
+        candidates.append(candidate)
+        source_centers.append(np.asarray(trajectory.centers[pose_index], dtype=np.float64))
+
+    disagreement = 0.0
+    for index, first in enumerate(candidates):
+        for second in candidates[index + 1 :]:
+            disagreement = max(disagreement, _rotation_angle_deg(first, second))
+    if disagreement > config.max_solve_rotation_disagreement_deg:
+        raise ValueError(
+            f"solve prior rotation disagreement is too large ({disagreement:.6g} deg)"
+        )
+    rotation = _mean_rotation(candidates)
+    translations = np.asarray(
+        [
+            np.asarray(prior.position_cad_m, dtype=np.float64)
+            - scale_fit.scale * (rotation @ center)
+            for prior, center in zip(solve_priors, source_centers)
+        ],
+        dtype=np.float64,
+    )
+    translation = np.median(translations, axis=0)
+    spread = float(np.max(np.linalg.norm(translations - translation, axis=1)))
+    if spread > config.max_translation_spread_m:
+        raise ValueError(f"solve prior translation spread is too large ({spread:.6g} m)")
+    if not np.isfinite(translation).all():
+        raise ValueError("Rank-1 translation contains NaN or Inf")
+    return Rank1Transform(
+        scale=float(scale_fit.scale),
+        rotation_cad_from_sfm=rotation,
+        translation_cad_from_sfm=translation,
+        solve_frame_indices=tuple(int(prior.source_frame_index) for prior in solve_priors),
+        rotation_disagreement_deg=disagreement,
+        translation_spread_m=spread,
     )
