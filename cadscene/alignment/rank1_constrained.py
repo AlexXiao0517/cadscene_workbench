@@ -39,6 +39,8 @@ class Rank1Config:
     min_direction_angle_deg: float = 20.0
     smoothing_window_sec: float = 2.0
     min_smoothing_support: int = 3
+    max_validate_position_error_m: float = 5.0
+    max_validate_orientation_error_deg: float = 15.0
 
 
 @dataclass(frozen=True)
