@@ -6,13 +6,16 @@ import pytest
 from cadscene.alignment.rank1_constrained import (
     AlongTrackScaleFit,
     Rank1Config,
+    apply_along_track_correction,
     analyze_rank1_axis,
+    build_rank1_trajectory_json,
     estimate_along_track_scale,
     project_along_track,
     solve_rank1_transform,
 )
 from cadscene.alignment.orientation_prior import OrientationPriorPackage
 from cadscene.sfm.trajectory import SfmTrajectory
+from cadscene.sfm.trajectory import load_sfm_trajectory, quat_wxyz_to_matrix
 
 
 def test_rank1_axis_uses_time_order_to_resolve_pca_sign():
@@ -163,3 +166,99 @@ def test_inconsistent_multiple_solve_priors_are_rejected():
             [first, second],
             Rank1Config(max_solve_rotation_disagreement_deg=5.0),
         )
+
+
+def test_srt_correction_moves_positions_along_cad_axis_only():
+    times = np.arange(7, dtype=np.float64)
+    base = np.column_stack([times, np.full(7, 5.0), np.full(7, 2.0)])
+    target_u = times + 3.0
+    result = apply_along_track_correction(
+        base,
+        np.asarray([1.0, 0.0, 0.0]),
+        times,
+        target_u,
+        np.ones(7, dtype=bool),
+        Rank1Config(smoothing_window_sec=3.0, min_smoothing_support=2),
+    )
+
+    assert np.allclose(result.fused_positions[:, 0], times + 3.0)
+    assert np.allclose(result.fused_positions[:, 1:], base[:, 1:])
+
+
+def test_lateral_srt_noise_and_single_jump_are_not_copied():
+    times = np.arange(9, dtype=np.float64)
+    base = np.column_stack([times, np.zeros(9), np.zeros(9)])
+    srt = base.copy()
+    srt[:, 1] = np.asarray([20.0, -18.0, 15.0, -22.0, 19.0, -16.0, 21.0, -17.0, 14.0])
+    target_u = project_along_track(srt, np.asarray([1.0, 0.0, 0.0]), np.zeros(3))
+    target_u[4] += 100.0
+
+    result = apply_along_track_correction(
+        base,
+        np.asarray([1.0, 0.0, 0.0]),
+        times,
+        target_u,
+        np.ones(9, dtype=bool),
+        Rank1Config(smoothing_window_sec=4.0, min_smoothing_support=3),
+    )
+
+    assert np.allclose(result.fused_positions, base)
+    assert result.raw_delta_u_m[4] == pytest.approx(100.0)
+    assert result.smoothed_delta_u_m[4] == pytest.approx(0.0)
+
+
+def test_srt_hole_is_not_corrected_or_bridged():
+    times = np.arange(7, dtype=np.float64)
+    base = np.column_stack([times, np.zeros(7), np.zeros(7)])
+    target_u = times + np.asarray([2.0, 2.0, 2.0, 100.0, -3.0, -3.0, -3.0])
+    valid = np.asarray([True, True, True, False, True, True, True])
+
+    result = apply_along_track_correction(
+        base,
+        np.asarray([1.0, 0.0, 0.0]),
+        times,
+        target_u,
+        valid,
+        Rank1Config(smoothing_window_sec=20.0, min_smoothing_support=2),
+    )
+
+    assert result.smoothing_support[3] == 0
+    assert np.allclose(result.fused_positions[3], base[3])
+    assert np.allclose(result.smoothed_delta_u_m[:3], 2.0)
+    assert np.allclose(result.smoothed_delta_u_m[4:], -3.0)
+
+
+def test_nonidentity_world_transform_preserves_normalized_projection_and_loader(tmp_path):
+    raw = {
+        "fps": 30.0, "width": 1920, "height": 1080,
+        "intrinsics": [{"width": 1920, "height": 1080, "params": [1000.0]}],
+        "poses": [
+            {"frame_index": 0, "registered": True, "center": [1.0, 2.0, 3.0], "cam_from_world_quat_wxyz": [1.0, 0.0, 0.0, 0.0]},
+            {"frame_index": 10, "registered": True, "center": [2.0, 2.0, 3.0], "cam_from_world_quat_wxyz": [1.0, 0.0, 0.0, 0.0]},
+        ],
+    }
+    rotation = _rotz(35.0)
+    transform = solve_rank1_transform(
+        _trajectory(np.asarray([[1.0, 2.0, 3.0], [2.0, 2.0, 3.0]])),
+        _scale_fit(2.25),
+        np.asarray([1.0, 0.0, 0.0]),
+        [_prior(0, rotation, 2.25 * (rotation @ np.asarray([1.0, 2.0, 3.0])) + np.asarray([4.0, -2.0, 1.0]))],
+        Rank1Config(min_baseline=0.1),
+    )
+    centers = transform.apply_points(np.asarray([pose["center"] for pose in raw["poses"]]))
+    output = build_rank1_trajectory_json(raw, transform, centers)
+
+    old_center = np.asarray(raw["poses"][0]["center"])
+    old_point = np.asarray([4.0, 6.0, 12.0])
+    new_center = np.asarray(output["poses"][0]["center"])
+    new_point = transform.apply_points(np.asarray([old_point]))[0]
+    old_camera = quat_wxyz_to_matrix(raw["poses"][0]["cam_from_world_quat_wxyz"]) @ (old_point - old_center)
+    new_camera = quat_wxyz_to_matrix(output["poses"][0]["cam_from_world_quat_wxyz"]) @ (new_point - new_center)
+    assert np.allclose(old_camera[:2] / old_camera[2], new_camera[:2] / new_camera[2])
+    assert output["meta"]["coordinate_system"] == "cad_meters"
+    assert output["meta"]["trajectory_mode"] == "srt_rank1_manual_prior"
+
+    path = tmp_path / "rank1.json"
+    path.write_text(__import__("json").dumps(output), encoding="utf-8")
+    loaded = load_sfm_trajectory(path)
+    assert np.allclose(loaded.centers, centers)

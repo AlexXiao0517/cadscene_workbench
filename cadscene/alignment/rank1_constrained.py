@@ -7,6 +7,7 @@ position-only Sim3.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -18,6 +19,7 @@ from cadscene.alignment.orientation_prior import (
     qualify_orientation_prior,
 )
 from cadscene.sfm.trajectory import SfmTrajectory
+from cadscene.srt.fusion import rotate_cam_from_world_quat
 
 
 @dataclass(frozen=True)
@@ -73,8 +75,20 @@ class Rank1Transform:
     translation_spread_m: float
 
     def apply_points(self, points: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
-        values = _points(points, "points")
+        values = np.asarray(points, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != 3 or len(values) < 1 or not np.isfinite(values).all():
+            raise ValueError("points must have finite shape (N, 3) with N>=1")
         return self.scale * (values @ self.rotation_cad_from_sfm.T) + self.translation_cad_from_sfm
+
+
+@dataclass(frozen=True)
+class AlongTrackCorrection:
+    base_positions: np.ndarray
+    fused_positions: np.ndarray
+    raw_delta_u_m: np.ndarray
+    smoothed_delta_u_m: np.ndarray
+    smoothing_support: np.ndarray
+    srt_valid: np.ndarray
 
 
 def _points(values: Sequence[Sequence[float]] | np.ndarray, name: str) -> np.ndarray:
@@ -313,3 +327,100 @@ def solve_rank1_transform(
         rotation_disagreement_deg=disagreement,
         translation_spread_m=spread,
     )
+
+
+def apply_along_track_correction(
+    base_positions: Sequence[Sequence[float]] | np.ndarray,
+    d_cad: Sequence[float] | np.ndarray,
+    frame_times_sec: Sequence[float] | np.ndarray,
+    target_along_track_m: Sequence[float] | np.ndarray,
+    srt_valid: Sequence[bool] | np.ndarray,
+    config: Rank1Config = Rank1Config(),
+) -> AlongTrackCorrection:
+    """Apply bounded median residuals strictly along the transformed track axis."""
+
+    base = _points(base_positions, "base_positions")
+    axis = np.asarray(d_cad, dtype=np.float64)
+    times = np.asarray(frame_times_sec, dtype=np.float64)
+    target = np.asarray(target_along_track_m, dtype=np.float64)
+    valid = np.asarray(srt_valid, dtype=bool)
+    if axis.shape != (3,) or not np.isfinite(axis).all() or np.linalg.norm(axis) <= 1e-12:
+        raise ValueError("d_cad must be a finite non-zero 3-vector")
+    axis /= np.linalg.norm(axis)
+    if times.shape != (len(base),) or target.shape != (len(base),) or valid.shape != (len(base),):
+        raise ValueError("times, target along-track values and validity must match base positions")
+    if not np.isfinite(times).all() or not np.isfinite(target[valid]).all():
+        raise ValueError("valid Rank-1 time/SRT samples must be finite")
+    if config.smoothing_window_sec <= 0.0 or config.min_smoothing_support < 1:
+        raise ValueError("Rank-1 smoothing settings must be positive")
+
+    base_u = project_along_track(base, axis, base[0])
+    raw_delta = np.full(len(base), np.nan, dtype=np.float64)
+    raw_delta[valid] = target[valid] - base_u[valid]
+    smooth = np.zeros(len(base), dtype=np.float64)
+    support = np.zeros(len(base), dtype=np.int64)
+    half_window = config.smoothing_window_sec / 2.0
+    for index in range(len(base)):
+        if not valid[index]:
+            continue
+        left = index
+        while left > 0 and valid[left - 1]:
+            left -= 1
+        right = index
+        while right + 1 < len(base) and valid[right + 1]:
+            right += 1
+        window = np.arange(left, right + 1)
+        window = window[np.abs(times[window] - times[index]) <= half_window]
+        support[index] = len(window)
+        if len(window) >= config.min_smoothing_support:
+            smooth[index] = float(np.median(raw_delta[window]))
+    fused = base + smooth[:, None] * axis[None, :]
+    return AlongTrackCorrection(
+        base_positions=base,
+        fused_positions=fused,
+        raw_delta_u_m=raw_delta,
+        smoothed_delta_u_m=smooth,
+        smoothing_support=support,
+        srt_valid=valid,
+    )
+
+
+def build_rank1_trajectory_json(
+    raw_trajectory: dict,
+    transform: Rank1Transform,
+    corrected_positions: Sequence[Sequence[float]] | np.ndarray,
+    correction: AlongTrackCorrection | None = None,
+) -> dict:
+    """Build a legacy-loader-compatible trajectory in CAD metres."""
+
+    output = deepcopy(raw_trajectory)
+    registered = [pose for pose in output.get("poses", []) if pose.get("registered", True)]
+    positions = _points(corrected_positions, "corrected_positions")
+    if len(registered) != len(positions):
+        raise ValueError("registered trajectory poses do not match corrected positions")
+    if correction is not None and len(correction.fused_positions) != len(positions):
+        raise ValueError("Rank-1 correction does not match trajectory pose count")
+    for index, pose in enumerate(registered):
+        pose["center"] = [float(value) for value in positions[index]]
+        pose["cam_from_world_quat_wxyz"] = rotate_cam_from_world_quat(
+            pose["cam_from_world_quat_wxyz"],
+            transform.rotation_cad_from_sfm,
+        )
+        pose["trajectory_source"] = "rank1_sfm_srt_along_track_cad"
+        if correction is not None:
+            pose["srt_valid"] = bool(correction.srt_valid[index])
+            pose["along_track_correction_m"] = float(correction.smoothed_delta_u_m[index])
+            pose["smoothing_support"] = int(correction.smoothing_support[index])
+    output["meta"] = {
+        **dict(output.get("meta") or {}),
+        "trajectory_mode": "srt_rank1_manual_prior",
+        "coordinate_system": "cad_meters",
+        "position_source": "rank1_sfm_srt_along_track_cad",
+        "orientation_source": "sfm_plus_manual_prior",
+        "srt_constraint": "along_track_only",
+        "transform_name": "rank1_sfm_to_cad_base",
+        "scale": float(transform.scale),
+        "rotation_cad_from_sfm": transform.rotation_cad_from_sfm.tolist(),
+        "translation_cad_from_sfm": transform.translation_cad_from_sfm.tolist(),
+    }
+    return output
