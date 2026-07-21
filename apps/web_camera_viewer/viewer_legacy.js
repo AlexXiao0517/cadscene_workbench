@@ -12,7 +12,7 @@
   const TRACK_FALLBACKS = VIEWER_PATHS.trackFallbacks || [];
   const CAMERA_PATH = VIEWER_PATHS.camera;
   const REVIEW_PATH = VIEWER_PATHS.review;
-  const DEFAULT_FPS = 23.976;
+  const FRAME_TIMESTAMPS_PATH = VIEWER_PATHS.frameTimestamps;
   const NEAR_PLANE = 0.1;
   const CAD_FOCUS_LAYER_GROUPS = [
     /中心线|道路|路面|标线|road|centerline|alignment/i,
@@ -84,6 +84,7 @@
   let cameraTrack = null;
   let reviewPacket = null;
   let manualFrameOverride = null;
+  let frameTimestampRows = [];
   let lastOverlayDrawAt = 0;
   let videoRangeSupported = null;
   let showCadText = true;
@@ -335,13 +336,49 @@
     return pose;
   }
 
+  function frameTimestampForSourceFrame(frame) {
+    const sourceFrame = Number(frame);
+    if (!Number.isFinite(sourceFrame)) return null;
+    return frameTimestampRows.find((row) => row.source_frame_index === sourceFrame) || null;
+  }
+
+  function nearestFrameTimestamp(timeSec) {
+    const target = Number(timeSec);
+    if (!Number.isFinite(target) || frameTimestampRows.length === 0) return null;
+    let best = frameTimestampRows[0];
+    let bestDelta = Math.abs(best.pts_time_sec - target);
+    for (const row of frameTimestampRows.slice(1)) {
+      const delta = Math.abs(row.pts_time_sec - target);
+      if (delta < bestDelta) {
+        best = row;
+        bestDelta = delta;
+      }
+    }
+    return best;
+  }
+
+  function confirmedCfrFrame(timeSec) {
+    const fps = Number(cameraTrack?.fps);
+    if (cameraTrack?.cfr_confirmed !== true || !Number.isFinite(fps) || fps <= 0) return null;
+    return Math.round(Number(timeSec) * fps);
+  }
+
+  function sourceFrameAtTime(timeSec) {
+    const timing = nearestFrameTimestamp(timeSec);
+    return timing ? timing.source_frame_index : confirmedCfrFrame(timeSec);
+  }
+
   function currentFrame() {
     if (manualFrameOverride !== null) return manualFrameOverride;
-    return Math.round((video.currentTime || 0) * cameraTrack.fps);
+    return sourceFrameAtTime(video.currentTime || 0) ?? 0;
   }
 
   function frameToTime(frame) {
-    return frame / cameraTrack.fps;
+    const timing = frameTimestampForSourceFrame(frame);
+    if (timing) return timing.pts_time_sec;
+    const fps = Number(cameraTrack?.fps);
+    if (cameraTrack?.cfr_confirmed === true && Number.isFinite(fps) && fps > 0) return frame / fps;
+    return video.currentTime || 0;
   }
 
   function sortKeyframes() {
@@ -353,7 +390,21 @@
   }
 
   function makeKeyframe(frame, pose, source) {
-    const entry = { frame: Number(frame), time: frameToTime(Number(frame)), camera: cloneCameraPose(pose) };
+    const requestedFrame = Number(frame);
+    const timing = frameTimestampForSourceFrame(requestedFrame) || nearestFrameTimestamp(video.currentTime || 0);
+    const sourceFrame = timing?.source_frame_index ?? confirmedCfrFrame(video.currentTime || 0);
+    if (!Number.isFinite(sourceFrame)) {
+      throw new Error("缺少权威帧时间映射，无法保存关键帧");
+    }
+    const ptsTimeSec = timing?.pts_time_sec ?? Number(video.currentTime || 0);
+    const entry = {
+      frame: sourceFrame,
+      source_frame_index: sourceFrame,
+      time: ptsTimeSec,
+      pts_time_sec: ptsTimeSec,
+      frame_mapping_source: timing ? "sfm_frame_timestamps" : "manifest_cfr_fps",
+      camera: cloneCameraPose(pose),
+    };
     if (source) entry.source = source;
     return entry;
   }
@@ -363,12 +414,18 @@
     const existing = findKeyframe(frame);
     if (existing) {
       existing.time = Number(entry.time ?? frameToTime(frame));
+      existing.source_frame_index = Number(entry.source_frame_index ?? frame);
+      existing.pts_time_sec = Number(entry.pts_time_sec ?? existing.time);
+      existing.frame_mapping_source = entry.frame_mapping_source;
       existing.camera = cloneCameraPose(entry.camera);
       if (entry.source) existing.source = entry.source;
     } else {
       cameraTrack.keyframes.push({
         frame,
         time: Number(entry.time ?? frameToTime(frame)),
+        source_frame_index: Number(entry.source_frame_index ?? frame),
+        pts_time_sec: Number(entry.pts_time_sec ?? entry.time ?? frameToTime(frame)),
+        frame_mapping_source: entry.frame_mapping_source,
         source: entry.source,
         camera: cloneCameraPose(entry.camera),
       });
@@ -506,7 +563,8 @@
     return {
       version: 1,
       video: VIDEO_PATH,
-      fps: DEFAULT_FPS,
+      fps: null,
+      cfr_confirmed: false,
       keyframes: [{ frame: 0, time: 0, camera: cloneCameraPose(initialPose) }],
     };
   }
@@ -1479,7 +1537,7 @@
     }
     await waitForVideoSeek();
 
-    let actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+    let actualFrame = sourceFrameAtTime(video.currentTime || 0) ?? -1;
     if (Math.abs(actualFrame - targetFrame) > 2) {
       const base = videoBaseUrl();
       video.src = `${base}#t=${clampedTime.toFixed(3)}`;
@@ -1488,12 +1546,12 @@
         video.addEventListener("loadeddata", resolve, { once: true });
         video.addEventListener("error", resolve, { once: true });
       });
-      actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      actualFrame = sourceFrameAtTime(video.currentTime || 0) ?? -1;
       if (Math.abs(actualFrame - targetFrame) > 2) {
         video.src = base;
         assignCurrentTime();
         await waitForVideoSeek();
-        actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+        actualFrame = sourceFrameAtTime(video.currentTime || 0) ?? -1;
       }
     }
 
@@ -1601,20 +1659,36 @@
   };
 
   function applyTrackPayload(payload) {
+    const payloadFps = Number(payload.fps);
     cameraTrack = {
       version: payload.version || 1,
       video: payload.video || VIDEO_PATH,
-      fps: Number(payload.fps || DEFAULT_FPS),
+      fps: Number.isFinite(payloadFps) && payloadFps > 0 ? payloadFps : null,
+      cfr_confirmed: payload.cfr_confirmed === true,
       keyframes: Array.isArray(payload.keyframes) ? payload.keyframes : [],
     };
-    cameraTrack.keyframes = cameraTrack.keyframes.map((keyframe) => ({
-      frame: Number(keyframe.frame),
-      time: Number(keyframe.time ?? frameToTime(Number(keyframe.frame))),
-      source: keyframe.source,
-      camera: cloneCameraPose(keyframe.camera),
-      // 质量评估附加字段（evaluate_sfm_alignment_quality 产出，可选；向后兼容，仅展示不影响对齐）
-      quality: keyframe.quality || null,
-    }));
+    cameraTrack.keyframes = cameraTrack.keyframes.map((keyframe) => {
+      const savedTime = Number(keyframe.pts_time_sec ?? keyframe.time);
+      const explicitSource = Number(keyframe.source_frame_index);
+      const timing = Number.isInteger(explicitSource)
+        ? frameTimestampForSourceFrame(explicitSource)
+        : nearestFrameTimestamp(savedTime);
+      const sourceFrame = timing?.source_frame_index
+        ?? (Number.isInteger(explicitSource) ? explicitSource : Number(keyframe.frame));
+      const ptsTimeSec = timing?.pts_time_sec
+        ?? (Number.isFinite(savedTime) ? savedTime : frameToTime(sourceFrame));
+      return {
+        frame: sourceFrame,
+        source_frame_index: sourceFrame,
+        time: ptsTimeSec,
+        pts_time_sec: ptsTimeSec,
+        frame_mapping_source: timing ? "sfm_frame_timestamps" : keyframe.frame_mapping_source,
+        source: keyframe.source,
+        camera: cloneCameraPose(keyframe.camera),
+        // 质量评估附加字段（evaluate_sfm_alignment_quality 产出，可选；向后兼容，仅展示不影响对齐）
+        quality: keyframe.quality || null,
+      };
+    });
     sortKeyframes();
     summarizeQualitySuggestions();
     if (cameraTrack.keyframes.length > 0) {
@@ -1728,6 +1802,45 @@
     return out;
   }
 
+  function applyFrameTimestampsCsv(text) {
+    const cleaned = String(text || "").replace(/^\uFEFF/, "").trim();
+    if (!cleaned) throw new Error("frame_timestamps.csv 为空");
+    const lines = cleaned.split(/\r?\n/).filter(Boolean);
+    const header = parseCsvLine(lines[0]);
+    const sourceIndex = header.indexOf("source_frame_index");
+    const extractedIndex = header.indexOf("extracted_index");
+    const ptsIndex = header.indexOf("pts_time_sec");
+    if (sourceIndex < 0 || extractedIndex < 0 || ptsIndex < 0) {
+      throw new Error("frame_timestamps.csv 缺少 source_frame_index/extracted_index/pts_time_sec");
+    }
+    frameTimestampRows = lines.slice(1).map((line) => {
+      const columns = parseCsvLine(line);
+      return {
+        source_frame_index: Number(columns[sourceIndex]),
+        extracted_index: Number(columns[extractedIndex]),
+        pts_time_sec: Number(columns[ptsIndex]),
+      };
+    }).filter((row) => (
+      Number.isInteger(row.source_frame_index)
+      && row.source_frame_index >= 0
+      && Number.isFinite(row.pts_time_sec)
+    )).sort((a, b) => a.pts_time_sec - b.pts_time_sec || a.source_frame_index - b.source_frame_index);
+    if (frameTimestampRows.length === 0) throw new Error("frame_timestamps.csv 没有有效 PTS");
+  }
+
+  async function loadFrameTimestampsFromPath(path) {
+    if (!path) return false;
+    try {
+      const response = await fetch(path, { cache: "no-store" });
+      if (!response.ok) return false;
+      applyFrameTimestampsCsv(await response.text());
+      return true;
+    } catch (error) {
+      console.warn(`[cadscene viewer] 无法加载权威帧时间映射: ${error.message}`);
+      return false;
+    }
+  }
+
   function applyQualityTimelineCsv(text) {
     const cleaned = String(text || "").replace(/^\uFEFF/, "").trim();
     if (!cleaned) {
@@ -1794,8 +1907,11 @@
 
   function timelineTotalFrames() {
     // 优先用视频真实时长换算总帧数；不可用时退回关键帧/建议帧的最大帧号。
-    const fps = cameraTrack.fps || DEFAULT_FPS;
-    if (Number.isFinite(video.duration) && video.duration > 0) {
+    if (frameTimestampRows.length > 0) {
+      return Math.max(1, frameTimestampRows[frameTimestampRows.length - 1].source_frame_index);
+    }
+    const fps = Number(cameraTrack?.fps);
+    if (cameraTrack?.cfr_confirmed === true && Number.isFinite(fps) && fps > 0 && Number.isFinite(video.duration) && video.duration > 0) {
       return Math.max(1, Math.round(video.duration * fps));
     }
     let maxFrame = 1;
@@ -2389,7 +2505,7 @@
     });
     video.addEventListener("pause", () => updateViews({ forceOverlay: true }));
     video.addEventListener("seeked", () => {
-      const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      const actualFrame = sourceFrameAtTime(video.currentTime || 0) ?? manualFrameOverride ?? 0;
       const targetFrame = manualFrameOverride ?? actualFrame;
       if (manualFrameOverride !== null && Math.abs(actualFrame - manualFrameOverride) <= 1) {
         manualFrameOverride = null;
@@ -2423,6 +2539,7 @@
     if (sceneHint) sceneHint.textContent = "左键旋转，右键平移，滚轮缩放。W/E 切换 Gizmo，G 显示/隐藏，F 聚焦 UAV。";
     setStatus(`${cadData.layers.length} 个图层，CAD 已就绪`);
 
+    await loadFrameTimestampsFromPath(FRAME_TIMESTAMPS_PATH);
     const trackLoaded = await loadTrackFromPaths([TRACK_PATH, ...TRACK_FALLBACKS]);
     if (trackLoaded) {
       setStatus(`${cadData.layers.length} 个图层，已加载 ${cameraTrack.keyframes.length} 个关键帧`);

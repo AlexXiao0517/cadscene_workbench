@@ -32,6 +32,7 @@
       sfmScene: "",
       diagnosticsScene: "",
       qualityTrack: "",
+      frameTimestamps: "",
     };
     if (!runId) return defaults;
     return {
@@ -43,6 +44,7 @@
       suggestions: runPath(dataset, runId, "04_quality", "keyframe_suggestions.json"),
       sfmScene: runPath(dataset, runId, "05_viewer_scene", "sfm_viewer_scene.json"),
       diagnosticsScene: runPath(dataset, runId, "06_road_surface", "viewer_diagnostics_scene.json"),
+      frameTimestamps: runPath(dataset, runId, "02_sfm", "frame_timestamps.csv"),
     };
   }
 
@@ -69,6 +71,7 @@
       qualityTimeline: param(params, "qualityTimeline", ["quality_timeline"]) || base.qualityTimeline,
       sfmScene: param(params, "sfmScene", ["sfm_scene"]) || base.sfmScene,
       diagnosticsScene: param(params, "diagnosticsScene", ["diagnostics_scene"]) || base.diagnosticsScene,
+      frameTimestamps: param(params, "frameTimestamps", ["frame_timestamps"]) || base.frameTimestamps,
     };
     for (const key of ["video", "cad"]) {
       if (!paths[key]) console.warn(`[cadscene viewer] missing ${key} path; pass ?${key}=... or place data under /data/`);

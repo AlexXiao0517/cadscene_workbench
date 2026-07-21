@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import inspect
 import json
 import os
@@ -13,6 +14,44 @@ import pytest
 from cadscene.workflow import job_runner as job_runner_module
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, build_stage_command, resolve_stage_inputs, save_camera_track
 from cadscene.workflow.keyframe_plan import validate_quality_plan
+
+
+def _write_frame_timestamps(run_dir: Path) -> None:
+    path = run_dir / "02_sfm/frame_timestamps.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=[
+                "source_frame_index",
+                "extracted_index",
+                "image_name",
+                "pts_time_sec",
+                "timestamp_source",
+                "cfr_confirmed",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "source_frame_index": 0,
+                    "extracted_index": 0,
+                    "image_name": "frame_000000.png",
+                    "pts_time_sec": 0.0,
+                    "timestamp_source": "pts_csv",
+                    "cfr_confirmed": False,
+                },
+                {
+                    "source_frame_index": 275,
+                    "extracted_index": 55,
+                    "image_name": "frame_000275.png",
+                    "pts_time_sec": 9.175833333333333,
+                    "timestamp_source": "pts_csv",
+                    "cfr_confirmed": False,
+                },
+            ]
+        )
 
 
 def _wait_for_status(runner: JobRunner, dataset: str, run_id: str, expected: str, timeout: float = 5.0) -> dict:
@@ -158,6 +197,67 @@ def test_sfm_completion_message_distinguishes_registration_failure_from_low_para
     assert "注册失败" in registration_failure
     assert "重新拍摄" not in registration_failure
     assert "明显平移" in low_parallax
+
+
+def test_save_camera_track_maps_pts_to_authoritative_source_frame(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs/demo/pts-map"
+    _write_frame_timestamps(run_dir)
+    track = {
+        "fps": 23.976,
+        "playback_rate": 2.0,
+        "keyframes": [
+            {
+                "frame": 220,
+                "time": 9.175843,
+                "pts_time_sec": 9.175843,
+                "camera": {"x": 1.0},
+            }
+        ],
+    }
+
+    output = save_camera_track(tmp_path, "demo", "pts-map", track)
+
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    frame = saved["keyframes"][0]
+    assert frame["frame"] == 275
+    assert frame["source_frame_index"] == 275
+    assert frame["pts_time_sec"] == pytest.approx(9.175833333333333)
+    assert frame["frame_mapping_source"] == "sfm_frame_timestamps"
+    assert frame.get("extracted_index") != frame["source_frame_index"]
+
+
+def test_save_camera_track_rejects_new_pts_without_authoritative_timing(tmp_path: Path) -> None:
+    track = {
+        "keyframes": [
+            {"frame": 220, "pts_time_sec": 9.175843, "camera": {"x": 1.0}},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="authoritative frame timing"):
+        save_camera_track(tmp_path, "demo", "missing-timing", track)
+
+
+def test_save_camera_track_uses_manifest_fps_only_for_confirmed_cfr(tmp_path: Path) -> None:
+    manifest = tmp_path / "data/demo/dataset_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"video": {"fps": 29.97002997002997, "cfr_confirmed": True}}),
+        encoding="utf-8",
+    )
+    track = {
+        "keyframes": [
+            {"frame": 220, "pts_time_sec": 9.175843, "camera": {"x": 1.0}},
+        ]
+    }
+
+    output = save_camera_track(tmp_path, "demo", "cfr-map", track)
+
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    frame = saved["keyframes"][0]
+    assert frame["frame"] == 275
+    assert frame["source_frame_index"] == 275
+    assert frame["pts_time_sec"] == pytest.approx(9.175843)
+    assert frame["frame_mapping_source"] == "manifest_cfr_fps"
 
 
 def test_saving_unchanged_track_does_not_invalidate_final_route_fit(tmp_path: Path) -> None:

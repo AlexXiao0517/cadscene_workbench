@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import json
+import math
 import os
 import signal
 import subprocess
@@ -767,6 +769,7 @@ def save_camera_track(root: str | Path, dataset: str, run_id: str, camera_track:
     base = Path(root).resolve()
     run_dir = base / "runs" / _safe_name(dataset, "dataset") / _safe_name(run_id, "runId")
     output = run_dir / "01_keyframes" / "camera_track_manual.json"
+    camera_track = _camera_track_with_authoritative_frames(base, dataset, run_dir, camera_track)
     unchanged = False
     if output.exists():
         try:
@@ -788,3 +791,91 @@ def save_camera_track(root: str | Path, dataset: str, run_id: str, camera_track:
         message="当前相机轨迹已保存",
     )
     return output
+
+
+def _frame_timestamp_rows(path: Path) -> list[tuple[int, float]]:
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"source_frame_index", "pts_time_sec"}
+        if not required.issubset(reader.fieldnames or set()):
+            raise ValueError("frame_timestamps.csv is missing authoritative frame timing columns")
+        rows: list[tuple[int, float]] = []
+        for row in reader:
+            try:
+                source_frame_index = int(row["source_frame_index"])
+                pts_time_sec = float(row["pts_time_sec"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("frame_timestamps.csv contains invalid authoritative frame timing") from exc
+            if source_frame_index < 0 or not math.isfinite(pts_time_sec):
+                raise ValueError("frame_timestamps.csv contains invalid authoritative frame timing")
+            rows.append((source_frame_index, pts_time_sec))
+    return sorted(rows, key=lambda item: (item[1], item[0]))
+
+
+def _confirmed_manifest_cfr(root: Path, dataset: str) -> float | None:
+    try:
+        manifest = load_dataset_manifest(root, dataset)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    video = manifest.get("video") or {}
+    try:
+        fps = float(video.get("fps"))
+    except (TypeError, ValueError):
+        return None
+    if video.get("cfr_confirmed") is not True or not math.isfinite(fps) or fps <= 0.0:
+        return None
+    return fps
+
+
+def _camera_track_with_authoritative_frames(
+    root: Path,
+    dataset: str,
+    run_dir: Path,
+    camera_track: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Canonicalize saved keyframes from video PTS without mutating the caller payload."""
+
+    payload = json.loads(json.dumps(dict(camera_track)))
+    keyframes = payload.get("keyframes")
+    if not isinstance(keyframes, list):
+        return payload
+    timing_rows = _frame_timestamp_rows(run_dir / "02_sfm" / "frame_timestamps.csv")
+    manifest_fps: float | None = None
+    for keyframe in keyframes:
+        if not isinstance(keyframe, dict):
+            continue
+        raw_pts = keyframe.get("pts_time_sec")
+        if raw_pts is None and timing_rows:
+            raw_pts = keyframe.get("time")
+        if raw_pts is None:
+            continue
+        try:
+            pts_time_sec = float(raw_pts)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("keyframe pts_time_sec must be finite") from exc
+        if not math.isfinite(pts_time_sec):
+            raise ValueError("keyframe pts_time_sec must be finite")
+        if timing_rows:
+            source_frame_index, authoritative_pts = min(
+                timing_rows,
+                key=lambda item: (abs(item[1] - pts_time_sec), item[1], item[0]),
+            )
+            mapping_source = "sfm_frame_timestamps"
+        else:
+            if manifest_fps is None:
+                manifest_fps = _confirmed_manifest_cfr(root, dataset)
+            if manifest_fps is None:
+                raise ValueError(
+                    "authoritative frame timing is unavailable; frame_timestamps.csv or confirmed manifest CFR is required"
+                )
+            source_frame_index = round(pts_time_sec * manifest_fps)
+            authoritative_pts = pts_time_sec
+            mapping_source = "manifest_cfr_fps"
+        keyframe["frame"] = int(source_frame_index)
+        keyframe["source_frame_index"] = int(source_frame_index)
+        keyframe["time"] = float(pts_time_sec)
+        keyframe["pts_time_sec"] = float(authoritative_pts)
+        keyframe["frame_mapping_source"] = mapping_source
+    return payload

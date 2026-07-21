@@ -52,6 +52,19 @@ def test_paths_js_supports_runs_outputs_and_url_overrides() -> None:
     assert "/data/${encoded}/design.json" in text
 
 
+def test_keyframes_use_authoritative_pts_and_source_frame_mapping() -> None:
+    paths = _text(APP_DIR / "paths.js")
+    viewer = _text(APP_DIR / "viewer_legacy.js")
+
+    assert "frameTimestamps" in paths
+    assert "frame_timestamps.csv" in paths
+    assert "loadFrameTimestampsFromPath" in viewer
+    assert "nearestFrameTimestamp" in viewer
+    assert "pts_time_sec" in viewer
+    assert "source_frame_index" in viewer
+    assert "frame_mapping_source" in viewer
+
+
 def test_viewer_legacy_contains_quality_suggestions_and_prediction_guards() -> None:
     text = _text(APP_DIR / "viewer_legacy.js")
 
