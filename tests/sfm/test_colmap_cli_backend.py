@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import cadscene.sfm.colmap_cli as colmap_cli
+import pytest
 
 from cadscene.sfm.colmap_cli import (
     ColmapCliPaths,
@@ -87,6 +88,7 @@ def test_gpu_execution_requires_positive_log_evidence() -> None:
         "Bind FeatureMatcherWorker to GPU device 0",
         requested=True,
     ) is True
+    assert parse_gpu_execution("SiftGPU not supported; using CPU features", requested=True) is False
     assert parse_gpu_execution("CUDA unavailable; falling back to CPU", requested=True) is False
     assert is_cuda_failure("SiftGPU was compiled without CUDA support") is True
     assert is_cuda_failure("mapper failed: no initial image pair") is False
@@ -160,6 +162,36 @@ def test_command_runner_calls_falsy_line_callback() -> None:
     assert seen == ["mapper line\n"]
 
 
+def test_command_runner_drains_and_waits_after_line_callback_failure(capsys) -> None:
+    class FakeProcess:
+        returncode = 7
+        stdout = iter(["first line\n", "second line\n", "third line\n"])
+
+        def __init__(self) -> None:
+            self.wait_called = False
+
+        def wait(self):
+            self.wait_called = True
+            return self.returncode
+
+    process = FakeProcess()
+
+    def failing_callback(line: str) -> None:
+        raise RuntimeError(f"cannot observe {line.strip()}")
+
+    with pytest.raises(colmap_cli.ColmapCommandError) as error:
+        run_colmap_command(
+            ["colmap.exe", "mapper"],
+            popen_factory=lambda command, **kwargs: process,
+            line_callback=failing_callback,
+        )
+
+    assert error.value.result.returncode == 7
+    assert error.value.result.output == "first line\nsecond line\nthird line\n"
+    assert process.wait_called is True
+    assert "progress callback failed" in capsys.readouterr().out
+
+
 def test_pipeline_reports_mapper_stdout_progress_only(monkeypatch, tmp_path: Path) -> None:
     paths = ColmapCliPaths(
         images_dir=tmp_path / "images",
@@ -216,6 +248,58 @@ def test_pipeline_reports_mapper_stdout_progress_only(monkeypatch, tmp_path: Pat
         ("mapper_global_ba", 0.78, "正在执行有界全局 BA"),
     ]
     assert [callback is None for _, callback in callbacks] == [True, True, False]
+
+
+def test_pipeline_mapper_progress_never_decreases_after_global_ba(monkeypatch, tmp_path: Path) -> None:
+    paths = ColmapCliPaths(
+        images_dir=tmp_path / "images",
+        masks_dir=tmp_path / "masks",
+        database_path=tmp_path / "database.db",
+        sparse_dir=tmp_path / "sparse",
+    )
+    progress = []
+    lines = [
+        "Retriangulation and Global bundle adjustment\n",
+        "Registering image #13 (num_reg_frames=9)\n",
+    ]
+
+    monkeypatch.setattr(colmap_cli, "probe_colmap_subcommand_help", lambda *args: "")
+
+    def fake_run(command, *, line_callback=None):
+        if line_callback is not None:
+            for line in lines:
+                line_callback(line)
+        return colmap_cli.ColmapCommandResult(
+            command=list(command),
+            returncode=0,
+            output="".join(lines),
+            elapsed_sec=0.0,
+        )
+
+    monkeypatch.setattr(colmap_cli, "run_colmap_command", fake_run)
+
+    colmap_cli.run_colmap_cli_pipeline(
+        "colmap.exe",
+        paths,
+        camera_model="OPENCV",
+        max_image_size=2048,
+        max_num_features=12000,
+        sequential_overlap=15,
+        init_min_tri_angle=2.0,
+        ba_global_frames_ratio=2.0,
+        ba_global_points_ratio=2.0,
+        ba_global_frames_freq=1000,
+        ba_global_points_freq=1000000,
+        ba_global_max_num_iterations=25,
+        ba_global_max_refinements=2,
+        use_mask=False,
+        use_gpu=True,
+        gpu_index="0",
+        progress_callback=lambda phase, value, message: progress.append((phase, value, message)),
+    )
+
+    mapper_progress = [event for event in progress if event[0].startswith("mapper_")]
+    assert [event[1] for event in mapper_progress] == [0.78, 0.78]
 
 
 def test_text_model_exports_existing_trajectory_schema(tmp_path: Path) -> None:

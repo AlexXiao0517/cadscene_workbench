@@ -165,6 +165,8 @@ def build_colmap_cli_commands(
 def parse_gpu_execution(output: str, *, requested: bool) -> bool:
     if not requested:
         return False
+    if is_cuda_failure(output):
+        return False
     lowered = str(output).lower()
     negative = (
         "falling back to cpu",
@@ -219,12 +221,20 @@ def run_colmap_command(
         **hidden_process_options(),
     )
     lines: list[str] = []
+    callback_failed = False
     if process.stdout is not None:
         for line in process.stdout:
             print(line, end="", flush=True)
             lines.append(line)
-            if line_callback is not None:
-                line_callback(line)
+            if line_callback is not None and not callback_failed:
+                try:
+                    line_callback(line)
+                except Exception as exc:
+                    callback_failed = True
+                    print(
+                        f"[sfm:progress_warning] progress callback failed; continuing: {exc}",
+                        flush=True,
+                    )
     returncode = int(process.wait())
     result = ColmapCommandResult(
         command=command_list,
@@ -304,14 +314,18 @@ def run_colmap_cli_pipeline(
     progress_values = (0.32, 0.52, 0.72)
     messages = ("正在提取特征", "正在进行顺序匹配", "正在稀疏重建")
     results: dict[str, ColmapCommandResult] = {}
+    mapper_progress = 0.0
 
     def mapper_line_callback(line: str) -> None:
+        nonlocal mapper_progress
         if not progress_callback:
             return
         if "Registering image #" in line:
-            progress_callback("mapper_registering", 0.76, line.strip())
+            mapper_progress = max(mapper_progress, 0.76)
+            progress_callback("mapper_registering", mapper_progress, line.strip())
         elif "Retriangulation and Global bundle adjustment" in line:
-            progress_callback("mapper_global_ba", 0.78, "正在执行有界全局 BA")
+            mapper_progress = max(mapper_progress, 0.78)
+            progress_callback("mapper_global_ba", mapper_progress, "正在执行有界全局 BA")
 
     for name, progress, message, command in zip(names, progress_values, messages, commands):
         if progress_callback:

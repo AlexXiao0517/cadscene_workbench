@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cadscene.sfm.colmap_cli import ColmapCommandResult, ColmapTextModelExport
 from cadscene.sfm.reconstruction import (
     ReconstructionConfig,
     build_camera_trajectory,
@@ -229,3 +230,105 @@ def test_load_best_sparse_model_selects_most_registered(tmp_path: Path) -> None:
     selected = load_best_sparse_model(FakePycolmap, sparse)
 
     assert selected.path.name == "1"
+
+
+def test_colmap_cli_cpu_retry_preserves_all_ba_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reconstruction = importlib.import_module("cadscene.sfm.reconstruction")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    calls = []
+    ba_kwargs = {
+        "ba_global_frames_ratio": 3.25,
+        "ba_global_points_ratio": 4.5,
+        "ba_global_frames_freq": 321,
+        "ba_global_points_freq": 654321,
+        "ba_global_max_num_iterations": 17,
+        "ba_global_max_refinements": 3,
+    }
+
+    monkeypatch.setattr(
+        reconstruction,
+        "detect_sfm_environment",
+        lambda *args, **kwargs: {
+            "colmap_cli_available": True,
+            "colmap_path": "colmap.exe",
+            "colmap_cuda_confirmed": True,
+            "cuda_device_available": True,
+            "gpu_names": ["Test GPU"],
+            "colmap_version": "test",
+            "pycolmap_version": None,
+        },
+    )
+    monkeypatch.setattr(reconstruction, "_video_metadata", lambda path: (3, 25.0, 64, 48))
+    monkeypatch.setattr(
+        reconstruction,
+        "extract_frames",
+        lambda video_path, images_dir, frame_indices: [
+            reconstruction.ExtractedFrame(frame_index=index, path=images_dir / f"frame_{index:06d}.png")
+            for index in frame_indices
+        ],
+    )
+
+    def fake_pipeline(executable, paths, **kwargs):
+        calls.append(kwargs)
+        if kwargs["use_gpu"]:
+            raise reconstruction.ColmapCommandError(
+                ColmapCommandResult(
+                    command=["colmap.exe", "feature_extractor"],
+                    returncode=1,
+                    output="SiftGPU not supported",
+                    elapsed_sec=0.0,
+                )
+            )
+        return {
+            "timings": {},
+            "feature_extraction_gpu": False,
+            "feature_matching_gpu": False,
+        }
+
+    monkeypatch.setattr(reconstruction, "run_colmap_cli_pipeline", fake_pipeline)
+    monkeypatch.setattr(
+        reconstruction,
+        "load_pycolmap",
+        lambda: (_ for _ in ()).throw(RuntimeError("pycolmap not installed")),
+    )
+    monkeypatch.setattr(reconstruction, "first_sparse_model_dir", lambda sparse_dir: sparse_dir)
+    monkeypatch.setattr(
+        reconstruction,
+        "convert_colmap_model_to_text",
+        lambda executable, model_dir, output_dir: output_dir,
+    )
+    monkeypatch.setattr(
+        reconstruction,
+        "export_colmap_text_model",
+        lambda *args, **kwargs: ColmapTextModelExport(
+            trajectory={
+                "poses": [
+                    {"frame_index": index, "registered": True}
+                    for index in range(3)
+                ]
+            },
+            intrinsics=[],
+            points=np.empty((0, 3), dtype=np.float64),
+            colors=None,
+            mean_reprojection_error=None,
+        ),
+    )
+
+    reconstruction.run_reconstruction(
+        video_path=video,
+        output_dir=tmp_path / "output",
+        config=ReconstructionConfig(
+            frame_step=1,
+            min_reg_images=1,
+            backend="colmap_cli",
+            device="cuda",
+            **ba_kwargs,
+        ),
+    )
+
+    assert [call["use_gpu"] for call in calls] == [True, False]
+    assert [{name: call[name] for name in ba_kwargs} for call in calls] == [ba_kwargs, ba_kwargs]
