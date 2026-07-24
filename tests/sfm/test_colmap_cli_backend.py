@@ -65,6 +65,14 @@ def test_cli_commands_use_current_help_options_and_gpu_index(tmp_path: Path) -> 
 def test_gpu_execution_requires_positive_log_evidence() -> None:
     assert parse_gpu_execution("Feature extraction completed", requested=True) is False
     assert parse_gpu_execution("Creating SIFT GPU feature extractor using CUDA device 0", requested=True) is True
+    assert parse_gpu_execution(
+        "Bind FeatureExtractorWorker to GPU device 0",
+        requested=True,
+    ) is True
+    assert parse_gpu_execution(
+        "Bind FeatureMatcherWorker to GPU device 0",
+        requested=True,
+    ) is True
     assert parse_gpu_execution("CUDA unavailable; falling back to CPU", requested=True) is False
     assert is_cuda_failure("SiftGPU was compiled without CUDA support") is True
     assert is_cuda_failure("mapper failed: no initial image pair") is False

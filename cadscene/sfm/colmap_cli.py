@@ -163,6 +163,7 @@ def parse_gpu_execution(output: str, *, requested: bool) -> bool:
         r"cuda\s+device",
         r"sift\s*gpu",
         r"gpu\s+feature\s+(?:extractor|matcher)",
+        r"bind\s+feature(?:extractor|matcher)worker\s+to\s+gpu\s+device",
     )
     return any(re.search(pattern, lowered) for pattern in positive)
 
