@@ -113,6 +113,25 @@ def test_command_runner_uses_list_without_shell_true() -> None:
         assert calls[0][1]["creationflags"] & subprocess.CREATE_NO_WINDOW
 
 
+def test_command_runner_streams_lines_to_callback() -> None:
+    seen = []
+
+    class FakeProcess:
+        returncode = 0
+        stdout = iter(["Registering image #12 (num_reg_frames=8)\n"])
+
+        def wait(self):
+            return self.returncode
+
+    run_colmap_command(
+        ["colmap.exe", "mapper"],
+        popen_factory=lambda command, **kwargs: FakeProcess(),
+        line_callback=seen.append,
+    )
+
+    assert seen == ["Registering image #12 (num_reg_frames=8)\n"]
+
+
 def test_text_model_exports_existing_trajectory_schema(tmp_path: Path) -> None:
     (tmp_path / "cameras.txt").write_text(
         "1 OPENCV 640 480 500 500 320 240 0 0 0 0\n",

@@ -204,6 +204,7 @@ def run_colmap_command(
     command: Sequence[str],
     *,
     popen_factory: Callable = subprocess.Popen,
+    line_callback: Callable[[str], None] | None = None,
 ) -> ColmapCommandResult:
     command_list = [str(item) for item in command]
     started = time.perf_counter()
@@ -222,6 +223,8 @@ def run_colmap_command(
         for line in process.stdout:
             print(line, end="", flush=True)
             lines.append(line)
+            if line_callback:
+                line_callback(line)
     returncode = int(process.wait())
     result = ColmapCommandResult(
         command=command_list,
@@ -301,10 +304,22 @@ def run_colmap_cli_pipeline(
     progress_values = (0.32, 0.52, 0.72)
     messages = ("正在提取特征", "正在进行顺序匹配", "正在稀疏重建")
     results: dict[str, ColmapCommandResult] = {}
+
+    def mapper_line_callback(line: str) -> None:
+        if not progress_callback:
+            return
+        if "Registering image #" in line:
+            progress_callback("mapper_registering", 0.76, line.strip())
+        elif "Retriangulation and Global bundle adjustment" in line:
+            progress_callback("mapper_global_ba", 0.78, "正在执行有界全局 BA")
+
     for name, progress, message, command in zip(names, progress_values, messages, commands):
         if progress_callback:
             progress_callback(name, progress, message)
-        results[name] = run_colmap_command(command)
+        results[name] = run_colmap_command(
+            command,
+            line_callback=mapper_line_callback if name == "mapper" else None,
+        )
     return {
         "commands": {name: result.command for name, result in results.items()},
         "timings": {f"{name}_sec": result.elapsed_sec for name, result in results.items()},
