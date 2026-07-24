@@ -19,6 +19,7 @@ from cadscene.alignment.rank1_constrained import (
     Rank1Config,
     analyze_rank1_axis,
     apply_along_track_correction,
+    apply_vertical_srt_constraint,
     build_rank1_trajectory_json,
     estimate_along_track_scale,
     project_along_track,
@@ -140,6 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--origin-y", type=float, default=0.0)
     parser.add_argument("--smoothing-window-sec", type=float, default=2.0)
     parser.add_argument("--min-smoothing-support", type=int, default=3)
+    parser.add_argument("--vertical-smoothing-window-sec", type=float, default=2.0)
+    parser.add_argument("--min-vertical-smoothing-support", type=int, default=3)
+    parser.add_argument("--max-sfm-vertical-detail-m", type=float, default=0.5)
     parser.add_argument("--min-direction-angle-deg", type=float, default=20.0)
     parser.add_argument("--min-baseline-m", type=float, default=5.0)
     parser.add_argument("--along-track-inlier-threshold-m", type=float, default=2.0)
@@ -156,6 +160,9 @@ def _config(args: argparse.Namespace) -> Rank1Config:
         ransac_seed=int(args.ransac_seed),
         smoothing_window_sec=float(args.smoothing_window_sec),
         min_smoothing_support=int(args.min_smoothing_support),
+        vertical_smoothing_window_sec=float(args.vertical_smoothing_window_sec),
+        min_vertical_smoothing_support=int(args.min_vertical_smoothing_support),
+        max_sfm_vertical_detail_m=float(args.max_sfm_vertical_detail_m),
         min_direction_angle_deg=float(args.min_direction_angle_deg),
     )
 
@@ -171,7 +178,10 @@ def _alignment_payload(result: dict[str, Any]) -> dict[str, Any]:
         "scale_source": "srt_along_track",
         "orientation_source": "manual_orientation_prior",
         "translation_source": "manual_solve_anchor_position",
-        "srt_constraint": "along_track_only",
+        "srt_constraint": "along_track_and_relative_height",
+        "vertical_source": "srt_relative_altitude_primary",
+        "height_datum": "manual_solve_anchors",
+        "absolute_elevation_available": False,
         "solve_frame_indices": list(transform.solve_frame_indices),
         "validate_frame_indices": [metric.source_frame_index for metric in validation.metrics],
         "scale": float(transform.scale),
@@ -228,7 +238,19 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     split = validate_prior_split(priors)
     if args.require_validate_anchor and not split.accepted:
         raise ValueError(f"holdout protocol is incomplete ({', '.join(split.rejection_reasons)})")
-    transform = solve_rank1_transform(trajectory, scale_fit, sfm_axis.primary_direction, priors, config)
+    relative_height_by_frame = {
+        sample.frame_index: float(sample.relative_height_m)
+        for sample in samples
+        if sample.valid and sample.relative_height_m is not None
+    }
+    transform = solve_rank1_transform(
+        trajectory,
+        scale_fit,
+        sfm_axis.primary_direction,
+        priors,
+        config,
+        srt_relative_height_by_frame=relative_height_by_frame,
+    )
     base = transform.apply_points(trajectory.centers)
     d_cad = transform.rotation_cad_from_sfm @ sfm_axis.primary_direction
 
@@ -245,11 +267,32 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         for frame in trajectory.frames
     ], dtype=np.float64)
     correction = apply_along_track_correction(base, d_cad, frame_times, target, valid, config)
-    validation = validate_holdout_anchors(trajectory, correction.fused_positions, transform, d_cad, priors, config)
+    relative_height = np.full(len(trajectory.frames), np.nan, dtype=np.float64)
+    height_valid = np.zeros(len(trajectory.frames), dtype=bool)
+    for index, frame in enumerate(trajectory.frames):
+        sample = sample_by_frame.get(int(frame))
+        if sample is not None and sample.relative_height_m is not None:
+            relative_height[index] = float(sample.relative_height_m)
+            height_valid[index] = True
+    vertical = apply_vertical_srt_constraint(
+        correction.fused_positions,
+        frame_times,
+        relative_height,
+        height_valid,
+        height_offset_m=transform.height_offset_m,
+        config=config,
+    )
+    validation = validate_holdout_anchors(trajectory, vertical.fused_positions, transform, d_cad, priors, config)
     if args.require_validate_anchor and not validation.accepted:
         raise ValueError(f"holdout validation failed ({', '.join(validation.rejection_reasons)})")
-    fused = build_rank1_trajectory_json(raw, transform, correction.fused_positions, correction)
-    if not np.isfinite(correction.fused_positions).all():
+    fused = build_rank1_trajectory_json(
+        raw,
+        transform,
+        vertical.fused_positions,
+        correction,
+        vertical,
+    )
+    if not np.isfinite(vertical.fused_positions).all():
         raise ValueError("Rank-1 output contains NaN or Inf")
     return {
         "raw": raw,
@@ -264,6 +307,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "base": base,
         "d_cad": d_cad,
         "correction": correction,
+        "vertical_correction": vertical,
         "validation": validation,
         "fused": fused,
         "warnings": (),
@@ -283,6 +327,11 @@ def _camera_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
             "yaw": yaw, "pitch": pitch, "roll": roll, "fov": fov,
             "trajectory_source": "rank1_sfm_srt_along_track_cad", "srt_valid": pose.get("srt_valid", False),
             "along_track_correction_m": pose.get("along_track_correction_m", 0.0),
+            "srt_height_valid": pose.get("srt_height_valid", False),
+            "srt_relative_height_m": pose.get("srt_relative_height_m"),
+            "vertical_correction_m": pose.get("vertical_correction_m", 0.0),
+            "vertical_smoothing_support": pose.get("vertical_smoothing_support", 0),
+            "sfm_vertical_detail_m": pose.get("sfm_vertical_detail_m", 0.0),
         })
     return rows
 
@@ -294,15 +343,21 @@ def _validation_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
 def _comparison_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
     trajectory = result["trajectory"]
     correction = result["correction"]
+    vertical = result["vertical_correction"]
     return [
         {
             "frame_index": int(frame),
             "base_x": correction.base_positions[index, 0], "base_y": correction.base_positions[index, 1], "base_z": correction.base_positions[index, 2],
-            "fused_x": correction.fused_positions[index, 0], "fused_y": correction.fused_positions[index, 1], "fused_z": correction.fused_positions[index, 2],
+            "fused_x": vertical.fused_positions[index, 0], "fused_y": vertical.fused_positions[index, 1], "fused_z": vertical.fused_positions[index, 2],
             "srt_valid": bool(correction.srt_valid[index]),
             "raw_delta_u_m": None if not correction.srt_valid[index] else correction.raw_delta_u_m[index],
             "smoothed_delta_u_m": correction.smoothed_delta_u_m[index],
             "smoothing_support": int(correction.smoothing_support[index]),
+            "srt_height_valid": bool(vertical.srt_height_valid[index]),
+            "srt_relative_height_m": None if not vertical.srt_height_valid[index] else vertical.srt_relative_height_m[index],
+            "vertical_correction_m": vertical.vertical_correction_m[index],
+            "vertical_smoothing_support": int(vertical.vertical_smoothing_support[index]),
+            "sfm_vertical_detail_m": vertical.sfm_vertical_detail_m[index],
         }
         for index, frame in enumerate(trajectory.frames)
     ]
@@ -344,6 +399,15 @@ def main(argv: list[str] | None = None) -> int:
             "srt_singular_values": list(result["srt_axis"].singular_values),
             "sfm_linearity_ratio": result["sfm_axis"].linearity_ratio,
             "srt_linearity_ratio": result["srt_axis"].linearity_ratio,
+            "vertical_height_source": next(
+                sample.height_source for sample in result["samples"] if sample.valid
+            ),
+            "vertical_height_coverage_ratio": float(
+                np.mean([sample.relative_height_m is not None for sample in result["samples"]])
+            ),
+            "vertical_smoothing_window_sec": float(args.vertical_smoothing_window_sec),
+            "min_vertical_smoothing_support": int(args.min_vertical_smoothing_support),
+            "max_sfm_vertical_detail_m": float(args.max_sfm_vertical_detail_m),
             **alignment["quality"],
         }
         _atomic_write_json(output / "rank1_alignment.json", alignment)

@@ -567,6 +567,7 @@ def build_rank1_trajectory_json(
     transform: Rank1Transform,
     corrected_positions: Sequence[Sequence[float]] | np.ndarray,
     correction: AlongTrackCorrection | None = None,
+    vertical_correction: VerticalCorrection | None = None,
 ) -> dict:
     """Build a legacy-loader-compatible trajectory in CAD metres."""
 
@@ -588,6 +589,16 @@ def build_rank1_trajectory_json(
             pose["srt_valid"] = bool(correction.srt_valid[index])
             pose["along_track_correction_m"] = float(correction.smoothed_delta_u_m[index])
             pose["smoothing_support"] = int(correction.smoothing_support[index])
+        if vertical_correction is not None:
+            pose["srt_height_valid"] = bool(vertical_correction.srt_height_valid[index])
+            pose["srt_relative_height_m"] = (
+                float(vertical_correction.srt_relative_height_m[index])
+                if vertical_correction.srt_height_valid[index]
+                else None
+            )
+            pose["vertical_correction_m"] = float(vertical_correction.vertical_correction_m[index])
+            pose["vertical_smoothing_support"] = int(vertical_correction.vertical_smoothing_support[index])
+            pose["sfm_vertical_detail_m"] = float(vertical_correction.sfm_vertical_detail_m[index])
     output["meta"] = {
         **dict(output.get("meta") or {}),
         "trajectory_mode": "srt_rank1_manual_prior",
@@ -600,4 +611,13 @@ def build_rank1_trajectory_json(
         "rotation_cad_from_sfm": transform.rotation_cad_from_sfm.tolist(),
         "translation_cad_from_sfm": transform.translation_cad_from_sfm.tolist(),
     }
+    if vertical_correction is not None:
+        output["meta"].update(
+            {
+                "srt_constraint": "along_track_and_relative_height",
+                "vertical_source": "srt_relative_altitude_primary",
+                "height_datum": "manual_solve_anchors",
+                "absolute_elevation_available": False,
+            }
+        )
     return output

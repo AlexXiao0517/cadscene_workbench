@@ -64,6 +64,36 @@ def test_cli_writes_validated_rank1_artifacts_atomically(tmp_path):
     assert alignment["coordinate_system"] == "cad_meters"
     assert alignment["scale"] == 2.0
     assert alignment["quality"]["holdout_accepted"] is True
+    assert alignment["quality"]["along_translation_spread_m"] == 0.0
+    assert alignment["quality"]["lateral_translation_spread_m"] == 0.0
+    assert alignment["quality"]["solve_height_offset_range_m"] == 0.0
+    assert alignment["srt_constraint"] == "along_track_and_relative_height"
+    trajectory = json.loads((output / "camera_trajectory_rank1_cad.json").read_text(encoding="utf-8"))
+    assert trajectory["meta"]["vertical_source"] == "srt_relative_altitude_primary"
+    assert trajectory["meta"]["height_datum"] == "manual_solve_anchors"
+    assert trajectory["meta"]["absolute_elevation_available"] is False
+    assert trajectory["meta"]["orientation_source"] == "sfm_plus_manual_prior"
+    for field in (
+        "srt_height_valid",
+        "srt_relative_height_m",
+        "vertical_correction_m",
+        "vertical_smoothing_support",
+        "sfm_vertical_detail_m",
+    ):
+        assert field in trajectory["poses"][0]
+    stats = json.loads((output / "rank1_alignment_stats.json").read_text(encoding="utf-8"))
+    assert stats["vertical_height_source"] == "rel_alt_relative"
+    assert stats["vertical_height_coverage_ratio"] == 1.0
+    assert stats["vertical_smoothing_window_sec"] == 2.0
+    with (output / "camera_path_rank1_cad.csv").open(encoding="utf-8-sig", newline="") as stream:
+        camera_fields = csv.DictReader(stream).fieldnames
+    assert {
+        "srt_height_valid",
+        "srt_relative_height_m",
+        "vertical_correction_m",
+        "vertical_smoothing_support",
+        "sfm_vertical_detail_m",
+    }.issubset(set(camera_fields or ()))
 
 
 def test_missing_validate_anchor_writes_failure_report_only(tmp_path):

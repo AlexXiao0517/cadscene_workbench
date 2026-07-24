@@ -3,6 +3,9 @@ from __future__ import annotations
 import csv
 import json
 
+import numpy as np
+
+from cadscene.srt.fusion import rotate_cam_from_world_quat
 from cadscene.cli.align_rank1_srt_to_cad import main
 from cadscene.sfm.trajectory import load_sfm_trajectory
 
@@ -34,3 +37,12 @@ def test_synthetic_rank1_cli_output_loads_as_standard_trajectory(tmp_path):
     assert len(loaded.frames) == len(frames)
     assert loaded.centers[0].tolist() == [10.0, -2.0, 4.0]
     assert loaded.centers[-1].tolist() == [10.0, 43.0, 4.0]
+    raw = json.loads((output / "camera_trajectory_rank1_cad.json").read_text(encoding="utf-8"))
+    assert raw["meta"]["vertical_source"] == "srt_relative_altitude_primary"
+    assert all(pose["srt_height_valid"] for pose in raw["poses"])
+    rotation = np.asarray(raw["meta"]["rotation_cad_from_sfm"], dtype=np.float64)
+    expected_quaternion = rotate_cam_from_world_quat(
+        [1.0, 0.0, 0.0, 0.0],
+        rotation,
+    )
+    assert np.allclose(raw["poses"][0]["cam_from_world_quat_wxyz"], expected_quaternion)
