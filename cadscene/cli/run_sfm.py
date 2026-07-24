@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-model", default="OPENCV")
     parser.add_argument("--sequential-overlap", type=int, default=15)
     parser.add_argument("--init-min-tri-angle", type=float, default=2.0)
+    parser.add_argument("--ba-global-frames-ratio", type=float, default=2.0)
+    parser.add_argument("--ba-global-points-ratio", type=float, default=2.0)
+    parser.add_argument("--ba-global-frames-freq", type=int, default=1000)
+    parser.add_argument("--ba-global-points-freq", type=int, default=1_000_000)
+    parser.add_argument("--ba-global-max-num-iterations", type=int, default=25)
+    parser.add_argument("--ba-global-max-refinements", type=int, default=2)
     parser.add_argument("--min-reg-images", type=int, default=10)
     parser.add_argument("--reuse-database", action="store_true")
     parser.add_argument("--export-only", action="store_true")
@@ -84,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
         camera_model=args.camera_model,
         sequential_overlap=args.sequential_overlap,
         init_min_tri_angle=args.init_min_tri_angle,
+        ba_global_frames_ratio=args.ba_global_frames_ratio,
+        ba_global_points_ratio=args.ba_global_points_ratio,
+        ba_global_frames_freq=args.ba_global_frames_freq,
+        ba_global_points_freq=args.ba_global_points_freq,
+        ba_global_max_num_iterations=args.ba_global_max_num_iterations,
+        ba_global_max_refinements=args.ba_global_max_refinements,
         min_reg_images=args.min_reg_images,
         reuse_database=args.reuse_database,
         export_only=args.export_only,
@@ -104,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         "device": args.device,
         "gpu_index": args.gpu_index,
         "colmap_exe": args.colmap_exe,
+        "ba_global_frames_ratio": args.ba_global_frames_ratio,
+        "ba_global_points_ratio": args.ba_global_points_ratio,
+        "ba_global_frames_freq": args.ba_global_frames_freq,
+        "ba_global_points_freq": args.ba_global_points_freq,
+        "ba_global_max_num_iterations": args.ba_global_max_num_iterations,
+        "ba_global_max_refinements": args.ba_global_max_refinements,
     }
     try:
         if args.mock_reconstruction:

@@ -16,4 +16,9 @@ def test_run_sfm_help_lists_backend_and_device_controls() -> None:
     assert "--device" in result.stdout
     assert "--gpu-index" in result.stdout
     assert "--no-cpu-fallback" in result.stdout
-
+    assert "--ba-global-frames-ratio" in result.stdout
+    assert "--ba-global-points-ratio" in result.stdout
+    assert "--ba-global-frames-freq" in result.stdout
+    assert "--ba-global-points-freq" in result.stdout
+    assert "--ba-global-max-num-iterations" in result.stdout
+    assert "--ba-global-max-refinements" in result.stdout

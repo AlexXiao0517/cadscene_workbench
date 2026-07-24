@@ -81,6 +81,26 @@ def test_stats_and_chinese_report_contain_required_fields(tmp_path: Path) -> Non
     assert "DINOv3 segmentation 尚未迁移" in report
 
 
+def test_bounded_ba_defaults_are_recorded_in_stats() -> None:
+    config = ReconstructionConfig()
+    stats = build_sfm_stats(
+        frame_count=10,
+        extracted_frame_count=5,
+        registered_count=5,
+        point_count=100,
+        mean_reprojection_error=0.5,
+        config=config,
+        backend="colmap_cli",
+    )
+
+    assert stats["ba_global_frames_ratio"] == 2.0
+    assert stats["ba_global_points_ratio"] == 2.0
+    assert stats["ba_global_frames_freq"] == 1000
+    assert stats["ba_global_points_freq"] == 1000000
+    assert stats["ba_global_max_num_iterations"] == 25
+    assert stats["ba_global_max_refinements"] == 2
+
+
 def test_stats_mark_well_supported_reconstruction_as_suitable() -> None:
     stats = build_sfm_stats(
         frame_count=100,

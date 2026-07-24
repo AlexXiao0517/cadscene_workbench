@@ -436,6 +436,12 @@ def build_stage_command(
         backend = str(opts.get("backend", "pycolmap"))
         device = str(opts.get("device", "cpu"))
         gpu_index = str(opts.get("gpu_index", "0"))
+        ba_global_frames_ratio = float(opts.get("ba_global_frames_ratio", 2.0))
+        ba_global_points_ratio = float(opts.get("ba_global_points_ratio", 2.0))
+        ba_global_frames_freq = int(opts.get("ba_global_frames_freq", 1000))
+        ba_global_points_freq = int(opts.get("ba_global_points_freq", 1_000_000))
+        ba_global_max_num_iterations = int(opts.get("ba_global_max_num_iterations", 25))
+        ba_global_max_refinements = int(opts.get("ba_global_max_refinements", 2))
         if backend not in {"auto", "pycolmap", "colmap_cli"}:
             raise ValueError("invalid SfM backend")
         if device not in {"auto", "cpu", "cuda"}:
@@ -455,6 +461,18 @@ def build_stage_command(
             "5",
             "--init-min-tri-angle",
             "2",
+            "--ba-global-frames-ratio",
+            str(ba_global_frames_ratio),
+            "--ba-global-points-ratio",
+            str(ba_global_points_ratio),
+            "--ba-global-frames-freq",
+            str(ba_global_frames_freq),
+            "--ba-global-points-freq",
+            str(ba_global_points_freq),
+            "--ba-global-max-num-iterations",
+            str(ba_global_max_num_iterations),
+            "--ba-global-max-refinements",
+            str(ba_global_max_refinements),
             "--no-mask",
             "--backend",
             backend,

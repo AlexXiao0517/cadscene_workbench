@@ -38,6 +38,12 @@ class ReconstructionConfig:
     sequential_overlap: int = 15
     quadratic_overlap: bool = True
     init_min_tri_angle: float = 2.0
+    ba_global_frames_ratio: float = 2.0
+    ba_global_points_ratio: float = 2.0
+    ba_global_frames_freq: int = 1000
+    ba_global_points_freq: int = 1_000_000
+    ba_global_max_num_iterations: int = 25
+    ba_global_max_refinements: int = 2
     init_max_forward_motion: float = 1.0
     filter_min_tri_angle: float = 1.0
     triangulation_min_angle: float = 1.0
@@ -288,6 +294,12 @@ def build_sfm_stats(
         "frame_step": int(config.frame_step),
         "start_frame": int(config.start_frame),
         "num_frames": int(config.num_frames),
+        "ba_global_frames_ratio": float(config.ba_global_frames_ratio),
+        "ba_global_points_ratio": float(config.ba_global_points_ratio),
+        "ba_global_frames_freq": int(config.ba_global_frames_freq),
+        "ba_global_points_freq": int(config.ba_global_points_freq),
+        "ba_global_max_num_iterations": int(config.ba_global_max_num_iterations),
+        "ba_global_max_refinements": int(config.ba_global_max_refinements),
         "backend": backend,
         "requested_device": runtime_values.get("requested_device", config.device),
         "effective_device": runtime_values.get("effective_device"),
@@ -676,6 +688,12 @@ def run_reconstruction(
             "max_num_features": config.max_num_features,
             "sequential_overlap": config.sequential_overlap,
             "init_min_tri_angle": config.init_min_tri_angle,
+            "ba_global_frames_ratio": config.ba_global_frames_ratio,
+            "ba_global_points_ratio": config.ba_global_points_ratio,
+            "ba_global_frames_freq": config.ba_global_frames_freq,
+            "ba_global_points_freq": config.ba_global_points_freq,
+            "ba_global_max_num_iterations": config.ba_global_max_num_iterations,
+            "ba_global_max_refinements": config.ba_global_max_refinements,
             "use_mask": config.use_mask,
             "gpu_index": config.gpu_index,
             "progress_callback": notify,
