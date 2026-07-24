@@ -7,6 +7,7 @@ from cadscene.alignment.rank1_constrained import (
     AlongTrackScaleFit,
     Rank1Config,
     apply_along_track_correction,
+    apply_vertical_srt_constraint,
     analyze_rank1_axis,
     build_rank1_trajectory_json,
     cad_track_basis,
@@ -265,6 +266,58 @@ def test_srt_hole_is_not_corrected_or_bridged():
     assert np.allclose(result.fused_positions[3], base[3])
     assert np.allclose(result.smoothed_delta_u_m[:3], 2.0)
     assert np.allclose(result.smoothed_delta_u_m[4:], -3.0)
+
+
+def test_vertical_constraint_uses_srt_low_frequency_and_clamps_sfm_detail():
+    times = np.arange(9, dtype=np.float64)
+    base = np.column_stack([times, np.zeros(9), np.linspace(0.0, 8.0, 9)])
+    relative_height = np.zeros(9, dtype=np.float64)
+
+    result = apply_vertical_srt_constraint(
+        base,
+        times,
+        relative_height,
+        np.ones(9, dtype=bool),
+        height_offset_m=10.0,
+        config=Rank1Config(
+            vertical_smoothing_window_sec=20.0,
+            min_vertical_smoothing_support=3,
+            max_sfm_vertical_detail_m=0.5,
+        ),
+    )
+
+    assert np.ptp(result.fused_positions[:, 2]) == pytest.approx(1.0)
+    assert result.fused_positions[0, 2] == pytest.approx(9.5)
+    assert result.fused_positions[-1, 2] == pytest.approx(10.5)
+    assert np.max(np.abs(result.sfm_vertical_detail_m)) == pytest.approx(0.5)
+    assert np.allclose(result.fused_positions[:, :2], base[:, :2])
+
+
+def test_vertical_constraint_suppresses_height_jump_and_does_not_bridge_hole():
+    times = np.arange(9, dtype=np.float64)
+    base = np.column_stack([times, np.zeros(9), np.full(9, 3.0)])
+    relative_height = np.asarray([0.0, 0.0, 0.0, 100.0, np.nan, 2.0, 2.0, 2.0, 2.0])
+    valid = np.asarray([True, True, True, True, False, True, True, True, True])
+
+    result = apply_vertical_srt_constraint(
+        base,
+        times,
+        relative_height,
+        valid,
+        height_offset_m=10.0,
+        config=Rank1Config(
+            vertical_smoothing_window_sec=20.0,
+            min_vertical_smoothing_support=3,
+            max_sfm_vertical_detail_m=0.5,
+        ),
+    )
+
+    assert np.allclose(result.fused_positions[:4, 2], 10.0)
+    assert result.fused_positions[4, 2] == pytest.approx(base[4, 2])
+    assert result.vertical_smoothing_support[4] == 0
+    assert np.allclose(result.fused_positions[5:, 2], 12.0)
+    assert np.all(result.vertical_smoothing_support[:4] == 4)
+    assert np.all(result.vertical_smoothing_support[5:] == 4)
 
 
 def test_nonidentity_world_transform_preserves_normalized_projection_and_loader(tmp_path):

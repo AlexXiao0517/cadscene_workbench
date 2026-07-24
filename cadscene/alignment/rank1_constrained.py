@@ -42,6 +42,9 @@ class Rank1Config:
     min_direction_angle_deg: float = 20.0
     smoothing_window_sec: float = 2.0
     min_smoothing_support: int = 3
+    vertical_smoothing_window_sec: float = 2.0
+    min_vertical_smoothing_support: int = 3
+    max_sfm_vertical_detail_m: float = 0.5
     max_validate_position_error_m: float = 5.0
     max_validate_orientation_error_deg: float = 15.0
 
@@ -98,6 +101,17 @@ class AlongTrackCorrection:
     smoothed_delta_u_m: np.ndarray
     smoothing_support: np.ndarray
     srt_valid: np.ndarray
+
+
+@dataclass(frozen=True)
+class VerticalCorrection:
+    base_positions: np.ndarray
+    fused_positions: np.ndarray
+    srt_relative_height_m: np.ndarray
+    srt_height_valid: np.ndarray
+    vertical_correction_m: np.ndarray
+    vertical_smoothing_support: np.ndarray
+    sfm_vertical_detail_m: np.ndarray
 
 
 def _points(values: Sequence[Sequence[float]] | np.ndarray, name: str) -> np.ndarray:
@@ -449,6 +463,102 @@ def apply_along_track_correction(
         smoothed_delta_u_m=smooth,
         smoothing_support=support,
         srt_valid=valid,
+    )
+
+
+def _segmented_time_median(
+    values: np.ndarray,
+    times: np.ndarray,
+    valid: np.ndarray,
+    *,
+    window_sec: float,
+    min_support: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    low = np.full(len(values), np.nan, dtype=np.float64)
+    support = np.zeros(len(values), dtype=np.int64)
+    half_window = float(window_sec) / 2.0
+    for index in range(len(values)):
+        if not valid[index]:
+            continue
+        left = index
+        while left > 0 and valid[left - 1]:
+            left -= 1
+        right = index
+        while right + 1 < len(values) and valid[right + 1]:
+            right += 1
+        window = np.arange(left, right + 1)
+        window = window[np.abs(times[window] - times[index]) <= half_window]
+        window = window[np.isfinite(values[window])]
+        support[index] = len(window)
+        if len(window) >= min_support:
+            low[index] = float(np.median(values[window]))
+    return low, support
+
+
+def apply_vertical_srt_constraint(
+    base_positions: Sequence[Sequence[float]] | np.ndarray,
+    frame_times_sec: Sequence[float] | np.ndarray,
+    srt_relative_height_m: Sequence[float] | np.ndarray,
+    srt_height_valid: Sequence[bool] | np.ndarray,
+    *,
+    height_offset_m: float,
+    config: Rank1Config = Rank1Config(),
+) -> VerticalCorrection:
+    """Fuse SRT low-frequency relative height with bounded SfM vertical detail."""
+
+    base = _points(base_positions, "base_positions")
+    times = np.asarray(frame_times_sec, dtype=np.float64)
+    relative = np.asarray(srt_relative_height_m, dtype=np.float64)
+    valid = np.asarray(srt_height_valid, dtype=bool)
+    if times.shape != (len(base),) or relative.shape != (len(base),) or valid.shape != (len(base),):
+        raise ValueError("vertical times, SRT heights and validity must match base positions")
+    if not np.isfinite(times).all() or not np.isfinite(relative[valid]).all():
+        raise ValueError("valid SRT relative heights and frame times must be finite")
+    if not np.isfinite(float(height_offset_m)):
+        raise ValueError("height_offset_m must be finite")
+    if config.vertical_smoothing_window_sec <= 0.0:
+        raise ValueError("vertical_smoothing_window_sec must be positive")
+    if config.min_vertical_smoothing_support < 1:
+        raise ValueError("min_vertical_smoothing_support must be positive")
+    if config.max_sfm_vertical_detail_m < 0.0:
+        raise ValueError("max_sfm_vertical_detail_m must be non-negative")
+
+    target = np.full(len(base), np.nan, dtype=np.float64)
+    target[valid] = float(height_offset_m) + relative[valid]
+    target_low, target_support = _segmented_time_median(
+        target,
+        times,
+        valid,
+        window_sec=config.vertical_smoothing_window_sec,
+        min_support=config.min_vertical_smoothing_support,
+    )
+    sfm_low, sfm_support = _segmented_time_median(
+        base[:, 2],
+        times,
+        valid,
+        window_sec=config.vertical_smoothing_window_sec,
+        min_support=config.min_vertical_smoothing_support,
+    )
+    applicable = valid & np.isfinite(target_low) & np.isfinite(sfm_low)
+    detail = np.zeros(len(base), dtype=np.float64)
+    detail[applicable] = np.clip(
+        base[applicable, 2] - sfm_low[applicable],
+        -float(config.max_sfm_vertical_detail_m),
+        float(config.max_sfm_vertical_detail_m),
+    )
+    fused = base.copy()
+    fused[applicable, 2] = target_low[applicable] + detail[applicable]
+    correction = fused[:, 2] - base[:, 2]
+    support = np.minimum(target_support, sfm_support)
+    support[~applicable] = 0
+    return VerticalCorrection(
+        base_positions=base,
+        fused_positions=fused,
+        srt_relative_height_m=relative,
+        srt_height_valid=valid,
+        vertical_correction_m=correction,
+        vertical_smoothing_support=support,
+        sfm_vertical_detail_m=detail,
     )
 
 
