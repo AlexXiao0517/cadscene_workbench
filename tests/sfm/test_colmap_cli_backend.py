@@ -45,6 +45,12 @@ def test_cli_commands_use_current_help_options_and_gpu_index(tmp_path: Path) -> 
         max_num_features=12000,
         sequential_overlap=15,
         init_min_tri_angle=2.0,
+        ba_global_frames_ratio=2.0,
+        ba_global_points_ratio=2.0,
+        ba_global_frames_freq=1000,
+        ba_global_points_freq=1000000,
+        ba_global_max_num_iterations=25,
+        ba_global_max_refinements=2,
         use_mask=False,
         use_gpu=True,
         gpu_index="0",
@@ -60,6 +66,12 @@ def test_cli_commands_use_current_help_options_and_gpu_index(tmp_path: Path) -> 
     assert matching[matching.index("--FeatureMatching.use_gpu") + 1] == "1"
     assert matching[matching.index("--FeatureMatching.gpu_index") + 1] == "0"
     assert mapper[1] == "mapper"
+    assert mapper[mapper.index("--Mapper.ba_global_frames_ratio") + 1] == "2.0"
+    assert mapper[mapper.index("--Mapper.ba_global_points_ratio") + 1] == "2.0"
+    assert mapper[mapper.index("--Mapper.ba_global_frames_freq") + 1] == "1000"
+    assert mapper[mapper.index("--Mapper.ba_global_points_freq") + 1] == "1000000"
+    assert mapper[mapper.index("--Mapper.ba_global_max_num_iterations") + 1] == "25"
+    assert mapper[mapper.index("--Mapper.ba_global_max_refinements") + 1] == "2"
 
 
 def test_gpu_execution_requires_positive_log_evidence() -> None:
