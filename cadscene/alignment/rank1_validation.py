@@ -12,7 +12,7 @@ from cadscene.alignment.orientation_prior import (
     PriorQualificationConfig,
     qualify_orientation_prior,
 )
-from cadscene.alignment.rank1_constrained import Rank1Config, Rank1Transform
+from cadscene.alignment.rank1_constrained import Rank1Config, Rank1Transform, cad_track_basis
 from cadscene.sfm.trajectory import SfmTrajectory
 
 
@@ -69,17 +69,12 @@ def validate_holdout_anchors(
     if axis.shape != (3,) or not np.isfinite(axis).all() or np.linalg.norm(axis) <= 1e-12:
         raise ValueError("d_cad must be a finite non-zero 3-vector")
     axis /= np.linalg.norm(axis)
+    along_axis, cross_axis, _cad_up = cad_track_basis(axis)
     validate_priors = [prior for prior in priors if prior.solver_role == "validate"]
     if not validate_priors:
         return Rank1ValidationReport(False, True, (), ("holdout-missing",))
 
     frame_to_index = {int(frame): index for index, frame in enumerate(trajectory.frames)}
-    cad_up = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
-    cross_axis = np.cross(cad_up, axis)
-    if np.linalg.norm(cross_axis) <= 1e-9:
-        # A near-vertical Rank-1 path has no stable horizontal cross-track axis.
-        cross_axis = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
-    cross_axis /= np.linalg.norm(cross_axis)
     metrics: list[HoldoutAnchorMetric] = []
     reasons: list[str] = []
     for prior in validate_priors:
@@ -104,7 +99,7 @@ def validate_holdout_anchors(
         metric = HoldoutAnchorMetric(
             source_frame_index=frame,
             position_error_m=float(np.linalg.norm(error)),
-            along_track_error_m=float(np.dot(error, axis)),
+            along_track_error_m=float(np.dot(error, along_axis)),
             cross_track_error_m=float(np.dot(error, cross_axis)),
             vertical_error_m=float(error[2]),
             orientation_error_deg=_rotation_angle_deg(predicted_cad_from_camera, manual),

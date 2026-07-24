@@ -9,6 +9,7 @@ from cadscene.alignment.rank1_constrained import (
     apply_along_track_correction,
     analyze_rank1_axis,
     build_rank1_trajectory_json,
+    cad_track_basis,
     estimate_along_track_scale,
     project_along_track,
     solve_rank1_transform,
@@ -34,6 +35,15 @@ def test_project_along_track_uses_explicit_reference():
     points = np.asarray([[5.0, 2.0, 0.0], [8.0, 2.0, 0.0]])
     result = project_along_track(points, np.asarray([1.0, 0.0, 0.0]), points[0])
     assert np.allclose(result, [0.0, 3.0])
+
+
+def test_cad_track_basis_removes_vertical_component_from_horizontal_axes():
+    along, lateral, vertical = cad_track_basis(np.asarray([3.0, 4.0, 12.0]))
+
+    assert np.allclose(along, [0.6, 0.8, 0.0])
+    assert np.allclose(lateral, [-0.8, 0.6, 0.0])
+    assert np.allclose(vertical, [0.0, 0.0, 1.0])
+    assert np.allclose(np.asarray([along, lateral, vertical]) @ np.asarray([along, lateral, vertical]).T, np.eye(3))
 
 
 def test_robust_scale_recovers_known_metric_scale_and_residuals():
@@ -166,6 +176,35 @@ def test_inconsistent_multiple_solve_priors_are_rejected():
             [first, second],
             Rank1Config(max_solve_rotation_disagreement_deg=5.0),
         )
+
+
+def test_multiple_solve_consistency_reports_horizontal_spread_and_height_offset_range_mad():
+    centers = np.column_stack(
+        [np.arange(8, dtype=np.float64), np.zeros(8), np.linspace(0.0, 4.0, 8)]
+    )
+    trajectory = _trajectory(centers)
+    first = _prior(10, np.eye(3), np.asarray([1.0, 0.0, 10.0]))
+    second = _prior(50, np.eye(3), np.asarray([5.0, 0.0, 10.345]))
+
+    transform = solve_rank1_transform(
+        trajectory,
+        _scale_fit(1.0),
+        np.asarray([1.0, 0.0, 0.0]),
+        [first, second],
+        Rank1Config(
+            max_along_translation_spread_m=2.0,
+            max_lateral_translation_spread_m=2.0,
+            max_solve_height_offset_range_m=3.0,
+            max_solve_height_offset_mad_m=1.5,
+        ),
+        srt_relative_height_by_frame={10: 0.0, 50: 0.0},
+    )
+
+    assert transform.along_translation_spread_m == pytest.approx(0.0)
+    assert transform.lateral_translation_spread_m == pytest.approx(0.0)
+    assert transform.solve_height_offset_range_m == pytest.approx(0.345)
+    assert transform.solve_height_offset_mad_m == pytest.approx(0.1725)
+    assert transform.height_offset_m == pytest.approx(10.1725)
 
 
 def test_srt_correction_moves_positions_along_cad_axis_only():

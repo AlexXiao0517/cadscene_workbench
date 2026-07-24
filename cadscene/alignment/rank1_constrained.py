@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -35,7 +35,10 @@ class Rank1Config:
     min_scale: float = 1e-6
     max_scale: float = 1e6
     max_solve_rotation_disagreement_deg: float = 5.0
-    max_translation_spread_m: float = 2.0
+    max_along_translation_spread_m: float = 2.0
+    max_lateral_translation_spread_m: float = 2.0
+    max_solve_height_offset_range_m: float = 3.0
+    max_solve_height_offset_mad_m: float = 1.5
     min_direction_angle_deg: float = 20.0
     smoothing_window_sec: float = 2.0
     min_smoothing_support: int = 3
@@ -74,7 +77,11 @@ class Rank1Transform:
     translation_cad_from_sfm: np.ndarray
     solve_frame_indices: tuple[int, ...]
     rotation_disagreement_deg: float
-    translation_spread_m: float
+    along_translation_spread_m: float = 0.0
+    lateral_translation_spread_m: float = 0.0
+    height_offset_m: float = 0.0
+    solve_height_offset_range_m: float = 0.0
+    solve_height_offset_mad_m: float = 0.0
 
     def apply_points(self, points: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
         values = np.asarray(points, dtype=np.float64)
@@ -159,6 +166,25 @@ def project_along_track(
     if norm <= 1e-12:
         raise ValueError("direction must be non-zero")
     return (values - origin) @ (axis / norm)
+
+
+def cad_track_basis(
+    d_cad: Sequence[float] | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return horizontal along/lateral axes plus CAD Z without vertical leakage."""
+
+    direction = np.asarray(d_cad, dtype=np.float64)
+    if direction.shape != (3,) or not np.isfinite(direction).all():
+        raise ValueError("d_cad must be a finite 3-vector")
+    along = np.asarray([direction[0], direction[1], 0.0], dtype=np.float64)
+    norm = float(np.linalg.norm(along))
+    if norm <= 1e-9:
+        raise ValueError("Rank-1 CAD direction has no observable horizontal projection")
+    along /= norm
+    vertical = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+    lateral = np.cross(vertical, along)
+    lateral /= np.linalg.norm(lateral)
+    return along, lateral, vertical
 
 
 def estimate_along_track_scale(
@@ -260,6 +286,8 @@ def solve_rank1_transform(
     sfm_primary_direction: Sequence[float] | np.ndarray,
     priors: Sequence[OrientationPriorPackage],
     config: Rank1Config = Rank1Config(),
+    *,
+    srt_relative_height_by_frame: Mapping[int, float] | None = None,
 ) -> Rank1Transform:
     """Recover SfM→CAD pose from qualified manual solve anchors only."""
 
@@ -307,7 +335,7 @@ def solve_rank1_transform(
             f"solve prior rotation disagreement is too large ({disagreement:.6g} deg)"
         )
     rotation = _mean_rotation(candidates)
-    translations = np.asarray(
+    translation_candidates = np.asarray(
         [
             np.asarray(prior.position_cad_m, dtype=np.float64)
             - scale_fit.scale * (rotation @ center)
@@ -315,10 +343,43 @@ def solve_rank1_transform(
         ],
         dtype=np.float64,
     )
-    translation = np.median(translations, axis=0)
-    spread = float(np.max(np.linalg.norm(translations - translation, axis=1)))
-    if spread > config.max_translation_spread_m:
-        raise ValueError(f"solve prior translation spread is too large ({spread:.6g} m)")
+    along, lateral, _cad_up = cad_track_basis(rotation @ sfm_direction)
+    along_values = translation_candidates @ along
+    lateral_values = translation_candidates @ lateral
+    along_median = float(np.median(along_values))
+    lateral_median = float(np.median(lateral_values))
+    along_spread = float(np.max(np.abs(along_values - along_median)))
+    lateral_spread = float(np.max(np.abs(lateral_values - lateral_median)))
+    if along_spread > config.max_along_translation_spread_m:
+        raise ValueError(f"solve prior along translation spread is too large ({along_spread:.6g} m)")
+    if lateral_spread > config.max_lateral_translation_spread_m:
+        raise ValueError(f"solve prior lateral translation spread is too large ({lateral_spread:.6g} m)")
+
+    height_offsets: list[float] = []
+    for prior in solve_priors:
+        if srt_relative_height_by_frame is None:
+            relative_height = 0.0
+        else:
+            relative_height = srt_relative_height_by_frame.get(int(prior.source_frame_index))
+            if relative_height is None or not np.isfinite(float(relative_height)):
+                raise ValueError(
+                    f"solve prior frame {prior.source_frame_index} has no valid SRT relative height"
+                )
+        height_offsets.append(float(prior.position_cad_m[2]) - float(relative_height))
+    height_offset_array = np.asarray(height_offsets, dtype=np.float64)
+    height_offset = float(np.median(height_offset_array))
+    height_range = float(np.ptp(height_offset_array))
+    height_mad = float(np.median(np.abs(height_offset_array - height_offset)))
+    if height_range > config.max_solve_height_offset_range_m:
+        raise ValueError(f"solve prior SRT height offset range is too large ({height_range:.6g} m)")
+    if height_mad > config.max_solve_height_offset_mad_m:
+        raise ValueError(f"solve prior SRT height offset MAD is too large ({height_mad:.6g} m)")
+
+    translation = (
+        along_median * along
+        + lateral_median * lateral
+        + float(np.median(translation_candidates[:, 2])) * _cad_up
+    )
     if not np.isfinite(translation).all():
         raise ValueError("Rank-1 translation contains NaN or Inf")
     return Rank1Transform(
@@ -327,7 +388,11 @@ def solve_rank1_transform(
         translation_cad_from_sfm=translation,
         solve_frame_indices=tuple(int(prior.source_frame_index) for prior in solve_priors),
         rotation_disagreement_deg=disagreement,
-        translation_spread_m=spread,
+        along_translation_spread_m=along_spread,
+        lateral_translation_spread_m=lateral_spread,
+        height_offset_m=height_offset,
+        solve_height_offset_range_m=height_range,
+        solve_height_offset_mad_m=height_mad,
     )
 
 

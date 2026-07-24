@@ -41,7 +41,7 @@ def _prior(frame: int, position: np.ndarray, rotation: np.ndarray, role: str) ->
 def _transform() -> Rank1Transform:
     return Rank1Transform(
         scale=2.0, rotation_cad_from_sfm=_rotz(90.0), translation_cad_from_sfm=np.asarray([5.0, 1.0, 3.0]),
-        solve_frame_indices=(0,), rotation_disagreement_deg=0.0, translation_spread_m=0.0,
+        solve_frame_indices=(0,), rotation_disagreement_deg=0.0,
     )
 
 
@@ -66,6 +66,27 @@ def test_holdout_reports_position_components_and_orientation_angle():
     assert metric.orientation_error_deg == pytest.approx(10.0)
     assert metric.projection_residual_px == pytest.approx(1.5)
     assert report.accepted
+
+
+def test_holdout_along_error_uses_horizontal_projection_of_cad_direction():
+    trajectory = _trajectory()
+    transform = _transform()
+    predicted = transform.apply_points(trajectory.centers)
+    manual_position = predicted[2] - np.asarray([1.0, 0.0, 1.0])
+    validate = _prior(20, manual_position, _rotz(90.0), "validate")
+
+    report = validate_holdout_anchors(
+        trajectory,
+        predicted,
+        transform,
+        np.asarray([1.0, 0.0, 1.0]),
+        [validate],
+        Rank1Config(max_validate_position_error_m=5.0),
+    )
+
+    assert report.metrics[0].along_track_error_m == pytest.approx(1.0)
+    assert report.metrics[0].cross_track_error_m == pytest.approx(0.0)
+    assert report.metrics[0].vertical_error_m == pytest.approx(1.0)
 
 
 def test_validate_anchor_never_changes_solve_transform():
