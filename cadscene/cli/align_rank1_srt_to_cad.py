@@ -403,7 +403,12 @@ def main(argv: list[str] | None = None) -> int:
                 sample.height_source for sample in result["samples"] if sample.valid
             ),
             "vertical_height_coverage_ratio": float(
-                np.mean([sample.relative_height_m is not None for sample in result["samples"]])
+                np.mean(
+                    [
+                        sample.valid and sample.relative_height_m is not None
+                        for sample in result["samples"]
+                    ]
+                )
             ),
             "vertical_smoothing_window_sec": float(args.vertical_smoothing_window_sec),
             "min_vertical_smoothing_support": int(args.min_vertical_smoothing_support),

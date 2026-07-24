@@ -167,3 +167,22 @@ def test_srt_samples_reject_missing_relative_and_absolute_height(tmp_path):
 
     with pytest.raises(ValueError, match="rel_alt or abs_alt"):
         _load_srt_samples(path)
+
+
+def test_vertical_height_coverage_counts_only_valid_height_samples(tmp_path):
+    paths = _write_inputs(tmp_path)
+    samples_path = paths[1]
+    with samples_path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+        fieldnames = list(rows[0])
+    rows[5]["height_valid"] = "false"
+    with samples_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    output = tmp_path / "03_rank1_alignment"
+
+    assert main(_argv(paths, output)) == 0
+
+    stats = json.loads((output / "rank1_alignment_stats.json").read_text(encoding="utf-8"))
+    assert stats["vertical_height_coverage_ratio"] == pytest.approx(19 / 20)
