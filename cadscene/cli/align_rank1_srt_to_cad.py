@@ -36,6 +36,8 @@ class SrtSample:
     frame_time_sec: float
     position_enu: np.ndarray
     valid: bool
+    relative_height_m: float | None
+    height_source: str
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -85,6 +87,17 @@ def _load_srt_samples(path: Path) -> list[SrtSample]:
         rows = list(csv.DictReader(stream))
     if not rows or any("frame_index" not in row or "frame_time_sec" not in row for row in rows):
         raise ValueError("srt-samples CSV requires frame_index and frame_time_sec")
+    rel_altitudes = [_number(row, "rel_alt") for row in rows]
+    abs_altitudes = [_number(row, "abs_alt") for row in rows]
+    if any(value is not None for value in rel_altitudes):
+        selected_heights = rel_altitudes
+        height_source = "rel_alt_relative"
+    elif any(value is not None for value in abs_altitudes):
+        selected_heights = abs_altitudes
+        height_source = "abs_alt_relative"
+    else:
+        raise ValueError("srt-samples CSV requires rel_alt or abs_alt for vertical constraint")
+    first_height = next(value for value in selected_heights if value is not None)
 
     direct_enu = all(all(name in row for name in ("east_m", "north_m", "up_m")) for row in rows)
     positions: dict[int, np.ndarray] = {}
@@ -107,9 +120,11 @@ def _load_srt_samples(path: Path) -> list[SrtSample]:
         if time is None:
             raise ValueError(f"SRT sample frame {frame} has invalid frame_time_sec")
         declared_valid = _boolean(row.get("gps_valid", True)) and _boolean(row.get("height_valid", True))
-        valid = declared_valid and index in positions
+        selected_height = selected_heights[index]
+        relative_height = None if selected_height is None else float(selected_height - first_height)
+        valid = declared_valid and index in positions and relative_height is not None
         position = positions.get(index, np.asarray([np.nan, np.nan, np.nan], dtype=np.float64))
-        samples.append(SrtSample(frame, time, position, valid))
+        samples.append(SrtSample(frame, time, position, valid, relative_height, height_source))
     return samples
 
 

@@ -17,10 +17,10 @@ def test_synthetic_rank1_cli_output_loads_as_standard_trajectory(tmp_path):
     }), encoding="utf-8")
     samples_path = tmp_path / "samples.csv"
     with samples_path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "gps_valid", "height_valid"])
+        writer = csv.DictWriter(stream, fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "rel_alt", "gps_valid", "height_valid"])
         writer.writeheader()
         for index, frame in enumerate(frames):
-            writer.writerow({"frame_index": frame, "frame_time_sec": frame / 25.0, "east_m": 0.0, "north_m": 3.0 * index, "up_m": 0.0, "gps_valid": True, "height_valid": True})
+            writer.writerow({"frame_index": frame, "frame_time_sec": frame / 25.0, "east_m": 0.0, "north_m": 3.0 * index, "up_m": 0.0, "rel_alt": 40.0, "gps_valid": True, "height_valid": True})
     def anchor(index: int, role: str) -> dict:
         return {"frame": frames[index], "source_frame_index": frames[index], "time": frames[index] / 25.0, "pts_time_sec": frames[index] / 25.0, "source": "manual_anchor", "camera": {"x": 10.0, "y": -2.0 + 3.0 * index, "z": 4.0, "yaw": -90.0, "pitch": 0.0, "roll": 0.0, "fov": 70.0}, "orientation_metadata": {"orientation_source": "manual", "orientation_confirmed": True, "yaw_confirmed": True, "pitch_confirmed": True, "roll_confirmed": False}, "prior": {"enabled": True, "direction_type": "camera_forward", "solver_role": role, "quality": "confirmed"}}
     track_path = tmp_path / "track.json"

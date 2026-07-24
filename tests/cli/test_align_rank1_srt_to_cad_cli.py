@@ -6,7 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from cadscene.cli.align_rank1_srt_to_cad import main
+import pytest
+
+from cadscene.cli.align_rank1_srt_to_cad import _load_srt_samples, main
 
 
 def _write_inputs(root: Path, *, include_validate: bool = True, rank2: bool = False) -> tuple[Path, Path, Path]:
@@ -21,11 +23,11 @@ def _write_inputs(root: Path, *, include_validate: bool = True, rank2: bool = Fa
 
     samples_path = root / "srt_frame_samples.csv"
     with samples_path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "gps_valid", "height_valid"])
+        writer = csv.DictWriter(stream, fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "rel_alt", "abs_alt", "gps_valid", "height_valid"])
         writer.writeheader()
         for index, frame in enumerate(frames):
             east = 4.0 * np.sin(index / 3.0) if rank2 else 0.0
-            writer.writerow({"frame_index": frame, "frame_time_sec": frame / 30.0, "east_m": east, "north_m": 2.0 * index, "up_m": 0.0, "gps_valid": "true", "height_valid": "true"})
+            writer.writerow({"frame_index": frame, "frame_time_sec": frame / 30.0, "east_m": east, "north_m": 2.0 * index, "up_m": 0.0, "rel_alt": 50.0, "abs_alt": 120.0, "gps_valid": "true", "height_valid": "true"})
 
     def keyframe(index: int, role: str) -> dict:
         return {
@@ -87,3 +89,51 @@ def test_rank2_input_does_not_enter_rank1_solver(tmp_path):
     assert main(_argv(_write_inputs(tmp_path, rank2=True), output)) == 1
     assert "rank=1" in (output / "rank1_failure_report.md").read_text(encoding="utf-8")
     assert not (output / "rank1_alignment.json").exists()
+
+
+def test_srt_samples_prefer_relative_altitude_and_rebase_it(tmp_path):
+    path = tmp_path / "samples.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "rel_alt", "abs_alt", "gps_valid", "height_valid"],
+        )
+        writer.writeheader()
+        writer.writerow({"frame_index": 0, "frame_time_sec": 0.0, "east_m": 0, "north_m": 0, "up_m": 0, "rel_alt": 50.0, "abs_alt": 120.0, "gps_valid": True, "height_valid": True})
+        writer.writerow({"frame_index": 10, "frame_time_sec": 1.0, "east_m": 0, "north_m": 2, "up_m": 0, "rel_alt": 50.3, "abs_alt": 140.0, "gps_valid": True, "height_valid": True})
+
+    samples = _load_srt_samples(path)
+
+    assert [row.relative_height_m for row in samples] == pytest.approx([0.0, 0.3])
+    assert {row.height_source for row in samples} == {"rel_alt_relative"}
+
+
+def test_srt_samples_fall_back_to_relative_absolute_altitude(tmp_path):
+    path = tmp_path / "samples.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "abs_alt", "gps_valid", "height_valid"],
+        )
+        writer.writeheader()
+        writer.writerow({"frame_index": 0, "frame_time_sec": 0.0, "east_m": 0, "north_m": 0, "up_m": 0, "abs_alt": 120.0, "gps_valid": True, "height_valid": True})
+        writer.writerow({"frame_index": 10, "frame_time_sec": 1.0, "east_m": 0, "north_m": 2, "up_m": 0, "abs_alt": 120.4, "gps_valid": True, "height_valid": True})
+
+    samples = _load_srt_samples(path)
+
+    assert [row.relative_height_m for row in samples] == pytest.approx([0.0, 0.4])
+    assert {row.height_source for row in samples} == {"abs_alt_relative"}
+
+
+def test_srt_samples_reject_missing_relative_and_absolute_height(tmp_path):
+    path = tmp_path / "samples.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["frame_index", "frame_time_sec", "east_m", "north_m", "up_m", "gps_valid", "height_valid"],
+        )
+        writer.writeheader()
+        writer.writerow({"frame_index": 0, "frame_time_sec": 0.0, "east_m": 0, "north_m": 0, "up_m": 0, "gps_valid": True, "height_valid": True})
+
+    with pytest.raises(ValueError, match="rel_alt or abs_alt"):
+        _load_srt_samples(path)
