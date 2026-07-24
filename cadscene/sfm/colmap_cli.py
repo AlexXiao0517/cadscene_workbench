@@ -223,7 +223,7 @@ def run_colmap_command(
         for line in process.stdout:
             print(line, end="", flush=True)
             lines.append(line)
-            if line_callback:
+            if line_callback is not None:
                 line_callback(line)
     returncode = int(process.wait())
     result = ColmapCommandResult(

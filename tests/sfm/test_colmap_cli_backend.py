@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import cadscene.sfm.colmap_cli as colmap_cli
+
 from cadscene.sfm.colmap_cli import (
     ColmapCliPaths,
     build_colmap_cli_commands,
@@ -130,6 +132,90 @@ def test_command_runner_streams_lines_to_callback() -> None:
     )
 
     assert seen == ["Registering image #12 (num_reg_frames=8)\n"]
+
+
+def test_command_runner_calls_falsy_line_callback() -> None:
+    seen = []
+
+    class FalsyCallback:
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, line: str) -> None:
+            seen.append(line)
+
+    class FakeProcess:
+        returncode = 0
+        stdout = iter(["mapper line\n"])
+
+        def wait(self):
+            return self.returncode
+
+    run_colmap_command(
+        ["colmap.exe", "mapper"],
+        popen_factory=lambda command, **kwargs: FakeProcess(),
+        line_callback=FalsyCallback(),
+    )
+
+    assert seen == ["mapper line\n"]
+
+
+def test_pipeline_reports_mapper_stdout_progress_only(monkeypatch, tmp_path: Path) -> None:
+    paths = ColmapCliPaths(
+        images_dir=tmp_path / "images",
+        masks_dir=tmp_path / "masks",
+        database_path=tmp_path / "database.db",
+        sparse_dir=tmp_path / "sparse",
+    )
+    progress = []
+    callbacks = []
+    lines = [
+        "Registering image #12 (num_reg_frames=8)\n",
+        "Retriangulation and Global bundle adjustment\n",
+    ]
+
+    monkeypatch.setattr(colmap_cli, "probe_colmap_subcommand_help", lambda *args: "")
+
+    def fake_run(command, *, line_callback=None):
+        callbacks.append((command[1], line_callback))
+        if line_callback is not None:
+            for line in lines:
+                line_callback(line)
+        return colmap_cli.ColmapCommandResult(
+            command=list(command),
+            returncode=0,
+            output="".join(lines),
+            elapsed_sec=0.0,
+        )
+
+    monkeypatch.setattr(colmap_cli, "run_colmap_command", fake_run)
+
+    colmap_cli.run_colmap_cli_pipeline(
+        "colmap.exe",
+        paths,
+        camera_model="OPENCV",
+        max_image_size=2048,
+        max_num_features=12000,
+        sequential_overlap=15,
+        init_min_tri_angle=2.0,
+        ba_global_frames_ratio=2.0,
+        ba_global_points_ratio=2.0,
+        ba_global_frames_freq=1000,
+        ba_global_points_freq=1000000,
+        ba_global_max_num_iterations=25,
+        ba_global_max_refinements=2,
+        use_mask=False,
+        use_gpu=True,
+        gpu_index="0",
+        progress_callback=lambda phase, value, message: progress.append((phase, value, message)),
+    )
+
+    mapper_progress = [event for event in progress if event[0].startswith("mapper_")]
+    assert mapper_progress == [
+        ("mapper_registering", 0.76, "Registering image #12 (num_reg_frames=8)"),
+        ("mapper_global_ba", 0.78, "正在执行有界全局 BA"),
+    ]
+    assert [callback is None for _, callback in callbacks] == [True, True, False]
 
 
 def test_text_model_exports_existing_trajectory_schema(tmp_path: Path) -> None:
