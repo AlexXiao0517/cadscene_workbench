@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -152,6 +153,42 @@ def test_rotation_only_alignment_keeps_manual_position_and_uses_sfm_orientation(
     assert middle.camera_x == pytest.approx(8.0)
     assert middle.camera_y == pytest.approx(5.0)
     assert middle.camera_z == pytest.approx(2.0)
+
+
+def test_run_alignment_allows_large_global_residual_when_scale_is_unobservable(tmp_path: Path) -> None:
+    base_traj = _trajectory()
+    traj = replace(base_traj, centers=base_traj.centers * 20.0)
+    coincident = CameraState(
+        camera_x=8.0,
+        camera_y=5.0,
+        camera_z=2.0,
+        yaw_deg=10.0,
+        fov_deg=67.0,
+        cad_scale=1.0,
+    )
+    track = _track_from_states(
+        {0: coincident, 10: coincident},
+        origin_xy=(0.0, 0.0),
+    )
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+        ),
+    )
+
+    assert result.metrics["alignment_mode"] == "rotation_only"
+    assert result.metrics["scale_observable"] is False
+    assert result.metrics["anchored_residual_m_max"] == pytest.approx(0.0)
+    assert result.metrics["global_residual_m_max"] > aligner.MAX_GLOBAL_ANCHOR_RESIDUAL_M
 
 
 def test_estimate_global_sim3_uses_camera_orientation_for_two_anchor_twist() -> None:
@@ -357,6 +394,54 @@ def test_two_anchor_sim3_treats_non_axis_antiparallel_roundoff_as_collinear() ->
     assert np.linalg.det(estimated.rotation) == pytest.approx(1.0, rel=0.0, abs=1e-12)
 
 
+def test_two_anchor_sim3_preserves_genuine_pi_minus_1e8_direction_on_250m_baseline() -> None:
+    angle = math.pi - 1e-8
+    source_first = np.asarray([1000.0, -1000.0, 500.0], dtype=np.float64)
+    source_centers = np.asarray(
+        [source_first, source_first + np.asarray([250.0, 0.0, 0.0])],
+        dtype=np.float64,
+    )
+    cad_first = np.asarray([-700.0, 300.0, 1200.0], dtype=np.float64)
+    destination_direction = np.asarray(
+        [math.cos(angle), math.sin(angle), 0.0],
+        dtype=np.float64,
+    )
+    cad_centers = np.asarray(
+        [cad_first, cad_first + 250.0 * destination_direction],
+        dtype=np.float64,
+    )
+    correspondences = [
+        KeyframeCorrespondence(
+            frame_index=index * 10,
+            state=CameraState(
+                camera_x=float(cad_center[0]),
+                camera_y=float(cad_center[1]),
+                camera_z=float(cad_center[2]),
+                cad_scale=1.0,
+            ),
+            center_cad=cad_center,
+            center_sfm=source_center,
+            r_camfromworld_sfm=np.eye(3, dtype=np.float64),
+            source="manual_keyframe",
+        )
+        for index, (source_center, cad_center) in enumerate(zip(source_centers, cad_centers))
+    ]
+
+    estimated = estimate_global_sim3(correspondences)
+    endpoint_error = float(
+        np.max(np.linalg.norm(estimated.apply(source_centers) - cad_centers, axis=1))
+    )
+
+    assert endpoint_error < 1e-6
+    np.testing.assert_allclose(
+        estimated.rotation.T @ estimated.rotation,
+        np.eye(3, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert np.linalg.det(estimated.rotation) == pytest.approx(1.0, rel=0.0, abs=1e-12)
+
+
 def test_segment_anchoring_passes_through_manual_keyframes_and_keeps_edge_residuals() -> None:
     traj = _trajectory()
     config = AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10, start_frame=0, end_frame=30)
@@ -551,6 +636,130 @@ def test_alignment_rejects_global_anchor_residual_above_five_metres() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "baseline_direction_error",
+    [float("nan"), 0.1000001],
+)
+def test_alignment_rejects_invalid_baseline_direction_metric(
+    baseline_direction_error: float,
+) -> None:
+    with pytest.raises(RuntimeError, match="baseline direction"):
+        aligner._validate_alignment_result(
+            metrics={
+                "global_residual_m_max": 0.0,
+                "scale_observable": True,
+                "baseline_direction_error_deg": baseline_direction_error,
+            },
+            intrinsics_warning=None,
+            trusted_fov=True,
+        )
+
+
+def test_real_target_shape_records_valid_baseline_direction_metric(tmp_path: Path) -> None:
+    source_centers = np.asarray(
+        [
+            [-1.6477624556206925, -0.47592717968842735, -3.3472404058347225],
+            [-1.4324010200845052, -0.568483450621065, -2.542810290320703],
+        ],
+        dtype=np.float64,
+    )
+    cad_centers = np.asarray(
+        [
+            [2233.8075259856414, 1147.3629063987173, 180.0],
+            [2012.021886261995, 1036.0974717158824, 180.0],
+        ],
+        dtype=np.float64,
+    )
+    traj = SfmTrajectory(
+        frames=np.asarray([0, 750], dtype=np.int64),
+        centers=source_centers,
+        quats_c2w_wxyz=np.asarray(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        fps=25.0,
+        width=1920,
+        height=1080,
+        intrinsics={"width": 1920, "params": [960.0]},
+    )
+    states = {
+        int(frame): CameraState(
+            camera_x=float(center[0]),
+            camera_y=float(center[1]),
+            camera_z=float(center[2]),
+            yaw_deg=-119.0,
+            pitch_deg=14.0,
+            fov_deg=67.0,
+            cad_scale=1.0,
+        )
+        for frame, center in zip(traj.frames, cad_centers)
+    }
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(
+        json.dumps(_track_from_states(states, origin_xy=(0.0, 0.0))),
+        encoding="utf-8",
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=750,
+        ),
+    )
+
+    assert result.metrics["baseline_direction_error_deg"] <= aligner.MAX_BASELINE_DIRECTION_ERROR_DEG
+    assert result.alignment_json["metrics"]["baseline_direction_error_deg"] <= 0.1
+
+
+@pytest.mark.parametrize("configured_fov", [float("nan"), 0.0, 180.0])
+def test_run_alignment_rejects_invalid_configured_fov_before_generating_rows(
+    tmp_path: Path,
+    configured_fov: float,
+) -> None:
+    traj = _trajectory()
+    track = _track_from_states(
+        {
+            0: CameraState(
+                camera_x=0.0,
+                camera_y=0.0,
+                camera_z=0.0,
+                fov_deg=67.0,
+                cad_scale=1.0,
+            ),
+            10: CameraState(
+                camera_x=1.0,
+                camera_y=0.0,
+                camera_z=0.0,
+                fov_deg=68.0,
+                cad_scale=1.0,
+            ),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="configured FOV"):
+        run_alignment(
+            trajectory_path=trajectory_path,
+            web_camera_track_path=track_path,
+            config=AlignmentConfig(
+                cad_scale=1.0,
+                origin_xy=(0.0, 0.0),
+                fov=configured_fov,
+                fov_from="config",
+                frame_step=10,
+            ),
+        )
+
+
 def test_pathological_intrinsics_are_allowed_with_trusted_fov() -> None:
     aligner._validate_alignment_result(
         metrics={"global_residual_m_max": 0.0},
@@ -669,6 +878,54 @@ def test_manual_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> N
     assert validation["fov_source"] == "manual"
     assert "pathological intrinsics" in validation["intrinsics_warning"]
     assert "9.24" in validation["intrinsics_warning"]
+
+
+def test_alignment_report_surfaces_manual_fov_upstream_warning(tmp_path: Path) -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "OPENCV", "params": [960.0, 960.0 * 9.24]})
+    track = _track_from_states(
+        {
+            0: CameraState(
+                camera_x=0.0,
+                camera_y=0.0,
+                camera_z=0.0,
+                fov_deg=67.0,
+                cad_scale=1.0,
+            ),
+            10: CameraState(
+                camera_x=1.0,
+                camera_y=0.0,
+                camera_z=0.0,
+                fov_deg=67.0,
+                cad_scale=1.0,
+            ),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+    config = AlignmentConfig(
+        cad_scale=1.0,
+        origin_xy=(0.0, 0.0),
+        frame_step=10,
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=config,
+    )
+    report = aligner.build_alignment_report(
+        result.metrics,
+        config,
+        validation=result.alignment_json["validation"],
+    )
+
+    assert aligner.UPSTREAM_SFM_MANUAL_FOV_WARNING in report
+    assert "pathological intrinsics" in report
+    assert "manual" in report
 
 
 def test_config_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> None:

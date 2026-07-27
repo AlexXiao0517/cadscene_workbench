@@ -16,7 +16,11 @@ from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 
 
 MAX_GLOBAL_ANCHOR_RESIDUAL_M = 5.0
+MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
 MAX_FOCAL_ASPECT_RATIO = 2.0
+UPSTREAM_SFM_MANUAL_FOV_WARNING = (
+    "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used."
+)
 INDEPENDENT_FY_CAMERA_MODELS = frozenset(
     {
         "PINHOLE",
@@ -163,7 +167,17 @@ def _decompose_world_from_cam(rotation: np.ndarray) -> tuple[float, float, float
 def _fov_for_path(traj: SfmTrajectory, config: AlignmentConfig) -> float:
     if config.fov_from == "trajectory":
         return float(traj.horizontal_fov_deg() or config.fov)
-    return float(config.fov)
+    return _validated_configured_fov(config.fov)
+
+
+def _validated_configured_fov(value: object) -> float:
+    try:
+        fov = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"configured FOV must be finite and inside (1, 179): {value!r}") from exc
+    if not math.isfinite(fov) or not 1.0 < fov < 179.0:
+        raise RuntimeError(f"configured FOV must be finite and inside (1, 179): {value!r}")
+    return fov
 
 
 def _manual_fov_from_track(track: Mapping[str, object]) -> float | None:
@@ -209,6 +223,18 @@ def _trajectory_intrinsics_warning(traj: SfmTrajectory) -> str | None:
     return None
 
 
+def _alignment_validation_warning(
+    *,
+    fov_source: str,
+    intrinsics_warning: str | None,
+) -> str | None:
+    if intrinsics_warning is None:
+        return None
+    if fov_source == "manual":
+        return UPSTREAM_SFM_MANUAL_FOV_WARNING
+    return intrinsics_warning
+
+
 def _validate_alignment_result(
     metrics: Mapping[str, object],
     *,
@@ -216,11 +242,26 @@ def _validate_alignment_result(
     trusted_fov: bool,
 ) -> None:
     global_residual = float(metrics.get("global_residual_m_max", 0.0))
-    if not math.isfinite(global_residual) or global_residual > MAX_GLOBAL_ANCHOR_RESIDUAL_M:
+    scale_observable = bool(metrics.get("scale_observable", True))
+    if scale_observable and (
+        not math.isfinite(global_residual)
+        or global_residual > MAX_GLOBAL_ANCHOR_RESIDUAL_M
+    ):
         raise RuntimeError(
             "global anchor residual exceeds "
             f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:.12g} m: {global_residual:.12g} m"
         )
+    if "baseline_direction_error_deg" in metrics:
+        baseline_direction_error = float(metrics["baseline_direction_error_deg"])
+        if (
+            not math.isfinite(baseline_direction_error)
+            or baseline_direction_error > MAX_BASELINE_DIRECTION_ERROR_DEG
+        ):
+            raise RuntimeError(
+                "baseline direction error exceeds "
+                f"{MAX_BASELINE_DIRECTION_ERROR_DEG:.12g} deg: "
+                f"{baseline_direction_error:.12g} deg"
+            )
     if intrinsics_warning is not None and not trusted_fov:
         raise RuntimeError(
             f"{intrinsics_warning}; provide a confirmed manual or configured FOV"
@@ -295,8 +336,9 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
     cross = np.cross(src_direction, dst_direction)
     cross_norm = float(np.linalg.norm(cross))
     machine_epsilon = np.finfo(np.float64).eps
-    # Below sqrt(eps), a near-antiparallel cross axis is dominated by roundoff.
-    if cosine < 0.0 and cross_norm <= math.sqrt(machine_epsilon):
+    # Subtracting translated float64 endpoints can amplify exact-antiparallel
+    # roundoff above a few eps; 32 eps is the narrow boundary covered by that case.
+    if cosine < 0.0 and cross_norm <= 32.0 * machine_epsilon:
         basis = np.zeros(3, dtype=np.float64)
         basis[int(np.argmin(np.abs(src_direction)))] = 1.0
         axis = np.cross(src_direction, basis)
@@ -619,7 +661,7 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
                 )
             )
         )
-    return {
+    metrics = {
         "num_keyframes": int(len(correspondences)),
         "global_residual_m_mean": float(np.mean(global_errors)) if global_errors else 0.0,
         "global_residual_m_max": float(np.max(global_errors)) if global_errors else 0.0,
@@ -627,6 +669,26 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
         "anchored_residual_m_max": float(np.max(anchored_errors)) if anchored_errors else 0.0,
         **anchored.residual_summary(),
     }
+    if len(correspondences) == 2:
+        source_baseline = (
+            np.asarray(correspondences[1].center_sfm, dtype=np.float64)
+            - np.asarray(correspondences[0].center_sfm, dtype=np.float64)
+        )
+        destination_baseline = (
+            np.asarray(correspondences[1].center_cad, dtype=np.float64)
+            - np.asarray(correspondences[0].center_cad, dtype=np.float64)
+        )
+        if (
+            float(np.linalg.norm(source_baseline)) > 1e-9
+            and float(np.linalg.norm(destination_baseline)) > 1e-9
+        ):
+            mapped_baseline = sim3.rotation @ source_baseline
+            angle_rad = math.atan2(
+                float(np.linalg.norm(np.cross(mapped_baseline, destination_baseline))),
+                float(np.dot(mapped_baseline, destination_baseline)),
+            )
+            metrics["baseline_direction_error_deg"] = math.degrees(angle_rad)
+    return metrics
 
 
 def _alignment_json(
@@ -656,6 +718,10 @@ def _alignment_json(
             "status": "warning" if intrinsics_warning is not None else "ok",
             "fov_source": fov_source,
             "intrinsics_warning": intrinsics_warning,
+            "warning": _alignment_validation_warning(
+                fov_source=fov_source,
+                intrinsics_warning=intrinsics_warning,
+            ),
         },
         "config": {
             "cad_scale": float(config.cad_scale),
@@ -670,7 +736,28 @@ def _alignment_json(
     }
 
 
-def build_alignment_report(metrics: Mapping[str, object], config: AlignmentConfig) -> str:
+def build_alignment_report(
+    metrics: Mapping[str, object],
+    config: AlignmentConfig,
+    *,
+    validation: Mapping[str, object] | None = None,
+) -> str:
+    validation_data = dict(validation or {})
+    validation_lines: list[str] = []
+    if validation_data:
+        validation_lines = [
+            "## Alignment validation",
+            "",
+            f"- status: {validation_data.get('status', 'unknown')}",
+            f"- FOV source: {validation_data.get('fov_source', 'unknown')}",
+        ]
+        warning = validation_data.get("warning")
+        if warning:
+            validation_lines.append(f"- warning: {warning}")
+        intrinsics_warning = validation_data.get("intrinsics_warning")
+        if intrinsics_warning:
+            validation_lines.append(f"- upstream detail: {intrinsics_warning}")
+        validation_lines.append("")
     return "\n".join(
         [
             "# SfM-CAD 对齐报告",
@@ -687,6 +774,7 @@ def build_alignment_report(metrics: Mapping[str, object], config: AlignmentConfi
             f"- 对齐模式：{metrics.get('alignment_mode', 'sfm_residual')}",
             f"- 尺度是否可观测：{'是' if metrics.get('scale_observable', True) else '否'}",
             "",
+            *validation_lines,
             "## 重要说明",
             "",
             *(
@@ -729,6 +817,8 @@ def run_alignment(
         fov_source = "manual"
     elif config.fov_from == "config":
         fov_source = "config"
+    if config.fov_from == "config":
+        _validated_configured_fov(config.fov)
     correspondences = build_correspondences(track, traj, config)
     sim3 = estimate_global_sim3(correspondences)
     anchored = apply_segment_anchoring(sim3, correspondences, traj, config)

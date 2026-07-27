@@ -1996,6 +1996,33 @@
     return scene;
   }
 
+  const UPSTREAM_SFM_MANUAL_FOV_WARNING =
+    "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used.";
+
+  function sfmSceneWarnings() {
+    if (!sfmScene) return [];
+    const warnings = Array.isArray(sfmScene.warnings)
+      ? sfmScene.warnings.map((item) => String(item)).filter(Boolean)
+      : [];
+    const validation = (sfmScene.meta && sfmScene.meta.alignment_validation) || {};
+    if (
+      warnings.length === 0
+      && validation.status === "warning"
+      && validation.fov_source === "manual"
+      && validation.intrinsics_warning
+    ) {
+      warnings.push(UPSTREAM_SFM_MANUAL_FOV_WARNING);
+    }
+    return warnings;
+  }
+
+  function displaySfmSceneWarnings() {
+    const warnings = sfmSceneWarnings();
+    if (warnings.length === 0) return false;
+    setStatus(`警告：${warnings.join("；")}`);
+    return true;
+  }
+
   function applySfmScenePayload(data) {
     sfmScene = normalizeSfmScenePayload(data);
     if (sfmScene && qualitySuggestions.length > 0) {
@@ -2015,6 +2042,7 @@
       threeScene.updateSfmGhost(currentFrame());
       updateSfmCurrentFrameInfo(currentFrame());
     }
+    displaySfmSceneWarnings();
   }
 
   function importSfmScene(file) {
@@ -2022,7 +2050,7 @@
     reader.addEventListener("load", () => {
       try {
         applySfmScenePayload(JSON.parse(reader.result));
-        setStatus("已加载 SfM 诊断场景");
+        if (!displaySfmSceneWarnings()) setStatus("已加载 SfM 诊断场景");
       } catch (error) {
         setStatus(`SfM 场景解析失败：${error.message}`);
       }
@@ -2100,6 +2128,7 @@
     const g = t.global_sfm_track || [];
     const a = t.anchored_camera_path || [];
     const sug = sfmScene.suggestions || [];
+    const sceneWarnings = sfmSceneWarnings();
     if ((p.count_exported || 0) > 200000) {
       setStatus("点云数量较大，建议用 --max-points 降采样后重新导出。");
     }
@@ -2107,6 +2136,7 @@
     info.textContent = [
       `点云：${p.count_exported || 0} / 原始 ${p.count_original || 0}（${p.sample_mode || "-"}，RGB ${p.has_rgb ? "有" : "无"}）`,
       `原始SfM轨迹帧：${g.length}　锚定轨迹帧：${a.length}　建议：${sug.length}`,
+      ...sceneWarnings.map((item) => `警告：${item}`),
       warn,
     ].filter(Boolean).join("\n");
   }

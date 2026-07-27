@@ -68,6 +68,22 @@ def test_viewer_legacy_contains_quality_suggestions_and_prediction_guards() -> N
     assert "new THREE.LineSegments(geometry, material)" in text
 
 
+def test_viewer_displays_alignment_warning_in_existing_status_area_after_scene_load() -> None:
+    html = _text(APP_DIR / "index.html")
+    script = _text(APP_DIR / "viewer_legacy.js")
+
+    assert 'id="loadStatus"' in html
+    assert "sfmScene.warnings" in script
+    assert "Upstream SfM intrinsics/geometry are unreliable" in script
+    assert "setStatus" in script
+    assert "function sfmSceneWarnings" in script
+    info_panel = script[
+        script.index("function updateSfmInfoPanel")
+        : script.index("function updateSfmCurrentFrameInfo")
+    ]
+    assert "sfmSceneWarnings()" in info_panel
+
+
 def test_three_scene_scales_camera_model_for_cad_units() -> None:
     text = _text(APP_DIR / "viewer_legacy.js")
 

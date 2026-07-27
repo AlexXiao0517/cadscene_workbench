@@ -59,7 +59,14 @@ def main(argv: list[str] | None = None) -> int:
     write_csv_utf8_sig(sfm_camera_path, result.sfm_camera_path_rows)
     write_json(camera_track_pred, result.camera_track_pred)
     write_csv_utf8_sig(correspondences_csv, result.keyframe_correspondences)
-    write_text(report_md, build_alignment_report(result.metrics, config))
+    write_text(
+        report_md,
+        build_alignment_report(
+            result.metrics,
+            config,
+            validation=result.alignment_json["validation"],
+        ),
+    )
     manager.record_stage(
         stage_name="alignment",
         command=[sys.executable, "-m", "cadscene.cli.align_to_cad", *sys.argv[1:]],

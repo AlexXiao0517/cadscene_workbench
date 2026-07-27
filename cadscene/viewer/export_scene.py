@@ -7,7 +7,11 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from cadscene.alignment.aligner import AlignmentConfig, aligned_state_at_frame
+from cadscene.alignment.aligner import (
+    UPSTREAM_SFM_MANUAL_FOV_WARNING,
+    AlignmentConfig,
+    aligned_state_at_frame,
+)
 from cadscene.core.camera import CameraState
 from cadscene.core.coordinates import cad_meters_to_web_camera, python_state_to_web_camera
 from cadscene.core.io import read_json
@@ -32,6 +36,25 @@ def load_sim3_from_alignment(path: str | Path) -> Sim3:
     data = read_json(path)
     raw = data.get("sim3") or data.get("transform") or data
     return Sim3.from_dict(raw)
+
+
+def _alignment_validation(data: Mapping[str, object]) -> dict:
+    raw = data.get("validation")
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _alignment_validation_warnings(validation: Mapping[str, object]) -> list[str]:
+    if validation.get("status") != "warning":
+        return []
+    warning = validation.get("warning")
+    if warning:
+        return [str(warning)]
+    intrinsics_warning = validation.get("intrinsics_warning")
+    if not intrinsics_warning:
+        return []
+    if validation.get("fov_source") == "manual":
+        return [UPSTREAM_SFM_MANUAL_FOV_WARNING]
+    return [str(intrinsics_warning)]
 
 
 def _bbox(points: np.ndarray) -> dict:
@@ -139,8 +162,28 @@ def _read_csv_rows(path: str | Path) -> list[dict]:
 
 def build_global_sfm_track(trajectory: str | Path, alignment: str | Path, config: ExportViewerSceneConfig) -> list[dict]:
     traj = load_sfm_trajectory(trajectory)
-    sim3 = load_sim3_from_alignment(alignment)
-    align_cfg = AlignmentConfig(cad_scale=config.cad_scale, origin_xy=config.origin_xy, fov_from="trajectory")
+    alignment_data = read_json(alignment)
+    raw_sim3 = alignment_data.get("sim3") or alignment_data.get("transform") or alignment_data
+    sim3 = Sim3.from_dict(raw_sim3)
+    raw_alignment_config = alignment_data.get("config")
+    selected_fov = (
+        dict(raw_alignment_config)
+        if isinstance(raw_alignment_config, Mapping)
+        else {}
+    )
+    if selected_fov.get("fov_from") == "config" and "fov" in selected_fov:
+        align_cfg = AlignmentConfig(
+            cad_scale=config.cad_scale,
+            origin_xy=config.origin_xy,
+            fov=float(selected_fov["fov"]),
+            fov_from="config",
+        )
+    else:
+        align_cfg = AlignmentConfig(
+            cad_scale=config.cad_scale,
+            origin_xy=config.origin_xy,
+            fov_from="trajectory",
+        )
     frames = [int(v) for v in traj.frames.tolist()]
     if config.trajectory_frame_step and config.trajectory_frame_step > 1:
         frames = frames[:: int(config.trajectory_frame_step)]
@@ -214,20 +257,25 @@ def assemble_scene(
     suggestions: Sequence[dict],
     quality_timeline: str | Path | None,
     suggestions_path: str | Path | None,
+    alignment_validation: Mapping[str, object] | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> dict:
+    meta = {
+        "generated_by": "cadscene.export_viewer_scene",
+        "coordinate_system": "web_cad_world",
+        "point_transform": "global_sim3_only",
+        "global_track_transform": "global_sim3_only",
+        "anchored_track_transform": "segment_anchor_path_from_sfm_camera_path",
+        "pitch_convention": "frontend_pitch_negated_from_python_pitch",
+        "dataset": dataset,
+        "run_id": run_id,
+        "rgb_range": "0_255",
+    }
+    if alignment_validation:
+        meta["alignment_validation"] = dict(alignment_validation)
     scene = {
         "schema_version": SCHEMA_VERSION,
-        "meta": {
-            "generated_by": "cadscene.export_viewer_scene",
-            "coordinate_system": "web_cad_world",
-            "point_transform": "global_sim3_only",
-            "global_track_transform": "global_sim3_only",
-            "anchored_track_transform": "segment_anchor_path_from_sfm_camera_path",
-            "pitch_convention": "frontend_pitch_negated_from_python_pitch",
-            "dataset": dataset,
-            "run_id": run_id,
-            "rgb_range": "0_255",
-        },
+        "meta": meta,
         "points": points,
         "tracks": {
             "global_sfm_track": list(global_track),
@@ -239,6 +287,7 @@ def assemble_scene(
             "quality_timeline_ref": str(quality_timeline) if quality_timeline else "",
             "suggestions_ref": str(suggestions_path) if suggestions_path else "",
         },
+        "warnings": list(warnings or []),
     }
     validate_viewer_scene(scene)
     return scene
@@ -247,6 +296,8 @@ def assemble_scene(
 def scene_stats(scene: Mapping[str, object], warnings: Sequence[str] | None = None) -> dict:
     points = scene.get("points", {})
     tracks = scene.get("tracks", {})
+    meta = scene.get("meta", {})
+    scene_warnings = scene.get("warnings")
     return {
         "point_count_original": int(points.get("count_original", 0)),
         "point_count_exported": int(points.get("count_exported", 0)),
@@ -257,7 +308,12 @@ def scene_stats(scene: Mapping[str, object], warnings: Sequence[str] | None = No
         "anchored_track_count": len(tracks.get("anchored_camera_path", [])),
         "suggestion_count": len(scene.get("suggestions", [])),
         "bbox_web_cad_world": points.get("bbox", {}),
-        "warnings": list(warnings or []),
+        "warnings": list(
+            scene_warnings
+            if isinstance(scene_warnings, Sequence) and not isinstance(scene_warnings, str)
+            else warnings or []
+        ),
+        "alignment_validation": dict(meta.get("alignment_validation") or {}),
     }
 
 
@@ -273,7 +329,9 @@ def build_viewer_scene(
     suggestions: str | Path | None,
     config: ExportViewerSceneConfig,
 ) -> tuple[dict, dict]:
-    warnings: list[str] = []
+    alignment_data = read_json(alignment)
+    validation = _alignment_validation(alignment_data)
+    warnings = _alignment_validation_warnings(validation)
     points = _empty_points(config)
     if sparse_ply:
         points = prepare_point_cloud(sparse_ply, alignment, config)
@@ -299,11 +357,28 @@ def build_viewer_scene(
         suggestions=suggestions_rows,
         quality_timeline=quality_timeline,
         suggestions_path=suggestions,
+        alignment_validation=validation,
+        warnings=warnings,
     )
-    return scene, scene_stats(scene, warnings)
+    return scene, scene_stats(scene)
 
 
 def build_viewer_scene_report(inputs: Mapping[str, object], stats: Mapping[str, object]) -> str:
+    validation = dict(stats.get("alignment_validation") or {})
+    warnings = list(stats.get("warnings") or [])
+    validation_lines: list[str] = []
+    if validation:
+        validation_lines = [
+            "## Alignment validation",
+            "",
+            f"- status: {validation.get('status', 'unknown')}",
+            f"- FOV source: {validation.get('fov_source', 'unknown')}",
+        ]
+        intrinsics_warning = validation.get("intrinsics_warning")
+        if intrinsics_warning:
+            validation_lines.append(f"- upstream detail: {intrinsics_warning}")
+        validation_lines.append("")
+    warning_lines = ["## Warnings", "", *[f"- {item}" for item in warnings], ""] if warnings else []
     return "\n".join(
         [
             "# SfM Viewer Scene 导出报告",
@@ -321,6 +396,8 @@ def build_viewer_scene_report(inputs: Mapping[str, object], stats: Mapping[str, 
             f"- anchored_camera_path 帧数：{stats.get('anchored_track_count', 0)}",
             f"- suggestion 数量：{stats.get('suggestion_count', 0)}",
             "",
+            *validation_lines,
+            *warning_lines,
             "## 坐标约定",
             "",
             "- 点云和 global_sfm_track 只使用 global sim3。",

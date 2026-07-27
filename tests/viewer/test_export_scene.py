@@ -9,6 +9,7 @@ from cadscene.core.io import write_csv_utf8_sig, write_json
 from cadscene.viewer.export_scene import (
     ExportViewerSceneConfig,
     build_viewer_scene,
+    build_viewer_scene_report,
     load_suggestions,
     prepare_point_cloud,
 )
@@ -58,23 +59,30 @@ def _write_trajectory(path: Path) -> None:
     )
 
 
-def _write_alignment(path: Path) -> None:
-    write_json(
-        path,
-        {
-            "schema_version": "cadscene_alignment_v1",
-            "sim3": {"scale": 2.0, "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "translation": [10, 0, 0]},
-            "residuals": {"frames": [0, 10], "position_m": [[100, 0, 0], [100, 0, 0]], "angle_deg": [[0, 0, 0], [0, 0, 0]]},
-        },
-    )
+def _write_alignment(
+    path: Path,
+    *,
+    fov: float | None = None,
+    validation: dict | None = None,
+) -> None:
+    payload = {
+        "schema_version": "cadscene_alignment_v1",
+        "sim3": {"scale": 2.0, "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "translation": [10, 0, 0]},
+        "residuals": {"frames": [0, 10], "position_m": [[100, 0, 0], [100, 0, 0]], "angle_deg": [[0, 0, 0], [0, 0, 0]]},
+    }
+    if fov is not None:
+        payload["config"] = {"fov": fov, "fov_from": "config"}
+    if validation is not None:
+        payload["validation"] = validation
+    write_json(path, payload)
 
 
-def _write_anchor_path(path: Path) -> None:
+def _write_anchor_path(path: Path, *, fov: float = 70.0) -> None:
     write_csv_utf8_sig(
         path,
         [
-            {"frame_index": 0, "camera_x": 100.0, "camera_y": 0.0, "camera_z": 2.0, "yaw": 0.0, "pitch": 12.0, "roll": 0.0, "fov": 70.0},
-            {"frame_index": 10, "camera_x": 120.0, "camera_y": 0.0, "camera_z": 2.0, "yaw": 5.0, "pitch": 8.0, "roll": 0.0, "fov": 70.0},
+            {"frame_index": 0, "camera_x": 100.0, "camera_y": 0.0, "camera_z": 2.0, "yaw": 0.0, "pitch": 12.0, "roll": 0.0, "fov": fov},
+            {"frame_index": 10, "camera_x": 120.0, "camera_y": 0.0, "camera_z": 2.0, "yaw": 5.0, "pitch": 8.0, "roll": 0.0, "fov": fov},
         ],
     )
 
@@ -158,3 +166,81 @@ def test_suggestions_list_format_and_no_points_no_quality_are_valid(tmp_path: Pa
     assert scene["points"]["count_exported"] == 0
     assert scene["quality"]["available"] is False
     assert stats["suggestion_count"] == 0
+    assert "alignment_validation" not in scene["meta"]
+    assert all(
+        "Upstream SfM intrinsics/geometry are unreliable" not in warning
+        for warning in scene["warnings"]
+    )
+
+
+def test_repaired_run_contract_exports_67_fov_for_global_and_anchored_tracks(
+    tmp_path: Path,
+) -> None:
+    trajectory = tmp_path / "trajectory.json"
+    alignment = tmp_path / "alignment.json"
+    anchored = tmp_path / "sfm_camera_path.csv"
+    _write_trajectory(trajectory)
+    _write_alignment(alignment, fov=67.0)
+    _write_anchor_path(anchored, fov=67.0)
+
+    scene, _stats = build_viewer_scene(
+        dataset="synthetic",
+        run_id="repaired",
+        sparse_ply=None,
+        trajectory=trajectory,
+        alignment=alignment,
+        sfm_camera_path=anchored,
+        quality_timeline=None,
+        suggestions=None,
+        config=ExportViewerSceneConfig(
+            cad_scale=2.0,
+            origin_xy=(1000.0, 2000.0),
+        ),
+    )
+
+    assert {
+        row["camera"]["fov"]
+        for row in scene["tracks"]["global_sfm_track"]
+    } == {67.0}
+    assert {
+        row["camera"]["fov"]
+        for row in scene["tracks"]["anchored_camera_path"]
+    } == {67.0}
+
+
+def test_alignment_warning_is_carried_into_scene_stats_and_report(tmp_path: Path) -> None:
+    alignment = tmp_path / "alignment.json"
+    warning = (
+        "Upstream SfM intrinsics/geometry are unreliable; "
+        "manual FOV is being used."
+    )
+    validation = {
+        "status": "warning",
+        "fov_source": "manual",
+        "intrinsics_warning": "pathological intrinsics: focal ratio 9.24 exceeds 2",
+        "warning": warning,
+    }
+    _write_alignment(alignment, fov=67.0, validation=validation)
+
+    scene, stats = build_viewer_scene(
+        dataset="synthetic",
+        run_id="warning",
+        sparse_ply=None,
+        trajectory=None,
+        alignment=alignment,
+        sfm_camera_path=None,
+        quality_timeline=None,
+        suggestions=None,
+        config=ExportViewerSceneConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+        ),
+    )
+    report = build_viewer_scene_report({"alignment": alignment}, stats)
+
+    assert scene["meta"]["alignment_validation"] == validation
+    assert warning in scene["warnings"]
+    assert warning in stats["warnings"]
+    assert stats["alignment_validation"] == validation
+    assert warning in report
+    assert "pathological intrinsics" in report
