@@ -9,3 +9,11 @@ def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -
     assert "/api/pure-rotation/trajectory" in script
     assert "pts_time_sec" in script
     assert "pure_rotation" in script
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+    assert "cadsceneApplyPureRotationPose" in legacy
+    assert 'apiPost("/api/pure-rotation/placement"' in script
+    assert 'apiPost("/api/pure-rotation/corrections"' in script
+    assert "pureRotationDeleteCorrection" in script
+    server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
+    assert "global_camera_placement.json" in server
+    assert "rotation_correction_keyframes.json" in server

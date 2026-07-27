@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
 import socket
 import sys
@@ -32,6 +33,13 @@ from cadscene.sfm.camera_init import load_sfm_camera_initialization
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 class ViewerHTTPServer(ThreadingHTTPServer):
@@ -350,17 +358,18 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 placement = payload.get("placement") or {}
                 base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
                 output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+                _atomic_json(run_dir / "03_pure_rotation_placement" / "global_camera_placement.json", placement)
+                _atomic_json(output, base)
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/pure-rotation/corrections":
                 base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
                 if not base_path.exists():
                     raise FileNotFoundError("pure-rotation segment is not calibrated")
-                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), payload.get("corrections") or [])
+                corrections = payload.get("corrections") or []
+                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), corrections)
                 output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(json.dumps(corrected, ensure_ascii=False, indent=2), encoding="utf-8")
+                _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
+                _atomic_json(output, corrected)
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
@@ -471,7 +480,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/pure-rotation/status":
                 run_dir = self._workflow_run_dir(payload)
                 summary = run_dir / "02_pure_rotation" / "backend_summary.json"
-                self._json_response(HTTPStatus.OK, {"ok": True, "summary": json.loads(summary.read_text(encoding="utf-8-sig")) if summary.exists() else None})
+                placement = run_dir / "03_pure_rotation_placement" / "global_camera_placement.json"
+                corrections = run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json"
+                self._json_response(HTTPStatus.OK, {"ok": True, "summary": json.loads(summary.read_text(encoding="utf-8-sig")) if summary.exists() else None, "placement": json.loads(placement.read_text(encoding="utf-8-sig")) if placement.exists() else None, "corrections": json.loads(corrections.read_text(encoding="utf-8-sig")) if corrections.exists() else {"schema_version": 1, "corrections": []}})
                 return
             if parsed.path == "/api/pure-rotation/trajectory":
                 run_dir = self._workflow_run_dir(payload)

@@ -33,6 +33,7 @@
   let keyframePlan = null;
   let keyframeSaveInFlight = false;
   let renderProgressState = null;
+  let pureRotationCorrections = [];
   function uploadTimestamp() {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -53,6 +54,8 @@
     trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
     trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
     document.querySelector("#pureRotationPanel")?.toggleAttribute("hidden", mode !== "pure_rotation");
+    document.querySelector("#sfmPanel")?.toggleAttribute("hidden", mode === "pure_rotation");
+    if (mode === "pure_rotation") window.setTimeout(initializePureRotationViewer, 0);
     if (implementation !== "interface_only") return;
     const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
     trajectoryModeLabel.title = explanation;
@@ -64,19 +67,74 @@
   }
 
   function pureRotationPoseAtPts(trajectory, pts_time_sec) {
-    const poses = trajectory?.poses || [];
-    return poses.reduce((best, pose) => Math.abs(Number(pose.pts_time_sec) - pts_time_sec) < Math.abs(Number(best?.pts_time_sec ?? Infinity) - pts_time_sec) ? pose : best, null);
+    return window.CadscenePureRotationMath.poseAtPts(trajectory?.poses || [], pts_time_sec);
   }
   async function loadPureRotationTrack(kind) {
     const response = await fetch(`/api/pure-rotation/trajectory?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}&kind=${encodeURIComponent(kind)}`, { cache: "no-store" });
     if (!response.ok) throw new Error("pure-rotation trajectory unavailable");
     return (await response.json()).trajectory;
   }
+  async function initializePureRotationViewer() {
+    if (!dataset || !runId) return;
+    const response = await fetch(`/api/pure-rotation/status?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}`, { cache: "no-store" });
+    if (response.ok) {
+      const status = await response.json();
+      pureRotationCorrections = status.corrections?.corrections || [];
+      const placement = status.placement;
+      const form = document.querySelector("#pureRotationPlacement");
+      if (placement && form) {
+        const center = placement.camera_center_web || [0, 0, 0];
+        form.elements.x.value = center[0]; form.elements.y.value = center[1]; form.elements.z.value = center[2];
+        form.elements.fov.value = placement.fov || 60;
+      }
+    }
+    document.querySelector("#pureRotationTrack")?.dispatchEvent(new Event("change"));
+  }
   document.querySelector("#pureRotationTrack")?.addEventListener("change", async (event) => {
     const trajectory = await loadPureRotationTrack(event.target.value);
     const video = document.querySelector("#sourceVideo");
-    window.pureRotationViewer = { trajectory, pose: pureRotationPoseAtPts(trajectory, video?.currentTime || 0) };
-    video?.addEventListener("timeupdate", () => { window.pureRotationViewer.pose = pureRotationPoseAtPts(trajectory, video.currentTime); }, { passive: true });
+    const apply = () => {
+      const pose = pureRotationPoseAtPts(trajectory, video?.currentTime || 0);
+      window.pureRotationViewer = { trajectory, pose };
+      if (pose) window.cadsceneApplyPureRotationPose?.(pose);
+    };
+    apply();
+    video?.addEventListener("timeupdate", apply, { passive: true });
+    video?.addEventListener("seeked", apply);
+  });
+  document.querySelector("#pureRotationPlacement")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const active = window.pureRotationViewer?.pose;
+    if (!active) throw new Error("请先加载 OpenGV 原始旋转轨迹");
+    const placement = {
+      segment_id: Number(active.segment_id),
+      anchor_decoded_frame_index: Number(active.decoded_frame_index),
+      anchor_pts_time_sec: Number(active.pts_time_sec),
+      camera_center_web: [Number(values.x), Number(values.y), Number(values.z)],
+      manual_rotation_cad_from_camera: window.CadscenePureRotationMath.viewerEulerToMatrix(values),
+      fov: Number(values.fov),
+    };
+    await apiPost("/api/pure-rotation/placement", { dataset, runId, placement });
+    const select = document.querySelector("#pureRotationTrack");
+    select.value = "base";
+    select.dispatchEvent(new Event("change"));
+  });
+  document.querySelector("#pureRotationCorrections")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const active = window.pureRotationViewer?.pose;
+    const manual = window.cadsceneGetCurrentCameraPose?.();
+    if (!active || !manual) throw new Error("当前帧没有可修正姿态");
+    const correction = { schema_version: 1, decoded_frame_index: Number(active.decoded_frame_index), pts_time_sec: Number(active.pts_time_sec), segment_id: Number(active.segment_id), base_rotation_cad_from_camera: active.rotation_cad_from_camera, manual_rotation_cad_from_camera: window.CadscenePureRotationMath.viewerEulerToMatrix(manual), source: "manual_rotation_correction", orientation_confirmed: true, note: "" };
+    pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
+    pureRotationCorrections.push(correction);
+    await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
+  });
+  document.querySelector("#pureRotationDeleteCorrection")?.addEventListener("click", async () => {
+    const active = window.pureRotationViewer?.pose;
+    if (!active) return;
+    pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
+    await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
   });
 
   function isInterfaceOnlyTrajectoryWorkflow() {

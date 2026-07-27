@@ -1600,6 +1600,27 @@
     return safeFields;
   };
 
+  window.cadsceneApplyPureRotationPose = function (pose) {
+    if (!camera || !pose || !window.CadscenePureRotationMath) return false;
+    const rotation = pose.rotation_cad_from_camera || pose.rotation_local_from_camera;
+    const center = pose.camera_center_web || pose.camera_center_local || [0, 0, 0];
+    if (!Array.isArray(rotation) || !Array.isArray(center) || center.length !== 3) return false;
+    const euler = window.CadscenePureRotationMath.matrixToViewerEuler(rotation);
+    camera.x = Number(center[0]);
+    camera.y = Number(center[1]);
+    camera.z = Number(center[2]);
+    camera.yaw = euler.yaw;
+    camera.pitch = euler.pitch;
+    camera.roll = euler.roll;
+    syncControls();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return { x: camera.x, y: camera.y, z: camera.z, yaw: camera.yaw, pitch: camera.pitch, roll: camera.roll, fov: camera.fov };
+  };
+
+  window.cadsceneGetCurrentCameraPose = function () {
+    return camera ? cloneCameraPose(camera) : null;
+  };
+
   function applyTrackPayload(payload) {
     cameraTrack = {
       version: payload.version || 1,
