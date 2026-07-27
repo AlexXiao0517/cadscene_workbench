@@ -52,7 +52,7 @@ class ExternalOpenGVBackend:
     def _git_commit(path: Path) -> str:
         try:
             completed = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "HEAD"],
+                ["git", "-c", f"safe.directory={path.as_posix()}", "-C", str(path), "rev-parse", "HEAD"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

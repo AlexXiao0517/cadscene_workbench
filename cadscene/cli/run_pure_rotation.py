@@ -17,10 +17,11 @@ def main() -> int:
     parser.add_argument("--video", required=True, type=Path)
     parser.add_argument("--backend-root")
     parser.add_argument("--backend-command")
+    parser.add_argument("--cadscene-readonly", type=Path)
     args = parser.parse_args()
     output = args.output_root / args.dataset / args.run_id / "02_pure_rotation"
     backend = ExternalOpenGVBackend(backend_root=args.backend_root, backend_command=[args.backend_command] if args.backend_command else None)
-    result = backend.run_video(video=args.video, cadscene_readonly=args.output_root.parents[0], output_dir=output)
+    result = backend.run_video(video=args.video, cadscene_readonly=args.cadscene_readonly or args.output_root.parents[0], output_dir=output)
     trajectory = json.loads((output / "full_video_rotation_trajectory.json").read_text(encoding="utf-8"))
     pts: dict[int, float] = {}
     with (output / "full_video_pairwise_rotations.csv").open(encoding="utf-8-sig", newline="") as stream:

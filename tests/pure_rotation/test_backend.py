@@ -59,6 +59,21 @@ def test_git_commit_audit_is_used_when_backend_metadata_file_is_absent(tmp_path:
     assert report["opengv_commit"] == OPENGV_COMMIT
 
 
+def test_git_audit_scopes_safe_directory_to_the_read_only_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = {}
+    class Completed:
+        returncode = 0
+        stdout = POC_COMMIT + "\n"
+    def fake_run(command, **kwargs):
+        recorded["command"] = command
+        return Completed()
+    monkeypatch.setattr("cadscene.pure_rotation.backend.subprocess.run", fake_run)
+
+    ExternalOpenGVBackend._git_commit(tmp_path)
+
+    assert recorded["command"][:3] == ["git", "-c", f"safe.directory={tmp_path.as_posix()}"]
+
+
 def test_run_uses_argument_array_unicode_paths_and_captures_logs(tmp_path: Path) -> None:
     backend_root = _backend_root(tmp_path)
     runner = backend_root / "runner.py"

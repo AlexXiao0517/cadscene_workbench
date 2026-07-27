@@ -440,6 +440,8 @@ def build_stage_command(
             command.extend(["--backend-root", str(opts["backend_root"])])
         if opts.get("backend_command"):
             command.extend(["--backend-command", str(opts["backend_command"])])
+        if opts.get("cadscene_readonly"):
+            command.extend(["--cadscene-readonly", str(opts["cadscene_readonly"])])
         return command
     python = str(resolve_sfm_python()) if stage == "sfm" else sys.executable
     common = ["--dataset", resolved["dataset"], "--run-id", resolved["run_id"], "--output-root", str(resolved["root"] / "runs")]
