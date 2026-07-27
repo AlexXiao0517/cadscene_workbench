@@ -38,3 +38,8 @@ def test_viewer_euler_round_trip_produces_same_orientation() -> None:
     assert abs(result["yaw"] - 35) < 1e-9
     assert abs(result["pitch"] + 20) < 1e-9
     assert abs(result["roll"] - 12) < 1e-9
+
+
+def test_raw_local_identity_is_displayed_as_viewer_zero_orientation() -> None:
+    result = _node("m.matrixToViewerEuler(m.localRotationToViewerMatrix([[1,0,0],[0,1,0],[0,0,1]]))")
+    assert all(abs(result[key]) < 1e-9 for key in ("yaw", "pitch", "roll"))

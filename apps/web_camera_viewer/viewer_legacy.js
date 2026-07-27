@@ -1602,7 +1602,7 @@
 
   window.cadsceneApplyPureRotationPose = function (pose) {
     if (!camera || !pose || !window.CadscenePureRotationMath) return false;
-    const rotation = pose.rotation_cad_from_camera || pose.rotation_local_from_camera;
+    const rotation = pose.rotation_cad_from_camera || window.CadscenePureRotationMath.localRotationToViewerMatrix(pose.rotation_local_from_camera);
     const center = pose.camera_center_web || pose.camera_center_local || [0, 0, 0];
     if (!Array.isArray(rotation) || !Array.isArray(center) || center.length !== 3) return false;
     const euler = window.CadscenePureRotationMath.matrixToViewerEuler(rotation);
