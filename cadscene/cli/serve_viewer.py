@@ -14,6 +14,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
+from cadscene.pure_rotation.placement import apply_global_placement
+from cadscene.pure_rotation.corrections import apply_rotation_corrections
 from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggestion
 from cadscene.workflow.data_import import (
     create_dataset,
@@ -269,6 +271,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/cancel",
             "/api/workflow/save-camera-track",
             "/api/workflow/generate-keyframe-plan",
+            "/api/pure-rotation/run",
+            "/api/pure-rotation/placement",
+            "/api/pure-rotation/corrections",
         } | upload_routes
         if route not in allowed_routes:
             self.send_error(HTTPStatus.NOT_FOUND, "API not found")
@@ -331,7 +336,32 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 },
             )
             runner: JobRunner = self.server.job_runner
-            if route == "/api/workflow/run-stage":
+            if route == "/api/pure-rotation/run":
+                manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                if (manifest.get("workflow") or {}).get("trajectory_mode") != "pure_rotation":
+                    raise ValueError("dataset is not routed to pure_rotation")
+                result = {"ok": True, **runner.start_stage(dataset, run_id, "pure_rotation", payload.get("options") or {})}
+            elif route == "/api/pure-rotation/placement":
+                raw_path = run_dir / "02_pure_rotation" / "camera_rotation_raw.json"
+                if not raw_path.exists():
+                    raise FileNotFoundError("pure-rotation raw trajectory not found")
+                raw = json.loads(raw_path.read_text(encoding="utf-8-sig"))
+                placement = payload.get("placement") or {}
+                base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
+                output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+                result = {"ok": True, "path": str(output)}
+            elif route == "/api/pure-rotation/corrections":
+                base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+                if not base_path.exists():
+                    raise FileNotFoundError("pure-rotation segment is not calibrated")
+                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), payload.get("corrections") or [])
+                output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(corrected, ensure_ascii=False, indent=2), encoding="utf-8")
+                result = {"ok": True, "path": str(output)}
+            elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
                 try:
                     manifest = load_dataset_manifest(self.server.root_dir, dataset)
@@ -406,6 +436,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/dataset-manifest",
             "/api/workflow/list-datasets",
             "/api/workflow/srt-analysis",
+            "/api/pure-rotation/status",
+            "/api/pure-rotation/trajectory",
         }
         if parsed.path not in api_routes:
             return super().do_GET()
@@ -435,6 +467,19 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 "runId": (query.get("runId") or [""])[0],
             }
             dataset, run_id = self._workflow_identity(payload)
+            if parsed.path == "/api/pure-rotation/status":
+                run_dir = self._workflow_run_dir(payload)
+                summary = run_dir / "02_pure_rotation" / "backend_summary.json"
+                self._json_response(HTTPStatus.OK, {"ok": True, "summary": json.loads(summary.read_text(encoding="utf-8-sig")) if summary.exists() else None})
+                return
+            if parsed.path == "/api/pure-rotation/trajectory":
+                run_dir = self._workflow_run_dir(payload)
+                kind = str((query.get("kind") or ["raw"])[0])
+                paths = {"raw": run_dir / "02_pure_rotation" / "camera_rotation_raw.json", "base": run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json", "corrected": run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"}
+                if kind not in paths or not paths[kind].exists():
+                    raise FileNotFoundError("pure-rotation trajectory not found")
+                self._json_response(HTTPStatus.OK, {"ok": True, "kind": kind, "trajectory": json.loads(paths[kind].read_text(encoding="utf-8-sig"))})
+                return
             if parsed.path == "/api/workflow/sfm-camera-init":
                 run_dir = self._workflow_run_dir(payload)
                 result = load_sfm_camera_initialization(run_dir / "02_sfm" / "camera_trajectory.json")

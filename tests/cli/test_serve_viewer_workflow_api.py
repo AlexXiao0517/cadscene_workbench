@@ -137,11 +137,13 @@ def test_dataset_manifest_api_preserves_no_srt_workflow_defaults(tmp_path: Path)
 
         assert response.status == 200
         assert payload["manifest"]["srt"]["status"] == "missing"
-        assert payload["manifest"]["workflow"] == {
+        assert payload["manifest"]["workflow"].items() >= {
             "trajectory_mode": "sfm_only",
             "debug_override": None,
             "implementation_status": "ready",
-        }
+            "motion_mode": "general_motion",
+            "hovering_declared": False,
+        }.items()
     finally:
         server.terminate()
         server.wait(timeout=5)

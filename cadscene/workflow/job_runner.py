@@ -23,7 +23,7 @@ from cadscene.workflow.keyframe_plan import (
 )
 
 
-ALLOWED_STAGES = {"sfm", "alignment", "quality", "render"}
+ALLOWED_STAGES = {"sfm", "alignment", "quality", "render", "pure_rotation"}
 
 
 class JobAlreadyRunningError(RuntimeError):
@@ -427,8 +427,20 @@ def build_stage_command(
         dataset,
         run_id,
         options,
-        require_alignment_inputs=stage != "sfm",
+        require_alignment_inputs=stage not in {"sfm", "pure_rotation"},
     )
+    if stage == "pure_rotation":
+        opts = dict(options or {})
+        command = [
+            sys.executable, "-m", "cadscene.cli.run_pure_rotation",
+            "--dataset", resolved["dataset"], "--run-id", resolved["run_id"],
+            "--output-root", str(resolved["root"] / "runs"), "--video", str(resolved["video"]),
+        ]
+        if opts.get("backend_root"):
+            command.extend(["--backend-root", str(opts["backend_root"])])
+        if opts.get("backend_command"):
+            command.extend(["--backend-command", str(opts["backend_command"])])
+        return command
     python = str(resolve_sfm_python()) if stage == "sfm" else sys.executable
     common = ["--dataset", resolved["dataset"], "--run-id", resolved["run_id"], "--output-root", str(resolved["root"] / "runs")]
     if stage == "sfm":
