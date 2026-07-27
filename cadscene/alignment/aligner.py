@@ -231,15 +231,16 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
     cosine = float(np.clip(np.dot(src_direction, dst_direction), -1.0, 1.0))
     cross = np.cross(src_direction, dst_direction)
     cross_norm = float(np.linalg.norm(cross))
-    if cross_norm <= 4.0 * np.finfo(np.float64).eps:
-        if cosine >= 0.0:
-            quaternion = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        else:
-            basis = np.zeros(3, dtype=np.float64)
-            basis[int(np.argmin(np.abs(src_direction)))] = 1.0
-            axis = np.cross(src_direction, basis)
-            axis /= np.linalg.norm(axis)
-            quaternion = np.concatenate(([0.0], axis))
+    machine_epsilon = np.finfo(np.float64).eps
+    # Below sqrt(eps), a near-antiparallel cross axis is dominated by roundoff.
+    if cosine < 0.0 and cross_norm <= math.sqrt(machine_epsilon):
+        basis = np.zeros(3, dtype=np.float64)
+        basis[int(np.argmin(np.abs(src_direction)))] = 1.0
+        axis = np.cross(src_direction, basis)
+        axis /= np.linalg.norm(axis)
+        quaternion = np.concatenate(([0.0], axis))
+    elif cross_norm <= 4.0 * machine_epsilon:
+        quaternion = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     else:
         axis = cross / cross_norm
         half_angle = 0.5 * math.atan2(cross_norm, cosine)
