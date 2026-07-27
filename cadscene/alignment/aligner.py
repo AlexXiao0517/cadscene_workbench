@@ -251,7 +251,7 @@ def _validate_alignment_result(
             "global anchor residual exceeds "
             f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:.12g} m: {global_residual:.12g} m"
         )
-    if "baseline_direction_error_deg" in metrics:
+    if scale_observable and "baseline_direction_error_deg" in metrics:
         baseline_direction_error = float(metrics["baseline_direction_error_deg"])
         if (
             not math.isfinite(baseline_direction_error)
@@ -336,6 +336,7 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
     cross = np.cross(src_direction, dst_direction)
     cross_norm = float(np.linalg.norm(cross))
     machine_epsilon = np.finfo(np.float64).eps
+    shortest_rotation: np.ndarray | None = None
     # Subtracting translated float64 endpoints can amplify exact-antiparallel
     # roundoff above a few eps; 32 eps is the narrow boundary covered by that case.
     if cosine < 0.0 and cross_norm <= 32.0 * machine_epsilon:
@@ -344,6 +345,43 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
         axis = np.cross(src_direction, basis)
         axis /= np.linalg.norm(axis)
         quaternion = np.concatenate(([0.0], axis))
+    elif cosine < 0.0:
+        # A threshold between the frame and quaternion constructions creates a
+        # numerical cliff near antiparallel baselines. The frame map is stable
+        # throughout this hemisphere and still maps the measured directions
+        # exactly, so it preserves rather than discards their true deviation.
+        basis = np.zeros(3, dtype=np.float64)
+        basis[
+            int(
+                np.argmin(
+                    np.maximum(np.abs(src_direction), np.abs(dst_direction))
+                )
+            )
+        ] = 1.0
+        src_perpendicular = basis - src_direction * float(
+            np.dot(src_direction, basis)
+        )
+        src_perpendicular /= np.linalg.norm(src_perpendicular)
+        dst_perpendicular = basis - dst_direction * float(
+            np.dot(dst_direction, basis)
+        )
+        dst_perpendicular /= np.linalg.norm(dst_perpendicular)
+        src_frame = np.column_stack(
+            [
+                src_direction,
+                src_perpendicular,
+                np.cross(src_direction, src_perpendicular),
+            ]
+        )
+        dst_frame = np.column_stack(
+            [
+                dst_direction,
+                dst_perpendicular,
+                np.cross(dst_direction, dst_perpendicular),
+            ]
+        )
+        shortest_rotation = dst_frame @ src_frame.T
+        quaternion = None
     elif cross_norm <= 4.0 * machine_epsilon:
         quaternion = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     else:
@@ -353,14 +391,15 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
             ([math.cos(half_angle)], math.sin(half_angle) * axis)
         )
         quaternion /= np.linalg.norm(quaternion)
-    w, x, y, z = quaternion
-    shortest_rotation = np.asarray(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ]
-    )
+    if shortest_rotation is None:
+        w, x, y, z = quaternion
+        shortest_rotation = np.asarray(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ]
+        )
 
     target_sum = np.sum(
         np.asarray(
@@ -669,7 +708,7 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
         "anchored_residual_m_max": float(np.max(anchored_errors)) if anchored_errors else 0.0,
         **anchored.residual_summary(),
     }
-    if len(correspondences) == 2:
+    if len(correspondences) == 2 and anchored.position_mode != "rotation_only":
         source_baseline = (
             np.asarray(correspondences[1].center_sfm, dtype=np.float64)
             - np.asarray(correspondences[0].center_sfm, dtype=np.float64)
@@ -680,7 +719,7 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
         )
         if (
             float(np.linalg.norm(source_baseline)) > 1e-9
-            and float(np.linalg.norm(destination_baseline)) > 1e-9
+            and float(np.linalg.norm(destination_baseline)) > 1e-6
         ):
             mapped_baseline = sim3.rotation @ source_baseline
             angle_rad = math.atan2(
