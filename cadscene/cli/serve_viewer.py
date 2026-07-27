@@ -289,6 +289,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                         float(payload.get("originX", 567747.5756295)),
                         float(payload.get("originY", 3330464.2234675)),
                     ),
+                    hovering_declared=(bool(payload["hoveringDeclared"]) if "hoveringDeclared" in payload else None),
                 )
                 self._update_upload_status(
                     str(manifest["dataset"]),

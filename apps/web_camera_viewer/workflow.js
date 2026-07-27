@@ -47,10 +47,12 @@
       sfm_only: "轨迹模式：仅 SfM（可用）",
       srt_sfm_fused: "轨迹模式：SRT + SfM（功能待启用）",
       srt_full_pose: "轨迹模式：SRT 完整姿态（功能待启用）",
+      pure_rotation: "轨迹模式：悬停旋转（实验）",
     };
     trajectoryModeLabel.hidden = false;
     trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
     trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
+    document.querySelector("#pureRotationPanel")?.toggleAttribute("hidden", mode !== "pure_rotation");
     if (implementation !== "interface_only") return;
     const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
     trajectoryModeLabel.title = explanation;
@@ -60,6 +62,22 @@
     });
     if (message) message.textContent = explanation;
   }
+
+  function pureRotationPoseAtPts(trajectory, pts_time_sec) {
+    const poses = trajectory?.poses || [];
+    return poses.reduce((best, pose) => Math.abs(Number(pose.pts_time_sec) - pts_time_sec) < Math.abs(Number(best?.pts_time_sec ?? Infinity) - pts_time_sec) ? pose : best, null);
+  }
+  async function loadPureRotationTrack(kind) {
+    const response = await fetch(`/api/pure-rotation/trajectory?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}&kind=${encodeURIComponent(kind)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("pure-rotation trajectory unavailable");
+    return (await response.json()).trajectory;
+  }
+  document.querySelector("#pureRotationTrack")?.addEventListener("change", async (event) => {
+    const trajectory = await loadPureRotationTrack(event.target.value);
+    const video = document.querySelector("#sourceVideo");
+    window.pureRotationViewer = { trajectory, pose: pureRotationPoseAtPts(trajectory, video?.currentTime || 0) };
+    video?.addEventListener("timeupdate", () => { window.pureRotationViewer.pose = pureRotationPoseAtPts(trajectory, video.currentTime); }, { passive: true });
+  });
 
   function isInterfaceOnlyTrajectoryWorkflow() {
     return trajectoryWorkflow?.implementation_status === "interface_only";
@@ -450,6 +468,7 @@
     const cadScale = Number(uploadControlValue("#workflowCadScale", 0.06));
     const originX = Number(uploadControlValue("#workflowOriginX", 567747.5756295));
     const originY = Number(uploadControlValue("#workflowOriginY", 3330464.2234675));
+    const hoveringDeclared = Boolean(document.querySelector("#workflowHoveringDeclared")?.checked);
     if (!(cadScale > 0) || !Number.isFinite(originX) || !Number.isFinite(originY)) {
       throw new Error("CAD scale / origin XY 参数无效");
     }
@@ -459,6 +478,7 @@
       cadScale,
       originX,
       originY,
+      hoveringDeclared,
     });
     activeUploadDataset = result.manifest.dataset;
     const input = document.querySelector("#workflowDatasetName");
@@ -930,6 +950,12 @@
   });
   document.querySelector("#workflowVideoInput")?.addEventListener("change", (event) => {
     runWithMessage(() => importSelectedFile("video", event.target.files?.[0]));
+  });
+  document.querySelector("#workflowHoveringDeclared")?.addEventListener("change", (event) => {
+    const hint = document.querySelector("#workflowMotionModeHint");
+    if (hint) hint.textContent = event.target.checked
+      ? "将使用 OpenGV 悬停旋转流程；相机位置固定，不恢复平移。"
+      : "将使用通用 SfM 三维重建流程。";
   });
   document.querySelector("#workflowCadInput")?.addEventListener("change", (event) => {
     runWithMessage(() => importSelectedFile("cad", event.target.files?.[0]));

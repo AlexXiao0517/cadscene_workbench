@@ -40,10 +40,12 @@
             <div class="workflow-actions">
               <label class="file-button">上传视频<input id="workflowVideoInput" type="file" accept=".mp4,.mov,.avi,.mkv,video/*" /></label>
               <label class="file-button">上传 CAD<input id="workflowCadInput" type="file" accept=".dxf,.dwg" /></label>
+              <label><input id="workflowHoveringDeclared" type="checkbox" /> 无人机悬停，仅转动视角（实验）</label>
               <progress id="workflowUploadProgress" max="1" value="0"></progress>
             </div>
             <span class="workflow-stage-note" id="workflowUploadStatus">等待选择视频和 CAD</span>
             <span class="workflow-stage-note" id="workflowCadStatus">未选择 CAD</span>
+            <span class="workflow-stage-note" id="workflowMotionModeHint">将使用通用 SfM 三维重建流程。</span>
             <details class="workflow-upload-advanced dev-only-control">
               <summary>高级设置</summary>
               <div class="workflow-upload-settings">
@@ -202,6 +204,13 @@
             <div class="sfm-info" id="sfmInfo">未加载 SfM 场景（用「导入 SfM 场景」或 URL 参数 sfmScene=）</div>
             <div class="sfm-info" id="sfmFrameInfo"></div>
           </div>
+          <section id="pureRotationPanel" class="sfm-panel" hidden>
+            <div class="sfm-panel-head"><span>悬停旋转模式（实验）</span></div>
+            <p>OpenGV 不恢复平移；相机中心由人工设置。候选内参未经验证。</p>
+            <label>轨迹 <select id="pureRotationTrack"><option value="raw">OpenGV 原始旋转</option><option value="base">CAD 基础放置</option><option value="corrected">关键帧修正结果</option></select></label>
+            <form id="pureRotationPlacement"><label>X <input name="x" type="number" step="any" value="0" /></label><label>Y <input name="y" type="number" step="any" value="0" /></label><label>Z <input name="z" type="number" step="any" value="0" /></label><label>Yaw <input name="yaw" type="number" step="any" value="0" /></label><label>Pitch <input name="pitch" type="number" step="any" value="0" /></label><label>Roll <input name="roll" type="number" step="any" value="0" /></label><label>FOV <input name="fov" type="number" value="60" /></label><button type="submit">设为全局初始标定</button></form>
+            <form id="pureRotationCorrections"><button type="submit">添加姿态修正关键帧</button><button type="button" id="pureRotationDeleteCorrection">删除当前修正</button></form>
+          </section>
         </section>
       </section>
 
