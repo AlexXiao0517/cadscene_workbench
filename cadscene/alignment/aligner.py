@@ -229,29 +229,32 @@ def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence])
     src_direction = src_baseline / src_length
     dst_direction = dst_baseline / dst_length
     cosine = float(np.clip(np.dot(src_direction, dst_direction), -1.0, 1.0))
-    if cosine >= 1.0 - 1e-12:
-        shortest_rotation = np.eye(3, dtype=np.float64)
-    elif cosine <= -1.0 + 1e-12:
-        basis = np.zeros(3, dtype=np.float64)
-        basis[int(np.argmin(np.abs(src_direction)))] = 1.0
-        axis = np.cross(src_direction, basis)
-        axis /= np.linalg.norm(axis)
-        shortest_rotation = 2.0 * np.outer(axis, axis) - np.eye(3, dtype=np.float64)
+    cross = np.cross(src_direction, dst_direction)
+    cross_norm = float(np.linalg.norm(cross))
+    if cross_norm <= 4.0 * np.finfo(np.float64).eps:
+        if cosine >= 0.0:
+            quaternion = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            basis = np.zeros(3, dtype=np.float64)
+            basis[int(np.argmin(np.abs(src_direction)))] = 1.0
+            axis = np.cross(src_direction, basis)
+            axis /= np.linalg.norm(axis)
+            quaternion = np.concatenate(([0.0], axis))
     else:
-        cross = np.cross(src_direction, dst_direction)
-        cross_matrix = np.asarray(
-            [
-                [0.0, -cross[2], cross[1]],
-                [cross[2], 0.0, -cross[0]],
-                [-cross[1], cross[0], 0.0],
-            ],
-            dtype=np.float64,
+        axis = cross / cross_norm
+        half_angle = 0.5 * math.atan2(cross_norm, cosine)
+        quaternion = np.concatenate(
+            ([math.cos(half_angle)], math.sin(half_angle) * axis)
         )
-        shortest_rotation = (
-            np.eye(3, dtype=np.float64)
-            + cross_matrix
-            + (cross_matrix @ cross_matrix) / (1.0 + cosine)
-        )
+        quaternion /= np.linalg.norm(quaternion)
+    w, x, y, z = quaternion
+    shortest_rotation = np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ]
+    )
 
     target_sum = np.sum(
         np.asarray(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -210,7 +211,107 @@ def test_two_anchor_sim3_maps_positions_exactly_when_orientations_conflict() -> 
 
     estimated = estimate_global_sim3(correspondences)
 
-    np.testing.assert_allclose(estimated.apply(source_centers), cad_centers, atol=1e-6)
+    np.testing.assert_allclose(estimated.apply(source_centers), cad_centers, rtol=0.0, atol=1e-6)
+
+
+def test_two_anchor_sim3_uses_both_orientation_targets_for_compromise_twist() -> None:
+    source_centers = np.asarray(
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 4.0]],
+        dtype=np.float64,
+    )
+    cad_centers = np.asarray(
+        [[10.0, 20.0, 30.0], [10.0, 28.0, 30.0]],
+        dtype=np.float64,
+    )
+    target_rolls = (20.0, 100.0)
+    correspondences = [
+        KeyframeCorrespondence(
+            frame_index=index * 10,
+            state=CameraState(
+                camera_x=float(cad_center[0]),
+                camera_y=float(cad_center[1]),
+                camera_z=float(cad_center[2]),
+                yaw_deg=0.0,
+                pitch_deg=0.0,
+                roll_deg=target_rolls[index],
+                cad_scale=1.0,
+            ),
+            center_cad=cad_center,
+            center_sfm=source_center,
+            r_camfromworld_sfm=np.eye(3, dtype=np.float64),
+            source="manual_keyframe",
+        )
+        for index, (source_center, cad_center) in enumerate(zip(source_centers, cad_centers))
+    ]
+    expected_compromise = _camera_to_world_rotation(
+        CameraState(yaw_deg=0.0, pitch_deg=0.0, roll_deg=60.0, cad_scale=1.0)
+    )
+
+    estimated = estimate_global_sim3(correspondences)
+
+    np.testing.assert_allclose(estimated.rotation, expected_compromise, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(estimated.apply(source_centers), cad_centers, rtol=0.0, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "destination_direction",
+    [
+        pytest.param(np.asarray([1.0, 0.0, 0.0]), id="parallel"),
+        pytest.param(np.asarray([-1.0, 0.0, 0.0]), id="antiparallel"),
+        pytest.param(
+            np.asarray([math.cos(1e-6), math.sin(1e-6), 0.0]),
+            id="near_parallel_inside_old_threshold",
+        ),
+        pytest.param(
+            np.asarray([math.cos(math.pi - 1e-6), math.sin(math.pi - 1e-6), 0.0]),
+            id="near_antiparallel_inside_old_threshold",
+        ),
+        pytest.param(
+            np.asarray([math.cos(math.pi - 2e-6), math.sin(math.pi - 2e-6), 0.0]),
+            id="near_antiparallel_outside_old_threshold",
+        ),
+    ],
+)
+def test_two_anchor_sim3_maps_rotation_boundaries_with_proper_rotation(
+    destination_direction: np.ndarray,
+) -> None:
+    source_first = np.asarray([3.0, -4.0, 5.0])
+    cad_first = np.asarray([100.0, 200.0, 5.0])
+    source_centers = np.asarray(
+        [source_first, source_first + np.asarray([10.0, 0.0, 0.0])],
+        dtype=np.float64,
+    )
+    cad_centers = np.asarray(
+        [cad_first, cad_first + 25.0 * destination_direction],
+        dtype=np.float64,
+    )
+    correspondences = [
+        KeyframeCorrespondence(
+            frame_index=index * 10,
+            state=CameraState(
+                camera_x=float(cad_center[0]),
+                camera_y=float(cad_center[1]),
+                camera_z=float(cad_center[2]),
+                cad_scale=1.0,
+            ),
+            center_cad=cad_center,
+            center_sfm=source_center,
+            r_camfromworld_sfm=np.eye(3, dtype=np.float64),
+            source="manual_keyframe",
+        )
+        for index, (source_center, cad_center) in enumerate(zip(source_centers, cad_centers))
+    ]
+
+    estimated = estimate_global_sim3(correspondences)
+
+    np.testing.assert_allclose(estimated.apply(source_centers), cad_centers, rtol=0.0, atol=1e-10)
+    np.testing.assert_allclose(
+        estimated.rotation.T @ estimated.rotation,
+        np.eye(3, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert np.linalg.det(estimated.rotation) == pytest.approx(1.0, rel=0.0, abs=1e-12)
 
 
 def test_segment_anchoring_passes_through_manual_keyframes_and_keeps_edge_residuals() -> None:
