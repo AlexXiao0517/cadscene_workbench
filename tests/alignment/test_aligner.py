@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cadscene.alignment import aligner
 from cadscene.alignment.aligner import (
     AlignmentConfig,
     KeyframeCorrespondence,
@@ -539,3 +540,71 @@ def test_inconsistent_manual_fov_keeps_trajectory_fallback(tmp_path: Path) -> No
     predicted = [row for row in result.camera_track_pred["keyframes"] if row["source"] == "algorithm_prediction"]
     assert predicted
     assert all(row["camera"]["fov"] == pytest.approx(fallback_fov) for row in predicted)
+
+
+def test_alignment_rejects_global_anchor_residual_above_five_metres() -> None:
+    with pytest.raises(RuntimeError, match="global anchor residual"):
+        aligner._validate_alignment_result(
+            metrics={"global_residual_m_max": 5.01},
+            intrinsics_warning=None,
+            trusted_fov=True,
+        )
+
+
+def test_pathological_intrinsics_are_allowed_with_trusted_fov() -> None:
+    aligner._validate_alignment_result(
+        metrics={"global_residual_m_max": 0.0},
+        intrinsics_warning="pathological intrinsics: focal ratio 9.24",
+        trusted_fov=True,
+    )
+
+
+def test_pathological_intrinsics_are_rejected_without_trusted_fov() -> None:
+    with pytest.raises(RuntimeError, match="pathological intrinsics"):
+        aligner._validate_alignment_result(
+            metrics={"global_residual_m_max": 0.0},
+            intrinsics_warning="pathological intrinsics: focal ratio 9.24",
+            trusted_fov=False,
+        )
+
+
+def test_pinhole_focal_aspect_ratio_is_validated() -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "PINHOLE", "params": [960.0, 960.0 * 9.24]})
+
+    warning = aligner._trajectory_intrinsics_warning(traj)
+
+    assert warning is not None
+    assert "pathological intrinsics" in warning
+    assert "9.24" in warning
+
+
+def test_manual_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "OPENCV", "params": [960.0, 960.0 * 9.24]})
+    track = _track_from_states(
+        {
+            0: CameraState(camera_x=0.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+            10: CameraState(camera_x=1.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    for keyframe in track["keyframes"]:
+        keyframe["camera"]["fov"] = 67.0
+    track["keyframes"][1]["source"] = "confirmed_keyframe"
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10, frontend_track_step=10),
+    )
+
+    validation = result.alignment_json["validation"]
+    assert validation["status"] == "warning"
+    assert validation["fov_source"] == "manual"
+    assert "pathological intrinsics" in validation["intrinsics_warning"]
+    assert "9.24" in validation["intrinsics_warning"]

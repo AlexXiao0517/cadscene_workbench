@@ -15,6 +15,10 @@ from cadscene.core.sim3 import Sim3
 from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 
 
+MAX_GLOBAL_ANCHOR_RESIDUAL_M = 5.0
+MAX_FOCAL_ASPECT_RATIO = 2.0
+
+
 @dataclass(frozen=True)
 class AlignmentConfig:
     cad_scale: float = 1.0
@@ -162,6 +166,59 @@ def _manual_fov_from_track(track: Mapping[str, object]) -> float | None:
     if not values or max(values) - min(values) > 0.1:
         return None
     return float(sum(values) / len(values))
+
+
+def _trajectory_intrinsics_warning(traj: SfmTrajectory) -> str | None:
+    params = traj.intrinsics.get("params", [])
+    try:
+        fx = float(params[0])
+    except (IndexError, TypeError, ValueError):
+        return "pathological intrinsics: focal ratio unavailable because fx is missing"
+    if not math.isfinite(fx) or fx <= 0.0:
+        return "pathological intrinsics: focal ratio unavailable because fx is not finite and positive"
+
+    model = str(traj.intrinsics.get("model", "")).upper()
+    independent_fy_models = {
+        "PINHOLE",
+        "OPENCV",
+        "FULL_OPENCV",
+        "OPENCV_FISHEYE",
+        "THIN_PRISM_FISHEYE",
+        "RAD_TAN_THIN_PRISM_FISHEYE",
+    }
+    if model not in independent_fy_models:
+        return None
+    try:
+        fy = float(params[1])
+    except (IndexError, TypeError, ValueError):
+        return "pathological intrinsics: focal ratio unavailable because fy is missing"
+    if not math.isfinite(fy) or fy <= 0.0:
+        return "pathological intrinsics: focal ratio unavailable because fy is not finite and positive"
+    ratio = max(fx, fy) / min(fx, fy)
+    if ratio > MAX_FOCAL_ASPECT_RATIO:
+        return (
+            "pathological intrinsics: focal ratio "
+            f"{ratio:.3g} exceeds {MAX_FOCAL_ASPECT_RATIO:.3g}"
+        )
+    return None
+
+
+def _validate_alignment_result(
+    metrics: Mapping[str, object],
+    *,
+    intrinsics_warning: str | None,
+    trusted_fov: bool,
+) -> None:
+    global_residual = float(metrics.get("global_residual_m_max", 0.0))
+    if not math.isfinite(global_residual) or global_residual > MAX_GLOBAL_ANCHOR_RESIDUAL_M:
+        raise RuntimeError(
+            "global anchor residual exceeds "
+            f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:.1f} m: {global_residual:.6g} m"
+        )
+    if intrinsics_warning is not None and not trusted_fov:
+        raise RuntimeError(
+            f"{intrinsics_warning}; provide a confirmed manual or configured FOV"
+        )
 
 
 def build_correspondences(track: Mapping[str, object], traj: SfmTrajectory, config: AlignmentConfig) -> list[KeyframeCorrespondence]:
@@ -566,7 +623,16 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
     }
 
 
-def _alignment_json(sim3: Sim3, anchored: AnchoredAlignment, correspondences: Sequence[KeyframeCorrespondence], metrics: Mapping[str, object], config: AlignmentConfig) -> dict:
+def _alignment_json(
+    sim3: Sim3,
+    anchored: AnchoredAlignment,
+    correspondences: Sequence[KeyframeCorrespondence],
+    metrics: Mapping[str, object],
+    config: AlignmentConfig,
+    *,
+    fov_source: str,
+    intrinsics_warning: str | None,
+) -> dict:
     return {
         "schema_version": "cadscene_alignment_v1",
         "alignment_mode": anchored.position_mode,
@@ -580,6 +646,11 @@ def _alignment_json(sim3: Sim3, anchored: AnchoredAlignment, correspondences: Se
             "angle_deg": anchored.residual_angles_deg.tolist(),
         },
         "metrics": dict(metrics),
+        "validation": {
+            "status": "warning" if intrinsics_warning is not None else "ok",
+            "fov_source": fov_source,
+            "intrinsics_warning": intrinsics_warning,
+        },
         "config": {
             "cad_scale": float(config.cad_scale),
             "origin_xy": [float(config.origin_xy[0]), float(config.origin_xy[1])],
@@ -646,16 +717,34 @@ def run_alignment(
     traj = load_sfm_trajectory(trajectory_path)
     track = load_web_camera_track(web_camera_track_path)
     manual_fov = _manual_fov_from_track(track)
+    fov_source = "trajectory"
     if manual_fov is not None:
         config = replace(config, fov=manual_fov, fov_from="config")
+        fov_source = "manual"
+    elif config.fov_from == "config":
+        fov_source = "config"
     correspondences = build_correspondences(track, traj, config)
     sim3 = estimate_global_sim3(correspondences)
     anchored = apply_segment_anchoring(sim3, correspondences, traj, config)
     path_rows = generate_aligned_camera_path(traj, sim3, anchored, config)
     camera_track_pred = generate_camera_track_pred(track, path_rows, config)
     metrics = _compute_metrics(correspondences, traj, sim3, anchored, config)
+    intrinsics_warning = _trajectory_intrinsics_warning(traj)
+    _validate_alignment_result(
+        metrics,
+        intrinsics_warning=intrinsics_warning,
+        trusted_fov=fov_source in {"manual", "config"},
+    )
     return AlignmentResult(
-        alignment_json=_alignment_json(sim3, anchored, correspondences, metrics, config),
+        alignment_json=_alignment_json(
+            sim3,
+            anchored,
+            correspondences,
+            metrics,
+            config,
+            fov_source=fov_source,
+            intrinsics_warning=intrinsics_warning,
+        ),
         sfm_camera_path_rows=path_rows,
         camera_track_pred=camera_track_pred,
         keyframe_correspondences=[row.to_row() for row in correspondences],
