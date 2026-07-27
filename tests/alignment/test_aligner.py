@@ -579,6 +579,67 @@ def test_pinhole_focal_aspect_ratio_is_validated() -> None:
     assert "9.24" in warning
 
 
+def test_fov_focal_aspect_ratio_warns_and_is_rejected_without_trusted_fov() -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "FOV", "params": [960.0, 960.0 * 9.24, 960.0, 540.0, 0.5]})
+
+    warning = aligner._trajectory_intrinsics_warning(traj)
+
+    assert warning is not None
+    assert "pathological intrinsics" in warning
+    assert "9.24" in warning
+    with pytest.raises(RuntimeError, match="9.24"):
+        aligner._validate_alignment_result(
+            metrics={"global_residual_m_max": 0.0},
+            intrinsics_warning=warning,
+            trusted_fov=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "PINHOLE",
+        "OPENCV",
+        "OPENCV_FISHEYE",
+        "FULL_OPENCV",
+        "FOV",
+        "THIN_PRISM_FISHEYE",
+        "RAD_TAN_THIN_PRISM_FISHEYE",
+        "DIVISION",
+        "FISHEYE",
+        "EUCM",
+    ],
+)
+def test_all_supported_two_focal_colmap_models_are_validated(model: str) -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": model, "params": [960.0, 960.0 * 9.24]})
+
+    warning = aligner._trajectory_intrinsics_warning(traj)
+
+    assert warning is not None
+    assert "9.24" in warning
+
+
+def test_intrinsics_warning_retains_ratio_precision_above_boundary() -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "FOV", "params": [1.0, 2.0001, 0.0, 0.0, 0.5]})
+
+    warning = aligner._trajectory_intrinsics_warning(traj)
+
+    assert warning is not None
+    assert "2.0001" in warning
+
+
+def test_global_residual_error_retains_precision_above_boundary() -> None:
+    with pytest.raises(RuntimeError, match="5.0000001"):
+        aligner._validate_alignment_result(
+            metrics={"global_residual_m_max": 5.0000001},
+            intrinsics_warning=None,
+            trusted_fov=True,
+        )
+
+
 def test_manual_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> None:
     traj = _trajectory()
     traj.intrinsics.update({"model": "OPENCV", "params": [960.0, 960.0 * 9.24]})
@@ -608,3 +669,39 @@ def test_manual_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> N
     assert validation["fov_source"] == "manual"
     assert "pathological intrinsics" in validation["intrinsics_warning"]
     assert "9.24" in validation["intrinsics_warning"]
+
+
+def test_config_fov_records_pathological_intrinsics_warning(tmp_path: Path) -> None:
+    traj = _trajectory()
+    traj.intrinsics.update({"model": "OPENCV", "params": [960.0, 960.0 * 9.24]})
+    track = _track_from_states(
+        {
+            0: CameraState(camera_x=0.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+            10: CameraState(camera_x=1.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    track["keyframes"][0]["camera"]["fov"] = 67.0
+    track["keyframes"][1]["camera"]["fov"] = 68.0
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            fov=67.0,
+            fov_from="config",
+            frame_step=10,
+            frontend_track_step=10,
+        ),
+    )
+
+    validation = result.alignment_json["validation"]
+    assert validation["status"] == "warning"
+    assert validation["fov_source"] == "config"
+    assert "pathological intrinsics" in validation["intrinsics_warning"]

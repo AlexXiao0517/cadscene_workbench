@@ -17,6 +17,20 @@ from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 
 MAX_GLOBAL_ANCHOR_RESIDUAL_M = 5.0
 MAX_FOCAL_ASPECT_RATIO = 2.0
+INDEPENDENT_FY_CAMERA_MODELS = frozenset(
+    {
+        "PINHOLE",
+        "OPENCV",
+        "OPENCV_FISHEYE",
+        "FULL_OPENCV",
+        "FOV",
+        "THIN_PRISM_FISHEYE",
+        "RAD_TAN_THIN_PRISM_FISHEYE",
+        "DIVISION",
+        "FISHEYE",
+        "EUCM",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -178,15 +192,7 @@ def _trajectory_intrinsics_warning(traj: SfmTrajectory) -> str | None:
         return "pathological intrinsics: focal ratio unavailable because fx is not finite and positive"
 
     model = str(traj.intrinsics.get("model", "")).upper()
-    independent_fy_models = {
-        "PINHOLE",
-        "OPENCV",
-        "FULL_OPENCV",
-        "OPENCV_FISHEYE",
-        "THIN_PRISM_FISHEYE",
-        "RAD_TAN_THIN_PRISM_FISHEYE",
-    }
-    if model not in independent_fy_models:
+    if model not in INDEPENDENT_FY_CAMERA_MODELS:
         return None
     try:
         fy = float(params[1])
@@ -198,7 +204,7 @@ def _trajectory_intrinsics_warning(traj: SfmTrajectory) -> str | None:
     if ratio > MAX_FOCAL_ASPECT_RATIO:
         return (
             "pathological intrinsics: focal ratio "
-            f"{ratio:.3g} exceeds {MAX_FOCAL_ASPECT_RATIO:.3g}"
+            f"{ratio:.12g} exceeds {MAX_FOCAL_ASPECT_RATIO:.12g}"
         )
     return None
 
@@ -213,7 +219,7 @@ def _validate_alignment_result(
     if not math.isfinite(global_residual) or global_residual > MAX_GLOBAL_ANCHOR_RESIDUAL_M:
         raise RuntimeError(
             "global anchor residual exceeds "
-            f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:.1f} m: {global_residual:.6g} m"
+            f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:.12g} m: {global_residual:.12g} m"
         )
     if intrinsics_warning is not None and not trusted_fov:
         raise RuntimeError(
