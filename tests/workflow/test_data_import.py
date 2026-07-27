@@ -73,11 +73,13 @@ def test_dataset_name_is_slugified_and_dataset_is_created(tmp_path: Path) -> Non
     assert manifest["defaults"]["cad_scale"] == 0.06
     assert (tmp_path / "data/user-dataset-01/dataset_manifest.json").exists()
     assert manifest["srt"]["status"] == "missing"
-    assert manifest["workflow"] == {
+    assert manifest["workflow"].items() >= {
         "trajectory_mode": "sfm_only",
         "debug_override": None,
         "implementation_status": "ready",
-    }
+        "motion_mode": "general_motion",
+        "hovering_declared": False,
+    }.items()
 
 
 def test_srt_import_writes_analysis_and_manifest(tmp_path: Path) -> None:
@@ -252,11 +254,12 @@ def test_load_manifest_normalizes_legacy_srt_workflow_to_interface_only(tmp_path
         "attitude_sources": {"gimbal": False, "drone": False},
         "warnings": [],
     }
-    assert manifest["workflow"] == {
+    assert manifest["workflow"].items() >= {
         "trajectory_mode": "srt_sfm_fused",
         "debug_override": None,
         "implementation_status": "interface_only",
-    }
+        "hovering_declared": False,
+    }.items()
     assert persisted["srt"] == manifest["srt"]
     assert persisted["workflow"] == manifest["workflow"]
 
@@ -278,11 +281,12 @@ def test_load_manifest_infers_interface_only_workflow_from_legacy_srt_status(
     manifest = load_dataset_manifest(tmp_path, "legacy")
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["workflow"] == {
+    assert manifest["workflow"].items() >= {
         "trajectory_mode": expected_mode,
         "debug_override": None,
         "implementation_status": "interface_only",
-    }
+        "hovering_declared": False,
+    }.items()
     assert persisted["workflow"] == manifest["workflow"]
 
 
@@ -325,11 +329,13 @@ def test_list_datasets_deep_normalizes_absent_srt_and_partial_workflow(tmp_path:
         "attitude_sources": {"gimbal": False, "drone": False},
         "warnings": [],
     }
-    assert manifest["workflow"] == {
+    assert manifest["workflow"].items() >= {
         "trajectory_mode": "sfm_only",
         "debug_override": "sfm_only",
         "implementation_status": "ready",
-    }
+        "motion_mode": "general_motion",
+        "hovering_declared": False,
+    }.items()
 
 
 def test_import_rejects_path_traversal_and_unsupported_extensions(tmp_path: Path) -> None:

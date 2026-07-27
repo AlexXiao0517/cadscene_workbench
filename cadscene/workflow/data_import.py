@@ -86,6 +86,14 @@ def _default_workflow() -> dict[str, Any]:
         "trajectory_mode": "sfm_only",
         "debug_override": None,
         "implementation_status": "ready",
+        "motion_mode": "general_motion",
+        "motion_mode_source": "user_selected",
+        "hovering_declared": False,
+        "hovering_detection": {"enabled": False, "result": None, "confidence": None},
+        "experimental": False,
+        "translation_observable": None,
+        "absolute_orientation_observable": None,
+        "intrinsics_verified": False,
     }
 
 
@@ -112,8 +120,13 @@ def _ensure_srt_workflow(manifest: dict[str, Any]) -> bool:
     if not isinstance(workflow_source, Mapping) and legacy_srt_mode is not None:
         workflow_source = {"trajectory_mode": legacy_srt_mode}
     workflow = _with_defaults(_default_workflow(), workflow_source)
+    if legacy_srt_mode is not None:
+        # Telemetry has exclusive routing precedence.  A persisted hovering
+        # declaration remains audit metadata but can never alter the SRT path.
+        workflow["trajectory_mode"] = legacy_srt_mode
+    mode = str(workflow.get("trajectory_mode", "sfm_only"))
     workflow["implementation_status"] = (
-        "ready" if workflow.get("trajectory_mode") == "sfm_only" else "interface_only"
+        "experimental" if mode == "pure_rotation" else ("ready" if mode == "sfm_only" else "interface_only")
     )
     changed = manifest.get("srt") != srt or manifest.get("workflow") != workflow
     manifest["srt"] = srt
@@ -164,6 +177,7 @@ def create_dataset(
     *,
     cad_scale: float = 0.06,
     origin_xy: tuple[float, float] = (567747.5756295, 3330464.2234675),
+    hovering_declared: bool | None = None,
 ) -> dict[str, Any]:
     if float(cad_scale) <= 0:
         raise ValueError("cad_scale must be positive")
@@ -178,10 +192,65 @@ def create_dataset(
             "cad_scale": float(cad_scale),
             "origin_xy": [float(origin_xy[0]), float(origin_xy[1])],
         }
+        if hovering_declared is not None:
+            _apply_no_srt_motion_mode(manifest, hovering_declared=bool(hovering_declared))
         _atomic_json(path, _refresh_status(manifest))
         return manifest
     manifest = _default_manifest(slug, float(cad_scale), (float(origin_xy[0]), float(origin_xy[1])))
+    if hovering_declared is not None:
+        _apply_no_srt_motion_mode(manifest, hovering_declared=bool(hovering_declared))
     _atomic_json(path, manifest)
+    return manifest
+
+
+def _apply_no_srt_motion_mode(manifest: dict[str, Any], *, hovering_declared: bool) -> None:
+    srt = _with_defaults(_default_srt(), manifest.get("srt"))
+    if srt.get("status") in {"partial", "full"}:
+        raise ValueError("cannot select pure_rotation when SRT is present")
+    workflow = _with_defaults(_default_workflow(), manifest.get("workflow"))
+    hovering_detection = {"enabled": False, "result": None, "confidence": None}
+    if hovering_declared:
+        workflow.update(
+            {
+                "trajectory_mode": "pure_rotation",
+                "motion_mode": "hovering_rotation",
+                "motion_mode_source": "user_selected",
+                "hovering_declared": True,
+                "hovering_detection": hovering_detection,
+                "experimental": True,
+                "translation_observable": False,
+                "absolute_orientation_observable": False,
+                "intrinsics_verified": False,
+                "implementation_status": "experimental",
+            }
+        )
+    else:
+        workflow.update(
+            {
+                "trajectory_mode": "sfm_only",
+                "motion_mode": "general_motion",
+                "motion_mode_source": "user_selected",
+                "hovering_declared": False,
+                "hovering_detection": hovering_detection,
+                "experimental": False,
+                "translation_observable": None,
+                "absolute_orientation_observable": None,
+                "intrinsics_verified": False,
+                "implementation_status": "ready",
+            }
+        )
+    manifest["srt"] = srt
+    manifest["workflow"] = workflow
+
+
+def set_no_srt_motion_mode(root: str | Path, dataset: str, *, hovering_declared: bool) -> dict[str, Any]:
+    """Persist the user's explicit no-SRT motion choice without inference."""
+    path = _manifest_path(root, dataset)
+    if not path.exists():
+        raise FileNotFoundError(f"dataset manifest not found: {path}")
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    _apply_no_srt_motion_mode(manifest, hovering_declared=bool(hovering_declared))
+    _atomic_json(path, _refresh_status(manifest))
     return manifest
 
 
@@ -355,11 +424,14 @@ def import_srt(
         "attitude_sources": analysis["attitude_sources"],
         "warnings": analysis["warnings"],
     }
-    manifest["workflow"] = {
-        "trajectory_mode": mode,
-        "debug_override": None,
-        "implementation_status": "ready" if mode == "sfm_only" else "interface_only",
-    }
+    workflow = _with_defaults(_default_workflow(), manifest.get("workflow"))
+    workflow.update(
+        {
+            "trajectory_mode": mode,
+            "implementation_status": "ready" if mode == "sfm_only" else "interface_only",
+        }
+    )
+    manifest["workflow"] = workflow
     _atomic_json(manifest_path, _refresh_status(manifest))
     return manifest
 
