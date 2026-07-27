@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -146,6 +146,22 @@ def _fov_for_path(traj: SfmTrajectory, config: AlignmentConfig) -> float:
     if config.fov_from == "trajectory":
         return float(traj.horizontal_fov_deg() or config.fov)
     return float(config.fov)
+
+
+def _manual_fov_from_track(track: Mapping[str, object]) -> float | None:
+    values: list[float] = []
+    for keyframe in confirmed_keyframes(dict(track)):
+        camera = keyframe.get("camera") or {}
+        try:
+            fov = float(camera["fov"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(fov) or not 1.0 < fov < 179.0:
+            return None
+        values.append(fov)
+    if not values or max(values) - min(values) > 0.1:
+        return None
+    return float(sum(values) / len(values))
 
 
 def build_correspondences(track: Mapping[str, object], traj: SfmTrajectory, config: AlignmentConfig) -> list[KeyframeCorrespondence]:
@@ -538,6 +554,9 @@ def run_alignment(
     _ = Path(cad_dir) if cad_dir is not None else None
     traj = load_sfm_trajectory(trajectory_path)
     track = load_web_camera_track(web_camera_track_path)
+    manual_fov = _manual_fov_from_track(track)
+    if manual_fov is not None:
+        config = replace(config, fov=manual_fov, fov_from="config")
     correspondences = build_correspondences(track, traj, config)
     sim3 = estimate_global_sim3(correspondences)
     anchored = apply_segment_anchoring(sim3, correspondences, traj, config)

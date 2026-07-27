@@ -15,6 +15,7 @@ from cadscene.alignment.aligner import (
     estimate_global_sim3,
     generate_aligned_camera_path,
     generate_camera_track_pred,
+    run_alignment,
 )
 from cadscene.core.camera import CameraState
 from cadscene.core.coordinates import python_state_to_web_camera
@@ -71,6 +72,28 @@ def _track_from_states(states: dict[int, CameraState], *, origin_xy=(1000.0, 200
             for frame, state in sorted(states.items())
         ]
     }
+
+
+def _write_trajectory(path: Path, traj: SfmTrajectory) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "fps": traj.fps,
+                "width": traj.width,
+                "height": traj.height,
+                "intrinsics": [traj.intrinsics],
+                "poses": [
+                    {
+                        "frame_index": int(frame),
+                        "center": center.tolist(),
+                        "cam_from_world_quat_wxyz": quat.tolist(),
+                    }
+                    for frame, center, quat in zip(traj.frames, traj.centers, traj.quats_c2w_wxyz)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_estimate_global_sim3_recovers_known_transform() -> None:
@@ -275,3 +298,66 @@ def test_path_rows_and_camera_track_prediction_schema(tmp_path: Path) -> None:
         "algorithm_prediction_step": 10,
     }
     json.dumps(pred, ensure_ascii=False)
+
+
+def test_manual_fov_overrides_trajectory_for_path_and_predictions(tmp_path: Path) -> None:
+    traj = _trajectory()
+    traj.intrinsics["params"] = [3788.0]
+    track = _track_from_states(
+        {
+            0: CameraState(camera_x=0.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+            10: CameraState(camera_x=1.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    track["keyframes"][0]["camera"]["fov"] = 67.0
+    track["keyframes"][1]["source"] = "confirmed_keyframe"
+    track["keyframes"][1]["camera"]["fov"] = 67.0
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10, frontend_track_step=10),
+    )
+
+    assert traj.horizontal_fov_deg() == pytest.approx(28.414, abs=0.1)
+    assert {row["fov"] for row in result.sfm_camera_path_rows} == {67.0}
+    predicted = [row for row in result.camera_track_pred["keyframes"] if row["source"] == "algorithm_prediction"]
+    assert predicted
+    assert {row["camera"]["fov"] for row in predicted} == {67.0}
+    assert result.camera_track_pred["keyframes"][:2] == track["keyframes"]
+
+
+def test_inconsistent_manual_fov_keeps_trajectory_fallback(tmp_path: Path) -> None:
+    traj = _trajectory()
+    traj.intrinsics["params"] = [3788.0]
+    track = _track_from_states(
+        {
+            0: CameraState(camera_x=0.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+            10: CameraState(camera_x=1.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    track["keyframes"][0]["camera"]["fov"] = 67.0
+    track["keyframes"][1]["camera"]["fov"] = 68.0
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10, frontend_track_step=10),
+    )
+
+    fallback_fov = traj.horizontal_fov_deg()
+    assert fallback_fov is not None
+    assert all(row["fov"] == pytest.approx(fallback_fov) for row in result.sfm_camera_path_rows)
+    predicted = [row for row in result.camera_track_pred["keyframes"] if row["source"] == "algorithm_prediction"]
+    assert predicted
+    assert all(row["camera"]["fov"] == pytest.approx(fallback_fov) for row in predicted)
