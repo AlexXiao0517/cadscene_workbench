@@ -1617,6 +1617,12 @@
     return { x: camera.x, y: camera.y, z: camera.z, yaw: camera.yaw, pitch: camera.pitch, roll: camera.roll, fov: camera.fov };
   };
 
+  window.cadsceneFocusVirtualCamera = function () {
+    if (!camera || !threeScene) return false;
+    threeScene.focusInspectOnCamera(camera);
+    return true;
+  };
+
   window.cadsceneGetCurrentCameraPose = function () {
     return camera ? cloneCameraPose(camera) : null;
   };

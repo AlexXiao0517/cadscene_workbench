@@ -34,6 +34,7 @@
   let keyframeSaveInFlight = false;
   let renderProgressState = null;
   let pureRotationCorrections = [];
+  let focusPureRotationCameraOnce = true;
   function uploadTimestamp() {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -96,11 +97,20 @@
     const apply = () => {
       const pose = pureRotationPoseAtPts(trajectory, video?.currentTime || 0);
       window.pureRotationViewer = { trajectory, pose };
-      if (pose) window.cadsceneApplyPureRotationPose?.(pose);
+      if (pose) {
+        window.cadsceneApplyPureRotationPose?.(pose);
+        if (focusPureRotationCameraOnce) {
+          window.cadsceneFocusVirtualCamera?.();
+          focusPureRotationCameraOnce = false;
+        }
+      }
     };
     apply();
     video?.addEventListener("timeupdate", apply, { passive: true });
     video?.addEventListener("seeked", apply);
+  });
+  document.querySelector("#pureRotationFocusCamera")?.addEventListener("click", () => {
+    window.cadsceneFocusVirtualCamera?.();
   });
   document.querySelector("#pureRotationPlacement")?.addEventListener("submit", async (event) => {
     event.preventDefault();

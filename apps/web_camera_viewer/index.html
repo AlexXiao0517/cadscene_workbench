@@ -208,6 +208,7 @@
             <div class="sfm-panel-head"><span>悬停旋转模式（实验）</span></div>
             <p>OpenGV 不恢复平移；相机中心由人工设置。候选内参未经验证。</p>
             <label>轨迹 <select id="pureRotationTrack"><option value="raw">OpenGV 原始旋转</option><option value="base">CAD 基础放置</option><option value="corrected">关键帧修正结果</option></select></label>
+            <button id="pureRotationFocusCamera" type="button">聚焦虚拟相机</button>
             <form id="pureRotationPlacement"><label>X <input name="x" type="number" step="any" value="0" /></label><label>Y <input name="y" type="number" step="any" value="0" /></label><label>Z <input name="z" type="number" step="any" value="0" /></label><label>Yaw <input name="yaw" type="number" step="any" value="0" /></label><label>Pitch <input name="pitch" type="number" step="any" value="0" /></label><label>Roll <input name="roll" type="number" step="any" value="0" /></label><label>FOV <input name="fov" type="number" value="60" /></label><button type="submit">设为全局初始标定</button></form>
             <form id="pureRotationCorrections"><button type="submit">添加姿态修正关键帧</button><button type="button" id="pureRotationDeleteCorrection">删除当前修正</button></form>
           </section>
@@ -267,8 +268,8 @@
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
     <script src="./pure_rotation_math.js?v=20260727-pure-rotation"></script>
-    <script src="./viewer_legacy.js?v=20260727-pure-rotation"></script>
-    <script src="./workflow.js?v=20260727-pure-rotation"></script>
+    <script src="./viewer_legacy.js?v=20260727-pure-rotation-focus"></script>
+    <script src="./workflow.js?v=20260727-pure-rotation-focus"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>
