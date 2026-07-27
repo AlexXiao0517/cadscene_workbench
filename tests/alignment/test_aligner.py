@@ -8,6 +8,7 @@ import pytest
 
 from cadscene.alignment.aligner import (
     AlignmentConfig,
+    KeyframeCorrespondence,
     _camera_to_world_rotation,
     apply_segment_anchoring,
     aligned_state_at_frame,
@@ -176,6 +177,40 @@ def test_estimate_global_sim3_uses_camera_orientation_for_two_anchor_twist() -> 
     estimated = estimate_global_sim3(build_correspondences(_track_from_states(states), traj, config))
 
     np.testing.assert_allclose(estimated.rotation, true_sim3.rotation, rtol=1e-6, atol=1e-6)
+
+
+def test_two_anchor_sim3_maps_positions_exactly_when_orientations_conflict() -> None:
+    source_centers = np.asarray(
+        [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    cad_centers = np.asarray(
+        [[100.0, 200.0, 5.0], [100.0, 225.0, 5.0]],
+        dtype=np.float64,
+    )
+    correspondences = [
+        KeyframeCorrespondence(
+            frame_index=index * 10,
+            state=CameraState(
+                camera_x=float(cad_center[0]),
+                camera_y=float(cad_center[1]),
+                camera_z=float(cad_center[2]),
+                yaw_deg=0.0,
+                pitch_deg=0.0,
+                roll_deg=0.0,
+                cad_scale=1.0,
+            ),
+            center_cad=cad_center,
+            center_sfm=source_center,
+            r_camfromworld_sfm=np.eye(3, dtype=np.float64),
+            source="manual_keyframe",
+        )
+        for index, (source_center, cad_center) in enumerate(zip(source_centers, cad_centers))
+    ]
+
+    estimated = estimate_global_sim3(correspondences)
+
+    np.testing.assert_allclose(estimated.apply(source_centers), cad_centers, atol=1e-6)
 
 
 def test_segment_anchoring_passes_through_manual_keyframes_and_keeps_edge_residuals() -> None:

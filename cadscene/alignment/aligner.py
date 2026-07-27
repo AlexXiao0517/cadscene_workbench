@@ -190,6 +190,10 @@ def build_correspondences(track: Mapping[str, object], traj: SfmTrajectory, conf
 
 
 def estimate_global_sim3(correspondences: Sequence[KeyframeCorrespondence]) -> Sim3:
+    if len(correspondences) == 2:
+        dst = np.asarray([row.center_cad for row in correspondences], dtype=np.float64)
+        if _position_spread(dst) > 1e-6:
+            return _estimate_two_anchor_sim3(correspondences)
     return _estimate_global_sim3_from_oriented_keyframes(correspondences)
 
 
@@ -201,6 +205,89 @@ def _position_spread(points: np.ndarray) -> float:
         for i in range(len(points))
         for j in range(i + 1, len(points))
     )
+
+
+def _estimate_two_anchor_sim3(correspondences: Sequence[KeyframeCorrespondence]) -> Sim3:
+    if len(correspondences) != 2:
+        raise RuntimeError("two-anchor sim3 requires exactly two keyframe correspondences")
+
+    src_first, src_second = (
+        np.asarray(row.center_sfm, dtype=np.float64)
+        for row in correspondences
+    )
+    dst_first, dst_second = (
+        np.asarray(row.center_cad, dtype=np.float64)
+        for row in correspondences
+    )
+    src_baseline = src_second - src_first
+    dst_baseline = dst_second - dst_first
+    src_length = float(np.linalg.norm(src_baseline))
+    dst_length = float(np.linalg.norm(dst_baseline))
+    if src_length <= 1e-9 or dst_length <= 1e-9:
+        raise RuntimeError("keyframe centers are degenerate; cannot estimate two-anchor sim3")
+
+    src_direction = src_baseline / src_length
+    dst_direction = dst_baseline / dst_length
+    cosine = float(np.clip(np.dot(src_direction, dst_direction), -1.0, 1.0))
+    if cosine >= 1.0 - 1e-12:
+        shortest_rotation = np.eye(3, dtype=np.float64)
+    elif cosine <= -1.0 + 1e-12:
+        basis = np.zeros(3, dtype=np.float64)
+        basis[int(np.argmin(np.abs(src_direction)))] = 1.0
+        axis = np.cross(src_direction, basis)
+        axis /= np.linalg.norm(axis)
+        shortest_rotation = 2.0 * np.outer(axis, axis) - np.eye(3, dtype=np.float64)
+    else:
+        cross = np.cross(src_direction, dst_direction)
+        cross_matrix = np.asarray(
+            [
+                [0.0, -cross[2], cross[1]],
+                [cross[2], 0.0, -cross[0]],
+                [-cross[1], cross[0], 0.0],
+            ],
+            dtype=np.float64,
+        )
+        shortest_rotation = (
+            np.eye(3, dtype=np.float64)
+            + cross_matrix
+            + (cross_matrix @ cross_matrix) / (1.0 + cosine)
+        )
+
+    target_sum = np.sum(
+        np.asarray(
+            [
+                _camera_to_world_rotation(row.state)
+                @ row.r_camfromworld_sfm
+                @ shortest_rotation.T
+                for row in correspondences
+            ],
+            dtype=np.float64,
+        ),
+        axis=0,
+    )
+    twist_generator = np.asarray(
+        [
+            [0.0, -dst_direction[2], dst_direction[1]],
+            [dst_direction[2], 0.0, -dst_direction[0]],
+            [-dst_direction[1], dst_direction[0], 0.0],
+        ],
+        dtype=np.float64,
+    )
+    cosine_weight = float(
+        np.trace(target_sum)
+        - dst_direction @ target_sum @ dst_direction
+    )
+    sine_weight = float(-np.trace(twist_generator @ target_sum))
+    twist = math.atan2(sine_weight, cosine_weight)
+    twist_rotation = (
+        np.eye(3, dtype=np.float64)
+        + math.sin(twist) * twist_generator
+        + (1.0 - math.cos(twist)) * (twist_generator @ twist_generator)
+    )
+    rotation = twist_rotation @ shortest_rotation
+    scale = dst_length / src_length
+    translation = dst_first - scale * (rotation @ src_first)
+    return Sim3(scale=scale, rotation=rotation, translation=translation)
 
 
 def _estimate_global_sim3_from_oriented_keyframes(correspondences: Sequence[KeyframeCorrespondence]) -> Sim3:
