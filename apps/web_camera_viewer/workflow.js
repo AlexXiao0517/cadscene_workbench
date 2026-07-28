@@ -35,6 +35,7 @@
   let renderProgressState = null;
   let pureRotationCorrections = [];
   let pureRotationTrajectory = null;
+  let pureRotationTrajectoryKind = null;
   let pureRotationRawTrajectory = null;
   let pureRotationDraftPlacement = null;
   let pureRotationDisplayFov = 70;
@@ -180,11 +181,9 @@
       }
     }
     pureRotationRawTrajectory = await loadPureRotationTrack("raw");
+    pureRotationTrajectory = await loadPureRotationTrack("raw");
+    pureRotationTrajectoryKind = "raw";
     updatePureRotationFovSource();
-    const initialTrack = pureRotationHasPlacement
-      ? (pureRotationCorrections.length ? "corrected" : "base")
-      : "raw";
-    pureRotationTrajectory = await loadPureRotationTrack(initialTrack);
     applyPureRotationPose();
   }
 
@@ -298,7 +297,14 @@
 
   function setPureRotationEditMode(mode) {
     const nextMode = mode === "correction" ? "correction" : "placement";
-    if (pureRotationEditMode === nextMode && pureRotationTrajectory) {
+    const target = nextMode === "placement"
+      ? (pureRotationHasPlacement ? "base" : "raw")
+      : (pureRotationCorrections.length ? "corrected" : "base");
+    if (
+      pureRotationEditMode === nextMode
+      && pureRotationTrajectory
+      && pureRotationTrajectoryKind === target
+    ) {
       window.cadsceneSetPureRotationEditMode?.(nextMode);
       return pureRotationEditModeReady;
     }
@@ -306,9 +312,9 @@
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
     if (pureRotationEditMode === "placement") {
-      const target = pureRotationHasPlacement ? "base" : "raw";
       pureRotationEditModeReady = loadPureRotationTrack(target).then((trajectory) => {
         pureRotationTrajectory = trajectory;
+        pureRotationTrajectoryKind = target;
         applyPureRotationPose();
         return trajectory;
       }).catch((error) => {
@@ -322,6 +328,7 @@
       const target = pureRotationCorrections.length ? "corrected" : "base";
       pureRotationEditModeReady = loadPureRotationTrack(target).then((trajectory) => {
         pureRotationTrajectory = trajectory;
+        pureRotationTrajectoryKind = target;
         applyPureRotationPose();
         return trajectory;
       }).catch((error) => {
@@ -353,6 +360,7 @@
     pureRotationDraftPlacement = null;
     updatePureRotationFovSource();
     pureRotationTrajectory = await loadPureRotationTrack("base");
+    pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
     setPureRotationEditMode("correction");
@@ -364,18 +372,17 @@
     pureRotationDisplayFov = Number(pureRotationSavedPlacement.fov);
     pureRotationFovSource = "saved_placement";
     updatePureRotationFovSource();
-    pureRotationTrajectory = await loadPureRotationTrack(
-      pureRotationCorrections.length ? "corrected" : "base",
-    );
+    pureRotationTrajectory = await loadPureRotationTrack("base");
+    pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
     message.textContent = "已恢复上次保存的固定相机放置。";
   }
 
   async function refreshPureRotationFittedPreview() {
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
-    pureRotationTrajectory = await loadPureRotationTrack(
-      pureRotationCorrections.length ? "corrected" : "base",
-    );
+    const target = pureRotationCorrections.length ? "corrected" : "base";
+    pureRotationTrajectory = await loadPureRotationTrack(target);
+    pureRotationTrajectoryKind = target;
     pureRotationDraftPlacement = null;
     applyPureRotationPose();
     refreshPureRotationCorrectionDraftBase();
@@ -682,7 +689,7 @@
     updateWorkflowStepActive(selectedWorkflowStage);
     renderWorkflowPanel(selectedWorkflowStage);
     if (isPureRotationWorkflow() && selectedWorkflowStage === "keyframes") {
-      setPureRotationEditMode(pureRotationHasPlacement ? "correction" : "placement");
+      setPureRotationEditMode("placement");
     }
   }
 

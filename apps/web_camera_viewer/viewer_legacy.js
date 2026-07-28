@@ -1744,8 +1744,8 @@
     const correctionMode = mode === "correction";
     if (correctionMode) {
       for (const key of ["x", "y", "z", "fov"]) pureRotationRestrictedFields.add(key);
-      if (threeScene) threeScene.setMode("rotate");
     }
+    if (threeScene) threeScene.setMode(correctionMode ? "rotate" : "translate");
     for (const id of ["translateMode"]) {
       const button = document.querySelector(`#${id}`);
       if (button) button.disabled = correctionMode;

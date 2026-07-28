@@ -168,9 +168,9 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "pure_rotation_math.js?v=20260728-stage-ui-v6" in html
-    assert "viewer_legacy.js?v=20260728-stage-ui-v6" in html
-    assert "workflow.js?v=20260728-stage-ui-v6" in html
+    assert "pure_rotation_math.js?v=20260728-stage-ui-v7" in html
+    assert "viewer_legacy.js?v=20260728-stage-ui-v7" in html
+    assert "workflow.js?v=20260728-stage-ui-v7" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -243,6 +243,41 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         assert f'id="{identifier}"' in html
     assert "#cameraToolbar[hidden]" in style
     assert "display: none !important" in style.split("#cameraToolbar[hidden]", 1)[1].split("}", 1)[0]
+
+
+def test_entering_pure_rotation_calibration_defaults_to_translatable_global_placement() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    stage_entry = workflow.split("function setWorkflowStage(stage)", 1)[1].split(
+        "async function refreshQualityArtifactsAfterSuccess", 1
+    )[0]
+    assert 'setPureRotationEditMode("placement")' in stage_entry
+    assert 'pureRotationHasPlacement ? "correction" : "placement"' not in stage_entry
+    edit_mode = legacy.split(
+        "window.cadsceneSetPureRotationEditMode = function (mode)", 1
+    )[1].split("window.cadsceneGetCurrentCameraPose", 1)[0]
+    assert 'threeScene.setMode(correctionMode ? "rotate" : "translate")' in edit_mode
+
+
+def test_recovery_and_global_placement_do_not_auto_apply_saved_corrections() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    initialization = workflow.split(
+        "async function initializePureRotationViewer()", 1
+    )[1].split("function updatePureRotationFovSource", 1)[0]
+    assert 'pureRotationTrajectory = await loadPureRotationTrack("raw")' in initialization
+    assert '"corrected"' not in initialization
+    edit_mode = workflow.split("function setPureRotationEditMode(mode)", 1)[1].split(
+        "async function savePureRotationPlacement", 1
+    )[0]
+    assert "pureRotationTrajectoryKind === target" in edit_mode
+    assert 'pureRotationHasPlacement ? "base" : "raw"' in edit_mode
+    restore = workflow.split(
+        "async function restorePureRotationPlacement()", 1
+    )[1].split("async function refreshPureRotationFittedPreview", 1)[0]
+    assert 'loadPureRotationTrack("base")' in restore
+    assert '"corrected"' not in restore
 
 
 def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
