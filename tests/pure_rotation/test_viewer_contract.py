@@ -160,9 +160,9 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "pure_rotation_math.js?v=20260728-so3-v3" in html
-    assert "viewer_legacy.js?v=20260728-so3-v3" in html
-    assert "workflow.js?v=20260728-so3-v3" in html
+    assert "pure_rotation_math.js?v=20260728-stage-ui-v4" in html
+    assert "viewer_legacy.js?v=20260728-stage-ui-v4" in html
+    assert "workflow.js?v=20260728-stage-ui-v4" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -197,8 +197,8 @@ def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> 
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
     pure_finish = workflow.split(
-        'document.querySelector("#workflowPureFinishKeyframes")', 1
-    )[1].split("});", 1)[0]
+        "async function finishPureRotationCalibration()", 1
+    )[1].split("async function previewPureRotationFittedTrack", 1)[0]
     assert "quality" not in pure_finish.lower()
     assert "render" in pure_finish.lower()
 
@@ -250,3 +250,27 @@ def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
     assert "refreshPureRotationCorrectionDraftBase" in workflow
     assert "cadsceneApplyManualPureRotationMatrix" in workflow
     assert "window.cadsceneApplyManualPureRotationMatrix" in legacy
+
+
+def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert "refreshPureRotationFittedPreview" in workflow
+    add_function = workflow.split("async function addPureRotationCorrection()", 1)[1].split(
+        "async function deletePureRotationCorrection()", 1
+    )[0]
+    delete_function = workflow.split("async function deletePureRotationCorrection()", 1)[1].split(
+        "function jumpPureRotationCorrection", 1
+    )[0]
+    assert "refreshPureRotationFittedPreview" in add_function
+    assert "refreshPureRotationFittedPreview" in delete_function
+    assert 'id="workflowPreviewPureFitted"' in html
+    assert 'id="workflowReturnPureCalibration"' in html
+    assert "finishPureRotationCalibration" in workflow
+    finish_function = workflow.split("async function finishPureRotationCalibration()", 1)[1].split(
+        "async function", 1
+    )[0]
+    assert "pureRotationHasPlacement" in finish_function
+    assert "refreshPureRotationFittedPreview" in finish_function
+    assert 'setWorkflowStage("render")' in finish_function

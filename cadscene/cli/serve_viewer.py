@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
 from cadscene.pure_rotation.placement import apply_global_placement
 from cadscene.pure_rotation.corrections import apply_rotation_corrections
+from cadscene.pure_rotation.rotation_matrix import normalize_rotation_fields
 from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggestion
 from cadscene.workflow.data_import import (
     create_dataset,
@@ -79,6 +80,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Accept-Ranges", "bytes")
+        viewer_path = urlsplit(self.path).path
+        if viewer_path.startswith("/apps/web_camera_viewer/") and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
+            self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
     def _json_response(self, status: HTTPStatus, payload: dict) -> None:
@@ -355,7 +359,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 if not raw_path.exists():
                     raise FileNotFoundError("pure-rotation raw trajectory not found")
                 raw = json.loads(raw_path.read_text(encoding="utf-8-sig"))
-                placement = payload.get("placement") or {}
+                placement = normalize_rotation_fields(
+                    payload.get("placement") or {},
+                    ("manual_rotation_cad_from_camera",),
+                    allow_legacy_reflection=True,
+                )
                 base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
                 output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
                 _atomic_json(run_dir / "03_pure_rotation_placement" / "global_camera_placement.json", placement)
@@ -365,7 +373,14 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
                 if not base_path.exists():
                     raise FileNotFoundError("pure-rotation segment is not calibrated")
-                corrections = payload.get("corrections") or []
+                corrections = [
+                    normalize_rotation_fields(
+                        item,
+                        ("base_rotation_cad_from_camera", "manual_rotation_cad_from_camera"),
+                        allow_legacy_reflection=True,
+                    )
+                    for item in (payload.get("corrections") or [])
+                ]
                 corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), corrections)
                 output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
                 _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
@@ -480,6 +495,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/pure-rotation/status":
                 run_dir = self._workflow_run_dir(payload)
                 summary = run_dir / "02_pure_rotation" / "backend_summary.json"
+                if not summary.exists():
+                    summary = run_dir / "02_pure_rotation" / "summary.json"
                 placement = run_dir / "03_pure_rotation_placement" / "global_camera_placement.json"
                 corrections = run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json"
                 self._json_response(HTTPStatus.OK, {"ok": True, "summary": json.loads(summary.read_text(encoding="utf-8-sig")) if summary.exists() else None, "placement": json.loads(placement.read_text(encoding="utf-8-sig")) if placement.exists() else None, "corrections": json.loads(corrections.read_text(encoding="utf-8-sig")) if corrections.exists() else {"schema_version": 1, "corrections": []}})

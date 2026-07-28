@@ -121,7 +121,11 @@
     document.querySelector("#standardKeyframeActions")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationKeyframeActions")?.classList.toggle("is-pure-visible", pure);
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
-    setPureVisible("#pureRotationCalibrationPanel, #pureRotationControlNotice", pure);
+    setPureVisible(
+      "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
+        + "#workflowPreviewPureFitted, #workflowReturnPureCalibration",
+      pure,
+    );
     document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure);
     for (const id of ["addKeyframe", "deleteKeyframe", "previousKeyframe", "nextKeyframe"]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
@@ -354,6 +358,17 @@
     message.textContent = "已恢复上次保存的固定相机放置。";
   }
 
+  async function refreshPureRotationFittedPreview() {
+    if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
+    pureRotationTrajectory = await loadPureRotationTrack(
+      pureRotationCorrections.length ? "corrected" : "base",
+    );
+    pureRotationDraftPlacement = null;
+    applyPureRotationPose();
+    refreshPureRotationCorrectionDraftBase();
+    return pureRotationTrajectory;
+  }
+
   async function addPureRotationCorrection() {
     const active = window.pureRotationViewer?.pose;
     const manual = window.cadsceneGetCurrentCameraPose?.();
@@ -362,8 +377,7 @@
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
-    pureRotationTrajectory = await loadPureRotationTrack("corrected");
-    applyPureRotationPose();
+    await refreshPureRotationFittedPreview();
     message.textContent = `已保存姿态关键帧 ${correction.decoded_frame_index}。`;
   }
 
@@ -372,9 +386,25 @@
     if (!active) return;
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
-    pureRotationTrajectory = await loadPureRotationTrack(pureRotationCorrections.length ? "corrected" : "base");
-    applyPureRotationPose();
+    await refreshPureRotationFittedPreview();
     message.textContent = `已删除姿态关键帧 ${active.decoded_frame_index}。`;
+  }
+
+  async function finishPureRotationCalibration() {
+    if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
+    await refreshPureRotationFittedPreview();
+    setWorkflowStage("render");
+    message.textContent = "关键帧拟合轨迹已生成，可以预览或开始渲染。";
+  }
+
+  async function previewPureRotationFittedTrack() {
+    await refreshPureRotationFittedPreview();
+    const video = document.querySelector("#sourceVideo");
+    if (video) {
+      video.currentTime = 0;
+      await video.play().catch(() => {});
+    }
+    message.textContent = "正在预览关键帧拟合后的固定中心旋转轨迹。";
   }
 
   function jumpPureRotationCorrection(direction) {
@@ -1336,7 +1366,9 @@
     if (isPureRotationWorkflow()) setWorkflowStage("render");
     else runWithMessage(finishKeyframePlan);
   });
-  document.querySelector("#workflowPureFinishKeyframes")?.addEventListener("click", () => setWorkflowStage("render"));
+  document.querySelector("#workflowPureFinishKeyframes")?.addEventListener("click", () => runWithMessage(finishPureRotationCalibration));
+  document.querySelector("#workflowPreviewPureFitted")?.addEventListener("click", () => runWithMessage(previewPureRotationFittedTrack));
+  document.querySelector("#workflowReturnPureCalibration")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
   document.querySelector("#pureRotationCorrectionSection")?.addEventListener("focusin", () => setPureRotationEditMode("correction"));
   document.querySelector("#pureRotationUseGizmo")?.addEventListener("click", () => {

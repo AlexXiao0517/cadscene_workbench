@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>虚拟相机 CAD 叠加查看器</title>
-    <link rel="stylesheet" href="./style.css?v=20260727-pure-rotation-workflow" />
+    <link rel="stylesheet" href="./style.css?v=20260728-stage-ui-v4" />
   </head>
   <body>
     <main class="app-shell">
@@ -124,6 +124,8 @@
           </div>
           <div class="workflow-stage-panel" data-stage="render">
             <div class="workflow-actions">
+              <button id="workflowPreviewPureFitted" class="workflow-hidden-control" type="button">预览拟合结果</button>
+              <button id="workflowReturnPureCalibration" class="workflow-hidden-control" type="button">返回关键帧标定</button>
               <button id="workflowRender" data-job-action type="button">渲染视频</button>
               <button id="workflowPreviewRender" type="button" disabled>预览视频</button>
               <a id="workflowDownloadRender" class="workflow-link" href="#" download>下载结果</a>
@@ -300,9 +302,9 @@
     <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
-    <script src="./pure_rotation_math.js?v=20260728-so3-v3"></script>
-    <script src="./viewer_legacy.js?v=20260728-so3-v3"></script>
-    <script src="./workflow.js?v=20260728-so3-v3"></script>
+    <script src="./pure_rotation_math.js?v=20260728-stage-ui-v4"></script>
+    <script src="./viewer_legacy.js?v=20260728-stage-ui-v4"></script>
+    <script src="./workflow.js?v=20260728-stage-ui-v4"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

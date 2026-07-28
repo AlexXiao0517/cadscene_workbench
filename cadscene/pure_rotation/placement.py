@@ -4,6 +4,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from cadscene.pure_rotation.rotation_matrix import coerce_so3_matrix
+
 
 def apply_global_placement(
     raw: Mapping[str, Any], *, segment_id: int, anchor_decoded_frame_index: int,
@@ -16,12 +18,12 @@ def apply_global_placement(
     center = [float(value) for value in camera_center_web]
     if len(center) != 3:
         raise ValueError("camera center must contain three values")
-    r_manual = np.asarray(manual_rotation_cad_from_camera, dtype=float)
-    r_anchor_local = np.asarray(anchor["rotation_local_from_camera"], dtype=float)
+    r_manual = coerce_so3_matrix(manual_rotation_cad_from_camera, allow_legacy_reflection=True)
+    r_anchor_local = coerce_so3_matrix(anchor["rotation_local_from_camera"])
     r_cad_from_local = r_manual @ r_anchor_local.T
     output = []
     for pose in poses:
-        r_cad_from_camera = r_cad_from_local @ np.asarray(pose["rotation_local_from_camera"], dtype=float)
+        r_cad_from_camera = r_cad_from_local @ coerce_so3_matrix(pose["rotation_local_from_camera"])
         output.append({
             "decoded_frame_index": int(pose["decoded_frame_index"]), "pts_time_sec": float(pose["pts_time_sec"]), "segment_id": segment_id,
             "rotation_cad_from_camera": r_cad_from_camera.tolist(), "rotation_cam_from_cad": r_cad_from_camera.T.tolist(),

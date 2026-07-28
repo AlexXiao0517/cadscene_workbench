@@ -6,6 +6,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
+from cadscene.pure_rotation.rotation_matrix import coerce_so3_matrix
+
 
 def apply_rotation_corrections(base: Mapping[str, Any], corrections: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     by_segment: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
@@ -15,7 +17,7 @@ def apply_rotation_corrections(base: Mapping[str, Any], corrections: Sequence[Ma
     for pose in base.get("poses", []):
         segment = int(pose["segment_id"])
         choices = sorted(by_segment.get(segment, []), key=lambda item: int(item["decoded_frame_index"]))
-        base_rotation = Rotation.from_matrix(np.asarray(pose["rotation_cad_from_camera"], dtype=float))
+        base_rotation = Rotation.from_matrix(coerce_so3_matrix(pose["rotation_cad_from_camera"]))
         if not choices:
             delta = Rotation.identity()
         else:
@@ -23,8 +25,8 @@ def apply_rotation_corrections(base: Mapping[str, Any], corrections: Sequence[Ma
             if len(set(times)) != len(times):
                 raise ValueError("conflicting corrections at the same decoded frame")
             deltas = Rotation.concatenate([
-                Rotation.from_matrix(np.asarray(item["manual_rotation_cad_from_camera"], dtype=float))
-                * Rotation.from_matrix(np.asarray(next(candidate for candidate in base["poses"] if int(candidate["decoded_frame_index"]) == int(item["decoded_frame_index"]) and int(candidate["segment_id"]) == segment)["rotation_cad_from_camera"], dtype=float)).inv()
+                Rotation.from_matrix(coerce_so3_matrix(item["manual_rotation_cad_from_camera"], allow_legacy_reflection=True))
+                * Rotation.from_matrix(coerce_so3_matrix(next(candidate for candidate in base["poses"] if int(candidate["decoded_frame_index"]) == int(item["decoded_frame_index"]) and int(candidate["segment_id"]) == segment)["rotation_cad_from_camera"])).inv()
                 for item in choices
             ])
             current = float(pose["decoded_frame_index"])
