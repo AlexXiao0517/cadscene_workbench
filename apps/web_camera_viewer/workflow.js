@@ -41,6 +41,7 @@
   let pureRotationFovSource = "default";
   let pureRotationEditMode = "placement";
   let pureRotationHasPlacement = false;
+  let pureRotationSavedPlacement = null;
   let focusPureRotationCameraOnce = true;
   function uploadTimestamp() {
     const now = new Date();
@@ -119,12 +120,8 @@
     document.querySelector("#standardKeyframeActions")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationKeyframeActions")?.classList.toggle("is-pure-visible", pure);
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
-    setPureVisible(
-      "#pureRotationTrackControl, #pureRotationModePlacement, #pureRotationSavePlacement, "
-        + "#pureRotationModeCorrection, #pureRotationAddCorrection, #pureRotationDeleteCorrection, "
-        + "#pureRotationFocusCamera, #pureRotationControlNotice",
-      pure,
-    );
+    setPureVisible("#pureRotationCalibrationPanel, #pureRotationControlNotice", pure);
+    document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure);
     for (const id of ["addKeyframe", "deleteKeyframe", "previousKeyframe", "nextKeyframe"]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
     }
@@ -155,6 +152,7 @@
       const status = await response.json();
       pureRotationCorrections = status.corrections?.corrections || [];
       const placement = status.placement;
+      pureRotationSavedPlacement = placement || null;
       pureRotationHasPlacement = Boolean(placement);
       if (placement && Number.isFinite(Number(placement.fov))) {
         pureRotationDisplayFov = Number(placement.fov);
@@ -170,11 +168,11 @@
     }
     pureRotationRawTrajectory = await loadPureRotationTrack("raw");
     updatePureRotationFovSource();
-    const select = document.querySelector("#pureRotationTrack");
-    if (select) {
-      select.value = pureRotationHasPlacement ? "base" : "raw";
-      select.dispatchEvent(new Event("change"));
-    }
+    const initialTrack = pureRotationHasPlacement
+      ? (pureRotationCorrections.length ? "corrected" : "base")
+      : "raw";
+    pureRotationTrajectory = await loadPureRotationTrack(initialTrack);
+    applyPureRotationPose();
   }
 
   function updatePureRotationFovSource() {
@@ -236,14 +234,6 @@
   }
   window.cadsceneRefreshPureRotationPose = applyPureRotationPose;
 
-  document.querySelector("#pureRotationTrack")?.addEventListener("change", async (event) => {
-    try {
-      pureRotationTrajectory = await loadPureRotationTrack(event.target.value);
-      applyPureRotationPose();
-    } catch (error) {
-      message.textContent = `旋转轨迹不可用：${error.message}`;
-    }
-  });
   const pureRotationVideo = document.querySelector("#sourceVideo");
   pureRotationVideo?.addEventListener("play", capturePureRotationDraftPlacement);
   pureRotationVideo?.addEventListener("timeupdate", applyPureRotationPose, { passive: true });
@@ -252,34 +242,30 @@
   pureRotationVideo?.addEventListener("pause", applyPureRotationPose);
   pureRotationVideo?.addEventListener("ended", applyPureRotationPose);
   window.addEventListener("cadsceneViewerReady", applyPureRotationPose);
-  document.querySelector("#pureRotationFocusCamera")?.addEventListener("click", () => {
-    window.cadsceneFocusVirtualCamera?.();
-  });
 
   function setPureRotationEditMode(mode) {
     pureRotationEditMode = mode === "correction" ? "correction" : "placement";
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
-    document.querySelector("#pureRotationModePlacement")?.classList.toggle("is-active", pureRotationEditMode === "placement");
-    document.querySelector("#pureRotationModeCorrection")?.classList.toggle("is-active", pureRotationEditMode === "correction");
     if (pureRotationEditMode === "placement") {
-      const select = document.querySelector("#pureRotationTrack");
       const target = pureRotationHasPlacement ? "base" : "raw";
-      if (select && select.value !== target) {
-        select.value = target;
-        select.dispatchEvent(new Event("change"));
-      } else {
-        window.cadsceneEnsureVirtualCameraNearCad?.();
-        window.cadsceneFocusVirtualCamera?.();
-      }
+      loadPureRotationTrack(target).then((trajectory) => {
+        pureRotationTrajectory = trajectory;
+        applyPureRotationPose();
+      }).catch((error) => {
+        message.textContent = `旋转轨迹不可用：${error.message}`;
+      });
+      window.cadsceneEnsureVirtualCameraNearCad?.();
+      window.cadsceneFocusVirtualCamera?.();
       message.textContent = "全局放置：使用下方 X/Y/Z/Yaw/Pitch/Roll/FOV 和 3D Gizmo 调整固定相机。";
     } else {
-      const select = document.querySelector("#pureRotationTrack");
       const target = pureRotationCorrections.length ? "corrected" : "base";
-      if (select && select.value !== target) {
-        select.value = target;
-        select.dispatchEvent(new Event("change"));
-      }
+      loadPureRotationTrack(target).then((trajectory) => {
+        pureRotationTrajectory = trajectory;
+        applyPureRotationPose();
+      }).catch((error) => {
+        message.textContent = `旋转轨迹不可用：${error.message}`;
+      });
       message.textContent = "姿态关键帧：位置和 FOV 已锁定，只调整 Yaw/Pitch/Roll。";
     }
   }
@@ -300,12 +286,26 @@
     pureRotationDisplayFov = placement.fov;
     pureRotationFovSource = "saved_placement";
     pureRotationHasPlacement = true;
+    pureRotationSavedPlacement = placement;
     pureRotationDraftPlacement = null;
     updatePureRotationFovSource();
-    const select = document.querySelector("#pureRotationTrack");
-    select.value = "base";
-    select.dispatchEvent(new Event("change"));
+    pureRotationTrajectory = await loadPureRotationTrack("base");
+    applyPureRotationPose();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
+    setPureRotationEditMode("correction");
+  }
+
+  async function restorePureRotationPlacement() {
+    if (!pureRotationSavedPlacement) throw new Error("尚未保存全局固定相机放置");
+    pureRotationDraftPlacement = null;
+    pureRotationDisplayFov = Number(pureRotationSavedPlacement.fov);
+    pureRotationFovSource = "saved_placement";
+    updatePureRotationFovSource();
+    pureRotationTrajectory = await loadPureRotationTrack(
+      pureRotationCorrections.length ? "corrected" : "base",
+    );
+    applyPureRotationPose();
+    message.textContent = "已恢复上次保存的固定相机放置。";
   }
 
   async function addPureRotationCorrection() {
@@ -316,8 +316,8 @@
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
-    document.querySelector("#pureRotationTrack").value = "corrected";
-    document.querySelector("#pureRotationTrack").dispatchEvent(new Event("change"));
+    pureRotationTrajectory = await loadPureRotationTrack("corrected");
+    applyPureRotationPose();
     message.textContent = `已保存姿态关键帧 ${correction.decoded_frame_index}。`;
   }
 
@@ -326,9 +326,31 @@
     if (!active) return;
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
-    document.querySelector("#pureRotationTrack").value = "corrected";
-    document.querySelector("#pureRotationTrack").dispatchEvent(new Event("change"));
+    pureRotationTrajectory = await loadPureRotationTrack(pureRotationCorrections.length ? "corrected" : "base");
+    applyPureRotationPose();
     message.textContent = `已删除姿态关键帧 ${active.decoded_frame_index}。`;
+  }
+
+  function jumpPureRotationCorrection(direction) {
+    const currentPts = Number(document.querySelector("#sourceVideo")?.currentTime || 0);
+    const ordered = pureRotationCorrections
+      .slice()
+      .sort((a, b) => Number(a.pts_time_sec) - Number(b.pts_time_sec));
+    const target = direction < 0
+      ? ordered.filter((item) => Number(item.pts_time_sec) < currentPts - 1e-6).at(-1)
+      : ordered.find((item) => Number(item.pts_time_sec) > currentPts + 1e-6);
+    if (!target) {
+      message.textContent = direction < 0 ? "没有上一个姿态关键帧。" : "没有下一个姿态关键帧。";
+      return;
+    }
+    const video = document.querySelector("#sourceVideo");
+    if (video) video.currentTime = Number(target.pts_time_sec);
+  }
+
+  function undoPureRotationDraft() {
+    pureRotationDraftPlacement = null;
+    applyPureRotationPose();
+    message.textContent = "已撤销当前未保存的姿态调整。";
   }
 
   function isInterfaceOnlyTrajectoryWorkflow() {
@@ -563,8 +585,15 @@
   function setWorkflowStage(stage) {
     const requested = isPureRotationWorkflow() && stage === "quality" ? "render" : stage;
     selectedWorkflowStage = stageOrder.includes(requested) ? requested : "upload";
+    const calibrationPanel = document.querySelector("#pureRotationCalibrationPanel");
+    if (calibrationPanel) {
+      calibrationPanel.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
+    }
     updateWorkflowStepActive(selectedWorkflowStage);
     renderWorkflowPanel(selectedWorkflowStage);
+    if (isPureRotationWorkflow() && selectedWorkflowStage === "keyframes") {
+      setPureRotationEditMode(pureRotationHasPlacement ? "correction" : "placement");
+    }
   }
 
   async function refreshQualityArtifactsAfterSuccess(payload) {
@@ -1261,19 +1290,19 @@
     else runWithMessage(finishKeyframePlan);
   });
   document.querySelector("#workflowPureFinishKeyframes")?.addEventListener("click", () => setWorkflowStage("render"));
-  document.querySelector("#workflowPureOpenPlacement")?.addEventListener("click", () => {
-    setPureRotationEditMode("placement");
-    document.querySelector("#cameraControls")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  });
-  document.querySelector("#workflowPureOpenCorrections")?.addEventListener("click", () => {
+  document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
+  document.querySelector("#pureRotationCorrectionSection")?.addEventListener("focusin", () => setPureRotationEditMode("correction"));
+  document.querySelector("#pureRotationUseGizmo")?.addEventListener("click", () => {
     setPureRotationEditMode("correction");
-    document.querySelector("#cameraControls")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.querySelector("#rotateMode")?.click();
   });
-  document.querySelector("#pureRotationModePlacement")?.addEventListener("click", () => setPureRotationEditMode("placement"));
-  document.querySelector("#pureRotationModeCorrection")?.addEventListener("click", () => setPureRotationEditMode("correction"));
   document.querySelector("#pureRotationSavePlacement")?.addEventListener("click", () => runWithMessage(savePureRotationPlacement));
+  document.querySelector("#pureRotationRestorePlacement")?.addEventListener("click", () => runWithMessage(restorePureRotationPlacement));
   document.querySelector("#pureRotationAddCorrection")?.addEventListener("click", () => runWithMessage(addPureRotationCorrection));
   document.querySelector("#pureRotationDeleteCorrection")?.addEventListener("click", () => runWithMessage(deletePureRotationCorrection));
+  document.querySelector("#pureRotationPreviousCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(-1));
+  document.querySelector("#pureRotationNextCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(1));
+  document.querySelector("#pureRotationUndoDraft")?.addEventListener("click", undoPureRotationDraft);
   document.querySelector("#addKeyframe")?.addEventListener("click", () => persistEditedCameraTrack({ advancePlan: true }));
   document.querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack());
   document.querySelector("#workflowGenerateKeyframes")?.addEventListener("click", () => runWithMessage(generateKeyframePlan));

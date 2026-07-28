@@ -4,8 +4,11 @@ from pathlib import Path
 def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     script = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
-    for identifier in ("pureRotationTrack", "pureRotationModePlacement", "pureRotationModeCorrection"):
+    for identifier in ("pureRotationCalibrationPanel", "pureRotationPlacementSection", "pureRotationCorrectionSection"):
         assert identifier in html
+    assert "pureRotationTrack" not in html
+    assert "pureRotationModePlacement" not in html
+    assert "pureRotationModeCorrection" not in html
     assert "/api/pure-rotation/trajectory" in script
     assert "pts_time_sec" in script
     assert "pure_rotation" in script
@@ -19,14 +22,14 @@ def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -
     assert "rotation_correction_keyframes.json" in server
 
 
-def test_pure_rotation_viewer_can_focus_the_fixed_virtual_camera() -> None:
+def test_pure_rotation_viewer_focus_is_automatic_not_a_debug_toolbar_action() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
 
-    assert 'id="pureRotationFocusCamera"' in html
+    assert 'id="pureRotationFocusCamera"' not in html
     assert "cadsceneFocusVirtualCamera" in legacy
-    assert 'document.querySelector("#pureRotationFocusCamera")' in workflow
+    assert 'document.querySelector("#pureRotationFocusCamera")' not in workflow
     assert "focusPureRotationCameraOnce" in workflow
 
 
@@ -38,14 +41,15 @@ def test_pure_rotation_replaces_only_sfm_stage_and_skips_quality() -> None:
     for identifier in (
         "workflowStartPureRotation",
         "pureRotationKeyframeActions",
-        "pureRotationModePlacement",
-        "pureRotationModeCorrection",
+        "pureRotationCalibrationPanel",
+        "pureRotationPlacementSection",
+        "pureRotationCorrectionSection",
         "pureRotationSavePlacement",
         "pureRotationAddCorrection",
     ):
         assert f'id="{identifier}"' in html
     assert "运行旋转轨迹恢复" in html
-    assert html.index('id="pureRotationModePlacement"') > html.index('<section class="control-panel">')
+    assert html.index('id="pureRotationCalibrationPanel"') > html.index('id="cameraControls"')
     assert 'id="pureRotationPanel"' not in html
     assert "applyPureRotationWorkflowLayout" in workflow
     assert 'li[data-stage="quality"]' in workflow
@@ -82,7 +86,7 @@ def test_pure_rotation_global_placement_recovers_before_single_frame_render() ->
     assert "threeScene.ensureCameraNearCad(nextCamera)" in pose_function
     assert pose_function.index("threeScene.ensureCameraNearCad(nextCamera)") < pose_function.index("updateViews(")
     apply_function = workflow.split("function applyPureRotationPose()", 1)[1].split(
-        'document.querySelector("#pureRotationTrack")', 1
+        "const pureRotationVideo", 1
     )[0]
     assert "cadsceneEnsureVirtualCameraNearCad" not in apply_function
     assert "focusInspectOnCameraAndCad" in legacy
@@ -137,14 +141,16 @@ def test_unsaved_current_pts_placement_is_captured_on_play_and_refreshed_at_boun
     assert "applyDraftPlacement" in workflow
 
 
-def test_track_names_explain_preview_semantics_and_fov_source_is_visible() -> None:
+def test_internal_track_layers_are_not_exposed_and_fov_source_is_visible() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "未标定局部旋转（调试）" in html
-    assert "固定相机放置预览" in html
-    assert "姿态关键帧预览" in html
+    assert "未标定局部旋转（调试）" not in html
+    assert "固定相机放置预览" not in html
+    assert "姿态关键帧预览" not in html
+    assert 'loadPureRotationTrack("raw")' in workflow
+    assert '"corrected" : "base"' in workflow
     assert 'id="pureRotationFovSource"' in html
     assert "horizontalFovDeg" in workflow
     assert '"summary.json"' in server
@@ -195,3 +201,34 @@ def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> 
     )[1].split("});", 1)[0]
     assert "quality" not in pure_finish.lower()
     assert "render" in pure_finish.lower()
+
+
+def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+
+    toolbar = html.split('<div class="panel-title">', 1)[1].split(
+        '<p id="pureRotationControlNotice"', 1
+    )[0]
+    for removed_id in (
+        "pureRotationTrackControl",
+        "pureRotationModePlacement",
+        "pureRotationModeCorrection",
+        "pureRotationFocusCamera",
+    ):
+        assert f'id="{removed_id}"' not in toolbar
+
+    camera_controls_position = html.index('id="cameraControls"')
+    calibration_panel_position = html.index('id="pureRotationCalibrationPanel"')
+    assert calibration_panel_position > camera_controls_position
+    for identifier in (
+        "pureRotationPlacementSection",
+        "pureRotationCorrectionSection",
+        "pureRotationSavePlacement",
+        "pureRotationRestorePlacement",
+        "pureRotationAddCorrection",
+        "pureRotationDeleteCorrection",
+        "pureRotationPreviousCorrection",
+        "pureRotationNextCorrection",
+        "pureRotationUndoDraft",
+    ):
+        assert f'id="{identifier}"' in html
