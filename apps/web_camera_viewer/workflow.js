@@ -96,8 +96,15 @@
     const runButton = document.querySelector("#workflowStartPureRotation");
     const rerunButton = document.querySelector("#workflowRerunPureRotation");
     const enterButton = document.querySelector("#workflowEnterPureCalibration");
-    if (runButton) runButton.hidden = ready;
-    if (rerunButton) rerunButton.hidden = !ready;
+    const blocked = trajectoryWorkflowActionsAreBlocked();
+    if (runButton) {
+      runButton.hidden = false;
+      runButton.disabled = running || blocked;
+    }
+    if (rerunButton) {
+      rerunButton.hidden = !ready;
+      rerunButton.disabled = !ready || running || blocked;
+    }
     if (enterButton) enterButton.disabled = !ready || running;
   }
 

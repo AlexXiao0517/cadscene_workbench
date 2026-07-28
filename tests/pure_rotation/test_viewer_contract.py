@@ -48,7 +48,7 @@ def test_pure_rotation_replaces_only_sfm_stage_and_skips_quality() -> None:
         "pureRotationAddCorrection",
     ):
         assert f'id="{identifier}"' in html
-    assert "运行旋转轨迹恢复" in html
+    assert ">开始运行<" in html
     assert html.index('id="pureRotationCalibrationPanel"') > html.index('id="cameraControls"')
     assert 'id="pureRotationPanel"' not in html
     assert "applyPureRotationWorkflowLayout" in workflow
@@ -70,10 +70,18 @@ def test_pure_rotation_replaces_only_sfm_stage_and_skips_quality() -> None:
 
 def test_pure_rotation_run_button_is_reenabled_after_manifest_resolution() -> None:
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
 
     assert 'const pureRunButton = document.querySelector("#workflowStartPureRotation")' in workflow
     assert "pureRunButton.disabled = false" in workflow
     assert 'pureRunButton.removeAttribute("title")' in workflow
+    assert 'id="workflowStartPureRotation"' in html
+    assert ">开始运行<" in html
+    recovery_actions = workflow.split(
+        "function updatePureRotationRecoveryActions", 1
+    )[1].split("function applyPureRotationWorkflowLayout", 1)[0]
+    assert "runButton.hidden = false" in recovery_actions
+    assert "rerunButton.disabled = !ready || running || blocked" in recovery_actions
 
 
 def test_pure_rotation_global_placement_recovers_before_single_frame_render() -> None:
@@ -160,9 +168,9 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "pure_rotation_math.js?v=20260728-stage-ui-v5" in html
-    assert "viewer_legacy.js?v=20260728-stage-ui-v5" in html
-    assert "workflow.js?v=20260728-stage-ui-v5" in html
+    assert "pure_rotation_math.js?v=20260728-stage-ui-v6" in html
+    assert "viewer_legacy.js?v=20260728-stage-ui-v6" in html
+    assert "workflow.js?v=20260728-stage-ui-v6" in html
     assert '"Cache-Control", "no-store"' in server
 
 

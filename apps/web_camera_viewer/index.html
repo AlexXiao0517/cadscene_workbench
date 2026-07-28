@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>虚拟相机 CAD 叠加查看器</title>
-    <link rel="stylesheet" href="./style.css?v=20260728-stage-ui-v5" />
+    <link rel="stylesheet" href="./style.css?v=20260728-stage-ui-v6" />
   </head>
   <body>
     <main class="app-shell">
@@ -62,7 +62,7 @@
               <button id="workflowStartSfm" data-job-action type="button">开始 SfM 重建</button>
             </div>
             <div class="workflow-actions workflow-hidden-control" id="pureRotationRecoveryActions">
-              <button id="workflowStartPureRotation" data-job-action type="button">运行旋转轨迹恢复</button>
+              <button id="workflowStartPureRotation" data-job-action type="button">开始运行</button>
               <button id="workflowRerunPureRotation" data-job-action type="button">重新运行</button>
               <button id="workflowEnterPureCalibration" type="button" disabled>进入关键帧标定</button>
             </div>
@@ -302,9 +302,9 @@
     <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
-    <script src="./pure_rotation_math.js?v=20260728-stage-ui-v5"></script>
-    <script src="./viewer_legacy.js?v=20260728-stage-ui-v5"></script>
-    <script src="./workflow.js?v=20260728-stage-ui-v5"></script>
+    <script src="./pure_rotation_math.js?v=20260728-stage-ui-v6"></script>
+    <script src="./viewer_legacy.js?v=20260728-stage-ui-v6"></script>
+    <script src="./workflow.js?v=20260728-stage-ui-v6"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

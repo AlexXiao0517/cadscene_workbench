@@ -442,6 +442,8 @@ def build_stage_command(
             command.extend(["--backend-command", str(opts["backend_command"])])
         if opts.get("cadscene_readonly"):
             command.extend(["--cadscene-readonly", str(opts["cadscene_readonly"])])
+        if opts.get("force"):
+            command.append("--force")
         return command
     try:
         dataset_manifest = load_dataset_manifest(resolved["root"], resolved["dataset"])
