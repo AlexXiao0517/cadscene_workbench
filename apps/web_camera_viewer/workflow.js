@@ -42,6 +42,7 @@
   let pureRotationEditMode = "placement";
   let pureRotationHasPlacement = false;
   let pureRotationSavedPlacement = null;
+  let pureRotationEditModeReady = Promise.resolve(null);
   let pureRotationCorrectionDraftBase = null;
   let focusPureRotationCameraOnce = true;
   function uploadTimestamp() {
@@ -216,8 +217,8 @@
     return pureRotationCorrectionDraftBase;
   }
 
-  function previewPureRotationWorldYaw(value) {
-    if (pureRotationEditMode !== "correction") setPureRotationEditMode("correction");
+  async function previewPureRotationWorldYaw(value) {
+    await setPureRotationEditMode("correction");
     const base = pureRotationCorrectionDraftBase || refreshPureRotationCorrectionDraftBase();
     if (!base) return;
     const angle = Math.max(-180, Math.min(180, Number(value) || 0));
@@ -292,32 +293,37 @@
     const nextMode = mode === "correction" ? "correction" : "placement";
     if (pureRotationEditMode === nextMode && pureRotationTrajectory) {
       window.cadsceneSetPureRotationEditMode?.(nextMode);
-      return;
+      return pureRotationEditModeReady;
     }
     pureRotationEditMode = nextMode;
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
     if (pureRotationEditMode === "placement") {
       const target = pureRotationHasPlacement ? "base" : "raw";
-      loadPureRotationTrack(target).then((trajectory) => {
+      pureRotationEditModeReady = loadPureRotationTrack(target).then((trajectory) => {
         pureRotationTrajectory = trajectory;
         applyPureRotationPose();
+        return trajectory;
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
+        return null;
       });
       window.cadsceneEnsureVirtualCameraNearCad?.();
       window.cadsceneFocusVirtualCamera?.();
       message.textContent = "全局放置：使用下方 X/Y/Z/Yaw/Pitch/Roll/FOV 和 3D Gizmo 调整固定相机。";
     } else {
       const target = pureRotationCorrections.length ? "corrected" : "base";
-      loadPureRotationTrack(target).then((trajectory) => {
+      pureRotationEditModeReady = loadPureRotationTrack(target).then((trajectory) => {
         pureRotationTrajectory = trajectory;
         applyPureRotationPose();
+        return trajectory;
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
+        return null;
       });
       message.textContent = "姿态关键帧：位置和 FOV 已锁定，只调整 Yaw/Pitch/Roll。";
     }
+    return pureRotationEditModeReady;
   }
 
   async function savePureRotationPlacement() {

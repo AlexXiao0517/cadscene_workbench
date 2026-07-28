@@ -160,9 +160,9 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "pure_rotation_math.js?v=20260728-stage-ui-v4" in html
-    assert "viewer_legacy.js?v=20260728-stage-ui-v4" in html
-    assert "workflow.js?v=20260728-stage-ui-v4" in html
+    assert "pure_rotation_math.js?v=20260728-stage-ui-v5" in html
+    assert "viewer_legacy.js?v=20260728-stage-ui-v5" in html
+    assert "workflow.js?v=20260728-stage-ui-v5" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -205,6 +205,7 @@ def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> 
 
 def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    style = Path("apps/web_camera_viewer/style.css").read_text(encoding="utf-8")
 
     toolbar = html.split('<div class="panel-title">', 1)[1].split(
         '<p id="pureRotationControlNotice"', 1
@@ -232,6 +233,8 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         "pureRotationUndoDraft",
     ):
         assert f'id="{identifier}"' in html
+    assert "#cameraToolbar[hidden]" in style
+    assert "display: none !important" in style.split("#cameraToolbar[hidden]", 1)[1].split("}", 1)[0]
 
 
 def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
@@ -250,6 +253,11 @@ def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
     assert "refreshPureRotationCorrectionDraftBase" in workflow
     assert "cadsceneApplyManualPureRotationMatrix" in workflow
     assert "window.cadsceneApplyManualPureRotationMatrix" in legacy
+    assert "pureRotationEditModeReady" in workflow
+    preview_function = workflow.split(
+        "async function previewPureRotationWorldYaw", 1
+    )[1].split("function capturePureRotationDraftPlacement", 1)[0]
+    assert 'await setPureRotationEditMode("correction")' in preview_function
 
 
 def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> None:

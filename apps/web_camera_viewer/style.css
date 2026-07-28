@@ -619,6 +619,10 @@ h2 {
   gap: 8px;
 }
 
+#cameraToolbar[hidden] {
+  display: none !important;
+}
+
 button,
 .file-button {
   border: 1px solid var(--line);
