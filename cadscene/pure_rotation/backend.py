@@ -93,6 +93,22 @@ class ExternalOpenGVBackend:
             return list(self.backend_command)
         configured = os.environ.get("PURE_ROTATION_BACKEND_COMMAND")
         if configured:
+            if configured.lstrip().startswith("["):
+                try:
+                    parsed = json.loads(configured)
+                except json.JSONDecodeError as exc:
+                    raise PureRotationBackendUnavailable(
+                        "backend command JSON is invalid"
+                    ) from exc
+                if (
+                    not isinstance(parsed, list)
+                    or not parsed
+                    or not all(isinstance(item, str) and item for item in parsed)
+                ):
+                    raise PureRotationBackendUnavailable(
+                        "backend command JSON must be a non-empty string array"
+                    )
+                return parsed
             return [configured]
         raise PureRotationBackendUnavailable("backend command is not configured")
 

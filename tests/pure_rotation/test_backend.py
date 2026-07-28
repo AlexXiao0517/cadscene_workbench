@@ -39,6 +39,18 @@ def test_backend_root_precedence_and_health_audits_pinned_metadata(tmp_path: Pat
     assert report["opengv_commit"] == OPENGV_COMMIT
 
 
+def test_backend_command_environment_accepts_json_argument_array(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = tmp_path / "run backend.py"
+    command = [sys.executable, str(runner)]
+    monkeypatch.setenv("PURE_ROTATION_BACKEND_COMMAND", json.dumps(command))
+    backend = ExternalOpenGVBackend()
+
+    assert backend._command() == command
+
+
 def test_missing_backend_is_a_typed_unavailable_failure(tmp_path: Path) -> None:
     backend = ExternalOpenGVBackend(backend_root=tmp_path / "missing")
 
