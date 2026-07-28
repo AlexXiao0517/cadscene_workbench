@@ -232,3 +232,21 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         "pureRotationUndoDraft",
     ):
         assert f'id="{identifier}"' in html
+
+
+def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    for identifier in (
+        "pureRotationWorldYaw",
+        "pureRotationWorldYawNumber",
+        "pureRotationResetWorldYaw",
+    ):
+        assert f'id="{identifier}"' in html
+    assert "pureRotationCorrectionDraftBase" in workflow
+    assert "rotateAboutWorldUp" in workflow
+    assert "refreshPureRotationCorrectionDraftBase" in workflow
+    assert "cadsceneApplyManualPureRotationMatrix" in workflow
+    assert "window.cadsceneApplyManualPureRotationMatrix" in legacy

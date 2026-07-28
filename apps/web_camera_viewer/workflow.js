@@ -42,6 +42,7 @@
   let pureRotationEditMode = "placement";
   let pureRotationHasPlacement = false;
   let pureRotationSavedPlacement = null;
+  let pureRotationCorrectionDraftBase = null;
   let focusPureRotationCameraOnce = true;
   function uploadTimestamp() {
     const now = new Date();
@@ -187,6 +188,43 @@
     label.textContent = `FOV ${pureRotationDisplayFov.toFixed(1)}° · 来源：${copy[pureRotationFovSource] || copy.default}`;
   }
 
+  function setPureRotationWorldYawInputs(value) {
+    const normalized = Number(value);
+    const slider = document.querySelector("#pureRotationWorldYaw");
+    const number = document.querySelector("#pureRotationWorldYawNumber");
+    if (slider) slider.value = String(normalized);
+    if (number) number.value = String(normalized);
+  }
+
+  function refreshPureRotationCorrectionDraftBase() {
+    const active = window.pureRotationViewer?.pose;
+    if (!active || !window.CadscenePureRotationMath) return null;
+    const rotation = active.rotation_cad_from_camera
+      || window.CadscenePureRotationMath.localRotationToViewerMatrix(active.rotation_local_from_camera);
+    if (!Array.isArray(rotation)) return null;
+    pureRotationCorrectionDraftBase = {
+      decoded_frame_index: Number(active.decoded_frame_index),
+      pts_time_sec: Number(active.pts_time_sec),
+      segment_id: Number(active.segment_id),
+      rotation_cad_from_camera: rotation.map((row) => row.map(Number)),
+    };
+    setPureRotationWorldYawInputs(0);
+    return pureRotationCorrectionDraftBase;
+  }
+
+  function previewPureRotationWorldYaw(value) {
+    if (pureRotationEditMode !== "correction") setPureRotationEditMode("correction");
+    const base = pureRotationCorrectionDraftBase || refreshPureRotationCorrectionDraftBase();
+    if (!base) return;
+    const angle = Math.max(-180, Math.min(180, Number(value) || 0));
+    setPureRotationWorldYawInputs(angle);
+    const rotation = window.CadscenePureRotationMath.rotateAboutWorldUp(
+      base.rotation_cad_from_camera,
+      angle,
+    );
+    window.cadsceneApplyManualPureRotationMatrix?.(rotation);
+  }
+
   function capturePureRotationDraftPlacement() {
     if (!isPureRotationWorkflow() || pureRotationEditMode !== "placement") return;
     const video = document.querySelector("#sourceVideo");
@@ -226,6 +264,9 @@
     window.pureRotationViewer = { trajectory: pureRotationTrajectory, pose };
     if (!pose) return;
     window.cadsceneApplyPureRotationPose?.({ ...pose, display_fov: pureRotationDisplayFov });
+    if (pureRotationEditMode === "correction" && video?.paused) {
+      refreshPureRotationCorrectionDraftBase();
+    }
     if (focusPureRotationCameraOnce) {
       window.cadsceneSetPureRotationEditMode?.("placement");
       window.cadsceneFocusVirtualCamera?.();
@@ -244,7 +285,12 @@
   window.addEventListener("cadsceneViewerReady", applyPureRotationPose);
 
   function setPureRotationEditMode(mode) {
-    pureRotationEditMode = mode === "correction" ? "correction" : "placement";
+    const nextMode = mode === "correction" ? "correction" : "placement";
+    if (pureRotationEditMode === nextMode && pureRotationTrajectory) {
+      window.cadsceneSetPureRotationEditMode?.(nextMode);
+      return;
+    }
+    pureRotationEditMode = nextMode;
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
     if (pureRotationEditMode === "placement") {
@@ -350,6 +396,7 @@
   function undoPureRotationDraft() {
     pureRotationDraftPlacement = null;
     applyPureRotationPose();
+    refreshPureRotationCorrectionDraftBase();
     message.textContent = "已撤销当前未保存的姿态调整。";
   }
 
@@ -1303,6 +1350,15 @@
   document.querySelector("#pureRotationPreviousCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(-1));
   document.querySelector("#pureRotationNextCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(1));
   document.querySelector("#pureRotationUndoDraft")?.addEventListener("click", undoPureRotationDraft);
+  document.querySelector("#pureRotationWorldYaw")?.addEventListener("input", (event) => {
+    previewPureRotationWorldYaw(event.target.value);
+  });
+  document.querySelector("#pureRotationWorldYawNumber")?.addEventListener("input", (event) => {
+    previewPureRotationWorldYaw(event.target.value);
+  });
+  document.querySelector("#pureRotationResetWorldYaw")?.addEventListener("click", () => {
+    previewPureRotationWorldYaw(0);
+  });
   document.querySelector("#addKeyframe")?.addEventListener("click", () => persistEditedCameraTrack({ advancePlan: true }));
   document.querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack());
   document.querySelector("#workflowGenerateKeyframes")?.addEventListener("click", () => runWithMessage(generateKeyframePlan));

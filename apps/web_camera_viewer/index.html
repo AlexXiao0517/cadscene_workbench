@@ -273,6 +273,13 @@
           <fieldset id="pureRotationCorrectionSection">
             <legend>当前帧姿态微调</legend>
             <p>相机中心保持固定；可使用绕竖直轴控制或旋转 Gizmo 调整当前帧姿态。</p>
+            <div class="pure-rotation-world-yaw">
+              <label for="pureRotationWorldYaw">绕竖直轴旋转</label>
+              <input id="pureRotationWorldYaw" type="range" min="-180" max="180" step="0.1" value="0" />
+              <input id="pureRotationWorldYawNumber" type="number" min="-180" max="180" step="0.1" value="0" aria-label="绕竖直轴旋转角度" />
+              <span>°</span>
+              <button id="pureRotationResetWorldYaw" type="button">水平旋转归零</button>
+            </div>
             <div class="button-row">
               <button id="pureRotationUseGizmo" type="button">使用旋转 Gizmo</button>
               <button id="pureRotationAddCorrection" type="button">添加/更新当前关键帧</button>

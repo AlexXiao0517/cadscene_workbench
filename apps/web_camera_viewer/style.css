@@ -474,8 +474,29 @@ h2 {
   line-height: 1.4;
 }
 
+.pure-rotation-world-yaw {
+  display: grid;
+  grid-template-columns: auto minmax(140px, 1fr) 80px auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pure-rotation-world-yaw label {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.pure-rotation-world-yaw input[type="number"] {
+  width: 80px;
+}
+
 @media (max-width: 900px) {
   .pure-rotation-calibration.is-pure-visible {
+    grid-template-columns: 1fr;
+  }
+
+  .pure-rotation-world-yaw {
     grid-template-columns: 1fr;
   }
 }

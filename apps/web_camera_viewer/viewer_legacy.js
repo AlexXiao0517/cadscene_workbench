@@ -1699,6 +1699,29 @@
     return { x: camera.x, y: camera.y, z: camera.z, yaw: camera.yaw, pitch: camera.pitch, roll: camera.roll, fov: camera.fov };
   };
 
+  window.cadsceneApplyManualPureRotationMatrix = function (rotation) {
+    if (!camera || !Array.isArray(rotation) || !window.CadscenePureRotationMath) return false;
+    const fixedCenter = [camera.x, camera.y, camera.z];
+    pureRotationPlaybackActive = true;
+    pureRotationAuthoritativeMatrix = rotation.map((row) => row.map(Number));
+    const euler = window.CadscenePureRotationMath.matrixToViewerEuler(pureRotationAuthoritativeMatrix);
+    camera = {
+      ...camera,
+      x: fixedCenter[0],
+      y: fixedCenter[1],
+      z: fixedCenter[2],
+      yaw: window.CadscenePureRotationMath.unwrapDegreesNear(euler.yaw, camera.yaw),
+      pitch: euler.pitch,
+      roll: window.CadscenePureRotationMath.unwrapDegreesNear(euler.roll, camera.roll),
+    };
+    syncControls();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return {
+      rotation_cad_from_camera: pureRotationAuthoritativeMatrix.map((row) => row.slice()),
+      camera_center_web: fixedCenter,
+    };
+  };
+
   window.cadsceneFocusVirtualCamera = function () {
     if (!camera || !threeScene) return false;
     threeScene.focusInspectOnCameraAndCad(camera);

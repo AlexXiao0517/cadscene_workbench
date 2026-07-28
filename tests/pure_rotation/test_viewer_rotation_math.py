@@ -84,3 +84,22 @@ def test_candidate_intrinsics_are_converted_to_horizontal_display_fov() -> None:
 def test_euler_display_wrap_uses_nearest_equivalent_angle() -> None:
     assert _node("m.unwrapDegreesNear(-179.5, 179.5)") == 180.5
     assert _node("m.unwrapDegreesNear(179.5, -179.5)") == -180.5
+
+
+def test_world_vertical_rotation_left_multiplies_a_tilted_camera() -> None:
+    tilted = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
+    result = _node(f"m.rotateAboutWorldUp({json.dumps(tilted)}, 90)")
+    expected = [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
+    for actual_row, expected_row in zip(result, expected, strict=True):
+        assert all(abs(actual - wanted) < 1e-9 for actual, wanted in zip(actual_row, expected_row, strict=True))
+
+
+def test_world_vertical_slider_values_are_relative_to_the_same_baseline() -> None:
+    result = _node(
+        "(()=>{const base=[[1,0,0],[0,1,0],[0,0,1]];"
+        "return [m.rotateAboutWorldUp(base,10),m.rotateAboutWorldUp(base,20)];})()"
+    )
+    ten_degrees, twenty_degrees = result
+    assert abs(ten_degrees[0][0] - 0.984807753012208) < 1e-9
+    assert abs(twenty_degrees[0][0] - 0.9396926207859084) < 1e-9
+    assert abs(twenty_degrees[0][0] - ten_degrees[0][0]) > 0.01
