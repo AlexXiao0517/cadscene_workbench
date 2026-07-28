@@ -44,7 +44,7 @@ def test_pure_rotation_replaces_only_sfm_stage_and_skips_quality() -> None:
         "pureRotationAddCorrection",
     ):
         assert f'id="{identifier}"' in html
-    assert "OpenGV 旋转轨迹恢复" in html
+    assert "运行旋转轨迹恢复" in html
     assert html.index('id="pureRotationModePlacement"') > html.index('<section class="control-panel">')
     assert 'id="pureRotationPanel"' not in html
     assert "applyPureRotationWorkflowLayout" in workflow
@@ -163,3 +163,35 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
 def test_pure_rotation_job_status_occupies_sfm_workflow_slot() -> None:
     runner = Path("cadscene/workflow/job_runner.py").read_text(encoding="utf-8")
     assert '"pure_rotation": "sfm"' in runner
+
+
+def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    for identifier in (
+        "pureRotationRecoveryActions",
+        "workflowStartPureRotation",
+        "workflowRerunPureRotation",
+        "workflowEnterPureCalibration",
+    ):
+        assert f'id="{identifier}"' in html
+    assert 'document.querySelector(\'#workflowSteps li[data-stage="quality"]\')' in workflow
+    assert 'toggleAttribute("hidden", pure)' in workflow
+    assert 'renderOrdinal.textContent = pure ? "4" : "5"' in workflow
+    pure_next = workflow.split("const pureNext =", 1)[1].split("};", 1)[0]
+    assert 'sfm: "keyframes"' in pure_next
+    assert 'keyframes: "render"' in pure_next
+    assert "quality" not in pure_next
+    assert 'document.querySelector("#workflowEnterPureCalibration")' in workflow
+    assert "updatePureRotationRecoveryActions" in workflow
+
+
+def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    pure_finish = workflow.split(
+        'document.querySelector("#workflowPureFinishKeyframes")', 1
+    )[1].split("});", 1)[0]
+    assert "quality" not in pure_finish.lower()
+    assert "render" in pure_finish.lower()

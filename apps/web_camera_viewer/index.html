@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>虚拟相机 CAD 叠加查看器</title>
-    <link rel="stylesheet" href="./style.css?v=20260713-design-json-render2" />
+    <link rel="stylesheet" href="./style.css?v=20260727-pure-rotation-workflow" />
   </head>
   <body>
     <main class="app-shell">
@@ -24,7 +24,7 @@
       <section class="workflow-bar" id="workflowBar" aria-label="产品工作流">
         <ol class="workflow-steps" id="workflowSteps">
           <li data-stage="upload"><span>1</span>上传数据</li>
-          <li data-stage="sfm"><span>2</span>SfM重建</li>
+          <li data-stage="sfm"><span>2</span><span id="workflowSfmStageLabel">SfM重建</span></li>
           <li data-stage="keyframes"><span>3</span>关键帧标定</li>
           <li data-stage="quality"><span>4</span>质量检测</li>
           <li data-stage="render"><span>5</span>渲染导出</li>
@@ -61,6 +61,11 @@
             <div class="workflow-actions">
               <button id="workflowStartSfm" data-job-action type="button">开始 SfM 重建</button>
             </div>
+            <div class="workflow-actions workflow-hidden-control" id="pureRotationRecoveryActions">
+              <button id="workflowStartPureRotation" data-job-action type="button">运行旋转轨迹恢复</button>
+              <button id="workflowRerunPureRotation" data-job-action type="button">重新运行</button>
+              <button id="workflowEnterPureCalibration" type="button" disabled>进入关键帧标定</button>
+            </div>
             <span class="workflow-stage-note" id="workflowSfmStatus">等待 SfM 任务</span>
             <div class="workflow-stage-note" id="workflowSfmRuntimeSummary">
               后端：<span id="workflowSfmBackend">自动检测</span>
@@ -68,7 +73,7 @@
               · 阶段：<span id="workflowSfmSubstage">等待</span>
               · 已用：<span id="workflowSfmElapsed">0 秒</span>
             </div>
-            <details class="workflow-upload-advanced dev-only-control">
+            <details id="standardSfmAdvanced" class="workflow-upload-advanced dev-only-control">
               <summary>SfM 高级设置</summary>
               <div class="workflow-upload-settings">
                 <label>后端
@@ -91,7 +96,7 @@
             </details>
           </div>
           <div class="workflow-stage-panel" data-stage="keyframes">
-            <div class="workflow-actions">
+            <div class="workflow-actions" id="standardKeyframeActions">
               <button id="workflowRunAlignment" data-job-action type="button">路线拟合</button>
               <label>关键帧间隔
                 <select id="workflowKeyframeStep">
@@ -103,6 +108,11 @@
               <button id="workflowGenerateKeyframes" type="button">生成关键帧计划</button>
               <button id="workflowContinueKeyframes" type="button">继续未完成标定</button>
               <button id="workflowFinishKeyframes" type="button">完成关键帧标定</button>
+            </div>
+            <div class="workflow-actions workflow-hidden-control" id="pureRotationKeyframeActions">
+              <button id="workflowPureOpenPlacement" type="button">全局固定相机放置</button>
+              <button id="workflowPureOpenCorrections" type="button">姿态关键帧标定</button>
+              <button id="workflowPureFinishKeyframes" type="button">完成标定，进入渲染导出</button>
             </div>
             <span class="workflow-stage-note" id="workflowKeyframePlanStatus">尚未生成关键帧计划</span>
           </div>
@@ -204,14 +214,6 @@
             <div class="sfm-info" id="sfmInfo">未加载 SfM 场景（用「导入 SfM 场景」或 URL 参数 sfmScene=）</div>
             <div class="sfm-info" id="sfmFrameInfo"></div>
           </div>
-          <section id="pureRotationPanel" class="sfm-panel" hidden>
-            <div class="sfm-panel-head"><span>悬停旋转模式（实验）</span></div>
-            <p>OpenGV 不恢复平移；相机中心由人工设置。候选内参未经验证。</p>
-            <label>轨迹 <select id="pureRotationTrack"><option value="raw">OpenGV 原始旋转</option><option value="base">CAD 基础放置</option><option value="corrected">关键帧修正结果</option></select></label>
-            <button id="pureRotationFocusCamera" type="button">聚焦虚拟相机</button>
-            <form id="pureRotationPlacement"><label>X <input name="x" type="number" step="any" value="0" /></label><label>Y <input name="y" type="number" step="any" value="0" /></label><label>Z <input name="z" type="number" step="any" value="0" /></label><label>Yaw <input name="yaw" type="number" step="any" value="0" /></label><label>Pitch <input name="pitch" type="number" step="any" value="0" /></label><label>Roll <input name="roll" type="number" step="any" value="0" /></label><label>FOV <input name="fov" type="number" value="60" /></label><button type="submit">设为全局初始标定</button></form>
-            <form id="pureRotationCorrections"><button type="submit">添加姿态修正关键帧</button><button type="button" id="pureRotationDeleteCorrection">删除当前修正</button></form>
-          </section>
         </section>
       </section>
 
@@ -237,8 +239,25 @@
               导入质量建议
               <input id="importSuggestions" type="file" accept="application/json,.json" />
             </label>
+            <label id="pureRotationTrackControl" class="workflow-hidden-control">预览层级（一般无需切换）
+              <select id="pureRotationTrack">
+                <option value="raw">未标定局部旋转（调试）</option>
+                <option value="base">固定相机放置预览</option>
+                <option value="corrected">姿态关键帧预览</option>
+              </select>
+            </label>
+            <button id="pureRotationModePlacement" class="workflow-hidden-control" type="button">全局放置模式</button>
+            <button id="pureRotationSavePlacement" class="workflow-hidden-control" type="button">保存固定相机放置</button>
+            <button id="pureRotationModeCorrection" class="workflow-hidden-control" type="button">姿态关键帧模式</button>
+            <button id="pureRotationAddCorrection" class="workflow-hidden-control" type="button">添加/更新姿态关键帧</button>
+            <button id="pureRotationDeleteCorrection" class="workflow-hidden-control" type="button">删除当前姿态关键帧</button>
+            <button id="pureRotationFocusCamera" class="workflow-hidden-control" type="button">聚焦相机与 CAD</button>
           </div>
         </div>
+        <p id="pureRotationControlNotice" class="workflow-hidden-control pure-rotation-control-notice">
+          悬停旋转模式（实验）：相机中心固定且由人工设置；OpenGV 不恢复平移。当前候选内参未经验证。
+          <span id="pureRotationFovSource">FOV 来源：等待读取</span>
+        </p>
         <div class="track-strip">
           <span id="timeStatus">时间：0.000 秒</span>
           <span id="frameStatus">帧：0</span>
@@ -267,9 +286,9 @@
     <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
-    <script src="./pure_rotation_math.js?v=20260727-pure-rotation"></script>
-    <script src="./viewer_legacy.js?v=20260727-pure-rotation-focus"></script>
-    <script src="./workflow.js?v=20260727-pure-rotation-focus"></script>
+    <script src="./pure_rotation_math.js?v=20260728-so3-v3"></script>
+    <script src="./viewer_legacy.js?v=20260728-so3-v3"></script>
+    <script src="./workflow.js?v=20260728-so3-v3"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>
