@@ -176,16 +176,14 @@
       const placement = status.placement;
       pureRotationSavedPlacement = placement || null;
       pureRotationHasPlacement = Boolean(placement);
-      if (placement && Number.isFinite(Number(placement.fov))) {
+      const candidate = status.summary?.candidate;
+      const candidateFov = window.CadscenePureRotationMath.horizontalFovDeg(candidate?.width, candidate?.fx);
+      if (Number.isFinite(candidateFov)) {
+        pureRotationDisplayFov = candidateFov;
+        pureRotationFovSource = "unverified_candidate_intrinsics";
+      } else if (placement && Number.isFinite(Number(placement.fov))) {
         pureRotationDisplayFov = Number(placement.fov);
         pureRotationFovSource = "saved_placement";
-      } else {
-        const candidate = status.summary?.candidate;
-        const candidateFov = window.CadscenePureRotationMath.horizontalFovDeg(candidate?.width, candidate?.fx);
-        if (Number.isFinite(candidateFov)) {
-          pureRotationDisplayFov = candidateFov;
-          pureRotationFovSource = "unverified_candidate_intrinsics";
-        }
       }
     }
     pureRotationRawTrajectory = await loadPureRotationTrack("raw");

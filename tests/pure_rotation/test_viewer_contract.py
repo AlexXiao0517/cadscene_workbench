@@ -407,6 +407,16 @@ def test_debug_entry_seeds_a_manual_anchor_instead_of_treating_raw_as_absolute()
     assert "window.cadsceneGetDefaultCameraPose = function ()" in legacy
 
 
+def test_default_debug_fov_prefers_candidate_intrinsics_over_saved_placement() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    initialization = workflow.split(
+        "async function initializePureRotationViewer()", 1
+    )[1].split("function seedPureRotationDraftPlacement", 1)[0]
+
+    assert initialization.index("candidateFov") < initialization.index("placement.fov")
+    assert 'pureRotationFovSource = "unverified_candidate_intrinsics"' in initialization
+
+
 def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
