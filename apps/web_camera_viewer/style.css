@@ -184,7 +184,7 @@ h2 {
   display: none;
 }
 
-.workflow-steps li span {
+.workflow-steps li > span:first-child {
   display: grid;
   place-items: center;
   width: 22px;
@@ -199,12 +199,12 @@ h2 {
   color: var(--text);
 }
 
-.workflow-steps li.is-active span {
+.workflow-steps li.is-active > span:first-child {
   border-color: var(--accent);
   background: #173448;
 }
 
-.workflow-steps li.is-success span {
+.workflow-steps li.is-success > span:first-child {
   border-color: #65c77b;
   color: #65c77b;
 }

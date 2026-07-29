@@ -201,6 +201,57 @@ def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition
     assert "updatePureRotationRecoveryActions" in workflow
 
 
+def test_pure_rotation_workflow_uses_single_step_badge_and_auto_enters_debug() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    style = Path("apps/web_camera_viewer/style.css").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert 'id="workflowKeyframeStageLabel"' in html
+    assert ".workflow-steps li > span:first-child" in style
+    assert ".workflow-steps li span {" not in style
+    layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
+        "function pureRotationPoseAtPts", 1
+    )[0]
+    assert 'keyframeLabel.textContent = pure ? "调试" : "关键帧标定"' in layout
+    status = workflow.split("async function renderStatus(payload)", 1)[1].split(
+        "async function pollJobStatus", 1
+    )[0]
+    assert 'operation === "pure_rotation"' in status
+    assert 'setWorkflowStage("keyframes")' in status
+
+
+def test_pure_rotation_debug_actions_are_compact_and_mode_stable() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert "<legend>固定相机初始设置</legend>" in html
+    assert 'id="pureRotationUseGizmo"' not in html
+    strip = html.split('<div class="track-strip">', 1)[1].split(
+        '<div id="cameraControls"', 1
+    )[0]
+    for identifier in (
+        "pureRotationAddCorrection",
+        "pureRotationDeleteCorrection",
+        "pureRotationPreviousCorrection",
+        "pureRotationNextCorrection",
+        "pureRotationUndoDraft",
+    ):
+        assert f'id="{identifier}"' in strip
+    correction_section = html.split('id="pureRotationCorrectionSection"', 1)[1].split(
+        "</fieldset>", 1
+    )[0]
+    assert "pureRotationAddCorrection" not in correction_section
+    layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
+        "function pureRotationPoseAtPts", 1
+    )[0]
+    assert '#viewCurrentSuggestion, #ignoreCurrentSuggestion' in layout
+    save = workflow.split("async function savePureRotationPlacement()", 1)[1].split(
+        "async function restorePureRotationPlacement", 1
+    )[0]
+    assert 'setPureRotationEditMode("correction")' not in save
+    assert 'document.querySelector("#pureRotationUseGizmo")' not in workflow
+
+
 def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> None:
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 

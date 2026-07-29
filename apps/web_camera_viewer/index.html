@@ -25,7 +25,7 @@
         <ol class="workflow-steps" id="workflowSteps">
           <li data-stage="upload"><span>1</span>上传数据</li>
           <li data-stage="sfm"><span>2</span><span id="workflowSfmStageLabel">SfM重建</span></li>
-          <li data-stage="keyframes"><span>3</span>关键帧标定</li>
+          <li data-stage="keyframes"><span>3</span><span id="workflowKeyframeStageLabel">关键帧标定</span></li>
           <li data-stage="quality"><span>4</span>质量检测</li>
           <li data-stage="render"><span>5</span>渲染导出</li>
         </ol>
@@ -261,15 +261,22 @@
           <button id="rejectReview" class="workflow-hidden-control" type="button">拒绝</button>
           <button id="viewCurrentSuggestion" type="button" title="查看当前建议帧" aria-label="查看当前建议帧" disabled>暂无建议</button>
           <button id="ignoreCurrentSuggestion" type="button" disabled>忽略当前建议</button>
+          <span id="pureRotationCorrectionActions" class="workflow-hidden-control">
+            <button id="pureRotationAddCorrection" type="button">添加/更新当前关键帧</button>
+            <button id="pureRotationDeleteCorrection" type="button">删除当前关键帧</button>
+            <button id="pureRotationPreviousCorrection" type="button">上一个关键帧</button>
+            <button id="pureRotationNextCorrection" type="button">下一个关键帧</button>
+            <button id="pureRotationUndoDraft" type="button">撤销当前调整</button>
+          </span>
         </div>
         <div id="cameraControls" class="controls-grid"></div>
         <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="悬停旋转关键帧标定">
           <fieldset id="pureRotationPlacementSection">
-            <legend>全局固定相机放置</legend>
-            <p>上方 X、Y、Z、Yaw、Pitch、Roll 和 FOV 调整会立即用于预览；保存仅用于确认当前方案。</p>
+            <legend>固定相机初始设置</legend>
+            <p>设置整段视频唯一的固定相机位置和当前帧方向；调整立即预览，保存和恢复都不会切换编辑模式。</p>
             <div class="button-row">
-              <button id="pureRotationSavePlacement" type="button">保存当前全局放置</button>
-              <button id="pureRotationRestorePlacement" type="button">恢复上次保存</button>
+              <button id="pureRotationSavePlacement" type="button">保存固定相机设置</button>
+              <button id="pureRotationRestorePlacement" type="button">恢复已保存设置</button>
             </div>
           </fieldset>
           <fieldset id="pureRotationCorrectionSection">
@@ -281,14 +288,6 @@
               <input id="pureRotationWorldYawNumber" type="number" min="-180" max="180" step="0.1" value="0" aria-label="绕竖直轴旋转角度" />
               <span>°</span>
               <button id="pureRotationResetWorldYaw" type="button">水平旋转归零</button>
-            </div>
-            <div class="button-row">
-              <button id="pureRotationUseGizmo" type="button">使用旋转 Gizmo</button>
-              <button id="pureRotationAddCorrection" type="button">添加/更新当前关键帧</button>
-              <button id="pureRotationDeleteCorrection" type="button">删除当前关键帧</button>
-              <button id="pureRotationPreviousCorrection" type="button">上一个关键帧</button>
-              <button id="pureRotationNextCorrection" type="button">下一个关键帧</button>
-              <button id="pureRotationUndoDraft" type="button">撤销当前未保存调整</button>
             </div>
           </fieldset>
         </section>

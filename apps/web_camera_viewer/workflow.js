@@ -115,6 +115,8 @@
     stageTitles.sfm = pure ? "OpenGV 旋转轨迹恢复" : "SfM重建";
     const sfmLabel = document.querySelector("#workflowSfmStageLabel");
     if (sfmLabel) sfmLabel.textContent = pure ? "旋转轨迹恢复" : "SfM重建";
+    const keyframeLabel = document.querySelector("#workflowKeyframeStageLabel");
+    if (keyframeLabel) keyframeLabel.textContent = pure ? "调试" : "关键帧标定";
     document.querySelector('#workflowSteps li[data-stage="quality"]')?.toggleAttribute("hidden", pure);
     const renderOrdinal = document.querySelector('#workflowSteps li[data-stage="render"] span');
     if (renderOrdinal) renderOrdinal.textContent = pure ? "4" : "5";
@@ -132,9 +134,13 @@
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
     setPureVisible(
       "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
-        + "#workflowPreviewPureFitted, #workflowReturnPureCalibration",
+        + "#workflowPreviewPureFitted, #workflowReturnPureCalibration, "
+        + "#pureRotationCorrectionActions",
       pure,
     );
+    document.querySelectorAll("#viewCurrentSuggestion, #ignoreCurrentSuggestion").forEach((node) => {
+      node.toggleAttribute("hidden", pure);
+    });
     document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure);
     for (const id of ["addKeyframe", "deleteKeyframe", "previousKeyframe", "nextKeyframe"]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
@@ -363,7 +369,6 @@
     pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
-    setPureRotationEditMode("correction");
   }
 
   async function restorePureRotationPlacement() {
@@ -686,6 +691,10 @@
     if (calibrationPanel) {
       calibrationPanel.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
     }
+    const correctionActions = document.querySelector("#pureRotationCorrectionActions");
+    if (correctionActions) {
+      correctionActions.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
+    }
     updateWorkflowStepActive(selectedWorkflowStage);
     renderWorkflowPanel(selectedWorkflowStage);
     if (isPureRotationWorkflow() && selectedWorkflowStage === "keyframes") {
@@ -746,6 +755,11 @@
         ready: payload.status === "success",
         running: isRunning,
       });
+      if (payload.status === "success") {
+        await initializePureRotationViewer();
+        sessionStorage.setItem(restoredWorkflowStageKey(), "keyframes");
+        setWorkflowStage("keyframes");
+      }
     }
     await refreshQualityArtifactsAfterSuccess(payload);
     if (payload.status === "success" && operation === "render") {
@@ -1391,10 +1405,6 @@
   document.querySelector("#workflowReturnPureCalibration")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
   document.querySelector("#pureRotationCorrectionSection")?.addEventListener("focusin", () => setPureRotationEditMode("correction"));
-  document.querySelector("#pureRotationUseGizmo")?.addEventListener("click", () => {
-    setPureRotationEditMode("correction");
-    document.querySelector("#rotateMode")?.click();
-  });
   document.querySelector("#pureRotationSavePlacement")?.addEventListener("click", () => runWithMessage(savePureRotationPlacement));
   document.querySelector("#pureRotationRestorePlacement")?.addEventListener("click", () => runWithMessage(restorePureRotationPlacement));
   document.querySelector("#pureRotationAddCorrection")?.addEventListener("click", () => runWithMessage(addPureRotationCorrection));
