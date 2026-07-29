@@ -1115,14 +1115,30 @@
       };
     }
 
+    function rotationMatrixFromRig() {
+      const quaternion = uavCameraRig.quaternion;
+      const right = directionToWorld(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion));
+      const down = directionToWorld(new THREE.Vector3(0, -1, 0).applyQuaternion(quaternion));
+      const forward = directionToWorld(new THREE.Vector3(0, 0, -1).applyQuaternion(quaternion));
+      return [
+        [right[0], down[0], forward[0]],
+        [right[1], down[1], forward[1]],
+        [right[2], down[2], forward[2]],
+      ];
+    }
+
     transformControls.addEventListener("dragging-changed", (event) => {
       orbitControls.enabled = !event.value;
       if (event.value) video.pause();
     });
     transformControls.addEventListener("objectChange", () => {
       if (updatingRig) return;
-      clearPureRotationAuthoritativeMatrix();
       camera = applyCameraLocks(cameraFromRig(), camera);
+      if (pureRotationPlaybackActive && pureRotationRestrictedFields.has("yaw")) {
+        pureRotationAuthoritativeMatrix = rotationMatrixFromRig();
+      } else {
+        clearPureRotationAuthoritativeMatrix();
+      }
       setRigFromCamera(camera);
       syncControls();
       drawOverlay();
@@ -1132,6 +1148,10 @@
     function setMode(mode) {
       transformControls.setMode(mode);
       setActiveGizmoButton(mode);
+    }
+
+    function setTransformSpace(space) {
+      transformControls.setSpace(space === "local" ? "local" : "world");
     }
 
     function setGizmoVisible(visible) {
@@ -1426,7 +1446,7 @@
     resize();
     animate();
     return {
-      updateVirtualCamera: setRigFromCamera, setMode, setGizmoVisible, setCadTextVisible,
+      updateVirtualCamera: setRigFromCamera, setMode, setTransformSpace, setGizmoVisible, setCadTextVisible,
       focusInspectOnCamera, focusInspectOnCameraAndCad, focusInspectOnCad, ensureCameraNearCad, transformControls,
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
@@ -1704,15 +1724,11 @@
     const fixedCenter = [camera.x, camera.y, camera.z];
     pureRotationPlaybackActive = true;
     pureRotationAuthoritativeMatrix = rotation.map((row) => row.map(Number));
-    const euler = window.CadscenePureRotationMath.matrixToViewerEuler(pureRotationAuthoritativeMatrix);
     camera = {
       ...camera,
       x: fixedCenter[0],
       y: fixedCenter[1],
       z: fixedCenter[2],
-      yaw: window.CadscenePureRotationMath.unwrapDegreesNear(euler.yaw, camera.yaw),
-      pitch: euler.pitch,
-      roll: window.CadscenePureRotationMath.unwrapDegreesNear(euler.roll, camera.roll),
     };
     syncControls();
     updateViews({ forceOverlay: true, updateThree: true });
@@ -1743,9 +1759,10 @@
     pureRotationRestrictedFields.clear();
     const correctionMode = mode === "correction";
     if (correctionMode) {
-      for (const key of ["x", "y", "z", "fov"]) pureRotationRestrictedFields.add(key);
+      for (const key of ["x", "y", "z", "yaw", "pitch", "roll", "fov"]) pureRotationRestrictedFields.add(key);
     }
     if (threeScene) threeScene.setMode(correctionMode ? "rotate" : "translate");
+    if (threeScene) threeScene.setTransformSpace(correctionMode ? "local" : "world");
     for (const id of ["translateMode"]) {
       const button = document.querySelector(`#${id}`);
       if (button) button.disabled = correctionMode;
@@ -1755,7 +1772,19 @@
   };
 
   window.cadsceneGetCurrentCameraPose = function () {
-    return camera ? cloneCameraPose(camera) : null;
+    if (!camera) return null;
+    const pose = cloneCameraPose(camera);
+    if (pureRotationAuthoritativeMatrix) {
+      pose.rotation_cad_from_camera = pureRotationAuthoritativeMatrix.map((row) => row.slice());
+    }
+    return pose;
+  };
+
+  window.cadsceneGetDefaultCameraPose = function () {
+    if (!defaultCamera || !window.CadscenePureRotationMath) return null;
+    const pose = cloneCameraPose(defaultCamera);
+    pose.rotation_cad_from_camera = window.CadscenePureRotationMath.viewerEulerToMatrix(pose);
+    return pose;
   };
 
   function applyTrackPayload(payload) {

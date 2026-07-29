@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>虚拟相机 CAD 叠加查看器</title>
-    <link rel="stylesheet" href="./style.css?v=20260728-stage-ui-v7" />
+    <link rel="stylesheet" href="./style.css?v=20260729-local-camera-v8" />
   </head>
   <body>
     <main class="app-shell">
@@ -289,6 +289,12 @@
               <span>°</span>
               <button id="pureRotationResetWorldYaw" type="button">水平旋转归零</button>
             </div>
+            <div class="pure-rotation-local-angles">
+              <span>相机局部轴微调</span>
+              <label>Yaw <input id="pureRotationLocalYaw" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+              <label>Pitch <input id="pureRotationLocalPitch" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+              <label>Roll <input id="pureRotationLocalRoll" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+            </div>
           </fieldset>
         </section>
       </section>
@@ -301,9 +307,9 @@
     <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
-    <script src="./pure_rotation_math.js?v=20260728-stage-ui-v7"></script>
-    <script src="./viewer_legacy.js?v=20260728-stage-ui-v7"></script>
-    <script src="./workflow.js?v=20260728-stage-ui-v7"></script>
+    <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
+    <script src="./viewer_legacy.js?v=20260729-local-camera-v8"></script>
+    <script src="./workflow.js?v=20260729-local-camera-v8"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

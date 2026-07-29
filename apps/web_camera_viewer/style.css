@@ -491,6 +491,25 @@ h2 {
   width: 80px;
 }
 
+.pure-rotation-local-angles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: var(--muted);
+}
+
+.pure-rotation-local-angles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+}
+
+.pure-rotation-local-angles input {
+  width: 74px;
+}
+
 @media (max-width: 900px) {
   .pure-rotation-calibration.is-pure-visible {
     grid-template-columns: 1fr;

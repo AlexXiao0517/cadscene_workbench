@@ -20,8 +20,10 @@
   const multiply=(a,b)=>a.map(row=>[0,1,2].map(column=>row.reduce((sum,value,index)=>sum+value*b[index][column],0)));
   function axisAngleMatrix(axis,angleDeg){const [x,y,z]=normalize(axis.map(Number)),a=Number(angleDeg)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),t=1-c;return [[t*x*x+c,t*x*y-s*z,t*x*z+s*y],[t*x*y+s*z,t*y*y+c,t*y*z-s*x],[t*x*z-s*y,t*y*z+s*x,t*z*z+c]];}
   function rotateAboutWorldUp(rotation,angleDeg,upAxis=[0,0,1]){return multiply(axisAngleMatrix(upAxis,angleDeg),rotation);}
+  function localCameraDeltaMatrix(value={}){const yaw=axisAngleMatrix([0,-1,0],Number(value.yaw)||0),pitch=axisAngleMatrix([1,0,0],Number(value.pitch)||0),roll=axisAngleMatrix([0,0,1],Number(value.roll)||0);return multiply(multiply(yaw,pitch),roll);}
+  function applyLocalCameraDelta(rotation,value={}){return multiply(rotation,localCameraDeltaMatrix(value));}
   function applyDraftPlacement(localRotation,anchorLocalRotation,manualAnchorRotation){return multiply(multiply(manualAnchorRotation,transpose(anchorLocalRotation)),localRotation);}
   function horizontalFovDeg(width,fx){const w=Number(width),f=Number(fx);return w>0&&f>0?2*Math.atan(w/(2*f))*180/Math.PI:null;}
   function unwrapDegreesNear(value,reference){const v=Number(value),r=Number(reference);return Number.isFinite(v)&&Number.isFinite(r)?v+360*Math.round((r-v)/360):v;}
-  return {matrixToViewerEuler,viewerEulerToMatrix,localRotationToViewerMatrix,poseAtPts,applyDraftPlacement,rotateAboutWorldUp,horizontalFovDeg,unwrapDegreesNear};
+  return {matrixToViewerEuler,viewerEulerToMatrix,localRotationToViewerMatrix,poseAtPts,applyDraftPlacement,rotateAboutWorldUp,localCameraDeltaMatrix,applyLocalCameraDelta,horizontalFovDeg,unwrapDegreesNear};
 });

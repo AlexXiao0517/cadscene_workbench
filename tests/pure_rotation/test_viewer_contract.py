@@ -168,9 +168,10 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "pure_rotation_math.js?v=20260728-stage-ui-v7" in html
-    assert "viewer_legacy.js?v=20260728-stage-ui-v7" in html
-    assert "workflow.js?v=20260728-stage-ui-v7" in html
+    assert "style.css?v=20260729-local-camera-v8" in html
+    assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
+    assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
+    assert "workflow.js?v=20260729-local-camera-v8" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -352,6 +353,58 @@ def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
         "async function previewPureRotationWorldYaw", 1
     )[1].split("function capturePureRotationDraftPlacement", 1)[0]
     assert 'await setPureRotationEditMode("correction")' in preview_function
+
+
+def test_pose_corrections_use_camera_local_axes_and_keep_world_up_separate() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    for identifier in (
+        "pureRotationLocalYaw",
+        "pureRotationLocalPitch",
+        "pureRotationLocalRoll",
+    ):
+        assert f'id="{identifier}"' in html
+    assert "applyLocalCameraDelta" in workflow
+    edit_mode = legacy.split(
+        "window.cadsceneSetPureRotationEditMode = function (mode)", 1
+    )[1].split("window.cadsceneGetCurrentCameraPose", 1)[0]
+    assert 'threeScene.setTransformSpace(correctionMode ? "local" : "world")' in edit_mode
+    assert '["x", "y", "z", "yaw", "pitch", "roll", "fov"]' in edit_mode
+
+
+def test_authoritative_rotation_matrix_is_saved_without_world_euler_round_trip() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    manual_apply = legacy.split(
+        "window.cadsceneApplyManualPureRotationMatrix = function (rotation)", 1
+    )[1].split("window.cadsceneFocusVirtualCamera", 1)[0]
+    assert "matrixToViewerEuler" not in manual_apply
+    current_pose = legacy.split(
+        "window.cadsceneGetCurrentCameraPose = function ()", 1
+    )[1].split("function applyTrackPayload", 1)[0]
+    assert "rotation_cad_from_camera" in current_pose
+    assert "manualRotationMatrix" in workflow
+    assert workflow.count("viewerEulerToMatrix(manual)") == 1
+
+
+def test_debug_entry_seeds_a_manual_anchor_instead_of_treating_raw_as_absolute() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    initialization = workflow.split(
+        "async function initializePureRotationViewer()", 1
+    )[1].split("function updatePureRotationFovSource", 1)[0]
+    assert "seedPureRotationDraftPlacement" in initialization
+    assert initialization.index("seedPureRotationDraftPlacement") < initialization.index("applyPureRotationPose")
+    seed = workflow.split(
+        "function seedPureRotationDraftPlacement()", 1
+    )[1].split("function updatePureRotationFovSource", 1)[0]
+    assert "rotation_local_from_camera" in seed
+    assert "cadsceneGetDefaultCameraPose" in seed
+    assert "window.cadsceneGetDefaultCameraPose = function ()" in legacy
 
 
 def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> None:

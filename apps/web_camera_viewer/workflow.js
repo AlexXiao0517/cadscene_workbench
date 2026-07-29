@@ -45,6 +45,8 @@
   let pureRotationSavedPlacement = null;
   let pureRotationEditModeReady = Promise.resolve(null);
   let pureRotationCorrectionDraftBase = null;
+  let pureRotationWorldYawDeg = 0;
+  let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
   let focusPureRotationCameraOnce = true;
   function uploadTimestamp() {
     const now = new Date();
@@ -190,7 +192,25 @@
     pureRotationTrajectory = await loadPureRotationTrack("raw");
     pureRotationTrajectoryKind = "raw";
     updatePureRotationFovSource();
+    seedPureRotationDraftPlacement();
     applyPureRotationPose();
+  }
+
+  function seedPureRotationDraftPlacement() {
+    if (pureRotationDraftPlacement || !pureRotationRawTrajectory) return pureRotationDraftPlacement;
+    const video = document.querySelector("#sourceVideo");
+    const rawPose = pureRotationPoseAtPts(pureRotationRawTrajectory, video?.currentTime || 0);
+    const manual = window.cadsceneGetDefaultCameraPose?.() || window.cadsceneGetCurrentCameraPose?.();
+    if (!rawPose?.rotation_local_from_camera || !manual) return null;
+    pureRotationDraftPlacement = {
+      segment_id: Number(rawPose.segment_id),
+      anchor_pts_time_sec: Number(rawPose.pts_time_sec),
+      anchor_local_rotation: rawPose.rotation_local_from_camera,
+      manual_anchor_rotation: manualRotationMatrix(manual),
+      camera_center_web: [Number(manual.x), Number(manual.y), Number(manual.z)],
+      fov: Number(pureRotationDisplayFov || manual.fov),
+    };
+    return pureRotationDraftPlacement;
   }
 
   function updatePureRotationFovSource() {
@@ -213,6 +233,20 @@
     if (number) number.value = String(normalized);
   }
 
+  function setPureRotationLocalDeltaInputs(value) {
+    for (const key of ["yaw", "pitch", "roll"]) {
+      const input = document.querySelector(`#pureRotationLocal${key[0].toUpperCase()}${key.slice(1)}`);
+      if (input) input.value = String(Number(value[key]) || 0);
+    }
+  }
+
+  function manualRotationMatrix(manual) {
+    if (Array.isArray(manual?.rotation_cad_from_camera)) {
+      return manual.rotation_cad_from_camera.map((row) => row.map(Number));
+    }
+    return window.CadscenePureRotationMath.viewerEulerToMatrix(manual);
+  }
+
   function refreshPureRotationCorrectionDraftBase() {
     const active = window.pureRotationViewer?.pose;
     if (!active || !window.CadscenePureRotationMath) return null;
@@ -225,21 +259,42 @@
       segment_id: Number(active.segment_id),
       rotation_cad_from_camera: rotation.map((row) => row.map(Number)),
     };
+    pureRotationWorldYawDeg = 0;
+    pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
     setPureRotationWorldYawInputs(0);
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
     return pureRotationCorrectionDraftBase;
+  }
+
+  function applyPureRotationCorrectionPreview() {
+    const base = pureRotationCorrectionDraftBase || refreshPureRotationCorrectionDraftBase();
+    if (!base) return;
+    const localRotation = window.CadscenePureRotationMath.applyLocalCameraDelta(
+      base.rotation_cad_from_camera,
+      pureRotationLocalDelta,
+    );
+    const rotation = window.CadscenePureRotationMath.rotateAboutWorldUp(
+      localRotation,
+      pureRotationWorldYawDeg,
+    );
+    window.cadsceneApplyManualPureRotationMatrix?.(rotation);
   }
 
   async function previewPureRotationWorldYaw(value) {
     await setPureRotationEditMode("correction");
-    const base = pureRotationCorrectionDraftBase || refreshPureRotationCorrectionDraftBase();
-    if (!base) return;
-    const angle = Math.max(-180, Math.min(180, Number(value) || 0));
-    setPureRotationWorldYawInputs(angle);
-    const rotation = window.CadscenePureRotationMath.rotateAboutWorldUp(
-      base.rotation_cad_from_camera,
-      angle,
-    );
-    window.cadsceneApplyManualPureRotationMatrix?.(rotation);
+    pureRotationWorldYawDeg = Math.max(-180, Math.min(180, Number(value) || 0));
+    setPureRotationWorldYawInputs(pureRotationWorldYawDeg);
+    applyPureRotationCorrectionPreview();
+  }
+
+  async function previewPureRotationLocalDelta(key, value) {
+    await setPureRotationEditMode("correction");
+    pureRotationLocalDelta = {
+      ...pureRotationLocalDelta,
+      [key]: Math.max(-180, Math.min(180, Number(value) || 0)),
+    };
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
+    applyPureRotationCorrectionPreview();
   }
 
   function capturePureRotationDraftPlacement() {
@@ -252,7 +307,7 @@
       segment_id: Number(rawPose.segment_id),
       anchor_pts_time_sec: Number(rawPose.pts_time_sec),
       anchor_local_rotation: rawPose.rotation_local_from_camera,
-      manual_anchor_rotation: window.CadscenePureRotationMath.viewerEulerToMatrix(manual),
+      manual_anchor_rotation: manualRotationMatrix(manual),
       camera_center_web: [Number(manual.x), Number(manual.y), Number(manual.z)],
       fov: Number(manual.fov),
     };
@@ -299,7 +354,10 @@
   pureRotationVideo?.addEventListener("seeked", applyPureRotationPose);
   pureRotationVideo?.addEventListener("pause", applyPureRotationPose);
   pureRotationVideo?.addEventListener("ended", applyPureRotationPose);
-  window.addEventListener("cadsceneViewerReady", applyPureRotationPose);
+  window.addEventListener("cadsceneViewerReady", () => {
+    seedPureRotationDraftPlacement();
+    applyPureRotationPose();
+  });
 
   function setPureRotationEditMode(mode) {
     const nextMode = mode === "correction" ? "correction" : "placement";
@@ -355,7 +413,7 @@
       anchor_decoded_frame_index: Number(active.decoded_frame_index),
       anchor_pts_time_sec: Number(active.pts_time_sec),
       camera_center_web: [Number(manual.x), Number(manual.y), Number(manual.z)],
-      manual_rotation_cad_from_camera: window.CadscenePureRotationMath.viewerEulerToMatrix(manual),
+      manual_rotation_cad_from_camera: manualRotationMatrix(manual),
       fov: Number(manual.fov),
     };
     await apiPost("/api/pure-rotation/placement", { dataset, runId, placement });
@@ -398,7 +456,7 @@
     const active = window.pureRotationViewer?.pose;
     const manual = window.cadsceneGetCurrentCameraPose?.();
     if (!active || !manual) throw new Error("当前帧没有可修正姿态");
-    const correction = { schema_version: 1, decoded_frame_index: Number(active.decoded_frame_index), pts_time_sec: Number(active.pts_time_sec), segment_id: Number(active.segment_id), base_rotation_cad_from_camera: active.rotation_cad_from_camera, manual_rotation_cad_from_camera: window.CadscenePureRotationMath.viewerEulerToMatrix(manual), source: "manual_rotation_correction", orientation_confirmed: true, note: "" };
+    const correction = { schema_version: 1, decoded_frame_index: Number(active.decoded_frame_index), pts_time_sec: Number(active.pts_time_sec), segment_id: Number(active.segment_id), base_rotation_cad_from_camera: active.rotation_cad_from_camera, manual_rotation_cad_from_camera: manualRotationMatrix(manual), source: "manual_rotation_correction", orientation_confirmed: true, note: "" };
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
@@ -1421,6 +1479,11 @@
   document.querySelector("#pureRotationResetWorldYaw")?.addEventListener("click", () => {
     previewPureRotationWorldYaw(0);
   });
+  for (const key of ["yaw", "pitch", "roll"]) {
+    document.querySelector(`#pureRotationLocal${key[0].toUpperCase()}${key.slice(1)}`)?.addEventListener("input", (event) => {
+      previewPureRotationLocalDelta(key, event.target.value);
+    });
+  }
   document.querySelector("#addKeyframe")?.addEventListener("click", () => persistEditedCameraTrack({ advancePlan: true }));
   document.querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack());
   document.querySelector("#workflowGenerateKeyframes")?.addEventListener("click", () => runWithMessage(generateKeyframePlan));

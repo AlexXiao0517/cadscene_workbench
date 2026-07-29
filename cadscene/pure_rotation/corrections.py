@@ -25,14 +25,14 @@ def apply_rotation_corrections(base: Mapping[str, Any], corrections: Sequence[Ma
             if len(set(times)) != len(times):
                 raise ValueError("conflicting corrections at the same decoded frame")
             deltas = Rotation.concatenate([
-                Rotation.from_matrix(coerce_so3_matrix(item["manual_rotation_cad_from_camera"], allow_legacy_reflection=True))
-                * Rotation.from_matrix(coerce_so3_matrix(next(candidate for candidate in base["poses"] if int(candidate["decoded_frame_index"]) == int(item["decoded_frame_index"]) and int(candidate["segment_id"]) == segment)["rotation_cad_from_camera"])).inv()
+                Rotation.from_matrix(coerce_so3_matrix(next(candidate for candidate in base["poses"] if int(candidate["decoded_frame_index"]) == int(item["decoded_frame_index"]) and int(candidate["segment_id"]) == segment)["rotation_cad_from_camera"])).inv()
+                * Rotation.from_matrix(coerce_so3_matrix(item["manual_rotation_cad_from_camera"], allow_legacy_reflection=True))
                 for item in choices
             ])
             current = float(pose["decoded_frame_index"])
             if current <= times[0]: delta = deltas[0]
             elif current >= times[-1]: delta = deltas[-1]
             else: delta = Slerp(times, deltas)([current])[0]
-        rotation = delta * base_rotation
+        rotation = base_rotation * delta
         final.append({**pose, "rotation_cad_from_camera": rotation.as_matrix().tolist(), "rotation_cam_from_cad": rotation.inv().as_matrix().tolist()})
     return {**dict(base), "orientation_source": "opengv_manual_anchor_plus_slerp_corrections", "local_position_correction_enabled": False, "poses": final}

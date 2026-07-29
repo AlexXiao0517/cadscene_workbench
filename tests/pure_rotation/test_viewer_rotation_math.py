@@ -103,3 +103,33 @@ def test_world_vertical_slider_values_are_relative_to_the_same_baseline() -> Non
     assert abs(ten_degrees[0][0] - 0.984807753012208) < 1e-9
     assert abs(twenty_degrees[0][0] - 0.9396926207859084) < 1e-9
     assert abs(twenty_degrees[0][0] - ten_degrees[0][0]) > 0.01
+
+
+def test_camera_local_yaw_pitch_roll_use_camera_axes() -> None:
+    result = _node(
+        "(()=>{const eye=[[1,0,0],[0,1,0],[0,0,1]];"
+        "return {"
+        "yaw:m.applyLocalCameraDelta(eye,{yaw:90,pitch:0,roll:0}),"
+        "pitch:m.applyLocalCameraDelta(eye,{yaw:0,pitch:90,roll:0}),"
+        "roll:m.applyLocalCameraDelta(eye,{yaw:0,pitch:0,roll:90})"
+        "};})()"
+    )
+    expected = {
+        "yaw": [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+        "pitch": [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+        "roll": [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    }
+    for name, expected_matrix in expected.items():
+        for actual_row, expected_row in zip(result[name], expected_matrix, strict=True):
+            assert all(abs(actual - wanted) < 1e-9 for actual, wanted in zip(actual_row, expected_row, strict=True))
+
+
+def test_camera_local_delta_right_multiplies_a_tilted_camera() -> None:
+    tilted = [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
+    result = _node(
+        f"m.applyLocalCameraDelta({json.dumps(tilted)}, "
+        "{yaw:0,pitch:0,roll:90})"
+    )
+    expected = [[0, 0, 1], [0, -1, 0], [1, 0, 0]]
+    for actual_row, expected_row in zip(result, expected, strict=True):
+        assert all(abs(actual - wanted) < 1e-9 for actual, wanted in zip(actual_row, expected_row, strict=True))
