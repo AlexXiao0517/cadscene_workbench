@@ -476,6 +476,11 @@ def build_stage_command(
             str(resolved["origin_xy"][1]),
             "--track",
             str(track),
+            "--faded-overlay",
+            "--fade-start-m",
+            "250",
+            "--max-distance-m",
+            "900",
         ]
     python = str(resolve_sfm_python()) if stage == "sfm" else sys.executable
     common = ["--dataset", resolved["dataset"], "--run-id", resolved["run_id"], "--output-root", str(resolved["root"] / "runs")]
