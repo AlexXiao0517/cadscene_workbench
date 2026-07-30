@@ -45,11 +45,12 @@ viewer 会按 `runs/<dataset>/<run_id>/` 推导：
 - `05_viewer_scene/sfm_viewer_scene.json`
 - `06_road_surface/viewer_diagnostics_scene.json`
 
-`dataset + runId` 会推导 `runs/` 输出。显式 URL 参数始终优先级最高。参数缺失且该
-数据集有可读的 manifest 时，工作流脚本会用 manifest 中的视频、CAD、`cadScale` 和
-`originXY` 补齐地址栏；这让门户创建的数据集可直接进入 Viewer。只有 manifest 不可读
-时，Viewer 才尝试默认 `/data/<dataset>/...` 路径。若 manifest 已给出媒体 URL 但资源
-已移动或失效，Viewer 不会自动退回默认路径；应修正 manifest 或传入显式 URL。
+`dataset + runId` 会推导 `runs/` 输出。视频和 CAD 各自按以下顺序解析：**显式 URL
+参数 > manifest 中该字段存在的 URL > dataset 默认路径**。工作流脚本只为缺失的
+视频、CAD、`cadScale` 和 `originXY` 参数补入可读 manifest 的值；因此门户创建的
+数据集可直接进入 Viewer。若 manifest 可读但某个媒体 URL 字段缺失，该字段仍尝试默认
+`/data/<dataset>/...` 路径。只有 manifest 已提供该字段的 URL、但资源已移动或失效时，
+Viewer 才不会自动回退默认路径；应修正 manifest 或为该字段传入显式 URL。
 
 ## 显式传入文件
 
@@ -102,7 +103,8 @@ cad=/legacy/out/...
 - 质量色带不显示：检查 `qualityTimeline` 参数或 `04_quality/quality_timeline.csv` 是否存在。
 - anchored path 与点云不重合：点云/global track 只用 global sim3，anchored path 是分段锚定结果。
 - 门户进入 Viewer 后视频或 CAD 丢失：确认 `dataset` 指向的 manifest 仍存在于同一
-  `--storage-root`。若 manifest URL 指向已移动资源，修正 manifest 或传入显式 Web
-  路径；旧数据也可用只读 `--extra-root` 挂载。不要期待此情形自动回退到默认路径。
+  `--storage-root`。缺失对应 manifest URL 字段时，该字段会尝试默认路径；若 manifest
+  已给出但指向已移动资源，修正该字段或传入显式 Web 路径。旧数据也可用只读
+  `--extra-root` 挂载；不要期待已提供但失效的 manifest URL 自动回退。
 - 道路诊断不显示：检查 `06_road_surface/viewer_diagnostics_scene.json`；若 run manifest
   将 `road_surface` 标为 `skipped`，通常是 CAD 没有可用道路中心线，并非 Viewer 故障。
