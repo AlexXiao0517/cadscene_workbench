@@ -12,6 +12,11 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 
+SRT_FIXTURES = Path(__file__).parents[1] / "fixtures" / "srt"
+PARTIAL_SRT = (SRT_FIXTURES / "no_attitude_partial.srt").read_bytes()
+FULL_POSE_SRT = (SRT_FIXTURES / "full_pose_example.srt").read_bytes()
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -143,6 +148,27 @@ def test_create_upload_and_manifest_api_complete_upload_stage(tmp_path: Path) ->
         server.wait(timeout=5)
 
 
+def test_video_upload_preserves_utf8_filename_for_external_backends(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        _json_request(port, "POST", "/api/workflow/create-dataset", {"dataset": "unicode", "runId": "r1"})
+        status, payload = _upload(
+            port,
+            "/api/workflow/upload-video?dataset=unicode&runId=r1",
+            "永康北互通.MP4",
+            b"video-data",
+        )
+
+        assert status == 200
+        assert payload["manifest"]["video"]["original_name"] == "永康北互通.MP4"
+        assert payload["manifest"]["video"]["path"] == "data/unicode/永康北互通.MP4"
+        assert (tmp_path / "data/unicode/永康北互通.MP4").is_file()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_upload_zip_rejects_zip_slip_and_dxf_is_parsed(tmp_path: Path) -> None:
     port = _free_port()
     server = _start_server(tmp_path, port)
@@ -243,6 +269,102 @@ def test_upload_api_rejects_unsafe_run_id_before_writing_job_status(tmp_path: Pa
         assert status == 400
         assert "invalid run_id" in payload["error"]
         assert not (tmp_path / "escape/job_status.json").exists()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_upload_srt_api_returns_partial_mode_and_persists_upload_status(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        _json_request(port, "POST", "/api/workflow/create-dataset", {"dataset": "demo", "runId": "r-srt"})
+
+        status, payload = _upload(
+            port,
+            "/api/workflow/upload-srt?dataset=demo&runId=r-srt",
+            "partial.srt",
+            PARTIAL_SRT,
+        )
+
+        assert status == 200
+        assert set(payload) == {"ok", "dataset", "srt_status", "trajectory_mode", "analysis", "message"}
+        assert payload["dataset"] == "demo"
+        assert payload["srt_status"] == "partial"
+        assert payload["trajectory_mode"] == "srt_sfm_fused"
+        assert payload["analysis"]["detected_mode"] == "srt_sfm_fused"
+        assert "pending activation" in payload["message"]
+        job = json.loads((tmp_path / "runs/demo/r-srt/job_status.json").read_text(encoding="utf-8"))
+        assert job["stages"]["upload"]["status"] == "pending"
+        assert "pending activation" in job["stages"]["upload"]["message"]
+        assert not (tmp_path / "runs/demo/r-srt/02_sfm").exists()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_srt_analysis_api_returns_json_and_bad_extension_is_rejected(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        _json_request(port, "POST", "/api/workflow/create-dataset", {"dataset": "demo"})
+
+        status, rejected = _upload(
+            port,
+            "/api/workflow/upload-srt?dataset=demo",
+            "bad.txt",
+            b"not telemetry",
+        )
+        assert status == 400
+        assert "extension" in rejected["error"]
+
+        status, missing = _json_request(port, "GET", "/api/workflow/srt-analysis?dataset=demo")
+        assert status == 404
+        assert "error" in missing
+
+        _upload(port, "/api/workflow/upload-srt?dataset=demo", "partial.srt", PARTIAL_SRT)
+        status, payload = _json_request(port, "GET", "/api/workflow/srt-analysis?dataset=demo")
+        assert status == 200
+        assert set(payload) == {"ok", "dataset", "srt_status", "trajectory_mode", "analysis", "message"}
+        assert payload["analysis"]["source_file"] == "partial.srt"
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_srt_analysis_api_requires_a_nonblank_dataset_query(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        for route in ("/api/workflow/srt-analysis", "/api/workflow/srt-analysis?dataset="):
+            status, payload = _json_request(port, "GET", route)
+            assert status == 400
+            assert payload == {"error": "missing query parameter: dataset"}
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_upload_srt_full_pose_stays_interface_only_without_starting_algorithms(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        _json_request(port, "POST", "/api/workflow/create-dataset", {"dataset": "demo", "runId": "r-full"})
+
+        status, payload = _upload(
+            port,
+            "/api/workflow/upload-srt?dataset=demo&runId=r-full",
+            "full.srt",
+            FULL_POSE_SRT,
+        )
+
+        assert status == 200
+        assert payload["srt_status"] == "full"
+        assert payload["trajectory_mode"] == "srt_full_pose"
+        assert "pending activation" in payload["message"]
+        job = json.loads((tmp_path / "runs/demo/r-full/job_status.json").read_text(encoding="utf-8"))
+        assert "pending activation" in job["stages"]["upload"]["message"]
+        assert not (tmp_path / "runs/demo/r-full/02_sfm").exists()
     finally:
         server.terminate()
         server.wait(timeout=5)

@@ -4,6 +4,7 @@
 # Local tool caches, raw captures, and ad-hoc workspace artifacts
 /.agents/
 /.codex/
+/.superpowers/
 /.local/
 /dji/
 /work/

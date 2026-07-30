@@ -91,6 +91,9 @@
   const controlInputs = new Map();
   const lockableCameraFields = new Set(["z", "yaw", "pitch", "roll", "fov"]);
   const lockedCameraFields = { z: false, yaw: false, pitch: false, roll: false, fov: false };
+  const pureRotationRestrictedFields = new Set();
+  let pureRotationPlaybackActive = false;
+  let pureRotationAuthoritativeMatrix = null;
 
   // 质量评估建议帧（keyframe_suggestions.json 或带 quality 的 track 归纳而来），仅用于可视化。
   let qualitySuggestions = [];
@@ -219,6 +222,14 @@
   }
 
   function getCameraAxes(params) {
+    const axesFromAuthoritativeRotation = (matrix) => ({
+      right: normalize([matrix[0][0], matrix[1][0], matrix[2][0]]),
+      down: normalize([matrix[0][1], matrix[1][1], matrix[2][1]]),
+      forward: normalize([matrix[0][2], matrix[1][2], matrix[2][2]]),
+    });
+    if (pureRotationPlaybackActive && pureRotationAuthoritativeMatrix && params === camera) {
+      return axesFromAuthoritativeRotation(pureRotationAuthoritativeMatrix);
+    }
     // CAD 在 XY 地面上，Z 向上；pitch 为负数时虚拟相机向下看。
     const yaw = degToRad(params.yaw || 0);
     const pitch = degToRad(params.pitch || 0);
@@ -238,6 +249,10 @@
       down = normalize(rotateAroundAxis(down, forward, roll));
     }
     return { right, down, forward };
+  }
+
+  function clearPureRotationAuthoritativeMatrix() {
+    pureRotationAuthoritativeMatrix = null;
   }
 
   function worldToCamera(point, params, axes) {
@@ -468,6 +483,7 @@
     for (const key of Object.keys(lockedCameraFields)) {
       if (lockedCameraFields[key]) pose[key] = previousPose[key];
     }
+    for (const key of pureRotationRestrictedFields) pose[key] = previousPose[key];
     return pose;
   }
 
@@ -679,6 +695,9 @@
       const value = camera[def.key];
       pair.range.value = String(value);
       pair.number.value = Number.isInteger(value) ? String(value) : value.toFixed(3);
+      const disabled = pureRotationRestrictedFields.has(def.key) || Boolean(pair.lock?.checked);
+      pair.range.disabled = disabled;
+      pair.number.disabled = disabled;
     }
   }
 
@@ -729,8 +748,8 @@
         lockLabel.append(lockInput, lockIcon);
         lockInput.addEventListener("change", () => {
           lockedCameraFields[def.key] = lockInput.checked;
-          range.disabled = lockInput.checked;
-          number.disabled = lockInput.checked;
+          range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
+          number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
           lockIcon.textContent = lockInput.checked ? "🔒" : "🔓";
           setStatus(`${def.label} ${lockInput.checked ? "已锁定" : "已解锁"}`);
         });
@@ -740,7 +759,8 @@
         lockLabel.textContent = " ";
       }
       const update = (value) => {
-        if (lockedCameraFields[def.key]) return;
+        if (lockedCameraFields[def.key] || pureRotationRestrictedFields.has(def.key)) return;
+        clearPureRotationAuthoritativeMatrix();
         camera[def.key] = Number(value);
         syncControls();
         updateViews();
@@ -748,8 +768,8 @@
       range.addEventListener("input", () => update(range.value));
       number.addEventListener("input", () => update(number.value));
       if (lockInput) {
-        range.disabled = lockInput.checked;
-        number.disabled = lockInput.checked;
+        range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
+        number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
       }
       item.append(label, lockLabel, range, number);
       controlContainer.appendChild(item);
@@ -932,6 +952,51 @@
       orbitControls.update();
     }
 
+    function focusInspectOnCameraAndCad(params) {
+      const rigScene = worldToScene([params.x, params.y, params.z || 0], origin);
+      const bounds = new THREE.Box3();
+      bounds.expandByPoint(rigScene);
+      for (const point of [
+        [focusBounds.min_x, focusBounds.min_y, 0],
+        [focusBounds.min_x, focusBounds.max_y, 0],
+        [focusBounds.max_x, focusBounds.min_y, 0],
+        [focusBounds.max_x, focusBounds.max_y, 0],
+      ]) {
+        bounds.expandByPoint(worldToScene(point, origin));
+      }
+      const center = bounds.getCenter(new THREE.Vector3());
+      const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+      const distance = Math.max(
+        (Math.max(sphere.radius, 1) / Math.tan(degToRad(inspectCamera.fov * 0.5))) * 1.35,
+        240,
+      );
+      inspectCamera.position.copy(center).add(new THREE.Vector3(distance * 0.45, distance * 0.72, distance * 0.72));
+      orbitControls.target.copy(center);
+      orbitControls.update();
+    }
+
+    function ensureCameraNearCad(params) {
+      // Manual placements may legitimately sit outside the CAD footprint. Only
+      // recover obviously mismatched coordinate systems (for example [0, 0]
+      // against a survey drawing with million-scale world coordinates).
+      const padding = Math.max(maxSize * 5, 1);
+      const inside =
+        Number(params.x) >= focusBounds.min_x - padding
+        && Number(params.x) <= focusBounds.max_x + padding
+        && Number(params.y) >= focusBounds.min_y - padding
+        && Number(params.y) <= focusBounds.max_y + padding;
+      if (inside) return { moved: false, pose: { ...params } };
+      return {
+        moved: true,
+        pose: {
+          ...params,
+          x: (focusBounds.min_x + focusBounds.max_x) * 0.5,
+          y: (focusBounds.min_y + focusBounds.max_y) * 0.5,
+          z: Number.isFinite(Number(params.z)) && Number(params.z) > 0 ? Number(params.z) : 120,
+        },
+      };
+    }
+
     function focusInspectOnCad() {
       const radius = Math.max(Math.hypot(focusWidth || 1, focusHeight || 1) * 0.5, 1);
       const distance = Math.max((radius / Math.tan(degToRad(inspectCamera.fov * 0.5))) * 1.2, 400);
@@ -1050,6 +1115,18 @@
       };
     }
 
+    function rotationMatrixFromRig() {
+      const quaternion = uavCameraRig.quaternion;
+      const right = directionToWorld(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion));
+      const down = directionToWorld(new THREE.Vector3(0, -1, 0).applyQuaternion(quaternion));
+      const forward = directionToWorld(new THREE.Vector3(0, 0, -1).applyQuaternion(quaternion));
+      return [
+        [right[0], down[0], forward[0]],
+        [right[1], down[1], forward[1]],
+        [right[2], down[2], forward[2]],
+      ];
+    }
+
     transformControls.addEventListener("dragging-changed", (event) => {
       orbitControls.enabled = !event.value;
       if (event.value) video.pause();
@@ -1057,6 +1134,11 @@
     transformControls.addEventListener("objectChange", () => {
       if (updatingRig) return;
       camera = applyCameraLocks(cameraFromRig(), camera);
+      if (pureRotationPlaybackActive && pureRotationRestrictedFields.has("yaw")) {
+        pureRotationAuthoritativeMatrix = rotationMatrixFromRig();
+      } else {
+        clearPureRotationAuthoritativeMatrix();
+      }
       setRigFromCamera(camera);
       syncControls();
       drawOverlay();
@@ -1066,6 +1148,10 @@
     function setMode(mode) {
       transformControls.setMode(mode);
       setActiveGizmoButton(mode);
+    }
+
+    function setTransformSpace(space) {
+      transformControls.setSpace(space === "local" ? "local" : "world");
     }
 
     function setGizmoVisible(visible) {
@@ -1360,8 +1446,8 @@
     resize();
     animate();
     return {
-      updateVirtualCamera: setRigFromCamera, setMode, setGizmoVisible, setCadTextVisible,
-      focusInspectOnCamera, focusInspectOnCad, transformControls,
+      updateVirtualCamera: setRigFromCamera, setMode, setTransformSpace, setGizmoVisible, setCadTextVisible,
+      focusInspectOnCamera, focusInspectOnCameraAndCad, focusInspectOnCad, ensureCameraNearCad, transformControls,
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
       setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
@@ -1389,6 +1475,10 @@
   let followOnPlay = false;
 
   function applyTrackPoseForCurrentFrame() {
+    if (pureRotationPlaybackActive && typeof window.cadsceneRefreshPureRotationPose === "function") {
+      window.cadsceneRefreshPureRotationPose();
+      return;
+    }
     if (!video.paused && (sfmFollowMode || cameraTrack.keyframes.length > 0)) {
       camera = poseForFrame(currentFrame());
     }
@@ -1598,6 +1688,103 @@
     updateViews({ forceOverlay: true });
     setStatus(`已应用 SfM 相机初值：${safeFields.join(", ")}`);
     return safeFields;
+  };
+
+  window.cadsceneApplyPureRotationPose = function (pose) {
+    if (!camera || !pose || !window.CadscenePureRotationMath) return false;
+    pureRotationPlaybackActive = true;
+    const rotation = pose.rotation_cad_from_camera || window.CadscenePureRotationMath.localRotationToViewerMatrix(pose.rotation_local_from_camera);
+    const center = pose.camera_center_web || pose.camera_center_local || [0, 0, 0];
+    if (!Array.isArray(rotation) || !Array.isArray(center) || center.length !== 3) return false;
+    pureRotationAuthoritativeMatrix = rotation;
+    const euler = window.CadscenePureRotationMath.matrixToViewerEuler(rotation);
+    euler.yaw = window.CadscenePureRotationMath.unwrapDegreesNear(euler.yaw, camera.yaw);
+    euler.roll = window.CadscenePureRotationMath.unwrapDegreesNear(euler.roll, camera.roll);
+    let nextCamera = {
+      ...camera,
+      x: Number(center[0]),
+      y: Number(center[1]),
+      z: Number(center[2]),
+      yaw: euler.yaw,
+      pitch: euler.pitch,
+      roll: euler.roll,
+    };
+    if (Number.isFinite(Number(pose.display_fov))) nextCamera.fov = Number(pose.display_fov);
+    if (threeScene && pureRotationRestrictedFields.size === 0) {
+      nextCamera = threeScene.ensureCameraNearCad(nextCamera).pose;
+    }
+    camera = nextCamera;
+    syncControls();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return { x: camera.x, y: camera.y, z: camera.z, yaw: camera.yaw, pitch: camera.pitch, roll: camera.roll, fov: camera.fov };
+  };
+
+  window.cadsceneApplyManualPureRotationMatrix = function (rotation) {
+    if (!camera || !Array.isArray(rotation) || !window.CadscenePureRotationMath) return false;
+    const fixedCenter = [camera.x, camera.y, camera.z];
+    pureRotationPlaybackActive = true;
+    pureRotationAuthoritativeMatrix = rotation.map((row) => row.map(Number));
+    camera = {
+      ...camera,
+      x: fixedCenter[0],
+      y: fixedCenter[1],
+      z: fixedCenter[2],
+    };
+    syncControls();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return {
+      rotation_cad_from_camera: pureRotationAuthoritativeMatrix.map((row) => row.slice()),
+      camera_center_web: fixedCenter,
+    };
+  };
+
+  window.cadsceneFocusVirtualCamera = function () {
+    if (!camera || !threeScene) return false;
+    threeScene.focusInspectOnCameraAndCad(camera);
+    return true;
+  };
+
+  window.cadsceneEnsureVirtualCameraNearCad = function () {
+    if (!camera || !threeScene) return { moved: false };
+    const result = threeScene.ensureCameraNearCad(camera);
+    if (!result.moved) return result;
+    camera = { ...camera, ...result.pose };
+    syncControls();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return result;
+  };
+
+  window.cadsceneSetPureRotationEditMode = function (mode) {
+    pureRotationPlaybackActive = true;
+    pureRotationRestrictedFields.clear();
+    const correctionMode = mode === "correction";
+    if (correctionMode) {
+      for (const key of ["x", "y", "z", "yaw", "pitch", "roll", "fov"]) pureRotationRestrictedFields.add(key);
+    }
+    if (threeScene) threeScene.setMode(correctionMode ? "rotate" : "translate");
+    if (threeScene) threeScene.setTransformSpace(correctionMode ? "local" : "world");
+    for (const id of ["translateMode"]) {
+      const button = document.querySelector(`#${id}`);
+      if (button) button.disabled = correctionMode;
+    }
+    syncControls();
+    return { mode: correctionMode ? "correction" : "placement", restricted: [...pureRotationRestrictedFields] };
+  };
+
+  window.cadsceneGetCurrentCameraPose = function () {
+    if (!camera) return null;
+    const pose = cloneCameraPose(camera);
+    if (pureRotationAuthoritativeMatrix) {
+      pose.rotation_cad_from_camera = pureRotationAuthoritativeMatrix.map((row) => row.slice());
+    }
+    return pose;
+  };
+
+  window.cadsceneGetDefaultCameraPose = function () {
+    if (!defaultCamera || !window.CadscenePureRotationMath) return null;
+    const pose = cloneCameraPose(defaultCamera);
+    pose.rotation_cad_from_camera = window.CadscenePureRotationMath.viewerEulerToMatrix(pose);
+    return pose;
   };
 
   function applyTrackPayload(payload) {
@@ -2419,6 +2606,10 @@
     });
     video.addEventListener("pause", () => updateViews({ forceOverlay: true }));
     video.addEventListener("seeked", () => {
+      if (pureRotationPlaybackActive) {
+        window.cadsceneRefreshPureRotationPose?.();
+        return;
+      }
       const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       const targetFrame = manualFrameOverride ?? actualFrame;
       if (manualFrameOverride !== null && Math.abs(actualFrame - manualFrameOverride) <= 1) {

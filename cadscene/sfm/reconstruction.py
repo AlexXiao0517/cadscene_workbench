@@ -10,7 +10,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from cadscene.core.io import ensure_dir, read_json, write_json, write_text
+from cadscene.core.io import ensure_dir, read_json, write_csv_utf8_sig, write_json, write_text
 from cadscene.sfm.backend_detection import detect_sfm_environment, select_sfm_backend
 from cadscene.sfm.colmap_cli import (
     ColmapCommandError,
@@ -65,6 +65,8 @@ class ReconstructionConfig:
 class ExtractedFrame:
     frame_index: int
     path: Path
+    pts_time_sec: float | None = None
+    timestamp_source: str = "unknown"
 
 
 @dataclass
@@ -75,6 +77,7 @@ class ReconstructionResult:
     colors: np.ndarray | None
     stats: dict
     warnings: list[str] = field(default_factory=list)
+    frame_timestamps: list[dict[str, object]] = field(default_factory=list)
 
 
 def frame_indices_for_config(config: ReconstructionConfig, frame_count: int) -> list[int]:
@@ -123,11 +126,36 @@ def extract_frames(
                 path = output / frame_image_name(frame_index)
                 if not cv2.imwrite(str(path), frame):
                     raise RuntimeError(f"failed to write extracted frame: {path}")
-                extracted.append(ExtractedFrame(frame_index=frame_index, path=path))
+                pts_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+                pts_time_sec = pts_msec / 1000.0 if np.isfinite(pts_msec) and pts_msec >= 0.0 else None
+                extracted.append(
+                    ExtractedFrame(
+                        frame_index=frame_index,
+                        path=path,
+                        pts_time_sec=pts_time_sec,
+                        timestamp_source="opencv_pos_msec" if pts_time_sec is not None else "unavailable",
+                    )
+                )
             frame_index += 1
     finally:
         capture.release()
     return extracted
+
+
+def frame_timestamp_rows(frames: Sequence[ExtractedFrame]) -> list[dict[str, object]]:
+    """Serialize extracted frames without conflating source-frame and extract order."""
+
+    return [
+        {
+            "source_frame_index": frame.frame_index,
+            "extracted_index": extracted_index,
+            "image_name": frame.path.name,
+            "pts_time_sec": "" if frame.pts_time_sec is None else frame.pts_time_sec,
+            "timestamp_source": frame.timestamp_source,
+            "cfr_confirmed": False,
+        }
+        for extracted_index, frame in enumerate(frames)
+    ]
 
 
 def prepare_masks(
@@ -653,6 +681,7 @@ def run_reconstruction(
             colors=colors,
             stats=stats,
             warnings=warnings,
+            frame_timestamps=[],
         )
     notify("extract_frames", 0.12, "正在从视频抽帧")
     frames = extract_frames(video, images_dir, frame_indices)
@@ -863,6 +892,7 @@ def run_reconstruction(
         colors=colors,
         stats=stats,
         warnings=warnings,
+        frame_timestamps=frame_timestamp_rows(frames),
     )
 
 
@@ -906,11 +936,24 @@ def write_reconstruction_outputs(
         "camera_intrinsics": output / "camera_intrinsics.json",
         "sfm_stats": output / "sfm_stats.json",
         "sfm_report": output / "sfm_report.md",
+        "frame_timestamps": output / "frame_timestamps.csv",
     }
     write_json(paths["camera_trajectory"], result.trajectory)
     write_sparse_ply(paths["sparse_points"], result.points, result.colors)
     write_json(paths["camera_intrinsics"], {"intrinsics": result.intrinsics})
     write_json(paths["sfm_stats"], result.stats)
+    write_csv_utf8_sig(
+        paths["frame_timestamps"],
+        result.frame_timestamps,
+        fieldnames=(
+            "source_frame_index",
+            "extracted_index",
+            "image_name",
+            "pts_time_sec",
+            "timestamp_source",
+            "cfr_confirmed",
+        ),
+    )
     write_text(
         paths["sfm_report"],
         build_sfm_report(video_path=video_path, output_dir=output, stats=result.stats, outputs=paths),

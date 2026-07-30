@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAD 场景工作流</title>
+    <link rel="stylesheet" href="./style.css?v=20260730-pure-rotation-v1" />
+  </head>
+  <body>
+    <main class="portal-shell">
+      <header>
+        <p class="eyebrow">CAD SCENE</p>
+        <h1>新建项目</h1>
+        <p>上传航拍视频和 CAD 图纸；如有 DJI SRT，可一并上传以自动识别轨迹工作模式。</p>
+      </header>
+
+      <form id="portalForm" novalidate>
+        <section class="upload-card" aria-labelledby="videoLabel">
+          <div><strong id="videoLabel">视频 <em>必传</em></strong><span id="videoStatus">尚未选择</span></div>
+          <label class="file-picker">选择视频<input id="portalVideo" type="file" accept="video/*,.mp4,.mov,.avi,.mkv" required /></label>
+          <progress id="videoProgress" max="1" value="0"></progress>
+        </section>
+        <section class="upload-card" aria-labelledby="cadLabel">
+          <div><strong id="cadLabel">CAD <em>必传</em></strong><span id="cadStatus">尚未选择</span></div>
+          <label class="file-picker">选择 CAD<input id="portalCad" type="file" accept=".dxf,.dwg" required /></label>
+          <progress id="cadProgress" max="1" value="0"></progress>
+        </section>
+        <section class="upload-card" aria-labelledby="srtLabel">
+          <div><strong id="srtLabel">SRT 遥测 <i>选填</i></strong><span id="srtStatus">不上传也可使用 SfM 工作流</span></div>
+          <label class="file-picker">选择 SRT<input id="portalSrt" type="file" accept=".srt" /></label>
+          <progress id="srtProgress" max="1" value="0"></progress>
+        </section>
+        <section id="portalMotionMode" class="motion-card" aria-labelledby="motionModeLabel">
+          <div>
+            <strong id="motionModeLabel">无 SRT 拍摄模式</strong>
+            <span>默认使用通用 SfM 三维重建流程</span>
+          </div>
+          <label class="motion-choice">
+            <input id="portalHoveringDeclared" type="checkbox" />
+            无人机悬停，仅转动视角（实验）
+          </label>
+          <p>勾选后使用 OpenGV 恢复相对旋转；不恢复相机平移，后续需要人工设置固定相机位置。</p>
+        </section>
+        <p id="portalMessage" class="message" role="status">请选择所需文件。</p>
+        <button id="portalSubmit" type="submit">创建并上传</button>
+      </form>
+
+      <section id="portalResult" class="result" hidden aria-live="polite">
+        <h2>检测结果</h2>
+        <p id="portalMode"></p>
+        <p id="portalSummary"></p>
+        <button id="portalEnter" type="button" disabled>进入项目</button>
+        <details id="portalDebug" class="debug-only">
+          <summary>调试信息</summary>
+          <p id="portalIdentifiers"></p>
+          <label>模式覆盖
+            <select id="portalModeOverride">
+              <option value="">自动检测</option>
+              <option value="sfm_only">仅 SfM</option>
+              <option value="pure_rotation">悬停旋转（实验）</option>
+              <option value="srt_sfm_fused">SRT + SfM（接口）</option>
+              <option value="srt_full_pose">SRT 完整姿态（接口）</option>
+            </select>
+          </label>
+        </details>
+      </section>
+    </main>
+    <script src="./workflow_portal.js?v=20260730-pure-rotation-v1"></script>
+  </body>
+</html>

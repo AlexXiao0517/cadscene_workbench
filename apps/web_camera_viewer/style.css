@@ -150,6 +150,10 @@ h2 {
   list-style: none;
 }
 
+.workflow-steps.is-pure-rotation {
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+}
+
 .workflow-steps li {
   display: flex;
   align-items: center;
@@ -159,6 +163,14 @@ h2 {
   font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.workflow-steps li[hidden] {
+  display: none !important;
+}
+
+.workflow-bar [hidden] {
+  display: none !important;
 }
 
 .workflow-steps li::after {
@@ -172,7 +184,7 @@ h2 {
   display: none;
 }
 
-.workflow-steps li span {
+.workflow-steps li > span:first-child {
   display: grid;
   place-items: center;
   width: 22px;
@@ -187,12 +199,12 @@ h2 {
   color: var(--text);
 }
 
-.workflow-steps li.is-active span {
+.workflow-steps li.is-active > span:first-child {
   border-color: var(--accent);
   background: #173448;
 }
 
-.workflow-steps li.is-success span {
+.workflow-steps li.is-success > span:first-child {
   border-color: #65c77b;
   color: #65c77b;
 }
@@ -402,6 +414,112 @@ h2 {
   display: none;
 }
 
+.workflow-hidden-control.is-pure-visible {
+  display: inline-flex;
+}
+
+.pure-rotation-control-notice.is-pure-visible {
+  display: block;
+  margin: 0 12px;
+  padding: 9px 10px;
+  border: 1px solid #b07d35;
+  background: rgba(176, 125, 53, 0.12);
+  color: #ffd08a;
+  font-size: 12px;
+}
+
+#pureRotationTrackControl {
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+#pureRotationTrack {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 5px 7px;
+}
+
+.pure-rotation-calibration.is-pure-visible {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 12px 12px;
+}
+
+.pure-rotation-calibration[hidden] {
+  display: none !important;
+}
+
+.pure-rotation-calibration fieldset {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 10px;
+}
+
+.pure-rotation-calibration legend {
+  padding: 0 6px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pure-rotation-calibration p {
+  min-height: 2.8em;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.pure-rotation-world-yaw {
+  display: grid;
+  grid-template-columns: auto minmax(140px, 1fr) 80px auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pure-rotation-world-yaw label {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.pure-rotation-world-yaw input[type="number"] {
+  width: 80px;
+}
+
+.pure-rotation-local-angles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: var(--muted);
+}
+
+.pure-rotation-local-angles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+}
+
+.pure-rotation-local-angles input {
+  width: 74px;
+}
+
+@media (max-width: 900px) {
+  .pure-rotation-calibration.is-pure-visible {
+    grid-template-columns: 1fr;
+  }
+
+  .pure-rotation-world-yaw {
+    grid-template-columns: 1fr;
+  }
+}
+
 .workflow-actions label {
   color: var(--muted);
   font-size: 12px;
@@ -518,6 +636,10 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+#cameraToolbar[hidden] {
+  display: none !important;
 }
 
 button,
@@ -657,6 +779,20 @@ button.is-active {
 
 .quality-timeline-summary {
   color: var(--accent-2);
+}
+
+.workflow-trajectory-mode {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflow-trajectory-mode.interface-only {
+  border-color: #b07d35;
+  color: #ffd08a;
 }
 
 #qualityTimelineCanvas {

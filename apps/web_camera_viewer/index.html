@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>虚拟相机 CAD 叠加查看器</title>
-    <link rel="stylesheet" href="./style.css?v=20260713-design-json-render2" />
+    <link rel="stylesheet" href="./style.css?v=20260729-local-camera-v8" />
   </head>
   <body>
     <main class="app-shell">
@@ -18,13 +18,14 @@
           <span id="drawStatus">尚未投影</span>
           <span id="fallbackStatus">诊断启动中</span>
         </div>
+        <div id="workflowTrajectoryMode" class="workflow-trajectory-mode" hidden aria-live="polite"></div>
       </header>
 
       <section class="workflow-bar" id="workflowBar" aria-label="产品工作流">
         <ol class="workflow-steps" id="workflowSteps">
           <li data-stage="upload"><span>1</span>上传数据</li>
-          <li data-stage="sfm"><span>2</span>SfM重建</li>
-          <li data-stage="keyframes"><span>3</span>关键帧标定</li>
+          <li data-stage="sfm"><span>2</span><span id="workflowSfmStageLabel">SfM重建</span></li>
+          <li data-stage="keyframes"><span>3</span><span id="workflowKeyframeStageLabel">关键帧标定</span></li>
           <li data-stage="quality"><span>4</span>质量检测</li>
           <li data-stage="render"><span>5</span>渲染导出</li>
         </ol>
@@ -39,10 +40,12 @@
             <div class="workflow-actions">
               <label class="file-button">上传视频<input id="workflowVideoInput" type="file" accept=".mp4,.mov,.avi,.mkv,video/*" /></label>
               <label class="file-button">上传 CAD<input id="workflowCadInput" type="file" accept=".dxf,.dwg" /></label>
+              <label><input id="workflowHoveringDeclared" type="checkbox" /> 无人机悬停，仅转动视角（实验）</label>
               <progress id="workflowUploadProgress" max="1" value="0"></progress>
             </div>
             <span class="workflow-stage-note" id="workflowUploadStatus">等待选择视频和 CAD</span>
             <span class="workflow-stage-note" id="workflowCadStatus">未选择 CAD</span>
+            <span class="workflow-stage-note" id="workflowMotionModeHint">将使用通用 SfM 三维重建流程。</span>
             <details class="workflow-upload-advanced dev-only-control">
               <summary>高级设置</summary>
               <div class="workflow-upload-settings">
@@ -58,6 +61,11 @@
             <div class="workflow-actions">
               <button id="workflowStartSfm" data-job-action type="button">开始 SfM 重建</button>
             </div>
+            <div class="workflow-actions workflow-hidden-control" id="pureRotationRecoveryActions">
+              <button id="workflowStartPureRotation" data-job-action type="button">开始运行</button>
+              <button id="workflowRerunPureRotation" data-job-action type="button">重新运行</button>
+              <button id="workflowEnterPureCalibration" type="button" disabled>进入关键帧标定</button>
+            </div>
             <span class="workflow-stage-note" id="workflowSfmStatus">等待 SfM 任务</span>
             <div class="workflow-stage-note" id="workflowSfmRuntimeSummary">
               后端：<span id="workflowSfmBackend">自动检测</span>
@@ -65,7 +73,7 @@
               · 阶段：<span id="workflowSfmSubstage">等待</span>
               · 已用：<span id="workflowSfmElapsed">0 秒</span>
             </div>
-            <details class="workflow-upload-advanced dev-only-control">
+            <details id="standardSfmAdvanced" class="workflow-upload-advanced dev-only-control">
               <summary>SfM 高级设置</summary>
               <div class="workflow-upload-settings">
                 <label>后端
@@ -88,7 +96,7 @@
             </details>
           </div>
           <div class="workflow-stage-panel" data-stage="keyframes">
-            <div class="workflow-actions">
+            <div class="workflow-actions" id="standardKeyframeActions">
               <button id="workflowRunAlignment" data-job-action type="button">路线拟合</button>
               <label>关键帧间隔
                 <select id="workflowKeyframeStep">
@@ -100,6 +108,9 @@
               <button id="workflowGenerateKeyframes" type="button">生成关键帧计划</button>
               <button id="workflowContinueKeyframes" type="button">继续未完成标定</button>
               <button id="workflowFinishKeyframes" type="button">完成关键帧标定</button>
+            </div>
+            <div class="workflow-actions workflow-hidden-control" id="pureRotationKeyframeActions">
+              <button id="workflowPureFinishKeyframes" type="button">完成调试并进入渲染</button>
             </div>
             <span class="workflow-stage-note" id="workflowKeyframePlanStatus">尚未生成关键帧计划</span>
           </div>
@@ -113,6 +124,8 @@
           </div>
           <div class="workflow-stage-panel" data-stage="render">
             <div class="workflow-actions">
+              <button id="workflowPreviewPureFitted" class="workflow-hidden-control" type="button">预览拟合结果</button>
+              <button id="workflowReturnPureCalibration" class="workflow-hidden-control" type="button">返回关键帧标定</button>
               <button id="workflowRender" data-job-action type="button">渲染视频</button>
               <button id="workflowPreviewRender" type="button" disabled>预览视频</button>
               <a id="workflowDownloadRender" class="workflow-link" href="#" download>下载结果</a>
@@ -207,7 +220,7 @@
       <section class="control-panel">
         <div class="panel-title">
           <h2>虚拟 UAV 相机</h2>
-          <div class="button-row">
+          <div class="button-row" id="cameraToolbar">
             <button id="resetCamera" type="button">重置相机</button>
             <button id="addKeyframe" type="button">添加/更新关键帧</button>
             <button id="deleteKeyframe" type="button">删除关键帧</button>
@@ -228,6 +241,10 @@
             </label>
           </div>
         </div>
+        <p id="pureRotationControlNotice" class="workflow-hidden-control pure-rotation-control-notice">
+          悬停旋转模式（实验）：相机中心固定且由人工设置；OpenGV 不恢复平移。当前候选内参未经验证。
+          <span id="pureRotationFovSource">FOV 来源：等待读取</span>
+        </p>
         <div class="track-strip">
           <span id="timeStatus">时间：0.000 秒</span>
           <span id="frameStatus">帧：0</span>
@@ -244,8 +261,42 @@
           <button id="rejectReview" class="workflow-hidden-control" type="button">拒绝</button>
           <button id="viewCurrentSuggestion" type="button" title="查看当前建议帧" aria-label="查看当前建议帧" disabled>暂无建议</button>
           <button id="ignoreCurrentSuggestion" type="button" disabled>忽略当前建议</button>
+          <span id="pureRotationCorrectionActions" class="workflow-hidden-control">
+            <button id="pureRotationAddCorrection" type="button">添加/更新当前关键帧</button>
+            <button id="pureRotationDeleteCorrection" type="button">删除当前关键帧</button>
+            <button id="pureRotationPreviousCorrection" type="button">上一个关键帧</button>
+            <button id="pureRotationNextCorrection" type="button">下一个关键帧</button>
+            <button id="pureRotationUndoDraft" type="button">撤销当前调整</button>
+          </span>
         </div>
         <div id="cameraControls" class="controls-grid"></div>
+        <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="悬停旋转关键帧标定">
+          <fieldset id="pureRotationPlacementSection">
+            <legend>固定相机初始设置</legend>
+            <p>设置整段视频唯一的固定相机位置和当前帧方向；调整立即预览，播放无需确认。完成调试时会自动确认当前设置。</p>
+            <div class="button-row">
+              <button id="pureRotationSavePlacement" type="button">确认当前相机位置与方向</button>
+              <button id="pureRotationRestorePlacement" type="button">撤销未确认的调整</button>
+            </div>
+          </fieldset>
+          <fieldset id="pureRotationCorrectionSection">
+            <legend>当前帧姿态微调</legend>
+            <p>相机中心保持固定；可使用绕竖直轴控制或旋转 Gizmo 调整当前帧姿态。</p>
+            <div class="pure-rotation-world-yaw">
+              <label for="pureRotationWorldYaw">绕竖直轴旋转</label>
+              <input id="pureRotationWorldYaw" type="range" min="-180" max="180" step="0.1" value="0" />
+              <input id="pureRotationWorldYawNumber" type="number" min="-180" max="180" step="0.1" value="0" aria-label="绕竖直轴旋转角度" />
+              <span>°</span>
+              <button id="pureRotationResetWorldYaw" type="button">水平旋转归零</button>
+            </div>
+            <div class="pure-rotation-local-angles">
+              <span>相机局部轴微调</span>
+              <label>Yaw <input id="pureRotationLocalYaw" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+              <label>Pitch <input id="pureRotationLocalPitch" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+              <label>Roll <input id="pureRotationLocalRoll" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+            </div>
+          </fieldset>
+        </section>
       </section>
     </main>
 
@@ -256,8 +307,9 @@
     <script src="./vendor/controls/three-controls-compat.js?v=20260708-data-fallback-fix3"></script>
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
-    <script src="./viewer_legacy.js?v=20260715-cad-primary-focus"></script>
-    <script src="./workflow.js?v=20260715-cad-fit-low-parallax"></script>
+    <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
+    <script src="./viewer_legacy.js?v=20260729-local-camera-v8"></script>
+    <script src="./workflow.js?v=20260730-pure-status-copy"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

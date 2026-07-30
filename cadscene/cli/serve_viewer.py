@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
 import socket
 import sys
@@ -14,13 +15,18 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
+from cadscene.pure_rotation.placement import apply_global_placement
+from cadscene.pure_rotation.corrections import apply_rotation_corrections
+from cadscene.pure_rotation.rotation_matrix import normalize_rotation_fields
 from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggestion
 from cadscene.workflow.data_import import (
     create_dataset,
     import_cad,
+    import_srt,
     import_video,
     list_datasets,
     load_dataset_manifest,
+    load_srt_analysis,
     slugify_dataset_name,
 )
 from cadscene.workflow.keyframe_plan import create_keyframe_plan, keyframe_plan_path, load_keyframe_plan, write_keyframe_plan
@@ -28,6 +34,13 @@ from cadscene.sfm.camera_init import load_sfm_camera_initialization
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 class ViewerHTTPServer(ThreadingHTTPServer):
@@ -43,6 +56,14 @@ class ViewerHTTPServer(ThreadingHTTPServer):
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def pure_rotation_options(payload: dict, extra_roots: dict[str, Path]) -> dict:
+    options = dict(payload.get("options") or {})
+    source_root = extra_roots.get("source")
+    if source_root is not None and not options.get("cadscene_readonly"):
+        options["cadscene_readonly"] = str(Path(source_root).resolve())
+    return options
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
@@ -67,6 +88,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Accept-Ranges", "bytes")
+        viewer_path = urlsplit(self.path).path
+        if viewer_path.startswith("/apps/web_camera_viewer/") and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
+            self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
     def _json_response(self, status: HTTPStatus, payload: dict) -> None:
@@ -127,6 +151,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         filename = disposition.get_filename()
         if field_name != "file" or not filename:
             raise ValueError("missing multipart field: file")
+        try:
+            filename = filename.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
 
         temporary = tempfile.TemporaryFile(mode="w+b")
         marker = b"\r\n--" + boundary
@@ -176,6 +204,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             message = "CAD 已准备，等待视频"
         else:
             message = "等待上传视频和 CAD assets"
+        trajectory_mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
+        if not failed and trajectory_mode == "srt_sfm_fused":
+            message = "SRT/SfM fusion functionality pending activation"
+        elif not failed and trajectory_mode == "srt_full_pose":
+            message = "SRT full-pose functionality pending activation"
         JobStatusStore(run_dir / "job_status.json", run_id=run_id).update_stage(
             "upload",
             status="failed" if failed else ("success" if ready else "pending"),
@@ -183,6 +216,25 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             message=message,
             error=message if failed else None,
         )
+
+    @staticmethod
+    def _srt_api_payload(dataset: str, manifest: dict, analysis: dict) -> dict:
+        srt = manifest.get("srt") or {}
+        mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
+        if mode == "srt_sfm_fused":
+            message = "SRT/SfM fusion functionality pending activation"
+        elif mode == "srt_full_pose":
+            message = "SRT full-pose functionality pending activation"
+        else:
+            message = "SRT analysis is available; SfM-only workflow remains active"
+        return {
+            "ok": True,
+            "dataset": dataset,
+            "srt_status": str(srt.get("status", "missing")),
+            "trajectory_mode": mode,
+            "analysis": analysis,
+            "message": message,
+        }
 
     def _set_upload_progress(self, dataset: str, run_id: str, message: str) -> None:
         if not run_id:
@@ -234,6 +286,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/create-dataset",
             "/api/workflow/upload-video",
             "/api/workflow/upload-cad",
+            "/api/workflow/upload-srt",
         }
         allowed_routes = {
             "/api/workflow/ignore-suggestion",
@@ -242,6 +295,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "/api/workflow/cancel",
             "/api/workflow/save-camera-track",
             "/api/workflow/generate-keyframe-plan",
+            "/api/pure-rotation/run",
+            "/api/pure-rotation/placement",
+            "/api/pure-rotation/corrections",
         } | upload_routes
         if route not in allowed_routes:
             self.send_error(HTTPStatus.NOT_FOUND, "API not found")
@@ -257,6 +313,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                         float(payload.get("originX", 567747.5756295)),
                         float(payload.get("originY", 3330464.2234675)),
                     ),
+                    hovering_declared=(bool(payload["hoveringDeclared"]) if "hoveringDeclared" in payload else None),
                 )
                 self._update_upload_status(
                     str(manifest["dataset"]),
@@ -265,7 +322,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 )
                 self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
                 return
-            if route in {"/api/workflow/upload-video", "/api/workflow/upload-cad"}:
+            if route in {"/api/workflow/upload-video", "/api/workflow/upload-cad", "/api/workflow/upload-srt"}:
                 dataset = slugify_dataset_name(self._query_value("dataset", required=True))
                 run_id = self._query_value("runId") or self._query_value("run_id")
                 if run_id and not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
@@ -274,6 +331,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 try:
                     if route.endswith("upload-video"):
                         manifest = import_video(self.server.root_dir, dataset, filename, stream)
+                    elif route.endswith("upload-srt"):
+                        manifest = import_srt(self.server.root_dir, dataset, filename, stream)
                     else:
                         manifest = import_cad(
                             self.server.root_dir,
@@ -285,7 +344,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 finally:
                     stream.close()
                 self._update_upload_status(dataset, run_id, manifest)
-                self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
+                if route.endswith("upload-srt"):
+                    analysis = load_srt_analysis(self.server.root_dir, dataset)
+                    self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
+                else:
+                    self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
                 return
             payload = self._read_json_body()
             dataset, run_id = self._workflow_identity(payload)
@@ -298,8 +361,59 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 },
             )
             runner: JobRunner = self.server.job_runner
-            if route == "/api/workflow/run-stage":
+            if route == "/api/pure-rotation/run":
+                manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                if (manifest.get("workflow") or {}).get("trajectory_mode") != "pure_rotation":
+                    raise ValueError("dataset is not routed to pure_rotation")
+                options = pure_rotation_options(payload, getattr(self.server, "extra_roots", {}))
+                result = {"ok": True, **runner.start_stage(dataset, run_id, "pure_rotation", options)}
+            elif route == "/api/pure-rotation/placement":
+                raw_path = run_dir / "02_pure_rotation" / "camera_rotation_raw.json"
+                if not raw_path.exists():
+                    raise FileNotFoundError("pure-rotation raw trajectory not found")
+                raw = json.loads(raw_path.read_text(encoding="utf-8-sig"))
+                placement = normalize_rotation_fields(
+                    payload.get("placement") or {},
+                    ("manual_rotation_cad_from_camera",),
+                    allow_legacy_reflection=True,
+                )
+                base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
+                output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+                _atomic_json(run_dir / "03_pure_rotation_placement" / "global_camera_placement.json", placement)
+                _atomic_json(output, base)
+                result = {"ok": True, "path": str(output)}
+            elif route == "/api/pure-rotation/corrections":
+                base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+                if not base_path.exists():
+                    raise FileNotFoundError("pure-rotation segment is not calibrated")
+                corrections = [
+                    normalize_rotation_fields(
+                        item,
+                        ("base_rotation_cad_from_camera", "manual_rotation_cad_from_camera"),
+                        allow_legacy_reflection=True,
+                    )
+                    for item in (payload.get("corrections") or [])
+                ]
+                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), corrections)
+                output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
+                _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
+                _atomic_json(output, corrected)
+                result = {"ok": True, "path": str(output)}
+            elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
+                try:
+                    manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                except FileNotFoundError:
+                    # Preserve legacy direct-run compatibility for no-SRT datasets.
+                    manifest = {}
+                workflow = manifest.get("workflow") or {}
+                trajectory_mode = str(workflow.get("trajectory_mode", "sfm_only"))
+                if trajectory_mode in {"srt_sfm_fused", "srt_full_pose"} or workflow.get("implementation_status") == "interface_only":
+                    self._json_response(
+                        HTTPStatus.CONFLICT,
+                        {"error": "SRT 轨迹功能待启用，当前模式不能启动处理流程。"},
+                    )
+                    return
                 result = runner.start_stage(dataset, run_id, stage, payload.get("options") or {})
                 result = {"ok": True, **result}
             elif route == "/api/workflow/cancel":
@@ -353,12 +467,21 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/":
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", "/apps/workflow_portal/index.html")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         api_routes = {
             "/api/workflow/job-log",
             "/api/workflow/sfm-camera-init",
             "/api/workflow/keyframe-plan",
             "/api/workflow/dataset-manifest",
             "/api/workflow/list-datasets",
+            "/api/workflow/srt-analysis",
+            "/api/pure-rotation/status",
+            "/api/pure-rotation/trajectory",
         }
         if parsed.path not in api_routes:
             return super().do_GET()
@@ -377,11 +500,34 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     {"ok": True, "manifest": load_dataset_manifest(self.server.root_dir, dataset)},
                 )
                 return
+            if parsed.path == "/api/workflow/srt-analysis":
+                dataset = slugify_dataset_name(self._query_value("dataset", required=True))
+                manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                analysis = load_srt_analysis(self.server.root_dir, dataset)
+                self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
+                return
             payload = {
                 "dataset": (query.get("dataset") or [""])[0],
                 "runId": (query.get("runId") or [""])[0],
             }
             dataset, run_id = self._workflow_identity(payload)
+            if parsed.path == "/api/pure-rotation/status":
+                run_dir = self._workflow_run_dir(payload)
+                summary = run_dir / "02_pure_rotation" / "backend_summary.json"
+                if not summary.exists():
+                    summary = run_dir / "02_pure_rotation" / "summary.json"
+                placement = run_dir / "03_pure_rotation_placement" / "global_camera_placement.json"
+                corrections = run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json"
+                self._json_response(HTTPStatus.OK, {"ok": True, "summary": json.loads(summary.read_text(encoding="utf-8-sig")) if summary.exists() else None, "placement": json.loads(placement.read_text(encoding="utf-8-sig")) if placement.exists() else None, "corrections": json.loads(corrections.read_text(encoding="utf-8-sig")) if corrections.exists() else {"schema_version": 1, "corrections": []}})
+                return
+            if parsed.path == "/api/pure-rotation/trajectory":
+                run_dir = self._workflow_run_dir(payload)
+                kind = str((query.get("kind") or ["raw"])[0])
+                paths = {"raw": run_dir / "02_pure_rotation" / "camera_rotation_raw.json", "base": run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json", "corrected": run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"}
+                if kind not in paths or not paths[kind].exists():
+                    raise FileNotFoundError("pure-rotation trajectory not found")
+                self._json_response(HTTPStatus.OK, {"ok": True, "kind": kind, "trajectory": json.loads(paths[kind].read_text(encoding="utf-8-sig"))})
+                return
             if parsed.path == "/api/workflow/sfm-camera-init":
                 run_dir = self._workflow_run_dir(payload)
                 result = load_sfm_camera_initialization(run_dir / "02_sfm" / "camera_trajectory.json")
@@ -400,6 +546,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             self._json_response(HTTPStatus.OK, result)
         except (ValueError, KeyError, TypeError) as exc:
             self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except FileNotFoundError as exc:
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 

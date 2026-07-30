@@ -10,12 +10,14 @@ import pytest
 from cadscene.sfm.colmap_cli import ColmapCommandResult, ColmapTextModelExport
 from cadscene.sfm.reconstruction import (
     ReconstructionConfig,
+    ReconstructionResult,
     build_camera_trajectory,
     build_sfm_report,
     build_sfm_stats,
     configure_incremental_mapping_options,
     frame_indices_for_config,
     mask_path_for_frame,
+    write_reconstruction_outputs,
 )
 
 
@@ -207,6 +209,33 @@ def test_extract_frames_selects_requested_original_frames(tmp_path: Path) -> Non
         "frame_000001.png",
         "frame_000003.png",
         "frame_000005.png",
+    ]
+
+
+def test_reconstruction_outputs_persist_source_frame_pts_table(tmp_path: Path) -> None:
+    result = ReconstructionResult(
+        trajectory={"poses": []},
+        intrinsics=[],
+        points=np.empty((0, 3), dtype=np.float64),
+        colors=None,
+        stats={},
+        frame_timestamps=[
+            {
+                "source_frame_index": 42,
+                "extracted_index": 0,
+                "image_name": "frame_000042.png",
+                "pts_time_sec": 1.401,
+                "timestamp_source": "opencv_pos_msec",
+                "cfr_confirmed": False,
+            }
+        ],
+    )
+
+    outputs = write_reconstruction_outputs(tmp_path, result, video_path=None)
+
+    assert outputs["frame_timestamps"].read_text(encoding="utf-8-sig").splitlines() == [
+        "source_frame_index,extracted_index,image_name,pts_time_sec,timestamp_source,cfr_confirmed",
+        "42,0,frame_000042.png,1.401,opencv_pos_msec,False",
     ]
 
 

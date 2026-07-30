@@ -228,6 +228,28 @@ def test_keyframe_plan_is_created_after_initial_route_fit_and_can_continue_pendi
     assert "Stage 4A mock" not in script
 
 
+def test_generating_keyframe_plan_refreshes_route_fit_and_timeline_from_saved_plan() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function generateKeyframePlan()")
+    end = script.index("async function finishKeyframePlan()", start)
+    generate = script[start:end]
+
+    # 路线拟合刚完成时，浏览器中的 readiness 不能成为阻断计划生成的旧状态。
+    assert "await refreshAlignmentArtifactState();" in generate
+    # 生成接口成功后必须从实际保存的 artifact 回读，确保质量时间轴拿到同一份计划数据。
+    assert "await loadKeyframePlan({ suppressErrors: false });" in generate
+    assert "关键帧计划生成失败" in generate
+
+
+def test_viewer_recovers_manifest_video_and_cad_paths_for_direct_dataset_run_urls() -> None:
+    script = _read("workflow.js")
+
+    assert "function ensureManifestViewerPaths" in script
+    assert 'target.searchParams.set("video", videoUrl);' in script
+    assert 'target.searchParams.set("cad", cadUrl);' in script
+    assert "window.location.replace(target.toString());" in script
+
+
 def test_keyframe_plan_shows_progress_without_counting_pending_frames_as_manual_anchors() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
@@ -276,6 +298,18 @@ def test_workflow_upload_combines_cad_selection_and_parse() -> None:
     assert ">上传 CAD<" in html
     assert ">解析 CAD<" not in html
     assert 'id="workflowParseCad"' not in html
+
+
+def test_viewer_displays_manifest_backed_trajectory_mode_without_replacing_layout() -> None:
+    html = _read("index.html")
+    workflow = _read("workflow.js")
+
+    assert 'id="workflowTrajectoryMode"' in html
+    assert "dataset-manifest" in workflow
+    assert "interface_only" in workflow
+    assert "isInterfaceOnlyTrajectoryWorkflow" in workflow
+    assert "轨迹功能尚未启用" in workflow
+    assert 'class="workspace"' in html
 
 
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:

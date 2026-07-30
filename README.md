@@ -26,14 +26,25 @@ runs/<dataset>/<run_id>/
 
 ### Current boundaries
 
-- The stable workflow is no-SRT only.
-- Partial-SRT and full-pose SRT interfaces are not supported in this release.
+- Video and CAD are required inputs; SRT telemetry is optional.
+- `sfm_only` is the stable, genuinely runnable no-SRT workflow (`ready`).
+- Upload analysis conservatively routes optional SRT as `srt_sfm_fused` or
+  `srt_full_pose` only when its metadata coverage is sufficient. Both are
+  currently `interface_only`: the UI can show their analysis, but fusion and
+  direct full-pose execution are not implemented.
+- SRT detection is not a high-precision trajectory or pose truth claim; retain
+  SfM, manual calibration, SfM-to-CAD alignment, and quality checks.
 - CUDA acceleration is not part of this baseline.
 - Optional pycolmap and other runtime dependencies are not bundled or introduced by this release.
 
+See [workflow routing](docs/workflow_routing.md) and [SRT capability
+detection](docs/srt_capability_detection.md) for inputs, modes, and limits.
+
 ### Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md): CUDA COLMAP backend in v0.2.0, upload analysis and workflow routing in v0.3.0, partial-SRT in v0.4.0, and a full-pose SRT interface in v0.5.0.
+See [docs/roadmap.md](docs/roadmap.md): CUDA COLMAP backend in v0.2.0,
+upload analysis and Stage 6A routing in v0.3.0, partial-SRT execution in
+v0.4.0, and a full-pose SRT execution workflow in v0.5.0.
 
 `cadscene_workbench` 是独立的 SfM-CAD 视频配准工作台，Python 包名为 `cadscene`。
 所有运行产物写入 `runs/<dataset>/<run_id>/`，报告默认中文，CSV 统一使用

@@ -23,7 +23,7 @@ from cadscene.workflow.keyframe_plan import (
 )
 
 
-ALLOWED_STAGES = {"sfm", "alignment", "quality", "render"}
+ALLOWED_STAGES = {"sfm", "alignment", "quality", "render", "pure_rotation"}
 
 
 class JobAlreadyRunningError(RuntimeError):
@@ -427,8 +427,61 @@ def build_stage_command(
         dataset,
         run_id,
         options,
-        require_alignment_inputs=stage != "sfm",
+        require_alignment_inputs=stage not in {"sfm", "pure_rotation"},
     )
+    if stage == "pure_rotation":
+        opts = dict(options or {})
+        command = [
+            sys.executable, "-m", "cadscene.cli.run_pure_rotation",
+            "--dataset", resolved["dataset"], "--run-id", resolved["run_id"],
+            "--output-root", str(resolved["root"] / "runs"), "--video", str(resolved["video"]),
+        ]
+        if opts.get("backend_root"):
+            command.extend(["--backend-root", str(opts["backend_root"])])
+        if opts.get("backend_command"):
+            command.extend(["--backend-command", str(opts["backend_command"])])
+        if opts.get("cadscene_readonly"):
+            command.extend(["--cadscene-readonly", str(opts["cadscene_readonly"])])
+        if opts.get("force"):
+            command.append("--force")
+        return command
+    try:
+        dataset_manifest = load_dataset_manifest(resolved["root"], resolved["dataset"])
+    except FileNotFoundError:
+        dataset_manifest = {}
+    if stage == "render" and (dataset_manifest.get("workflow") or {}).get("trajectory_mode") == "pure_rotation":
+        corrected = resolved["run_dir"] / "04_pure_rotation_corrections" / "camera_track_corrected.json"
+        base = resolved["run_dir"] / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+        track = corrected if corrected.exists() else base
+        if not track.exists():
+            raise FileNotFoundError("请先完成 Pure-Rotation 全局放置和姿态关键帧拟合。")
+        return [
+            sys.executable,
+            "-m",
+            "cadscene.cli.render_pure_rotation",
+            "--dataset",
+            resolved["dataset"],
+            "--run-id",
+            resolved["run_id"],
+            "--output-root",
+            str(resolved["root"] / "runs"),
+            "--video",
+            str(resolved["video"]),
+            "--cad-dir",
+            str(resolved["cad_dir"]),
+            "--cad-scale",
+            str(resolved["cad_scale"]),
+            "--origin-xy",
+            str(resolved["origin_xy"][0]),
+            str(resolved["origin_xy"][1]),
+            "--track",
+            str(track),
+            "--faded-overlay",
+            "--fade-start-m",
+            "250",
+            "--max-distance-m",
+            "900",
+        ]
     python = str(resolve_sfm_python()) if stage == "sfm" else sys.executable
     common = ["--dataset", resolved["dataset"], "--run-id", resolved["run_id"], "--output-root", str(resolved["root"] / "runs")]
     if stage == "sfm":
@@ -582,7 +635,11 @@ class JobRunner:
 
     @staticmethod
     def _status_stage(stage: str) -> str:
-        return "keyframes" if stage == "alignment" else stage
+        workflow_slots = {
+            "alignment": "keyframes",
+            "pure_rotation": "sfm",
+        }
+        return workflow_slots.get(stage, stage)
 
     def query(self, dataset: str, run_id: str) -> dict[str, Any] | None:
         path = self._process_path(dataset, run_id)
