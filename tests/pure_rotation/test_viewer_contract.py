@@ -265,7 +265,7 @@ def test_pure_rotation_quality_copy_is_not_used_for_calibration_completion() -> 
 
 def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
-    style = Path("apps/web_camera_viewer/style.css").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
     toolbar = html.split('<div class="panel-title">', 1)[1].split(
         '<p id="pureRotationControlNotice"', 1
@@ -291,10 +291,14 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         "pureRotationPreviousCorrection",
         "pureRotationNextCorrection",
         "pureRotationUndoDraft",
+        "translateMode",
+        "rotateMode",
     ):
         assert f'id="{identifier}"' in html
-    assert "#cameraToolbar[hidden]" in style
-    assert "display: none !important" in style.split("#cameraToolbar[hidden]", 1)[1].split("}", 1)[0]
+    pure_layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
+        "function pureRotationPoseAtPts", 1
+    )[0]
+    assert 'document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure)' not in pure_layout
 
 
 def test_entering_pure_rotation_calibration_defaults_to_translatable_global_placement() -> None:
@@ -310,6 +314,7 @@ def test_entering_pure_rotation_calibration_defaults_to_translatable_global_plac
         "window.cadsceneSetPureRotationEditMode = function (mode)", 1
     )[1].split("window.cadsceneGetCurrentCameraPose", 1)[0]
     assert 'threeScene.setMode(correctionMode ? "rotate" : "translate")' in edit_mode
+    assert 'button.disabled = correctionMode' in edit_mode
 
 
 def test_recovery_and_global_placement_do_not_auto_apply_saved_corrections() -> None:

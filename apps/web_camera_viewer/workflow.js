@@ -143,7 +143,6 @@
     document.querySelectorAll("#viewCurrentSuggestion, #ignoreCurrentSuggestion").forEach((node) => {
       node.toggleAttribute("hidden", pure);
     });
-    document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure);
     for (const id of ["addKeyframe", "deleteKeyframe", "previousKeyframe", "nextKeyframe"]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
     }
