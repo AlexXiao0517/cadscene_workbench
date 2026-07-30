@@ -1,126 +1,106 @@
-# cadscene_workbench
+# CADScene Workbench
 
-## Stable baseline: v0.1.0-road-sfm-only
+[English](README_EN.md) | 中文
 
-This release freezes the stable no-SRT CAD video alignment workflow. It supports local video and CAD import, pycolmap/COLMAP SfM, manual keyframe calibration, SfM-to-CAD alignment, quality checks, viewer-scene and road-surface diagnostics, and rendered-video preview/download through the frontend workflow.
+CADScene Workbench 是面向建筑、道路等设计工作的本地视频与 CAD 协同工作台。它帮助您将现场视频、CAD 图纸和必要的人工确认信息组织为可查看、核对和导出的成果。
 
-### Supported no-SRT workflow
+这里的 SfM（三维重建）指从视频画面估计相机运动与场景结构，以便将视频内容与 CAD 参照进行对齐。本 README 以界面操作为主；部署、维护和二次开发信息请从[文档中心](docs/README.md)进入。
 
-Run SfM from a local video, provide the CAD and manual keyframe calibration inputs, then run the configured pipeline to produce alignment, quality, viewer-scene, road diagnostics, and render outputs. No SRT input is required for this version.
+## 适用场景与开始前准备
 
-Start the local viewer with:
+适用于需要以现场视频核对建筑或道路设计、查看相机视角、辅助进行视频与 CAD 对齐的项目。
 
-```bash
-python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
-```
+开始前请准备：
 
-User-owned datasets and generated artifacts stay outside version control. For example:
+- 一段清晰、连续的现场视频；
+- 与项目对应的 CAD 文件；DWG 是否可直接使用取决于部署环境中的外部转换工具；
+- 可选的普通 SRT 文件。它可提供时间、位置等元数据提示，但不是高精度的位置、姿态或 CAD 高程真值；
+- 对现场和图纸都熟悉的人员，以便确认关键画面和视场角（FOV，即画面覆盖的视野范围）。
 
-```text
-data/<dataset>/input.mp4
-data/<dataset>/cad/
-runs/<dataset>/<run_id>/
-```
+## 输入、处理流程与输出
 
-`data/` and `runs/` are intentionally excluded from Git, along with videos, SRT, CAD source files, point clouds, COLMAP databases, and model weights.
+工作台接收视频、CAD 文件和可选 SRT。处理后，您可以在任务结果中查看重建与对齐摘要、关键帧、质量提示、查看器场景、道路表面诊断（如适用）以及渲染预览，并导出可用成果。
 
-### Current boundaries
+建议先把视频与 CAD 作为一组项目资料上传，再根据工作台给出的分析和项目实际情况选择工作流。完成后，先核对关键帧、FOV 和质量提示，再将结果用于设计沟通或后续复核。
 
-- Video and CAD are required inputs; SRT telemetry is optional.
-- `sfm_only` is the stable, genuinely runnable no-SRT workflow (`ready`).
-- Upload analysis conservatively routes optional SRT as `srt_sfm_fused` or
-  `srt_full_pose` only when its metadata coverage is sufficient. Both are
-  currently `interface_only`: the UI can show their analysis, but fusion and
-  direct full-pose execution are not implemented.
-- SRT detection is not a high-precision trajectory or pose truth claim; retain
-  SfM, manual calibration, SfM-to-CAD alignment, and quality checks.
-- CUDA acceleration is not part of this baseline.
-- Optional pycolmap and other runtime dependencies are not bundled or introduced by this release.
+## 快速开始
 
-See [workflow routing](docs/workflow_routing.md) and [SRT capability
-detection](docs/srt_capability_detection.md) for inputs, modes, and limits.
-
-### Roadmap
-
-See [docs/roadmap.md](docs/roadmap.md): CUDA COLMAP backend in v0.2.0,
-upload analysis and Stage 6A routing in v0.3.0, partial-SRT execution in
-v0.4.0, and a full-pose SRT execution workflow in v0.5.0.
-
-`cadscene_workbench` 是独立的 SfM-CAD 视频配准工作台，Python 包名为 `cadscene`。
-所有运行产物写入 `runs/<dataset>/<run_id>/`，报告默认中文，CSV 统一使用
-`utf-8-sig`。`project/` 仅为只读迁移参考，新项目不依赖其中任何模块或路径。
-
-## v0.1-sfm-workbench
-
-当前稳定流程包括：
-
-- 从原始视频运行 pycolmap SfM，或消费已有 SfM 产物；
-- SfM 到 CAD 的 global sim3 与分段关键帧锚定；
-- quality 时间线和建议帧；
-- viewer scene、道路表面只读诊断和 overlay render；
-- legacy web viewer 与 `runs/` 输出联动。
-
-240f keyframe ablation 是激进闭环演示，不代表推荐默认关键帧密度。
-
-## 从视频运行 SfM
-
-真实 SfM 是重任务，请在安装了 `pycolmap` 和 OpenCV 的 difusser 环境运行：
-
-```bash
-python -m cadscene.cli.run_sfm \
-  --dataset hygs_1min \
-  --run-id sfm_smoke_0_250_s5 \
-  --output-root runs \
-  --video data/hygs_1min/hygs_1min.mp4 \
-  --start-frame 0 \
-  --num-frames 251 \
-  --frame-step 5 \
-  --init-min-tri-angle 2 \
-  --no-mask
-```
-
-产物位于 `runs/hygs_1min/sfm_smoke_0_250_s5/02_sfm/`。
-
-## 一键流程
-
-从原始视频开始：
-
-```bash
-python -m cadscene.cli.run_pipeline \
-  --dataset hygs_1min \
-  --config configs/pipelines/sfm_overlay_with_sfm.yaml \
-  --run-id demo_with_sfm \
-  --output-root runs \
-  --video data/hygs_1min/hygs_1min.mp4 \
-  --web-camera-track data/hygs_1min/camera_track_240f_kf.json \
-  --cad-dir data/hygs_1min/cad \
-  --cad-scale 0.06 \
-  --origin-xy 567747.5756295 3330464.2234675
-```
-
-消费已有 SfM 产物时使用
-`configs/pipelines/sfm_overlay_existing_sfm.yaml`，并传入 `--trajectory` 与
-`--sparse-ply`。运行前可追加 `--dry-run` 检查解析后的输入、输出和命令。
-
-无道路中心线总平面场景与多分辨率视频规则见 `docs/stage5b_site_plan_compatibility.md`。
-
-## Web viewer
+本节假定工作台已由维护人员部署完成。启动本地服务：
 
 ```bash
 python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
 ```
 
-打开：
+然后在浏览器打开：
 
 ```text
-http://127.0.0.1:8300/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>
+http://127.0.0.1:8300/apps/workflow_portal/index.html
 ```
 
-更多说明见 `docs/pipeline_usage.md` 和 `docs/web_viewer_usage.md`。
+在门户中创建任务，上传视频和 CAD 文件；如有 SRT，也一并上传。阅读工作台给出的工作流建议后再开始处理。
 
-## 当前限制
+## 如何选择工作流
 
-- DINOv3 segmentation 尚未迁移，SfM 默认使用 `--no-mask`；
-- 不做 semantic refine；
-- 不做 CAD-on-tilted-plane apply；
-- `pycolmap` 为惰性可选依赖，普通 import 和 CLI `--help` 不会加载它。
+| 工作流或能力 | 状态 | 何时使用与应知边界 |
+|---|---|---|
+| `sfm_only` | 稳定 | 当前唯一稳定的端到端主路径。适用于视频与 CAD 对齐，不要求 SRT。 |
+| `pure_rotation` | 实验性 | 用于固定相机中心的纯旋转拍摄；不恢复相机平移或尺度，且依赖外部 OpenGV 后端。 |
+| partial-SRT core | 实验性命令行核心 | 可处理时间戳（PTS）、本地东-北-天坐标（ENU）和稳健 Sim3（同时处理位置、旋转和尺度的对齐）等融合核心；尚未接入正式任务运行器，不能作为门户中的正式流程。 |
+| `srt_sfm_fused` 门户路由 | 仅界面 | 门户可识别并提示该路线，但会阻止正式工作流启动。 |
+| `srt_full_pose` | 仅界面 | 尚无端到端执行流程。 |
+| SfM CUDA | 可选 | 仅确认特征提取和匹配可使用 CUDA；建图与全局束调整（global BA，整体相机优化）不应理解为 GPU 处理。 |
+
+如无明确的实验需求，请选择 `sfm_only`。工作台的建议是辅助判断；请结合拍摄方式、CAD 完整性和现场知识确认。
+
+## 从上传到结果导出
+
+1. 在门户中新建任务并上传视频、CAD 文件和可选 SRT。
+2. 检查输入分析和推荐路线。若显示仅界面路线，请改用 `sfm_only` 或联系维护人员，不要把提示当作已可执行的融合流程。
+3. 开始任务，并等待任务状态进入可查看结果的阶段。
+4. 查看关键帧、质量提示和查看器场景；对照 CAD 与现场情况确认结果是否合理。
+5. 如需要调整，优先确认手动关键帧的 FOV，然后重新处理或请维护人员协助。
+6. 在任务结果页面预览、下载或交付所需成果，并保留任务摘要以便复核。
+
+## 常见问题
+
+### 处理需要多久？
+
+时长取决于视频长度、画面质量、硬件和所选流程。SfM 是计算量较大的步骤；请将任务进度与结果摘要作为实际依据。
+
+### 需要 GPU 吗？
+
+不需要。默认使用 `pycolmap + CPU`。CUDA 需要明确选择并通过能力检测；无法确认时会回退到 CPU，并在日志和摘要中记录。CUDA 仅覆盖已确认的特征提取和匹配范围。
+
+### FOV 不一致或对齐看起来不对怎么办？
+
+优先使用已确认、彼此一致的手动关键帧 FOV。FOV 不会保证 SfM 一定准确；请结合关键帧、质量提示和 CAD/现场核对结果，必要时重新选择关键帧。
+
+### 有 SRT 是否就能得到高精度位置和姿态？
+
+不能。普通 SRT 主要提供元数据能力提示，不能替代 SfM、人工校准、SfM-CAD 对齐和质量检查，也不能作为 CAD 高程真值。
+
+### 纯旋转视频可以恢复行进距离吗？
+
+不能。`pure_rotation` 不恢复相机平移或尺度，也不会自动判断拍摄是否属于纯旋转。
+
+## 能力边界
+
+- 当前稳定主路径是 `sfm_only`；SRT 融合和 full-pose 入口尚未形成端到端正式流程。
+- CAD 导入是否成功还取决于文件内容及部署环境的外部转换能力。
+- 结果应由熟悉现场和设计意图的人员复核；实验性能力不替代工程测量或专业验收。
+- `--root` 用于静态界面资源，`--storage-root` 用于工作流数据和结果；维护人员应按部署需要分别配置。
+
+## 结果文件与故障排查
+
+请从任务结果页面查看摘要、预览和可下载成果。若上传失败、任务无法启动、CUDA 回退、CAD 无法就绪、FOV 不一致或查看器显示异常，请先保留任务摘要和输入信息，再从[文档中心](docs/README.md)查找相应说明或联系维护人员。
+
+## 维护与二次开发
+
+安装、环境检查、批量运行、接口、产物存储、故障排查和测试信息不在本 README 展开。请从[文档中心](docs/README.md)进入面向维护人员的技术文档；其中也包含工作流路由、[SRT 能力检测](docs/srt_capability_detection.md)、[CUDA 后端](docs/sfm_cuda_backend.md)和[查看器使用](docs/web_viewer_usage.md)的说明。
+
+## Roadmap、变更、致谢与许可
+
+- 后续能力和优先级见[路线图](docs/roadmap.md)。
+- 已发布与未发布的行为变化见[CHANGELOG](CHANGELOG.md)。
+- 感谢为三维重建、CAD 协同、视频处理与开源依赖生态作出贡献的社区和维护者。
+- 本仓库尚未声明开源许可证；在获得明确许可前，请不要将其视为已授予开源使用权。
