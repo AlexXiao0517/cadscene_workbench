@@ -56,6 +56,22 @@ def _post(port: int, route: str, payload: dict) -> tuple[int, dict]:
     return response.status, data
 
 
+def test_server_root_redirects_to_workflow_portal(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        response.read()
+        conn.close()
+        assert response.status == 302
+        assert response.getheader("Location") == "/apps/workflow_portal/index.html"
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:
     (tmp_path / "runs/demo/r1").mkdir(parents=True)
     port = _free_port()

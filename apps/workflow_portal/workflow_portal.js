@@ -4,6 +4,7 @@
   const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
   const modeCopy = {
     sfm_only: ["仅 SfM", "将使用已可用的 SfM 轨迹流程。"],
+    pure_rotation: ["悬停旋转（实验）", "将使用 OpenGV 恢复相对旋转；相机中心固定，不恢复平移。"],
     srt_sfm_fused: ["SRT + SfM（功能待启用）", "已识别到定位遥测；融合算法尚未启用，不会自动开始。"],
     srt_full_pose: ["SRT 完整姿态（功能待启用）", "已识别到完整姿态字段；直接姿态驱动尚未启用，不会自动开始。"],
   };
@@ -29,6 +30,15 @@
       file ? "已选择，等待上传" + `：${file.name}` : (required ? "尚未选择" : "不上传也可使用 SfM 工作流"),
       0,
     );
+  }
+
+  function updateMotionModeAvailability() {
+    const srt = $("#portalSrt").files[0];
+    const motionSection = $("#portalMotionMode");
+    const hoveringInput = $("#portalHoveringDeclared");
+    motionSection.hidden = Boolean(srt);
+    hoveringInput.disabled = Boolean(srt);
+    if (srt) hoveringInput.checked = false;
   }
 
   async function postJson(path, payload) {
@@ -80,13 +90,14 @@
     const video = $("#portalVideo").files[0];
     const cad = $("#portalCad").files[0];
     const srt = $("#portalSrt").files[0];
+    const hoveringDeclared = Boolean(!srt && $("#portalHoveringDeclared").checked);
     if (!video || !cad) { setMessage("请先选择视频和 CAD 文件。"); return; }
     $("#portalSubmit").disabled = true;
     state.dataset = generatedId("dataset");
     state.runId = generatedId("run");
     try {
       setMessage("正在创建项目…");
-      await postJson("/api/workflow/create-dataset", { dataset: state.dataset, runId: state.runId, cadScale: 0.06, originX: 567747.5756295, originY: 3330464.2234675 });
+      await postJson("/api/workflow/create-dataset", { dataset: state.dataset, runId: state.runId, cadScale: 0.06, originX: 567747.5756295, originY: 3330464.2234675, hoveringDeclared });
       await upload(`/api/workflow/upload-video?dataset=${encodeURIComponent(state.dataset)}&runId=${encodeURIComponent(state.runId)}`, video, "video");
       setFileStatus("video", "视频已上传", 1);
       await upload(`/api/workflow/upload-cad?dataset=${encodeURIComponent(state.dataset)}&runId=${encodeURIComponent(state.runId)}`, cad, "cad");
@@ -108,8 +119,10 @@
   ["video", "cad", "srt"].forEach((kind) => {
     $(`#portal${kind[0].toUpperCase()}${kind.slice(1)}`).addEventListener("change", () => {
       updateSelectedFileStatus(kind, kind !== "srt");
+      if (kind === "srt") updateMotionModeAvailability();
     });
   });
+  updateMotionModeAvailability();
   $("#portalEnter").addEventListener("click", () => {
     const mode = debugEnabled && $("#portalModeOverride").value ? $("#portalModeOverride").value : state.mode;
     const target = new URL("/apps/web_camera_viewer/", window.location.origin);

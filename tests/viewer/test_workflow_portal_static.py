@@ -59,6 +59,26 @@ def test_portal_passes_manifest_resource_paths_to_existing_viewer() -> None:
     assert 'target.searchParams.set("originXY", state.manifest.defaults.origin_xy.join(","))' in script
 
 
+def test_portal_offers_explicit_hovering_rotation_only_without_srt() -> None:
+    html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
+
+    assert 'id="portalMotionMode"' in html
+    assert 'id="portalHoveringDeclared"' in html
+    assert "无人机悬停，仅转动视角（实验）" in html
+    assert "updateMotionModeAvailability" in script
+    assert 'motionSection.hidden = Boolean(srt)' in script
+    assert "hoveringInput.checked = false" in script
+
+
+def test_portal_sends_hovering_declaration_and_displays_pure_rotation_result() -> None:
+    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
+
+    assert "pure_rotation:" in script
+    assert "hoveringDeclared" in script
+    assert 'Boolean(!srt && $("#portalHoveringDeclared").checked)' in script
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 

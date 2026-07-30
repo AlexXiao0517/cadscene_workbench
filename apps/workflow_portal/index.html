@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD 场景工作流</title>
-    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./style.css?v=20260730-pure-rotation-v1" />
   </head>
   <body>
     <main class="portal-shell">
@@ -30,6 +30,17 @@
           <label class="file-picker">选择 SRT<input id="portalSrt" type="file" accept=".srt" /></label>
           <progress id="srtProgress" max="1" value="0"></progress>
         </section>
+        <section id="portalMotionMode" class="motion-card" aria-labelledby="motionModeLabel">
+          <div>
+            <strong id="motionModeLabel">无 SRT 拍摄模式</strong>
+            <span>默认使用通用 SfM 三维重建流程</span>
+          </div>
+          <label class="motion-choice">
+            <input id="portalHoveringDeclared" type="checkbox" />
+            无人机悬停，仅转动视角（实验）
+          </label>
+          <p>勾选后使用 OpenGV 恢复相对旋转；不恢复相机平移，后续需要人工设置固定相机位置。</p>
+        </section>
         <p id="portalMessage" class="message" role="status">请选择所需文件。</p>
         <button id="portalSubmit" type="submit">创建并上传</button>
       </form>
@@ -46,6 +57,7 @@
             <select id="portalModeOverride">
               <option value="">自动检测</option>
               <option value="sfm_only">仅 SfM</option>
+              <option value="pure_rotation">悬停旋转（实验）</option>
               <option value="srt_sfm_fused">SRT + SfM（接口）</option>
               <option value="srt_full_pose">SRT 完整姿态（接口）</option>
             </select>
@@ -53,6 +65,6 @@
         </details>
       </section>
     </main>
-    <script src="./workflow_portal.js"></script>
+    <script src="./workflow_portal.js?v=20260730-pure-rotation-v1"></script>
   </body>
 </html>

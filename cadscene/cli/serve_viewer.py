@@ -454,6 +454,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/":
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", "/apps/workflow_portal/index.html")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         api_routes = {
             "/api/workflow/job-log",
             "/api/workflow/sfm-camera-init",
