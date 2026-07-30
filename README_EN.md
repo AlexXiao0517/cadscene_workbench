@@ -14,14 +14,14 @@ Prepare the following before you begin:
 
 - a clear, continuous site video; the portal supports MP4, MOV, AVI, and MKV;
 - CAD files that correspond to the project. Basic upload accepts DXF or DWG; the workbench compatibility-asset import also accepts `design.json` or ZIP. DXF can be imported directly, while DWG requires an external converter in the deployment environment;
-- an optional ordinary SRT file. It can provide metadata hints such as time and location, but it is not high-precision position, pose, or CAD elevation truth;
+- an optional ordinary SRT file. It provides metadata hints such as time and location only; it is not high-precision position, pose, or CAD elevation truth. After upload, the portal displays a detected mode; if it is Interface only, create a new project without SRT or contact a maintainer;
 - someone familiar with both the site and the drawings, to confirm key images and the field of view (FOV, the visible extent of an image).
 
 ## Inputs, processing, and outputs
 
 The workbench accepts video, CAD files, and optional SRT. After processing, task results can include reconstruction and alignment summaries, keyframes, quality guidance, a viewer scene, road-surface diagnostics where applicable, and render previews, with usable outputs available for export.
 
-Upload video and CAD together as one project set, then choose a workflow according to the workbench analysis and the project situation. When processing completes, check the keyframes, FOV, and quality guidance before using the results for design communication or further review.
+Upload video and CAD together as one project set. The portal automatically displays a detected mode, and ordinary users do not have a control for switching normal workflows. If SRT produces an Interface only mode, create a new project without SRT or contact a maintainer. When processing completes, check the keyframes, FOV, and quality guidance before using the results for design communication or further review.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ Then open this address in a browser:
 http://127.0.0.1:8300/apps/workflow_portal/index.html
 ```
 
-Create a task in the portal and upload the video and CAD files. Upload SRT as well when it is available. Read the workbench workflow recommendation before starting processing.
+Create a task in the portal and upload the video and CAD files. SRT is optional metadata; when you upload it, check the detected mode that follows. If it is Interface only, create a new project without SRT or contact a maintainer before starting processing.
 
 ## Workflow status detected by the portal
 
