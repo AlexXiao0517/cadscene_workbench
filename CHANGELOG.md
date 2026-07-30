@@ -7,7 +7,7 @@
 - Added the upload portal and workflow routing for video, CAD, and optional SRT inputs.
 - Added conservative SRT capability detection and the experimental partial-SRT core for PTS, ENU, robust Sim3, and fusion processing. Ordinary SRT remains a metadata capability source, not high-precision position, pose, or CAD elevation truth.
 - Added the experimental `pure_rotation` workflow for fixed-camera-center footage through the external OpenGV backend. It does not recover translation or scale, and it does not classify the motion mode automatically.
-- Added optional CUDA selection for SfM feature extraction and matching, with explicit capability detection and CPU fallback when CUDA cannot be confirmed.
+- Added `pycolmap` and COLMAP CLI backend choices for SfM, plus optional CUDA selection for feature extraction and matching, with explicit capability detection and CPU fallback when CUDA cannot be confirmed.
 
 ### Changed
 
