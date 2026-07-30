@@ -26,11 +26,17 @@ stateDiagram-v2
     "路线拟合" --> "质量检测"
     "质量检测" --> "渲染导出"
     "质量检测" --> "关键帧标定": "需要补帧或复核"
+    "上传数据" --> "OpenGV 旋转恢复": "pure_rotation / Experimental"
+    "OpenGV 旋转恢复" --> "人工全局放置"
+    "人工全局放置" --> "局部姿态关键帧校正"
+    "局部姿态关键帧校正" --> "渲染导出": "跳过 alignment 与 quality"
     "上传数据" --> "接口提示": "SRT 路由"
     "接口提示" --> [*]: "Interface only：不启动 JobRunner"
 ```
 
 界面进度使用 `upload`、`sfm`、`keyframes`、`quality`、`render` 五个槽位。实际 `alignment` 任务写入 `keyframes` 槽位，`pure_rotation` 任务写入 `sfm` 槽位；因此状态标签是面向操作的汇总，不能据此推断内部阶段名称一一对应。路线拟合、质量和渲染会先检查前置产物；其中路线拟合至少需要两个非算法预测的人工关键帧，且常规 3D 路径要求 SfM 结果适合三维重建。
+
+纯旋转分支不进入标准路线拟合 `alignment` 或 `quality`。OpenGV 旋转恢复完成后，用户在同一个 `keyframes` 界面先保存固定相机的人工全局放置，再添加局部姿态关键帧校正，随后直接进入渲染。`workflow.js` 会隐藏 quality 步骤和质量时间线；纯旋转流程若请求显示 `quality`，会转到 `render`。这不是“质量检测通过”，而是该实验性流程没有运行标准 quality 阶段。
 
 ## 路由模式与可执行性
 
