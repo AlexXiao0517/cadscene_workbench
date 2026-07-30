@@ -13,8 +13,10 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
 ```
 
 - **视频**：必传，支持本地 MP4、MOV、AVI、MKV。
-- **CAD**：必传，可上传 `design.json`、DXF、DWG 或包含 CAD assets 的 ZIP；只有
+- **CAD（门户文件选择器）**：必传，门户创建项目页面仅可选择 DXF 或 DWG；只有
   CAD 解析为可用 assets 后，数据集才能运行。
+- **CAD（HTTP/兼容导入）**：`POST /api/workflow/upload-cad` 及兼容资产导入还接受
+  `design.json` 或包含 CAD assets 的 ZIP；它们不是门户普通文件选择器提供的选项。
 - **SRT 遥测**：选传。上传后只做解析和能力检测；不上传不影响稳定的无 SRT 流程。
 
 门户先创建数据集，再上传视频、CAD 和可选 SRT，显示检测结果后进入 Viewer。调试
@@ -25,7 +27,7 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
 | 路由或能力 | 触发条件 | 状态 | 当前行为 |
 | --- | --- | --- | --- |
 | `sfm_only` | 无 SRT、SRT 无法解析，或定位/高度覆盖不足 | **Stable** | 当前唯一稳定的 JobRunner 端到端路径：SfM、人工关键帧、路线拟合、质量和渲染。 |
-| `pure_rotation` | 用户声明悬停旋转且没有 SRT 路由优先级 | **Experimental** | 运行外部 OpenGV 旋转恢复，再人工全局放置和局部姿态校正；固定相机中心，不恢复平移或尺度。 |
+| `pure_rotation` | 用户在门户显式勾选“无人机悬停，仅转动视角（实验）”，且没有 SRT 路由优先级 | **Experimental** | 运行外部 OpenGV 旋转恢复，再人工全局放置和局部姿态校正；固定相机中心，不恢复平移或尺度，不自动识别运动类型。 |
 | partial-SRT core | 独立命令行使用 | **Experimental CLI** | 可做 PTS 时间同步、局部 ENU、稳健 Sim3 和融合辅助；尚未接入正式 JobRunner。 |
 | `srt_sfm_fused` portal route | SRT 有足够 GPS 与高度，未满足完整相机姿态 | **Interface only** | 上传、分析和提示可用；HTTP 服务拒绝启动正式工作流阶段。 |
 | `srt_full_pose` | SRT 有足够 GPS、高度与完整云台相机姿态 | **Interface only** | 上传、分析和提示可用；没有端到端执行任务。 |

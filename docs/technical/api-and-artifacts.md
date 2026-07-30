@@ -19,7 +19,7 @@
 | `GET /api/workflow/list-datasets` | 无 | 返回存储根下的数据集摘要 |
 | `GET /api/workflow/dataset-manifest?dataset=…` | `dataset` | 返回数据集 manifest |
 | `GET /api/workflow/srt-analysis?dataset=…` | `dataset` | 返回分析结果、`trajectory_mode` 和提示 |
-| `POST /api/workflow/run-stage` | JSON：`dataset`、`runId`、`stage`、可选 `options` | 启动 `sfm`、`alignment`、`quality` 或 `render` 后台阶段 |
+| `POST /api/workflow/run-stage` | JSON：`dataset`、`runId`、`stage`、可选 `options` | 启动 `sfm`、`alignment`、`quality`、`render` 或底层支持的 `pure_rotation` 后台阶段；纯旋转应优先使用专用的 `POST /api/pure-rotation/run` |
 | `POST /api/workflow/cancel` | JSON：`dataset`、`runId` | 取消当前后台进程 |
 | `POST /api/workflow/job-status` | JSON：`dataset`、`runId`、`stage`，可选 `status`、`progress`、`message`、`error` | 写入工作流槽位状态，主要用于服务内部/调试 |
 | `GET /api/workflow/job-log?dataset=…&runId=…&stage=…&tail=200` | `dataset`、`runId`、`stage`；`tail` 限制为 1–2000 | 返回阶段日志尾部 |
@@ -29,7 +29,7 @@
 | `POST /api/workflow/ignore-suggestion` | JSON：`dataset`、`runId`、`frame_index`，可选 `reason` | 记录用户确认无需补帧的建议 |
 | `GET /api/workflow/sfm-camera-init?dataset=…&runId=…` | `dataset`、`runId` | 从 SfM 轨迹读取相机初始化信息 |
 
-`run-stage` 会拒绝 `srt_sfm_fused` 和 `srt_full_pose`：它们只有上传、检测和界面提示，尚不能由 JobRunner 端到端执行。
+`run-stage` 会拒绝 `srt_sfm_fused` 和 `srt_full_pose`：它们只有上传、检测和界面提示，尚不能由 JobRunner 端到端执行。它在底层接受 `pure_rotation` stage，但门户和客户端应使用 `POST /api/pure-rotation/run`，以便在启动前执行该实验路线的专用 manifest 路由检查。
 
 ## pure-rotation 端点
 

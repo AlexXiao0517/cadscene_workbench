@@ -27,6 +27,9 @@
 
 ## 部署与维护
 
+- [开发指南](technical/developer-guide.md)：环境、目录、命令行与测试边界。
+- [HTTP API 与产物](technical/api-and-artifacts.md)：上传、任务端点、运行目录和恢复规则。
+- [故障排查](technical/troubleshooting.md)：上传、CAD、SfM、SRT 与 pure-rotation 的诊断处理。
 - [SfM CUDA 后端](sfm_cuda_backend.md)：默认 `pycolmap + cpu`、可选 CUDA 与 CPU 回退。
 - [Pipeline 使用说明](pipeline_usage.md)：批处理、阶段产物和命令行排查。
 - [Web Camera Viewer 使用说明](web_viewer_usage.md)：`--root`、`--storage-root` 和静态/产物访问边界。

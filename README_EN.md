@@ -13,7 +13,7 @@ Use the workbench when you need to check a building or road design against site 
 Prepare the following before you begin:
 
 - a clear, continuous site video; the portal supports MP4, MOV, AVI, and MKV;
-- CAD files that correspond to the project. Basic upload accepts DXF or DWG; the workbench compatibility-asset import also accepts `design.json` or ZIP. DXF can be imported directly, while DWG requires an external converter in the deployment environment;
+- CAD files that correspond to the project. The portal CAD file chooser accepts DXF or DWG only; the HTTP API and workbench compatibility-asset import also accept `design.json` or ZIP. DXF can be imported directly, while DWG requires an external converter in the deployment environment;
 - an optional ordinary SRT file. It provides metadata hints such as time and location only; it is not high-precision position, pose, or CAD elevation truth. After upload, the portal displays a detected mode; if it is Interface only, create a new project without SRT or contact a maintainer;
 - someone familiar with both the site and the drawings, to confirm key images and the field of view (FOV, the visible extent of an image).
 
@@ -21,7 +21,7 @@ Prepare the following before you begin:
 
 The workbench accepts video, CAD files, and optional SRT. After processing, task results can include reconstruction and alignment summaries, keyframes, quality guidance, a viewer scene, road-surface diagnostics where applicable, and render previews, with usable outputs available for export.
 
-Upload video and CAD together as one project set. The portal automatically displays a detected mode, and ordinary users do not have a control for switching normal workflows. If SRT produces an Interface only mode, create a new project without SRT or contact a maintainer. When processing completes, check the keyframes, FOV, and quality guidance before using the results for design communication or further review.
+Upload video and CAD together as one project set. The portal automatically displays an SRT-derived detected mode, and ordinary users do not have a control for switching normal workflows. `pure_rotation` is not automatically detected: it is selected only when the user explicitly checks the portal option “无人机悬停，仅转动视角（实验）” (Drone hovering, view rotation only—experimental). That experimental declaration is not a general workflow-switching control. If SRT produces an Interface only mode, create a new project without SRT or contact a maintainer. When processing completes, check the keyframes, FOV, and quality guidance before using the results for design communication or further review.
 
 ## Quick start
 
@@ -44,13 +44,13 @@ Create a task in the portal and upload the video and CAD files. SRT is optional 
 | Workflow or capability | Status | When to use it and its boundary |
 |---|---|---|
 | `sfm_only` | Stable | The only stable end-to-end primary path today. Use it for video-to-CAD alignment; SRT is not required. |
-| `pure_rotation` | Experimental | For footage captured with a fixed camera center and pure rotation; it does not recover camera translation or scale, and depends on an external OpenGV backend. |
+| `pure_rotation` | Experimental | Selected only when the portal option “无人机悬停，仅转动视角（实验）” (Drone hovering, view rotation only—experimental) is explicitly checked, for footage captured with a fixed camera center and pure rotation; it does not recover camera translation or scale, and depends on an external OpenGV backend. It is not an automatically detected mode. |
 | partial-SRT core | Experimental CLI | The fusion core covers timestamps (PTS), local east-north-up coordinates (ENU), and robust Sim3 (alignment of position, rotation, and scale); it is not connected to the formal job runner and is not a formal portal workflow. |
 | `srt_sfm_fused` portal route | Interface only | The portal can identify and describe this route, but blocks formal workflow launch. |
 | `srt_full_pose` | Interface only | No end-to-end execution workflow exists yet. |
 | SfM CUDA | Optional | CUDA is confirmed only for feature extraction and matching; mapping and global bundle adjustment (global BA, whole-camera optimization) must not be understood as GPU processing. |
 
-The portal displays a detected mode from the uploaded inputs; ordinary users do not have a control for switching normal workflows. Without SRT, the portal detects `sfm_only`. If uploading SRT produces an Interface only mode, create a new project without SRT or contact a maintainer; do not treat the prompt as an executable workflow.
+The portal displays an SRT-derived detected mode from the uploaded inputs; ordinary users do not have a control for switching normal workflows. Without SRT, the portal detects `sfm_only`. `pure_rotation` is the exception: users must explicitly check “无人机悬停，仅转动视角（实验）” (Drone hovering, view rotation only—experimental); the system never selects it by automatically classifying the camera motion. If uploading SRT produces an Interface only mode, create a new project without SRT or contact a maintainer; do not treat the prompt as an executable workflow.
 
 ## From upload to result export
 
@@ -83,14 +83,14 @@ No. Ordinary SRT mainly provides metadata capability hints. It does not replace 
 
 ### Can pure-rotation video recover travel distance?
 
-No. `pure_rotation` does not recover camera translation or scale, and it does not automatically decide whether footage is pure rotation.
+No. `pure_rotation` does not recover camera translation or scale, and it does not automatically decide whether footage is pure rotation; the user must explicitly check “无人机悬停，仅转动视角（实验）” (Drone hovering, view rotation only—experimental) in the portal to select this experimental workflow.
 
 ## Capability boundaries
 
 - The stable primary path is currently `sfm_only`; SRT fusion and full-pose entry points are not yet formal end-to-end workflows.
 - Successful CAD import also depends on file contents and the external conversion capability of the deployment environment.
 - Results must be reviewed by people who understand the site and design intent. Experimental capabilities do not replace engineering survey or professional acceptance.
-- `--root` serves static interface resources, while `--storage-root` serves workflow data and results; maintainers must configure them separately for the deployment.
+- `--root` serves static interface resources, while `--storage-root` serves workflow data and results when separation is needed; maintainers may configure separate roots according to deployment needs.
 
 ## Results and troubleshooting
 

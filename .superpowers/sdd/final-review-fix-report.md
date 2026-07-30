@@ -182,3 +182,45 @@ tests/workflow/test_job_runner_sfm_backend.py: 2 passed
   preventing a decrease after global BA.
 - Review result: no unresolved correctness, scope, or compatibility concerns
   found.
+
+## 2026-07-30 documentation final-review corrections
+
+### Scope
+
+Documentation-only corrections for the final review findings in
+`D:\zjic2026\cadscene_workbench\.worktrees\docs-refresh`.
+
+### Changes
+
+1. Updated both project READMEs to state that `pure_rotation` requires the user
+   to explicitly check “无人机悬停，仅转动视角（实验）” in the portal. It is not
+   automatically detected, and this experimental declaration does not add a
+   general workflow-switching control for ordinary users.
+2. Clarified that the portal CAD chooser accepts DXF/DWG only, while the HTTP
+   API and compatibility import additionally support `design.json` and ZIP.
+3. Added the three maintainer references under `docs/technical/` to the
+   documentation hub's deployment and maintenance section.
+4. Corrected the Unreleased changelog so pre-existing v0.1 SfM backend choice
+   and default are not reported as new. It now records CUDA detection/reporting,
+   mapper progress, bounded bundle adjustment, and CPU fallback improvements.
+5. Made `README_EN.md` describe separate `--storage-root` configuration as
+   optional according to deployment needs.
+6. Documented that `run-stage` accepts the lower-level `pure_rotation` stage
+   while recommending the specialized `/api/pure-rotation/run` endpoint.
+
+### Verification
+
+- Markdown-link scan: passed for all 7 changed Markdown files; every relative
+  repository link resolves.
+- Bilingual structure/status/command check: passed. Both READMEs retain the 6
+  workflow/status tokens and the same single `python -m` command. Focused
+  searches confirmed the explicit portal option in both README files and in the
+  routing reference.
+- Focused final-review text check: passed. It verified the changelog no longer
+  presents the v0.1 SfM backend/default as new, the revised CUDA/progress/BA/
+  CPU-fallback language, the portal-versus-HTTP CAD distinction, the three
+  technical-document links, and the `run-stage`/specialized pure-rotation API
+  guidance.
+- `python -m pytest -q`: passed — 438 passed, 1 deprecation warning, in 27.09s.
+- `git diff --check`: passed with no output.
+- `git diff --check e301148..HEAD`: passed with no output.
