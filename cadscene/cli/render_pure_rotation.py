@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         camera_path = write_camera_path_csv(
             json.loads(track_path.read_text(encoding="utf-8-sig")),
             stage_dir / "pure_rotation_camera_path.csv",
+            origin_xy=tuple(args.origin_xy) if args.origin_xy else (0.0, 0.0),
+            cad_scale=float(args.cad_scale or 1.0),
         )
         output_video = stage_dir / "sfm_align_overlay.mp4"
         config = RenderOverlayConfig(

@@ -6,11 +6,18 @@ from typing import Any, Mapping
 import numpy as np
 
 from cadscene.core.camera import decompose_world_from_camera_rotation
+from cadscene.core.coordinates import web_camera_to_cad_meters
 from cadscene.core.io import write_csv_utf8_sig
 from cadscene.pure_rotation.rotation_matrix import coerce_so3_matrix
 
 
-def write_camera_path_csv(track: Mapping[str, Any], output: str | Path) -> Path:
+def write_camera_path_csv(
+    track: Mapping[str, Any],
+    output: str | Path,
+    *,
+    origin_xy: tuple[float, float],
+    cad_scale: float,
+) -> Path:
     """Convert a fixed-center Pure-Rotation track to the overlay renderer CSV."""
 
     poses = list(track.get("poses") or [])
@@ -27,14 +34,19 @@ def write_camera_path_csv(track: Mapping[str, Any], output: str | Path) -> Path:
             reference_center = center
         elif not np.allclose(center, reference_center, atol=1e-9):
             raise ValueError("pure-rotation camera center must remain fixed")
+        center_m = web_camera_to_cad_meters(
+            {"x": center[0], "y": center[1], "z": center[2]},
+            origin_xy,
+            cad_scale,
+        )
         rotation = coerce_so3_matrix(pose.get("rotation_cad_from_camera"))
         yaw, pitch, roll = decompose_world_from_camera_rotation(rotation)
         rows.append(
             {
                 "frame_index": int(pose["decoded_frame_index"]),
-                "camera_x": float(center[0]),
-                "camera_y": float(center[1]),
-                "camera_z": float(center[2]),
+                "camera_x": center_m[0],
+                "camera_y": center_m[1],
+                "camera_z": center_m[2],
                 "yaw": float(yaw),
                 "pitch": float(pitch),
                 "roll": float(roll),

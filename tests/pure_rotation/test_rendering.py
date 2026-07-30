@@ -37,13 +37,18 @@ def test_write_camera_path_csv_preserves_fixed_center_and_rotation(tmp_path: Pat
         ],
     }
 
-    output = write_camera_path_csv(track, tmp_path / "pure_rotation_camera_path.csv")
+    output = write_camera_path_csv(
+        track,
+        tmp_path / "pure_rotation_camera_path.csv",
+        origin_xy=(501500.0, 3206300.0),
+        cad_scale=0.5,
+    )
 
     with output.open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
     assert [int(row["frame_index"]) for row in rows] == [12, 13]
     assert {(float(row["camera_x"]), float(row["camera_y"]), float(row["camera_z"])) for row in rows} == {
-        (501900.0, 3206400.0, 120.0)
+        (200.0, 50.0, 60.0)
     }
     assert all(float(row["fov"]) == 68.0 for row in rows)
     reconstructed = world_from_camera_rotation(CameraState.from_row(rows[0]))
