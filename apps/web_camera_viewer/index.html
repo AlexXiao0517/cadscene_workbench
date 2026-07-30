@@ -110,7 +110,7 @@
               <button id="workflowFinishKeyframes" type="button">完成关键帧标定</button>
             </div>
             <div class="workflow-actions workflow-hidden-control" id="pureRotationKeyframeActions">
-              <button id="workflowPureFinishKeyframes" type="button">完成标定并生成拟合轨迹</button>
+              <button id="workflowPureFinishKeyframes" type="button">完成调试并进入渲染</button>
             </div>
             <span class="workflow-stage-note" id="workflowKeyframePlanStatus">尚未生成关键帧计划</span>
           </div>
@@ -273,10 +273,10 @@
         <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="悬停旋转关键帧标定">
           <fieldset id="pureRotationPlacementSection">
             <legend>固定相机初始设置</legend>
-            <p>设置整段视频唯一的固定相机位置和当前帧方向；调整立即预览，保存和恢复都不会切换编辑模式。</p>
+            <p>设置整段视频唯一的固定相机位置和当前帧方向；调整立即预览，播放无需确认。完成调试时会自动确认当前设置。</p>
             <div class="button-row">
-              <button id="pureRotationSavePlacement" type="button">保存固定相机设置</button>
-              <button id="pureRotationRestorePlacement" type="button">恢复已保存设置</button>
+              <button id="pureRotationSavePlacement" type="button">确认当前相机位置与方向</button>
+              <button id="pureRotationRestorePlacement" type="button">撤销未确认的调整</button>
             </div>
           </fieldset>
           <fieldset id="pureRotationCorrectionSection">

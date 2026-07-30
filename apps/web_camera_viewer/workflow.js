@@ -427,8 +427,15 @@
   }
 
   async function restorePureRotationPlacement() {
-    if (!pureRotationSavedPlacement) throw new Error("尚未保存全局固定相机放置");
     pureRotationDraftPlacement = null;
+    if (!pureRotationSavedPlacement) {
+      seedPureRotationDraftPlacement();
+      pureRotationFovSource = "unverified_candidate_intrinsics";
+      updatePureRotationFovSource();
+      applyPureRotationPose();
+      message.textContent = "已撤销未确认的调整，恢复进入调试时的相机设置。";
+      return;
+    }
     pureRotationDisplayFov = Number(pureRotationSavedPlacement.fov);
     pureRotationFovSource = "saved_placement";
     updatePureRotationFovSource();
@@ -471,10 +478,13 @@
   }
 
   async function finishPureRotationCalibration() {
+    if (pureRotationEditMode === "placement" || !pureRotationHasPlacement) {
+      await savePureRotationPlacement();
+    }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
     setWorkflowStage("render");
-    message.textContent = "关键帧拟合轨迹已生成，可以预览或开始渲染。";
+    message.textContent = "当前相机设置和关键帧拟合轨迹已保存，可以预览或开始渲染。";
   }
 
   async function previewPureRotationFittedTrack() {

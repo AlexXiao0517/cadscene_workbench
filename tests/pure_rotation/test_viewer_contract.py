@@ -442,5 +442,28 @@ def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> 
         "async function", 1
     )[0]
     assert "pureRotationHasPlacement" in finish_function
+    assert 'pureRotationEditMode === "placement"' in finish_function
+    assert "await savePureRotationPlacement()" in finish_function
     assert "refreshPureRotationFittedPreview" in finish_function
     assert 'setWorkflowStage("render")' in finish_function
+    assert finish_function.index("await savePureRotationPlacement()") < finish_function.index(
+        "await refreshPureRotationFittedPreview()"
+    )
+    assert finish_function.index("await refreshPureRotationFittedPreview()") < finish_function.index(
+        'setWorkflowStage("render")'
+    )
+
+
+def test_pure_rotation_debug_labels_explain_confirmation_and_render_handoff() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert "确认当前相机位置与方向" in html
+    assert "撤销未确认的调整" in html
+    assert "完成调试并进入渲染" in html
+    assert "调整立即预览，播放无需确认" in html
+    restore_function = workflow.split(
+        "async function restorePureRotationPlacement()", 1
+    )[1].split("async function refreshPureRotationFittedPreview", 1)[0]
+    assert "尚未保存全局固定相机放置" not in restore_function
+    assert "seedPureRotationDraftPlacement()" in restore_function
