@@ -299,6 +299,20 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         "function pureRotationPoseAtPts", 1
     )[0]
     assert 'document.querySelector("#cameraToolbar")?.toggleAttribute("hidden", pure)' not in pure_layout
+    for hidden_control in (
+        "resetCamera",
+        "addKeyframe",
+        "deleteKeyframe",
+        "previousKeyframe",
+        "nextKeyframe",
+        "toggleGizmo",
+        "toggleCadText",
+        "exportCamera",
+    ):
+        assert hidden_control in pure_layout
+    toolbar_hiding = pure_layout.split("for (const id of [", 1)[1].split("])", 1)[0]
+    assert "translateMode" not in toolbar_hiding
+    assert "rotateMode" not in toolbar_hiding
 
 
 def test_entering_pure_rotation_calibration_defaults_to_translatable_global_placement() -> None:

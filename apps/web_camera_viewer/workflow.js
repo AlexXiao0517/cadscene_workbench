@@ -143,9 +143,21 @@
     document.querySelectorAll("#viewCurrentSuggestion, #ignoreCurrentSuggestion").forEach((node) => {
       node.toggleAttribute("hidden", pure);
     });
-    for (const id of ["addKeyframe", "deleteKeyframe", "previousKeyframe", "nextKeyframe"]) {
+    for (const id of [
+      "resetCamera",
+      "addKeyframe",
+      "deleteKeyframe",
+      "previousKeyframe",
+      "nextKeyframe",
+      "toggleGizmo",
+      "toggleCadText",
+      "exportCamera",
+    ]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
     }
+    document.querySelectorAll("#cameraToolbar .dev-only-control").forEach((node) => {
+      node.toggleAttribute("hidden", pure);
+    });
     const keyframeStatus = document.querySelector("#workflowKeyframePlanStatus");
     if (pure && keyframeStatus) {
       keyframeStatus.textContent = "先完成固定相机全局放置，再在需要的位置添加姿态关键帧；完成后直接进入渲染导出。";
