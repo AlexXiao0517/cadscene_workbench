@@ -148,6 +148,27 @@ def test_create_upload_and_manifest_api_complete_upload_stage(tmp_path: Path) ->
         server.wait(timeout=5)
 
 
+def test_video_upload_preserves_utf8_filename_for_external_backends(tmp_path: Path) -> None:
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        _json_request(port, "POST", "/api/workflow/create-dataset", {"dataset": "unicode", "runId": "r1"})
+        status, payload = _upload(
+            port,
+            "/api/workflow/upload-video?dataset=unicode&runId=r1",
+            "永康北互通.MP4",
+            b"video-data",
+        )
+
+        assert status == 200
+        assert payload["manifest"]["video"]["original_name"] == "永康北互通.MP4"
+        assert payload["manifest"]["video"]["path"] == "data/unicode/永康北互通.MP4"
+        assert (tmp_path / "data/unicode/永康北互通.MP4").is_file()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_upload_zip_rejects_zip_slip_and_dxf_is_parsed(tmp_path: Path) -> None:
     port = _free_port()
     server = _start_server(tmp_path, port)

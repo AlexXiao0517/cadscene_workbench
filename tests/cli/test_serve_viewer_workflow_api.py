@@ -72,6 +72,25 @@ def test_server_root_redirects_to_workflow_portal(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_pure_rotation_options_use_configured_source_root_as_readonly_input(tmp_path: Path) -> None:
+    from cadscene.cli.serve_viewer import pure_rotation_options
+
+    source = tmp_path / "source"
+    source.mkdir()
+    resolved = pure_rotation_options(
+        {"options": {"force": True}},
+        {"source": source},
+    )
+    assert resolved["force"] is True
+    assert resolved["cadscene_readonly"] == str(source.resolve())
+
+    explicit = pure_rotation_options(
+        {"options": {"cadscene_readonly": "C:/explicit"}},
+        {"source": source},
+    )
+    assert explicit["cadscene_readonly"] == "C:/explicit"
+
+
 def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:
     (tmp_path / "runs/demo/r1").mkdir(parents=True)
     port = _free_port()

@@ -58,6 +58,14 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def pure_rotation_options(payload: dict, extra_roots: dict[str, Path]) -> dict:
+    options = dict(payload.get("options") or {})
+    source_root = extra_roots.get("source")
+    if source_root is not None and not options.get("cadscene_readonly"):
+        options["cadscene_readonly"] = str(Path(source_root).resolve())
+    return options
+
+
 class RangeRequestHandler(SimpleHTTPRequestHandler):
     server_version = "CadsceneViewerHTTP/0.1"
 
@@ -143,6 +151,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         filename = disposition.get_filename()
         if field_name != "file" or not filename:
             raise ValueError("missing multipart field: file")
+        try:
+            filename = filename.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
 
         temporary = tempfile.TemporaryFile(mode="w+b")
         marker = b"\r\n--" + boundary
@@ -353,7 +365,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 manifest = load_dataset_manifest(self.server.root_dir, dataset)
                 if (manifest.get("workflow") or {}).get("trajectory_mode") != "pure_rotation":
                     raise ValueError("dataset is not routed to pure_rotation")
-                result = {"ok": True, **runner.start_stage(dataset, run_id, "pure_rotation", payload.get("options") or {})}
+                options = pure_rotation_options(payload, getattr(self.server, "extra_roots", {}))
+                result = {"ok": True, **runner.start_stage(dataset, run_id, "pure_rotation", options)}
             elif route == "/api/pure-rotation/placement":
                 raw_path = run_dir / "02_pure_rotation" / "camera_rotation_raw.json"
                 if not raw_path.exists():
