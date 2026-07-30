@@ -48,6 +48,7 @@
   let pureRotationWorldYawDeg = 0;
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
   let focusPureRotationCameraOnce = true;
+  let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -832,10 +833,22 @@
         ready: payload.status === "success",
         running: isRunning,
       });
-      if (payload.status === "success") {
-        await initializePureRotationViewer();
-        sessionStorage.setItem(restoredWorkflowStageKey(), "keyframes");
-        setWorkflowStage("keyframes");
+      const completionKey = String(stages.sfm?.updated_at || payload.updated_at || "success");
+      if (
+        payload.status === "success"
+        && pureRotationHandledCompletion !== completionKey
+      ) {
+        pureRotationHandledCompletion = completionKey;
+        try {
+          await initializePureRotationViewer();
+          sessionStorage.setItem(restoredWorkflowStageKey(), "keyframes");
+          if (!selectedWorkflowStage || selectedWorkflowStage === "sfm") {
+            setWorkflowStage("keyframes");
+          }
+        } catch (error) {
+          pureRotationHandledCompletion = null;
+          throw error;
+        }
       }
     }
     await refreshQualityArtifactsAfterSuccess(payload);
