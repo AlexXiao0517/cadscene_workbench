@@ -1,24 +1,51 @@
 # Roadmap
 
-This roadmap describes planned milestones only; no items below are part of the v0.1.0 baseline.
+This document separates functionality already present in the workbench from
+work that is still future work. It is not a release promise.
 
-## v0.2.0
+## Current baseline
 
-- COLMAP CUDA backend.
+- The upload portal, dataset manifest, conservative SRT capability detection,
+  and route prompts are available now.
+- `sfm_only` is **Stable** and is the only stable end-to-end JobRunner route.
+- `pure_rotation` is **Experimental**. It can run the external OpenGV
+  rotation-recovery backend, then use manual placement and local pose
+  corrections. The camera centre is fixed: translation and scale are not
+  recovered.
+- The partial-SRT core is **Experimental CLI** functionality: PTS timing,
+  local ENU conversion, robust Sim3 estimation, and fusion helpers are
+  available outside the formal JobRunner route.
+- The `srt_sfm_fused` portal route is **Interface only**. Upload and analysis
+  work, but the server blocks formal workflow-stage execution.
+- `srt_full_pose` is **Interface only**; no end-to-end full-pose workflow is
+  available.
+- SfM CUDA is **Optional**. The default route is `pycolmap + cpu`; CUDA is
+  limited to supported feature extraction and matching, and falls back to CPU
+  when its capability cannot be confirmed.
 
-## v0.3.0
+The portal and viewer can keep workflow data under `--storage-root` while
+serving static files from `--root`. Guided standard runs include initial route
+fitting, a keyframe plan, final route fitting, quality inspection, and render
+export. If CAD contains no usable road centreline, road-surface diagnostics are
+recorded as skipped rather than treated as a failed render.
 
-- Stage 6A upload analysis and automatic routing across `sfm_only`,
-  `srt_sfm_fused`, and `srt_full_pose`.
-- Video and CAD remain required; SRT is optional. Conservative metadata
-  detection chooses the interface branch but is not an accuracy/truth claim.
-- `sfm_only` is ready without SRT. The two SRT branches remain
-  `interface_only` until their execution algorithms are delivered.
+## Planned work
 
-## v0.4.0
+### Formal SRT/SfM integration
 
-- Execute the partial-SRT/SfM fusion workflow currently exposed as an interface.
+Connect the experimental partial-SRT core to a supported JobRunner route only
+after its time synchronization, quality gates, failure handling, and manual
+SfM-CAD alignment workflow have been validated. Ordinary SRT metadata will
+remain supplementary evidence, not precision position, attitude, or CAD
+elevation truth.
 
-## v0.5.0
+### Full-pose SRT workflow
 
-- Execute the full-pose SRT workflow currently exposed as an interface.
+Implement and validate an end-to-end `srt_full_pose` route. Capability
+detection alone is not execution, and must not be used as an accuracy claim.
+
+### Broader acceleration validation
+
+Validate optional CUDA installations and quality/performance trade-offs across
+supported COLMAP/pycolmap configurations. Mapping and global bundle adjustment
+are not advertised as GPU processing.

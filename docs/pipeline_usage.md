@@ -1,5 +1,16 @@
 # run_pipeline 使用说明
 
+`run_pipeline` 是面向维护和批处理的命令行入口；日常项目操作从工作流门户开始：
+
+```text
+http://127.0.0.1:8300/apps/workflow_portal/index.html
+```
+
+门户的稳定端到端路径是 `sfm_only`（**Stable**）。`pure_rotation` 是
+**Experimental**，partial-SRT core 是 **Experimental CLI**；
+`srt_sfm_fused` 和 `srt_full_pose` 门户路由均为 **Interface only**，不能通过
+JobRunner 启动。不要用 SRT 的检测标签替代本节所述的 SfM、人工关键帧和质量验证。
+
 `v0.1-sfm-workbench` 提供两条 pipeline：
 
 - `sfm_overlay_existing_sfm.yaml`：消费已有 `camera_trajectory.json` 和
@@ -11,6 +22,10 @@
 
 完整流程需要原始视频、web viewer keyframe track、CAD assets、`cad_scale` 和
 `origin_xy`。SfM 阶段默认无 mask；DINOv3 segmentation 尚未迁移。
+
+人工关键帧应包含经确认的相机视场角（FOV）。当重建内参或几何不可靠时，彼此一致的
+已确认人工关键帧 FOV 优先于重建 FOV；不要把 SfM 或普通 SRT 元数据宣传为必然准确的
+FOV 来源。
 
 ## dry-run
 
@@ -81,12 +96,40 @@ pipeline 结束后查看 `reports/viewer_url.txt`，并先启动：
 python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
 ```
 
+服务的 `--root` 是静态站点根；`--storage-root` 是 workflow 的 `data/` 与 `runs/`
+根，默认继承 `--root`。部署时若把两者分开，先建立存储目录，再显式指定：
+
+```powershell
+python -m cadscene.cli.serve_viewer `
+  --root . `
+  --storage-root D:\cadscene-storage `
+  --bind 127.0.0.1 --port 8300
+```
+
+分离后浏览器仍通过 `/data/` 和 `/runs/` 读取存储根内容；不要用 `--extra-root`
+代替工作流存储根。
+
+## 引导式关键帧与质量
+
+门户中的标准顺序是：先保存至少两个已确认人工关键帧并完成初步路线拟合；再生成关键
+帧计划，逐项完成计划帧的人工标定，最后重新路线拟合并运行质量检测。计划中的待标定帧
+不会自动计入人工锚点。质量检测会校验计划已完成且其后已重新路线拟合，因此不能跳过
+这两个条件直接运行 quality。
+
+`road_surface` 是 quality 路径中的可选诊断阶段。当 CAD 没有可用道路中心线时，运行
+manifest 会将它标为 `skipped`；这不是对齐、质量或渲染成功的替代证明。可用时，诊断
+场景写入 `06_road_surface/viewer_diagnostics_scene.json`。
+
 ## 常见错误
 
 - 缺少视频：检查 dataset config 的 `video_path` 或 `--video`。
 - 缺少 pycolmap：切换到 difusser 环境并安装 `cadscene-workbench[sfm]`。
 - CAD 对齐异常：核对 `cad_scale` 和 `origin_xy`。
+- FOV 与画面对不上：优先检查人工关键帧中已确认且一致的 FOV；若重建 FOV 不可靠，
+  使用人工值复核，不要用普通 SRT 修正。
 - viewer URL 无法打开：必须通过 `serve_viewer`，不要使用 `file://`。
+- 质量检测被拒绝：先完成关键帧计划，再重新路线拟合。
+- 道路诊断显示跳过：检查 CAD 是否有可用道路中心线；其余质量/渲染结果应单独判断。
 - render 失败：检查视频编码和 OpenCV MP4 writer 支持。
 
 ## 当前限制

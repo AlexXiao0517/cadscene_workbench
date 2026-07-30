@@ -8,6 +8,19 @@ python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
 
 请通过 HTTP 服务访问 viewer，不要直接用 `file://` 打开。视频拖动依赖 HTTP Range 请求。
 
+`--root` 提供静态页面；`--storage-root` 提供项目的 `data/` 和 `runs/`，默认与
+`--root` 相同。若部署时两者分开，存储目录必须预先存在：
+
+```powershell
+python -m cadscene.cli.serve_viewer `
+  --root . `
+  --storage-root D:\cadscene-storage `
+  --bind 127.0.0.1 --port 8300
+```
+
+分离后服务会把存储根映射为 `/data/` 与 `/runs/`，供 Viewer 和工作流 API 使用。
+`--extra-root` 只用于只读旧数据兼容，不能作为 workflow 写入位置。
+
 推荐把 demo 数据整理到新项目的 `data/` 目录下，例如：
 
 ```text
@@ -32,7 +45,10 @@ viewer 会按 `runs/<dataset>/<run_id>/` 推导：
 - `05_viewer_scene/sfm_viewer_scene.json`
 - `06_road_surface/viewer_diagnostics_scene.json`
 
-`dataset + runId` 主要负责推导 `runs/` 输出；视频和 CAD 仍需要在 `/data/` 下存在，或通过显式 URL 参数传入。
+`dataset + runId` 会推导 `runs/` 输出。若该数据集有可读的 manifest，工作流脚本还会
+恢复 manifest 中的视频、CAD、`cadScale` 和 `originXY`，并把缺失的 URL 参数补到地址
+栏；这让门户创建的数据集可直接进入 Viewer。manifest 不存在或资源已移动时，Viewer
+才回退到默认 `/data/<dataset>/...` 路径或显式 URL 参数。
 
 ## 显式传入文件
 
@@ -72,6 +88,10 @@ cad=/legacy/out/...
 - SfM 点云只读展示，RGB 按 0..255 整数解释。
 - diagnostics scene 只读展示 road points、profile、keyframe residuals 和 warnings。
 - 点云和 global track 只使用 global sim3；anchored path 来自分段锚定结果，二者不完全重合是正常现象。
+- 已确认且一致的人工关键帧 FOV 优先于不可靠的上游 SfM 重建 FOV；Viewer 的提示会说明
+  该人工覆盖，不能据此推断 SRT 或 SfM 的绝对精度。
+- `pure_rotation` 是 Experimental 工作流：它固定相机中心，只恢复旋转，随后由人工全局
+  放置和局部姿态校正进入渲染；不恢复平移或尺度。
 
 ## 常见问题
 
@@ -80,3 +100,8 @@ cad=/legacy/out/...
 - 建议帧不显示：检查 `suggestions` 参数或 `04_quality/keyframe_suggestions.json` 是否存在。
 - 质量色带不显示：检查 `qualityTimeline` 参数或 `04_quality/quality_timeline.csv` 是否存在。
 - anchored path 与点云不重合：点云/global track 只用 global sim3，anchored path 是分段锚定结果。
+- 门户进入 Viewer 后视频或 CAD 丢失：确认 `dataset` 指向的 manifest 仍存在于同一
+  `--storage-root`，然后刷新页面以恢复 manifest URL；旧数据可用显式 Web 路径或只读
+  `--extra-root` 挂载。
+- 道路诊断不显示：检查 `06_road_surface/viewer_diagnostics_scene.json`；若 run manifest
+  将 `road_surface` 标为 `skipped`，通常是 CAD 没有可用道路中心线，并非 Viewer 故障。

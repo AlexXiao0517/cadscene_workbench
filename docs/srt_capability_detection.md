@@ -1,29 +1,47 @@
 # SRT 能力检测
 
-SRT 是可选输入。系统只解析 DJI 风格字幕中的位置、 高度和姿态字段，用于保守地选择接口模式；**SRT 不是高精度轨迹或相机姿态真值**，不能据此跳过 SfM、人工关键帧标定、SfM-CAD 对齐和质量检查。
+SRT 是可选输入。系统只解析 DJI 风格字幕中的位置、高度和姿态字段，以保守地选择
+接口分支；**SRT 不是高精度轨迹、相机姿态或 CAD 高程真值**，不能据此跳过 SfM、
+人工关键帧标定、SfM-CAD 对齐和质量检查。
 
 ## 识别字段
 
 - 位置：`latitude`、`longitude`（兼容 `lat`、`lon`、`lng` 和常见别名）。
 - 高度：`altitude`、`height`、`relalt`、`absalt` 等别名。
-- 相机姿态：`gimbal_yaw`、`gimbal_pitch`、`gimbal_roll`，也识别 `GBYaw`、`CameraYaw` 等别名。
-- 飞行器姿态：`drone_*` 或 `aircraft_*`。它不是云台/相机姿态，不能单独判定完整相机姿态。
+- 相机姿态：`gimbal_yaw`、`gimbal_pitch`、`gimbal_roll`，也识别 `GBYaw`、
+  `CameraYaw` 等别名。
+- 飞行器姿态：`drone_*` 或 `aircraft_*`。它不是云台/相机姿态，不能单独判定完整
+  相机姿态。
 
 ## 保守判定规则
 
-检测只接受有限的、可转换为数值的记录。至少需要 2 条记录；位置经纬度和高度各自的有效覆盖率都必须达到 **80%**，才会认为存在可用于 `srt_sfm_fused` 的遥测轨迹。若 GPS 或高度不足、SRT 无法解析或没有有效记录，则回退 `sfm_only` 并写入警告。
+检测只接受有限的、可转换为数值的记录，且至少需要两条记录。位置经纬度和高度各自
+的有效覆盖率都必须达到 **80%**，才会识别为 `srt_sfm_fused` 接口分支。GPS 或高度
+不足、SRT 无法解析或没有有效记录时，系统回退 `sfm_only` 并写入警告。
 
-`srt_full_pose` 的门槛更高：在上述轨迹条件之外，云台 yaw/pitch/roll 各自覆盖率必须达到 **80%**，且 GPS、 高度和三个云台角在同一记录中共同出现的覆盖率也必须达到 **80%**。仅有飞行器姿态、姿态字段零散出现或来源不明时，最多判为 `srt_sfm_fused`，不会提升为完整姿态。
+`srt_full_pose` 的门槛更高：除轨迹条件外，云台 yaw/pitch/roll 各自覆盖率和 GPS、
+高度、三个云台角共同出现的覆盖率都必须达到 **80%**。仅有飞行器姿态、姿态字段
+零散出现或来源不明时，最多识别为 `srt_sfm_fused`，不会提升为完整姿态。
 
-若提供视频时长，检测会对比 SRT 的末尾时间；偏差超过 1 秒或视频时长的 10%（取较大者）时产生警告，但不会凭此把一个已满足字段门槛的模式升级或降级。
+若提供视频时长，检测会对比 SRT 末尾时间；偏差超过 1 秒或视频时长的 10%（取较大
+者）会产生警告，但不会据此升级或降级一个已满足字段门槛的分支。
 
-## 输出与限制
+## 输出、状态与边界
 
-分析结果保存为 `srt_analysis.json` 和 `srt_analysis_report.md`，包含检测模式、每个字段的覆盖率、完整姿态共同覆盖率、云台/飞行器姿态来源和警告。结果仅说明“元数据字段足以进入哪种接口分支”，不说明坐标系、时间同步、测量精度、云台安装误差或与 CAD 的一致性。
+结果保存为 `srt_analysis.json` 和 `srt_analysis_report.md`，包含检测模式、字段覆盖率、
+完整姿态共同覆盖率、云台/飞行器姿态来源和警告。结果只说明“元数据字段足以进入哪种
+接口分支”，不说明坐标系、时间同步、测量精度、云台安装误差或与 CAD 的一致性。
 
-目前只有 `sfm_only` 为 `ready`。`srt_sfm_fused` 与 `srt_full_pose` 均为 `interface_only`：系统可以显示检测结果，但不会执行融合或 SRT 直接姿态路线。任何精度结论必须来自既有 SfM-CAD 对齐和质量诊断，而不是 SRT 检测标签。
-# Stage 6B-1 补充：Partial-SRT 融合核心
+当前状态如下：
 
-`sfm_only` 仍是稳定可用流程。`srt_sfm_fused` 现在具有实验性后端融合 CLI：它仍需要 SfM、PTS 时间同步、质量门控和人工关键帧到 CAD 的对齐；正式 Job Runner 路由尚未接入。`srt_full_pose` 仍为 `interface_only`。
+| 能力 | 状态 | 边界 |
+| --- | --- | --- |
+| `sfm_only` | **Stable** | 唯一稳定的端到端正式工作流。 |
+| partial-SRT core | **Experimental CLI** | 可处理 PTS、局部 ENU、稳健 Sim3 和融合核心，但尚未接入 JobRunner。 |
+| `srt_sfm_fused` portal route | **Interface only** | 检测和提示可用；服务阻止正式 workflow 启动。 |
+| `srt_full_pose` | **Interface only** | 没有端到端执行。 |
 
-Partial-SRT 融合不会把普通 SRT 当作 CAD 绝对高程真值：East/North 使用 WGS84 局部 ENU，Up 单独记录为 `rel_alt` 或 `abs_alt` 的相对变化。融合失败时应明确回退 `sfm_only`，而不是写出伪造轨迹。`fusion_confidence` 只表示内部一致性，不代表绝对定位精度。
+Partial-SRT 融合仍需要 SfM、PTS 时间同步、质量门控和人工关键帧到 CAD 的对齐。它在
+WGS84 局部 ENU 中处理 East/North，Up 仅保留为 `rel_alt` 或 `abs_alt` 的相对变化；
+融合失败时应明确回退 `sfm_only`，而不是写出伪造轨迹。`fusion_confidence` 只表示
+内部一致性，不代表绝对定位精度。

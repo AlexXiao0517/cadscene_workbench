@@ -1,30 +1,50 @@
 # 上传工作流与轨迹路由
 
-Stage 6A 提供上传入口和自动轨迹工作流路由。它先保存并检查输入，再把检测结果写入数据集清单；路由结果不会替代人工标定、质量检查或对齐验证。
+上传门户会先保存并检查输入，再把保守的路由结果写入数据集清单。路由不会替代人工
+关键帧、SfM-CAD 对齐或质量检查，也不会把普通 SRT 元数据当作精确位置、姿态或
+CAD 高程真值。
 
-## 输入与上传顺序
+## 入口与输入
 
-- **视频**：必传。支持本地 MP4、MOV、AVI、MKV。
-- **CAD**：必传。可上传 `design.json`、DXF、DWG 或包含 CAD assets 的 ZIP；只有 CAD 解析为可用 assets 后，数据集才可运行。
-- **SRT 遥测**：选传。上传后仅做解析和能力检测，不上传也不影响已可用的无 SRT 流程。
+启动本地服务后，从门户创建项目：
 
-门户会先创建数据集，再依次上传视频、CAD 和（可选）SRT。随后进入 Viewer；实际 SfM、关键帧人工标定、SfM-CAD 对齐和质量检查仍由既有流程执行。调试模式可以显示模式覆盖选项，但它不能把尚未实现的能力变成可执行流程。
+```text
+http://127.0.0.1:8300/apps/workflow_portal/index.html
+```
 
-## 自动路由结果
+- **视频**：必传，支持本地 MP4、MOV、AVI、MKV。
+- **CAD**：必传，可上传 `design.json`、DXF、DWG 或包含 CAD assets 的 ZIP；只有
+  CAD 解析为可用 assets 后，数据集才能运行。
+- **SRT 遥测**：选传。上传后只做解析和能力检测；不上传不影响稳定的无 SRT 流程。
 
-| `trajectory_mode` | 触发条件 | 当前状态 | 可执行含义 |
+门户先创建数据集，再上传视频、CAD 和可选 SRT，显示检测结果后进入 Viewer。调试
+界面可以显示模式覆盖选项，但不能把未实现的路线变为可执行流程。
+
+## 当前路由状态
+
+| 路由或能力 | 触发条件 | 状态 | 当前行为 |
 | --- | --- | --- | --- |
-| `sfm_only` | 未上传 SRT、SRT 无法解析，或定位/高度覆盖不足 | `ready` | 已真实可用：沿用无 SRT 的 SfM、人工关键帧和 SfM-CAD 对齐流程。 |
-| `srt_sfm_fused` | SRT 具备足够的 GPS 与高度轨迹，但不满足完整相机姿态条件 | `interface_only` | 只完成上传、分析、清单和界面提示；SRT/SfM 融合算法尚未启用，不能启动该路线。 |
-| `srt_full_pose` | SRT 具备足够的 GPS、 高度与完整云台相机姿态 | `interface_only` | 只完成上传、分析、清单和界面提示；直接以 SRT 完整姿态驱动的流程尚未启用，不能启动该路线。 |
+| `sfm_only` | 无 SRT、SRT 无法解析，或定位/高度覆盖不足 | **Stable** | 当前唯一稳定的 JobRunner 端到端路径：SfM、人工关键帧、路线拟合、质量和渲染。 |
+| `pure_rotation` | 用户声明悬停旋转且没有 SRT 路由优先级 | **Experimental** | 运行外部 OpenGV 旋转恢复，再人工全局放置和局部姿态校正；固定相机中心，不恢复平移或尺度。 |
+| partial-SRT core | 独立命令行使用 | **Experimental CLI** | 可做 PTS 时间同步、局部 ENU、稳健 Sim3 和融合辅助；尚未接入正式 JobRunner。 |
+| `srt_sfm_fused` portal route | SRT 有足够 GPS 与高度，未满足完整相机姿态 | **Interface only** | 上传、分析和提示可用；HTTP 服务拒绝启动正式工作流阶段。 |
+| `srt_full_pose` | SRT 有足够 GPS、高度与完整云台相机姿态 | **Interface only** | 上传、分析和提示可用；没有端到端执行任务。 |
 
-当模式为 `interface_only` 时，服务会阻止工作流阶段启动并提示功能待启用，避免把未实现接口误当成结果。无 SRT 的 `sfm_only` 才是当前可运行的稳定路径。
+SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹配）保留在分析报告中。
+字段和阈值见 [SRT 能力检测](srt_capability_detection.md)。
 
-## 清单状态
+## 稳定路径中的关键帧
 
-数据集的 `dataset_manifest.json` 保存 `workflow.trajectory_mode`、`workflow.implementation_status` 和 SRT 分析摘要。SRT 检测异常会回退到 `sfm_only`；解析出的警告（例如时长不匹配）会保留在分析报告中，供人工复核。
+对 `sfm_only`，先完成至少两个已确认的人工关键帧并运行初步路线拟合。随后使用
+“生成关键帧计划”按间隔创建待标定帧；待标定帧不会自动成为人工锚点。逐帧保存计划
+中的人工标定后，选择“完成关键帧标定”进行最终路线拟合，才可进入质量检测。
 
-详细的字段识别和阈值见 [SRT 能力检测](srt_capability_detection.md)。
-# Stage 6B-1：Partial-SRT 融合核心
+如果重建内参或几何不可靠，已确认且彼此一致的人工关键帧 FOV 优先于重建 FOV。FOV
+是人工核对的一部分，不是 SRT 或 SfM 自动结果的精度承诺。
 
-`srt_sfm_fused` 现有独立命令行融合核心，尚未接入正式 Job Runner。它通过 PTS 优先的帧时间表将 SRT 映射到 SfM 注册帧，在局部 ENU 中估计 SfM→SRT Sim3，再以 SRT 低频残差修正 SfM 位置；相机旋转始终来自 SfM。输出仍需进入既有人工关键帧与 `align_to_cad` 流程，不能把 SRT 默认视为高精度轨迹真值或 CAD 绝对高程。
+## 存储与恢复
+
+`--root` 提供静态页面，`--storage-root` 提供 workflow 的 `data/` 和 `runs/`。
+二者分离时，服务把存储根中的数据映射为 `/data/` 和 `/runs/`；额外根仅用于只读
+旧数据兼容，不能改变工作流写入位置。任务异常时，从同一 `dataset + runId` 的状态、
+阶段日志和已有产物判断恢复点；Interface-only 路由不能作为可恢复的已执行任务。
