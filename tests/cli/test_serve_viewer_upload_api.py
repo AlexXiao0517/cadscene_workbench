@@ -23,19 +23,22 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _start_server(root: Path, port: int) -> subprocess.Popen:
+def _start_server(root: Path, port: int, storage_root: Path | None = None) -> subprocess.Popen:
+    command = [
+        sys.executable,
+        "-m",
+        "cadscene.cli.serve_viewer",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--root",
+        str(root),
+    ]
+    if storage_root is not None:
+        command += ["--storage-root", str(storage_root)]
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "cadscene.cli.serve_viewer",
-            "--bind",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--root",
-            str(root),
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -54,6 +57,44 @@ def _start_server(root: Path, port: int) -> subprocess.Popen:
             time.sleep(0.1)
     process.kill()
     raise AssertionError("server did not start")
+
+
+def test_upload_and_static_get_use_separate_storage_root(tmp_path: Path) -> None:
+    static_root = tmp_path / "static"
+    storage_root = tmp_path / "storage"
+    static_root.mkdir()
+    storage_root.mkdir()
+    port = _free_port()
+    server = _start_server(static_root, port, storage_root)
+    try:
+        status, _ = _json_request(
+            port,
+            "POST",
+            "/api/workflow/create-dataset",
+            {"dataset": "demo", "runId": "r1"},
+        )
+        assert status == 200
+        status, payload = _upload(
+            port,
+            "/api/workflow/upload-video?dataset=demo&runId=r1",
+            "flight.mp4",
+            b"video-data",
+        )
+        assert status == 200
+        assert payload["manifest"]["video"]["path"] == "data/demo/flight.mp4"
+        assert (storage_root / "data/demo/flight.mp4").read_bytes() == b"video-data"
+        assert (storage_root / "runs/demo/r1/job_status.json").is_file()
+        assert not (static_root / "data/demo/flight.mp4").exists()
+
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/data/demo/flight.mp4")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.read() == b"video-data"
+        conn.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
 
 
 def _json_request(port: int, method: str, route: str, payload: dict | None = None) -> tuple[int, dict]:

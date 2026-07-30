@@ -26,6 +26,18 @@ def test_serve_viewer_help_runs() -> None:
     assert "--port" in result.stdout
 
 
+def test_build_parser_accepts_storage_root() -> None:
+    args = serve_viewer.build_parser().parse_args(["--storage-root", "storage"])
+
+    assert args.storage_root == "storage"
+
+
+def test_main_returns_one_for_missing_storage_root(tmp_path: Path) -> None:
+    missing_storage_root = tmp_path / "missing-storage"
+
+    assert serve_viewer.main(["--root", str(tmp_path), "--storage-root", str(missing_storage_root)]) == 1
+
+
 def test_viewer_server_exclusively_owns_its_port() -> None:
     server_class = getattr(serve_viewer, "ViewerHTTPServer", ThreadingHTTPServer)
     first = server_class(("127.0.0.1", 0), serve_viewer.RangeRequestHandler)

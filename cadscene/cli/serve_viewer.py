@@ -58,6 +58,10 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _storage_root(server: ThreadingHTTPServer) -> Path:
+    return Path(getattr(server, "storage_root_dir", getattr(server, "root_dir", project_root()))).resolve()
+
+
 def pure_rotation_options(payload: dict, extra_roots: dict[str, Path]) -> dict:
     options = dict(payload.get("options") or {})
     source_root = extra_roots.get("source")
@@ -186,7 +190,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             return
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
             raise ValueError("invalid run_id")
-        run_dir = Path(self.server.root_dir).resolve() / "runs" / dataset / run_id
+        run_dir = _storage_root(self.server) / "runs" / dataset / run_id
         ready = manifest.get("status") == "ready"
         failed = manifest.get("status") == "failed" or (manifest.get("cad") or {}).get("status") == "failed"
         video_ready = bool((manifest.get("video") or {}).get("path"))
@@ -249,7 +253,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             "CAD 解析完成": 0.95,
             "CAD 解析失败": 0.5,
         }
-        run_dir = Path(self.server.root_dir).resolve() / "runs" / dataset / run_id
+        run_dir = _storage_root(self.server) / "runs" / dataset / run_id
         failed = message == "CAD 解析失败"
         JobStatusStore(run_dir / "job_status.json", run_id=run_id).update_stage(
             "upload",
@@ -269,7 +273,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def _workflow_run_dir(self, payload: dict, *, create: bool = False) -> Path:
         dataset, run_id = self._workflow_identity(payload)
-        root = Path(getattr(self.server, "root_dir", project_root())).resolve()
+        root = _storage_root(self.server)
         run_dir = (root / "runs" / dataset / run_id).resolve()
         runs_root = (root / "runs").resolve()
         if runs_root not in run_dir.parents:
@@ -306,7 +310,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             if route == "/api/workflow/create-dataset":
                 payload = self._read_json_body()
                 manifest = create_dataset(
-                    self.server.root_dir,
+                    _storage_root(self.server),
                     str(payload.get("dataset", "")),
                     cad_scale=float(payload.get("cadScale", 0.06)),
                     origin_xy=(
@@ -330,12 +334,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 filename, stream = self._multipart_upload()
                 try:
                     if route.endswith("upload-video"):
-                        manifest = import_video(self.server.root_dir, dataset, filename, stream)
+                        manifest = import_video(_storage_root(self.server), dataset, filename, stream)
                     elif route.endswith("upload-srt"):
-                        manifest = import_srt(self.server.root_dir, dataset, filename, stream)
+                        manifest = import_srt(_storage_root(self.server), dataset, filename, stream)
                     else:
                         manifest = import_cad(
-                            self.server.root_dir,
+                            _storage_root(self.server),
                             dataset,
                             filename,
                             stream,
@@ -345,7 +349,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     stream.close()
                 self._update_upload_status(dataset, run_id, manifest)
                 if route.endswith("upload-srt"):
-                    analysis = load_srt_analysis(self.server.root_dir, dataset)
+                    analysis = load_srt_analysis(_storage_root(self.server), dataset)
                     self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
                 else:
                     self._json_response(HTTPStatus.OK, {"ok": True, "manifest": manifest})
@@ -362,7 +366,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             )
             runner: JobRunner = self.server.job_runner
             if route == "/api/pure-rotation/run":
-                manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                manifest = load_dataset_manifest(_storage_root(self.server), dataset)
                 if (manifest.get("workflow") or {}).get("trajectory_mode") != "pure_rotation":
                     raise ValueError("dataset is not routed to pure_rotation")
                 options = pure_rotation_options(payload, getattr(self.server, "extra_roots", {}))
@@ -402,7 +406,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
                 try:
-                    manifest = load_dataset_manifest(self.server.root_dir, dataset)
+                    manifest = load_dataset_manifest(_storage_root(self.server), dataset)
                 except FileNotFoundError:
                     # Preserve legacy direct-run compatibility for no-SRT datasets.
                     manifest = {}
@@ -422,7 +426,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 camera_track = payload.get("cameraTrack")
                 if not isinstance(camera_track, dict):
                     raise ValueError("cameraTrack must be a JSON object")
-                output = save_camera_track(self.server.root_dir, dataset, run_id, camera_track)
+                output = save_camera_track(_storage_root(self.server), dataset, run_id, camera_track)
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/workflow/generate-keyframe-plan":
                 if not (run_dir / "03_alignment" / "alignment.json").exists():
@@ -490,20 +494,20 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/workflow/list-datasets":
                 self._json_response(
                     HTTPStatus.OK,
-                    {"ok": True, "datasets": list_datasets(self.server.root_dir)},
+                    {"ok": True, "datasets": list_datasets(_storage_root(self.server))},
                 )
                 return
             if parsed.path == "/api/workflow/dataset-manifest":
                 dataset = slugify_dataset_name((query.get("dataset") or [""])[0])
                 self._json_response(
                     HTTPStatus.OK,
-                    {"ok": True, "manifest": load_dataset_manifest(self.server.root_dir, dataset)},
+                    {"ok": True, "manifest": load_dataset_manifest(_storage_root(self.server), dataset)},
                 )
                 return
             if parsed.path == "/api/workflow/srt-analysis":
                 dataset = slugify_dataset_name(self._query_value("dataset", required=True))
-                manifest = load_dataset_manifest(self.server.root_dir, dataset)
-                analysis = load_srt_analysis(self.server.root_dir, dataset)
+                manifest = load_dataset_manifest(_storage_root(self.server), dataset)
+                analysis = load_srt_analysis(_storage_root(self.server), dataset)
                 self._json_response(HTTPStatus.OK, self._srt_api_payload(dataset, manifest, analysis))
                 return
             payload = {
@@ -622,6 +626,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8300)
     parser.add_argument("--root", default=str(project_root()))
+    parser.add_argument(
+        "--storage-root",
+        default=None,
+        help="Store workflow data and runs under this root; defaults to --root.",
+    )
     parser.add_argument("--extra-root", action="append", default=[], metavar="NAME=PATH", help="Mount an additional read-only root, for example legacy=D:\\data.")
     return parser
 
@@ -642,14 +651,25 @@ def parse_extra_roots(items: list[str]) -> dict[str, Path]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root).resolve()
+    storage_root = Path(args.storage_root).resolve() if args.storage_root else root
     if not root.exists():
         print(f"root not found: {root}", file=sys.stderr)
+        return 1
+    if not storage_root.exists():
+        print(f"storage root not found: {storage_root}", file=sys.stderr)
         return 1
     try:
         extra_roots = parse_extra_roots(args.extra_root)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    if storage_root != root and {"data", "runs"} & extra_roots.keys():
+        print("--extra-root names data and runs are reserved when --storage-root differs from --root", file=sys.stderr)
+        return 1
+    served_roots = dict(extra_roots)
+    if storage_root != root:
+        served_roots["data"] = storage_root / "data"
+        served_roots["runs"] = storage_root / "runs"
     try:
         server = ViewerHTTPServer((args.bind, args.port), RangeRequestHandler)
     except OSError as exc:
@@ -659,11 +679,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     server.root_dir = root
-    server.extra_roots = extra_roots
-    server.job_runner = JobRunner(root)
+    server.storage_root_dir = storage_root
+    server.extra_roots = served_roots
+    server.job_runner = JobRunner(storage_root)
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"
     print(f"Serving {root}")
-    for name, path in extra_roots.items():
+    for name, path in served_roots.items():
         print(f"Extra root /{name}/ -> {path}")
     print(f"Viewer URL: {url}")
     try:
