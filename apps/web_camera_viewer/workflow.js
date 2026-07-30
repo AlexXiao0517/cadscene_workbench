@@ -745,8 +745,11 @@
     } else if (stage === "render" && latestJobStatus?.status !== "running") {
       renderProgressState = null;
     }
-    if (
+    if (stage === "keyframes" && isPureRotationWorkflow()) {
+      message.textContent = "悬停旋转调试：移动固定相机并调整姿态；播放检查旋转效果，完成后直接进入渲染导出。";
+    } else if (
       stage === "keyframes" &&
+      !isPureRotationWorkflow() &&
       !stageStatus?.message &&
       latestJobStatus?.stages?.sfm?.status === "success"
     ) {

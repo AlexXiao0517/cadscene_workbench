@@ -171,7 +171,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     assert "style.css?v=20260729-local-camera-v8" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
     assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260730-pure-poll-once" in html
+    assert "workflow.js?v=20260730-pure-status-copy" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -487,7 +487,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260730-pure-poll-once" in html
+    assert "workflow.js?v=20260730-pure-status-copy" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1
@@ -500,3 +500,17 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     assert render_status.index('selectedWorkflowStage === "sfm"') < render_status.index(
         'setWorkflowStage("keyframes")'
     )
+
+
+def test_pure_rotation_keyframe_stage_never_shows_sfm_alignment_copy() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    render_panel = workflow.split("function renderWorkflowPanel(stage)", 1)[1].split(
+        "function setWorkflowStage(stage)", 1
+    )[0]
+
+    assert 'stage === "keyframes" && isPureRotationWorkflow()' in render_panel
+    assert "悬停旋转调试：移动固定相机并调整姿态；播放检查旋转效果，完成后直接进入渲染导出。" in render_panel
+    sfm_copy_branch = render_panel.split(
+        'stage === "keyframes" && isPureRotationWorkflow()', 1
+    )[1].split("SfM 已完成", 1)[0]
+    assert "!isPureRotationWorkflow()" in sfm_copy_branch
