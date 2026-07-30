@@ -21,9 +21,10 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev,sfm,cad,diagnostics]"
+python -m pip install PyYAML
 ```
 
-`segmentation` 只在需要该实验性依赖时追加安装。安装后先检查解释器和 SfM 后端能力：
+当前 `pyproject.toml` 没有声明 PyYAML；上面的 extras 不会安装它。需要读取 YAML 管线/数据集配置时，临时显式安装 `PyYAML`，直到项目元数据更新为止。`segmentation` 只在需要该实验性依赖时追加安装。安装后先检查解释器和 SfM 后端能力：
 
 ```powershell
 python --version
@@ -76,7 +77,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
 ```
 
-打开 `http://127.0.0.1:8300/apps/workflow_portal/index.html`。`--root` 是静态站点根，默认是项目根；`--storage-root` 是可写的 workflow `data/` 与 `runs/` 根，默认跟随 `--root`。部署时将二者分开可避免把运行产物写入静态代码目录：
+打开 `http://127.0.0.1:8300/apps/workflow_portal/index.html`。`--root` 是静态站点根，默认是项目根；未传 `--storage-root` 时，它也同时是可写 workflow `data/` 与 `runs/` 根。传入 `--storage-root` 时，该目录必须预先存在，并成为可写 workflow 根；部署时将二者分开可避免把运行产物写入静态代码目录：
 
 ```powershell
 python -m cadscene.cli.serve_viewer `
@@ -85,7 +86,7 @@ python -m cadscene.cli.serve_viewer `
   --extra-root legacy=D:\cadscene-legacy
 ```
 
-服务会以 `/data/` 和 `/runs/` 暴露 storage root 的两个目录；`--extra-root` 只读挂载，不能使用 `data` 或 `runs` 作为名称，也不会改变写入位置。视频请求支持 HTTP Range。不要把监听地址改为外网地址，除非另有认证和网络隔离措施。
+服务会以 `/data/` 和 `/runs/` 暴露 workflow 数据；当两个根分离时，它们映射到 storage root 的两个目录。`--extra-root` 只读挂载，目录必须已存在，也不会改变写入位置。虽然程序只在两个根不同时拒绝名为 `data` 或 `runs` 的额外挂载，部署约定一律不要使用这两个名称，以免覆盖或混淆 workflow 路径。视频请求支持 HTTP Range。不要把监听地址改为外网地址，除非另有认证和网络隔离措施。
 
 ## 开发与测试
 

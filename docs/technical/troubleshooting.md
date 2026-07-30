@@ -18,7 +18,7 @@
 
 **检查：** 核对服务启动参数、浏览器 URL、`<storage-root>/data/<dataset>/dataset_manifest.json` 和 `<storage-root>/runs/<dataset>/<runId>/manifest.json`。确认浏览器可访问 `/data/<dataset>/…` 和 `/runs/<dataset>/<runId>/…`。
 
-**处理：** 用同一个 storage root 重启服务，或为旧数据配置 `--extra-root legacy=PATH` 并让查看器使用相应只读 URL。不要将 `--extra-root` 命名为 `data` 或 `runs`，也不要期望它成为 workflow 写入根。
+**处理：** 用同一个 storage root 重启服务，或为旧数据配置 `--extra-root legacy=PATH` 并让查看器使用相应只读 URL。若未传 `--storage-root`，`--root` 同时也是 workflow 写入根；若传入，storage root 必须预先存在。不要将 `--extra-root` 命名为 `data` 或 `runs`，也不要期望它成为 workflow 写入根。
 
 ## SfM、CUDA 与全局 BA
 
@@ -42,7 +42,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 **检查：** 用 `GET /api/workflow/job-log?dataset=…&runId=…&stage=sfm` 读取末尾日志，检查 `job_process.json` 的 `status`、`returncode` 和 PID，以及 `02_sfm/sfm_report.md` / `sfm_stats.json`。复查 `--ba-global-frames-ratio`、`--ba-global-points-ratio`、`--ba-global-frames-freq`、`--ba-global-points-freq`、`--ba-global-max-num-iterations`、`--ba-global-max-refinements`。
 
-**处理：** 让有持续日志和存活 PID 的任务完成，或取消后用较小视频范围/更保守的 BA 参数重新运行。若无新日志且进程已结束，以 `job_process.json` 的返回码为准并从错误修复处重跑；不要仅凭进度条推断 GPU 或 BA 已成功。
+**处理：** 让有持续日志和存活 PID 的任务完成，或取消后用较小视频范围/更保守的 BA 参数重新运行。服务重启后不要仅凭 `job_process.json` 的 PID 取消：先确认当前进程命令与 `job_process.command` 一致；无法确认时不要取消，使用新的 `runId` 重跑。若无新日志且进程已结束，以 `job_process.json` 的返回码为准；优先使用新的 `runId`，若必须原地重跑，先完整备份该 run 目录，因为同名产物和 manifest 会被覆盖。不要仅凭进度条推断 GPU 或 BA 已成功。
 
 ## CAD、坐标与 FOV
 

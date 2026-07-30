@@ -4,7 +4,7 @@
 
 ## 服务与通用约定
 
-用 `python -m cadscene.cli.serve_viewer` 启动服务。JSON API 使用 UTF-8；JSON 写入会先写临时文件再替换，避免读取到半写入文件。除上传接口外，POST 请求体是 JSON。成功响应通常含有 `ok: true`；无效参数为 400，缺少文件为 404，正在运行的同一 `dataset + runId` 或 Interface-only SRT 路线冲突为 409。
+用 `python -m cadscene.cli.serve_viewer` 启动服务。JSON API 使用 UTF-8。数据集 manifest、SRT 分析和 JobRunner/工作流状态等由各自的临时文件加 `os.replace` 写入；上传文件也先写 `.upload` 临时文件再替换。不要把此保证扩展到所有产物：通用 `core.io.write_json` 直接写目标文件，许多阶段产物和 run manifest 因而不是原子写入。除上传接口外，POST 请求体是 JSON。成功响应通常含有 `ok: true`；无效参数为 400，缺少文件为 404，正在运行的同一 `dataset + runId` 或 Interface-only SRT 路线冲突为 409。
 
 `dataset` 会被规范化为小写 ASCII slug（最多 80 个字符）；`runId` 必须匹配 `[A-Za-z0-9_.-]+`。不要把 API 接收到的路径、URL 或客户端文件名当成可穿越目录的路径。
 
@@ -62,7 +62,7 @@
 ```text
 <storage-root>/data/<dataset>/
   dataset_manifest.json
-  video/<uploaded-video>
+  <uploaded-video>
   raw_cad/<uploaded.dxf-or-dwg>
   design.json
   telemetry/<uploaded.srt>
@@ -100,7 +100,8 @@ DXF 会解析为 `design.json`；DWG 先保存原件，再依赖外部 DWG→DXF
 
 ## 根目录、静态文件和路径安全
 
-- `--root` 仅提供静态站点；`--storage-root` 承载可写的 `data/` 与 `runs/`。两者分离时，服务仍将存储根映射到 `/data/` 和 `/runs/`。
-- `--extra-root NAME=PATH` 只读挂载用于旧数据兼容；挂载名不能与 `data`、`runs` 冲突。静态路径和 ZIP 成员都会解析并验证仍在允许根目录内。
+- `--root` 提供静态站点；未传 `--storage-root` 时，`--root` 也就是可写的 workflow 根。传入 `--storage-root` 时，服务要求该目录预先存在，并在根分离时把它的 `data/` 与 `runs/` 映射到 `/data/` 与 `/runs/`。
+- `--extra-root NAME=PATH` 是必须预先存在的只读挂载，用于旧数据兼容。程序仅在根分离时拒绝 `data`、`runs` 这两个名称；文档约定始终不要使用它们，避免与 workflow 路径混淆。静态路径和 ZIP 成员都会解析并验证仍在允许根目录内。
 - 服务器校验数据集和 run ID，运行目录不能逃离 `runs/`；`ArtifactManager` 也只允许把阶段产物写进当前 run 目录。
-- 服务重启不会接管、续跑或重试旧子进程。恢复时先检查 `job_process.json`、`job_status.json`、`manifest.json` 和阶段日志，再从需要的阶段重新启动。
+- 服务重启不会接管、续跑或重试旧子进程。恢复时先检查 `job_process.json`、`job_status.json`、`manifest.json` 和阶段日志；优先使用新的 `runId` 重跑以保留原始证据。若确需在原 run 内重跑，先完整备份整个 run 目录：同名阶段产物、`manifest.json`、`job_status.json` 和 `job_process.json` 都可能被覆盖。
+- 服务重启后如考虑调用取消接口，先核对 `job_process.json` 的 PID 当前进程命令是否与 `job_process.command` 一致；无法确认一致性时不要取消该 PID，改用新的 `runId` 重新运行。
