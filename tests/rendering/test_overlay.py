@@ -289,6 +289,26 @@ def test_sparse_legacy_polyline_is_densified_before_distance_clipping() -> None:
     assert int(output.sum()) > 0
 
 
+def test_sparse_polyline_without_fade_uses_densified_point_count() -> None:
+    image = np.zeros((180, 320, 3), dtype=np.uint8)
+    cad = _bundle(
+        [RoadLine(points=np.asarray([[-20.0, -10.0], [20.0, 100.0]]), kind="center")]
+    )
+
+    output = render_frame_overlay(
+        image,
+        _camera(),
+        cad,
+        faded_overlay=False,
+        max_distance_m=900,
+        fade_start_m=250,
+        cad_scale=0.06,
+    )
+
+    assert output.shape == image.shape
+    assert int(output.sum()) > 0
+
+
 def test_rendered_mp4_uses_browser_compatible_h264(tmp_path: Path) -> None:
     import cv2
 

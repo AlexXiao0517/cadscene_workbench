@@ -135,7 +135,7 @@ def render_frame_overlay(
         if faded_overlay and max_depth > fade_start_depth:
             fade_weight = np.clip((max_depth - depth) / (max_depth - fade_start_depth), 0.0, 1.0)
         else:
-            fade_weight = np.ones(len(line.points), dtype=np.float64)
+            fade_weight = np.ones(len(points), dtype=np.float64)
         linewidth = max(1, int(overlay_linewidth))
         finite = np.isfinite(uv).all(axis=1)
         jumps = np.linalg.norm(np.diff(uv, axis=0), axis=1)
