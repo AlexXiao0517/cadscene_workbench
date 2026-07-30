@@ -12,10 +12,10 @@ SRT、CUDA 和 viewer 文档也存在状态不一致。
 
 ## 目标读者
 
-- 首次使用工作台的项目成员；
-- 需要判断某条工作流是否可用的算法和产品人员；
-- 调试 SfM、CAD 对齐、SRT 或 pure-rotation 的开发者；
-- 维护 HTTP API、数据产物和前端工作流的工程人员。
+- 主要读者是建筑、道路等领域的设计人员，默认不具备计算机或三维视觉背景；
+- 次要读者是负责部署、故障排查和二次开发的工程人员；
+- README 优先帮助设计人员完成真实任务，不以代码结构、测试体系或算法名词组织内容；
+- 面向工程人员的细节集中放在 `docs/technical/`，不打断 README 的使用主线。
 
 ## 信息架构
 
@@ -29,17 +29,20 @@ SRT、CUDA 和 viewer 文档也存在状态不一致。
 两个 README 采用相同章节顺序：
 
 1. 项目定位和语言切换；
-2. 快速链接；
+2. 适用场景与开始前准备；
 3. 输入、处理流程和输出；
-4. 工作流状态矩阵；
-5. Quick Start；
-6. 工作流选择；
-7. 数据与产物结构；
-8. CLI 入口；
-9. GPU 和运行边界；
-10. 已知限制；
-11. 开发与测试；
-12. Roadmap、CHANGELOG、致谢和许可说明。
+4. 快速开始；
+5. 如何选择工作流；
+6. 从上传到结果导出的操作流程；
+7. 运行时间、GPU、FOV、SRT 等用户常见问题；
+8. 工作流能力与限制；
+9. 结果文件和故障排查入口；
+10. 面向维护人员的技术文档入口；
+11. Roadmap、CHANGELOG、致谢和许可说明。
+
+README 中不展开模块清单、完整 CLI 目录、测试方法或内部 API。开发安装、
+命令行批处理、模块架构、测试和产物协议统一由 `docs/technical/` 承载。
+README 只保留启动工作台所需的最短命令，以及一个“维护与二次开发”链接。
 
 README 参考成熟项目的克制风格：COLMAP 的清晰定位与 Getting Started、
 nerfstudio 的 Quick Start 和功能入口、OpenMVS 的输入输出边界、Open3D 的
@@ -106,10 +109,11 @@ nerfstudio 的 Quick Start 和功能入口、OpenMVS 的输入输出边界、Ope
 README 使用通用命令，不引用私有数据集、硬编码 CAD 比例或真实坐标：
 
 ```bash
-python -m pip install -e ".[sfm,cad,diagnostics,dev]"
-python -m cadscene.cli.check_sfm_environment --json
 python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
 ```
+
+安装依赖和环境检查移至开发者指南；README 的快速开始假定应用已经由维护人员
+部署完成，并使用非专业人员能够理解的界面操作步骤解释上传和工作流选择。
 
 入口统一为：
 
@@ -122,7 +126,9 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
 - 不添加不存在的 CI、coverage、release 或 license 徽章；
 - 可以添加静态 Python 3.10+ 徽章；
 - 仓库当前没有 LICENSE，必须明确“尚未声明开源许可证”，不能暗示开源授权；
-- 不硬编码测试通过数量到徽章；开发章节只给测试命令；
+- 不硬编码测试通过数量到徽章；README 不设置独立“开发与测试”章节；
+- 算法名首次出现时同时给出业务含义，例如“SfM（三维重建）”；
+- 优先使用界面名称、按钮名称和结果名称，CLI、JSON 字段和目录协议不进入主流程；
 - 没有可长期维护的截图资产时不制造占位图片。
 
 ## CHANGELOG 范围
