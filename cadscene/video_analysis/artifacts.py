@@ -31,6 +31,12 @@ def _validate_payloads(revision: str, payloads: Mapping[str, str]) -> None:
         raise ValueError("manifest analysis_revision mismatch")
     if clips.get("analysis_revision") != revision:
         raise ValueError("clip manifest analysis_revision mismatch")
+    for clip in clips.get("clips", []):
+        duration = float(clip["source_end_pts_sec"]) - float(clip["source_start_pts_sec"])
+        if duration > 60.0 + 1e-9:
+            raise ValueError(f"clip {clip.get('clip_id', '')} exceeds 60 second hard limit")
+        if duration <= 0:
+            raise ValueError(f"clip {clip.get('clip_id', '')} has non-positive duration")
 
 
 def publish_analysis_revision(
@@ -66,4 +72,3 @@ def publish_analysis_revision(
         return destination
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
-

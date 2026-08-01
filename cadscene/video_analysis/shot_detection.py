@@ -147,13 +147,18 @@ def detect_shot_boundaries(
     *,
     expected_interval_sec: float,
     config: ShotDetectionConfig | None = None,
+    pair_evidence: list[FramePairEvidence] | None = None,
 ) -> list[BoundaryEvidence]:
     if expected_interval_sec <= 0:
         raise ValueError("expected_interval_sec must be positive")
     settings = config or ShotDetectionConfig()
+    evidence_items = pair_evidence or [
+        analyze_frame_pair(before, after) for before, after in zip(frames, frames[1:])
+    ]
+    if len(evidence_items) != max(0, len(frames) - 1):
+        raise ValueError("pair evidence count must match adjacent frame pairs")
     boundaries: list[BoundaryEvidence] = []
-    for before, after in zip(frames, frames[1:]):
-        evidence = analyze_frame_pair(before, after)
+    for before, after, evidence in zip(frames, frames[1:], evidence_items):
         reasons: list[str] = []
         confidence = 0.0
         if after.pts_sec <= before.pts_sec or (

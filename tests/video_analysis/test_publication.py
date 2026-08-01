@@ -73,3 +73,16 @@ def test_invalid_staged_outputs_are_not_published(tmp_path: Path) -> None:
 
     assert not output.exists()
 
+
+def test_publication_rejects_clip_over_hard_sixty_second_limit(tmp_path: Path) -> None:
+    output = tmp_path / "02_video_analysis"
+    payloads = _valid_payloads("analysis-0001")
+    clip_manifest = json.loads(payloads["clip_manifest.json"])
+    clip_manifest["clips"][0]["source_end_pts_sec"] = 60.001
+    payloads["clip_manifest.json"] = json.dumps(clip_manifest)
+
+    with pytest.raises(ValueError, match="exceeds 60"):
+        publish_analysis_revision(output, "analysis-0001", payloads)
+
+    assert not output.exists()
+
