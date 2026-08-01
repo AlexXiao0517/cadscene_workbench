@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from fractions import Fraction
+from pathlib import Path
+import subprocess
+
+from cadscene.video_analysis.pts import (
+    PacketTimestamp,
+    choose_sparse_samples,
+    decode_sparse_frames,
+    parse_debug_packet_timestamps,
+    probe_video_pts,
+    resolve_ffmpeg_executable,
+)
+
+
+def test_packet_parser_preserves_irregular_source_pts_without_fps_math() -> None:
+    debug_output = """
+demuxer -> ist_index:0 type:video next_dts:NOPTS next_dts_time:NOPTS next_pts:NOPTS next_pts_time:NOPTS pkt_pts:9009 pkt_pts_time:0.1001 pkt_dts:9009 pkt_dts_time:0.1001 duration:3003 duration_time:0.0333667
+demuxer -> ist_index:0 type:video next_dts:133466 next_dts_time:0.133466 next_pts:133466 next_pts_time:0.133466 pkt_pts:15015 pkt_pts_time:0.166833 pkt_dts:15015 pkt_dts_time:0.166833 duration:6006 duration_time:0.0667333
+demuxer -> ist_index:0 type:video next_dts:233566 next_dts_time:0.233566 next_pts:233566 next_pts_time:0.233566 pkt_pts:45045 pkt_pts_time:0.5005 pkt_dts:45045 pkt_dts_time:0.5005 duration:3003 duration_time:0.0333667
+"""
+
+    packets = parse_debug_packet_timestamps(debug_output, time_base=Fraction(1, 90_000))
+
+    assert [packet.pts for packet in packets] == [9009, 15015, 45045]
+    assert [packet.pts_sec for packet in packets] == [0.1001, 0.16683333333333333, 0.5005]
+    assert packets[1].duration_sec == 0.06673333333333334
+
+
+def test_sparse_selection_uses_packet_pts_and_always_keeps_ends() -> None:
+    packets = [
+        PacketTimestamp(pts=0, pts_sec=0.0, duration_sec=0.1),
+        PacketTimestamp(pts=1, pts_sec=0.1, duration_sec=0.3),
+        PacketTimestamp(pts=4, pts_sec=0.4, duration_sec=0.6),
+        PacketTimestamp(pts=10, pts_sec=1.0, duration_sec=0.1),
+    ]
+
+    samples = choose_sparse_samples(packets, interval_sec=0.35)
+
+    assert [sample.pts_sec for sample in samples] == [0.0, 0.4, 1.0]
+
+
+def test_packet_parser_rejects_non_monotonic_source_pts() -> None:
+    debug_output = """
+demuxer -> ist_index:0 type:video pkt_pts:100 pkt_pts_time:1.0 duration:10 duration_time:0.1
+demuxer -> ist_index:0 type:video pkt_pts:90 pkt_pts_time:0.9 duration:10 duration_time:0.1
+"""
+
+    try:
+        parse_debug_packet_timestamps(debug_output, time_base=Fraction(1, 100))
+    except ValueError as exc:
+        assert "non-monotonic" in str(exc)
+    else:
+        raise AssertionError("non-monotonic PTS must be reported")
+
+
+def test_probe_reads_irregular_pts_from_real_vfr_video(tmp_path: Path) -> None:
+    ffmpeg = resolve_ffmpeg_executable()
+    video = tmp_path / "irregular.mkv"
+    subprocess.run(
+        [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10:duration=0.4",
+            "-vf",
+            "setpts=N*N",
+            "-frames:v",
+            "4",
+            "-fps_mode",
+            "vfr",
+            "-c:v",
+            "ffv1",
+            str(video),
+        ],
+        check=True,
+    )
+
+    index = probe_video_pts(video, ffmpeg_executable=ffmpeg)
+
+    assert index.time_base == Fraction(1, 1000)
+    assert [packet.pts_sec for packet in index.packets] == [0.0, 0.1, 0.4, 0.9]
+    assert index.source_start_pts_sec == 0.0
+    assert index.source_end_pts_sec == 0.9
+
+    frames = decode_sparse_frames(
+        video,
+        index=index,
+        interval_sec=0.25,
+        output_size=(64, 48),
+        ffmpeg_executable=ffmpeg,
+    )
+
+    assert [frame.pts_sec for frame in frames] == [0.0, 0.4, 0.9]
+    assert all(frame.image.shape == (48, 64) for frame in frames)

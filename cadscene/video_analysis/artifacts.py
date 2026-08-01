@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import tempfile
+from typing import Mapping
+
+
+REQUIRED_ARTIFACTS = (
+    "video_analysis_manifest.json",
+    "video_metadata.json",
+    "analysis_windows.csv",
+    "detected_boundaries.json",
+    "clip_manifest.json",
+    "video_analysis_report.md",
+)
+
+
+def _validate_payloads(revision: str, payloads: Mapping[str, str]) -> None:
+    missing = set(REQUIRED_ARTIFACTS) - set(payloads)
+    extra = set(payloads) - set(REQUIRED_ARTIFACTS)
+    if missing:
+        raise ValueError(f"missing required artifacts: {sorted(missing)}")
+    if extra:
+        raise ValueError(f"unexpected artifacts: {sorted(extra)}")
+    manifest = json.loads(payloads["video_analysis_manifest.json"])
+    clips = json.loads(payloads["clip_manifest.json"])
+    if manifest.get("analysis_revision") != revision:
+        raise ValueError("manifest analysis_revision mismatch")
+    if clips.get("analysis_revision") != revision:
+        raise ValueError("clip manifest analysis_revision mismatch")
+
+
+def publish_analysis_revision(
+    output_dir: Path, revision: str, payloads: Mapping[str, str]
+) -> Path:
+    _validate_payloads(revision, payloads)
+    revisions_dir = output_dir / "analysis_revisions"
+    destination = revisions_dir / revision
+    if destination.exists():
+        raise FileExistsError(f"analysis revision already exists: {revision}")
+
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}-{revision}-", dir=output_dir.parent)
+    )
+    staged_revision = staging_root / revision
+    try:
+        staged_revision.mkdir()
+        for name, content in payloads.items():
+            (staged_revision / name).write_text(content, encoding="utf-8", newline="")
+        _validate_payloads(
+            revision,
+            {name: (staged_revision / name).read_text(encoding="utf-8") for name in REQUIRED_ARTIFACTS},
+        )
+
+        revisions_dir.mkdir(parents=True, exist_ok=True)
+        os.replace(staged_revision, destination)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name in REQUIRED_ARTIFACTS:
+            staged_root_file = staging_root / name
+            shutil.copyfile(destination / name, staged_root_file)
+            os.replace(staged_root_file, output_dir / name)
+        return destination
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
