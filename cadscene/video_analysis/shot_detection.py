@@ -35,6 +35,7 @@ class FramePairEvidence:
     flow_magnitude_px: float
     flow_residual_px: float
     clarity_score: float
+    feature_homography_residual_px: float = 0.0
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -45,16 +46,16 @@ def _as_gray(image: np.ndarray) -> np.ndarray:
     raise ValueError(f"unsupported frame shape: {image.shape}")
 
 
-def _feature_evidence(before: np.ndarray, after: np.ndarray) -> tuple[int, float, float]:
+def _feature_evidence(before: np.ndarray, after: np.ndarray) -> tuple[int, float, float, float]:
     detector = cv2.ORB_create(nfeatures=600, fastThreshold=8)
     keypoints_a, descriptors_a = detector.detectAndCompute(before, None)
     keypoints_b, descriptors_b = detector.detectAndCompute(after, None)
     if descriptors_a is None or descriptors_b is None:
-        return 0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0
     pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(descriptors_a, descriptors_b, k=2)
     matches = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.72 * pair[1].distance]
     if not matches:
-        return 0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0
     points_a = np.float32([keypoints_a[match.queryIdx].pt for match in matches])
     points_b = np.float32([keypoints_b[match.trainIdx].pt for match in matches])
     height, width = before.shape
@@ -67,10 +68,14 @@ def _feature_evidence(before: np.ndarray, after: np.ndarray) -> tuple[int, float
 
     spatial_coverage = min(coverage(points_a), coverage(points_b))
     if len(matches) < 4:
-        return len(matches), spatial_coverage, 0.0
-    _, mask = cv2.findHomography(points_a, points_b, cv2.RANSAC, 3.0)
+        return len(matches), spatial_coverage, 0.0, 0.0
+    homography, mask = cv2.findHomography(points_a, points_b, cv2.RANSAC, 3.0)
     inlier_ratio = float(mask.mean()) if mask is not None else 0.0
-    return len(matches), spatial_coverage, inlier_ratio
+    residual = 0.0
+    if homography is not None:
+        predicted = cv2.perspectiveTransform(points_a.reshape(-1, 1, 2), homography).reshape(-1, 2)
+        residual = float(np.percentile(np.linalg.norm(points_b - predicted, axis=1), 75))
+    return len(matches), spatial_coverage, inlier_ratio, residual
 
 
 def _flow_evidence(before: np.ndarray, after: np.ndarray) -> tuple[float, float]:
@@ -102,9 +107,11 @@ def _flow_evidence(before: np.ndarray, after: np.ndarray) -> tuple[float, float]
         return flow_magnitude, diagonal
     predicted = cv2.perspectiveTransform(source.reshape(-1, 1, 2), homography).reshape(-1, 2)
     residuals = np.linalg.norm(target - predicted, axis=1)
-    if mask is not None and np.any(mask):
-        residuals = residuals[mask.reshape(-1).astype(bool)]
-    return flow_magnitude, float(np.median(residuals))
+    # A single homography explains a rotating planar view but intentionally
+    # leaves foreground/background parallax.  Measuring only RANSAC inliers
+    # would erase that evidence, so retain all valid tracks and use a robust
+    # upper quantile rather than an outlier-sensitive maximum.
+    return flow_magnitude, float(np.percentile(residuals, 75))
 
 
 def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEvidence:
@@ -120,7 +127,7 @@ def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEv
         max(0.0, 1.0 - mean_b / 24.0),
     )
     exposure_jump = abs(mean_b - mean_a) / 255.0
-    match_count, coverage, inlier_ratio = _feature_evidence(image_a, image_b)
+    match_count, coverage, inlier_ratio, feature_residual = _feature_evidence(image_a, image_b)
     flow_magnitude, flow_residual = _flow_evidence(image_a, image_b)
     clarity = min(
         1.0,
@@ -139,6 +146,7 @@ def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEv
         flow_magnitude_px=flow_magnitude,
         flow_residual_px=flow_residual,
         clarity_score=clarity,
+        feature_homography_residual_px=feature_residual,
     )
 
 

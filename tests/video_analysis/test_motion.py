@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import cv2
+import numpy as np
+
 from cadscene.video_analysis.models import MotionMode
 from cadscene.video_analysis.motion import (
     MotionAnalysisConfig,
@@ -8,6 +11,8 @@ from cadscene.video_analysis.motion import (
     stabilize_motion_windows,
 )
 from cadscene.video_analysis.shot_detection import FramePairEvidence
+from cadscene.video_analysis.pts import DecodedFrame
+from cadscene.video_analysis.shot_detection import analyze_frame_pair
 
 
 def _evidence(
@@ -127,3 +132,29 @@ def test_short_mode_flicker_does_not_pass_sustain_and_hysteresis() -> None:
     assert {item.motion_mode for item in stabilized} == {MotionMode.GENERAL_MOTION}
     assert boundaries == []
 
+
+def test_rotation_compensated_parallax_distinguishes_general_from_global_warp() -> None:
+    base = np.random.default_rng(7).integers(0, 256, size=(180, 320), dtype=np.uint8)
+    rotation = cv2.warpAffine(
+        base,
+        cv2.getRotationMatrix2D((160, 90), 2.0, 1.0),
+        (320, 180),
+        borderMode=cv2.BORDER_REFLECT,
+    )
+    parallax = cv2.warpAffine(
+        base,
+        np.float32([[1, 0, 2], [0, 1, 0]]),
+        (320, 180),
+        borderMode=cv2.BORDER_REFLECT,
+    )
+    parallax[40:150, 92:202] = base[40:150, 80:190]
+
+    rotation_evidence = analyze_frame_pair(
+        DecodedFrame(0, 0.0, base), DecodedFrame(1, 0.5, rotation)
+    )
+    parallax_evidence = analyze_frame_pair(
+        DecodedFrame(0, 0.0, base), DecodedFrame(1, 0.5, parallax)
+    )
+
+    assert classify_motion_window([rotation_evidence]).motion_mode is MotionMode.ROTATION_DOMINANT
+    assert classify_motion_window([parallax_evidence]).motion_mode is MotionMode.GENERAL_MOTION

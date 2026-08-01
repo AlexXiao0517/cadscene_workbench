@@ -19,8 +19,10 @@ class MotionAnalysisConfig:
     static_flow_threshold_px: float = 0.6
     rotation_inlier_threshold: float = 0.65
     rotation_residual_ratio: float = 0.18
+    rotation_feature_residual_px: float = 1.5
     general_inlier_threshold: float = 0.55
     general_residual_ratio: float = 0.25
+    general_feature_residual_px: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -54,15 +56,20 @@ def classify_motion_window(
         return MotionWindow(start, end, MotionMode.UNKNOWN, 0.35, len(evidence), 0.0, 0.0, 0.0)
 
     flow = float(np.median([item.flow_magnitude_px for item in usable]))
-    residual = float(np.median([item.flow_residual_px for item in usable]))
+    flow_residual = float(np.median([item.flow_residual_px for item in usable]))
+    feature_residual = float(
+        np.median([item.feature_homography_residual_px for item in usable])
+    )
+    residual = max(flow_residual, feature_residual)
     inlier_ratio = float(np.median([item.homography_inlier_ratio for item in usable]))
-    residual_ratio = residual / max(flow, 0.25)
+    residual_ratio = flow_residual / max(flow, 0.25)
     if flow <= settings.static_flow_threshold_px:
         confidence = min(0.98, 0.82 + 0.16 * (1.0 - flow / settings.static_flow_threshold_px))
         mode = MotionMode.STATIC
     elif (
         inlier_ratio >= settings.rotation_inlier_threshold
         and residual_ratio <= settings.rotation_residual_ratio
+        and feature_residual <= settings.rotation_feature_residual_px
     ):
         confidence = min(
             0.98,
@@ -74,6 +81,7 @@ def classify_motion_window(
     elif (
         inlier_ratio <= settings.general_inlier_threshold
         or residual_ratio >= settings.general_residual_ratio
+        or feature_residual >= settings.general_feature_residual_px
     ):
         confidence = min(
             0.95,
@@ -172,4 +180,3 @@ def stabilize_motion_windows(
             for index in range(start, end):
                 stabilized[index] = replace(stabilized[index], motion_mode=current_mode)
     return stabilized, boundaries
-
