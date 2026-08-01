@@ -110,14 +110,7 @@ def build_motion_windows(
             if item.to_pts_sec > cursor and item.from_pts_sec < cursor + settings.window_sec
         ]
         if selected:
-            classified = classify_motion_window(selected, settings)
-            windows.append(
-                replace(
-                    classified,
-                    start_pts_sec=cursor,
-                    end_pts_sec=min(final_pts, cursor + settings.window_sec),
-                )
-            )
+            windows.append(classify_motion_window(selected, settings))
         cursor += settings.step_sec
     return windows
 
@@ -135,6 +128,24 @@ def _runs(windows: list[MotionWindow]) -> list[tuple[int, int, MotionMode]]:
     return runs
 
 
+def _decision_run_duration(
+    windows: list[MotionWindow], start: int, end: int, default_step_sec: float
+) -> float:
+    centers = [
+        (window.start_pts_sec + window.end_pts_sec) / 2.0
+        for window in windows[start:end]
+    ]
+    if len(centers) <= 1:
+        return default_step_sec
+    positive_steps = [
+        later - earlier
+        for earlier, later in zip(centers, centers[1:])
+        if later > earlier
+    ]
+    step = float(np.median(positive_steps)) if positive_steps else default_step_sec
+    return centers[-1] - centers[0] + step
+
+
 def stabilize_motion_windows(
     windows: list[MotionWindow], config: MotionAnalysisConfig | None = None
 ) -> tuple[list[MotionWindow], list[BoundaryEvidence]]:
@@ -144,7 +155,9 @@ def stabilize_motion_windows(
     stabilized = list(windows)
 
     for start, end, mode in _runs(stabilized):
-        duration = stabilized[end - 1].end_pts_sec - stabilized[start].start_pts_sec
+        duration = _decision_run_duration(
+            stabilized, start, end, settings.step_sec
+        )
         if mode is not MotionMode.STATIC or duration > settings.static_merge_max_sec:
             continue
         previous = stabilized[start - 1].motion_mode if start > 0 else None
@@ -162,7 +175,9 @@ def stabilize_motion_windows(
     for start, end, candidate_mode in runs[1:]:
         if candidate_mode == current_mode:
             continue
-        duration = stabilized[end - 1].end_pts_sec - stabilized[start].start_pts_sec
+        duration = _decision_run_duration(
+            stabilized, start, end, settings.step_sec
+        )
         average_confidence = float(
             np.mean([item.confidence for item in stabilized[start:end]])
         )

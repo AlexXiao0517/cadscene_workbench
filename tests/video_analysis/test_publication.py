@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import cadscene.video_analysis.artifacts as artifacts_module
 from cadscene.video_analysis.artifacts import REQUIRED_ARTIFACTS, publish_analysis_revision
 
 
@@ -86,3 +87,25 @@ def test_publication_rejects_clip_over_hard_sixty_second_limit(tmp_path: Path) -
 
     assert not output.exists()
 
+
+def test_copy_failure_rolls_back_revision_and_root_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "02_video_analysis"
+    original_copy = artifacts_module.shutil.copyfile
+    calls = 0
+
+    def fail_second_copy(source: Path, destination: Path) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected publication failure")
+        return original_copy(source, destination)
+
+    monkeypatch.setattr(artifacts_module.shutil, "copyfile", fail_second_copy)
+
+    with pytest.raises(OSError, match="injected publication failure"):
+        publish_analysis_revision(output, "analysis-0001", _valid_payloads("analysis-0001"))
+
+    assert not (output / "analysis_revisions" / "analysis-0001").exists()
+    assert not any((output / name).exists() for name in REQUIRED_ARTIFACTS)

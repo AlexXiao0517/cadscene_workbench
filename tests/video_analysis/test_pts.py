@@ -8,7 +8,9 @@ from cadscene.video_analysis.pts import (
     PacketTimestamp,
     choose_sparse_samples,
     decode_sparse_frames,
+    iter_sparse_frames,
     parse_debug_packet_timestamps,
+    parse_selected_video_time_base,
     probe_video_pts,
     resolve_ffmpeg_executable,
 )
@@ -98,3 +100,26 @@ def test_probe_reads_irregular_pts_from_real_vfr_video(tmp_path: Path) -> None:
 
     assert [frame.pts_sec for frame in frames] == [0.0, 0.4, 0.9]
     assert all(frame.image.shape == (48, 64) for frame in frames)
+
+    streamed = list(
+        iter_sparse_frames(
+            video,
+            index=index,
+            interval_sec=0.25,
+            output_size=(64, 48),
+            ffmpeg_executable=ffmpeg,
+        )
+    )
+    assert [frame.pts_sec for frame in streamed] == [0.0, 0.4, 0.9]
+
+
+def test_time_base_is_bound_to_selected_video_not_first_video_or_container_stream() -> None:
+    ffmpeg_output = """
+  Stream #0:0: Audio: aac, 48000 Hz, stereo
+  Stream #0:1: Video: mjpeg, yuvj420p, 960x540, 90k tbr, 90k tbn (attached pic)
+  Stream #0:2: Video: hevc, yuv420p, 3840x2160, 29.97 fps, 30k tbn
+Stream mapping:
+  Stream #0:2 -> #0:0 (copy)
+"""
+
+    assert parse_selected_video_time_base(ffmpeg_output) == Fraction(1, 30_000)

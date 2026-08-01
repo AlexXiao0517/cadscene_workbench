@@ -7,6 +7,7 @@ from cadscene.video_analysis.models import MotionMode
 from cadscene.video_analysis.motion import (
     MotionAnalysisConfig,
     MotionWindow,
+    build_motion_windows,
     classify_motion_window,
     stabilize_motion_windows,
 )
@@ -158,3 +159,45 @@ def test_rotation_compensated_parallax_distinguishes_general_from_global_warp() 
 
     assert classify_motion_window([rotation_evidence]).motion_mode is MotionMode.ROTATION_DOMINANT
     assert classify_motion_window([parallax_evidence]).motion_mode is MotionMode.GENERAL_MOTION
+
+
+def test_sliding_window_ranges_are_snapped_to_authoritative_evidence_pts() -> None:
+    evidence = [
+        _evidence(end, flow=8.0, residual=0.4)
+        for end in (0.6001, 1.1006, 1.6011, 2.1016, 2.6021, 3.1026, 3.6031)
+    ]
+    authoritative_pts = {
+        value
+        for item in evidence
+        for value in (item.from_pts_sec, item.to_pts_sec)
+    }
+
+    windows = build_motion_windows(evidence, MotionAnalysisConfig())
+
+    assert windows
+    assert all(window.start_pts_sec in authoritative_pts for window in windows)
+    assert all(window.end_pts_sec in authoritative_pts for window in windows)
+
+
+def test_one_overlapping_static_decision_is_only_one_step_and_gets_absorbed() -> None:
+    modes = [MotionMode.GENERAL_MOTION] * 5 + [MotionMode.STATIC] + [
+        MotionMode.GENERAL_MOTION
+    ] * 4
+    overlapping = [
+        MotionWindow(
+            start_pts_sec=float(index),
+            end_pts_sec=float(index + 4),
+            motion_mode=mode,
+            confidence=0.85,
+            evidence_count=8,
+            median_flow_px=0.2 if mode is MotionMode.STATIC else 5.0,
+            median_residual_px=0.1,
+            median_homography_inlier_ratio=0.8,
+        )
+        for index, mode in enumerate(modes)
+    ]
+
+    stabilized, boundaries = stabilize_motion_windows(overlapping, MotionAnalysisConfig())
+
+    assert {window.motion_mode for window in stabilized} == {MotionMode.GENERAL_MOTION}
+    assert boundaries == []

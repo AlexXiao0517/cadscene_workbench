@@ -18,7 +18,7 @@ from .motion import (
     build_motion_windows,
     stabilize_motion_windows,
 )
-from .pts import decode_sparse_frames, probe_video_pts
+from .pts import iter_sparse_frames, probe_video_pts
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
 from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
 from .shot_detection import analyze_frame_pair, detect_shot_boundaries
@@ -55,8 +55,10 @@ def _dominant_motion(
     return mode, confidence_weight[mode] / scores[mode]
 
 
-def _analysis_range(frames, start_pts_sec: float, end_pts_sec: float) -> tuple[float, float]:
-    pts = [frame.pts_sec for frame in frames if start_pts_sec <= frame.pts_sec <= end_pts_sec]
+def _analysis_range(
+    sampled_pts: list[float], start_pts_sec: float, end_pts_sec: float
+) -> tuple[float, float]:
+    pts = [pts for pts in sampled_pts if start_pts_sec <= pts <= end_pts_sec]
     if not pts:
         return start_pts_sec, end_pts_sec
     return min(pts), max(pts)
@@ -148,21 +150,30 @@ def analyze_video(
     source = Path(video_path)
     revision = analysis_revision or _new_revision()
     pts_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
-    frames = decode_sparse_frames(
+    sampled_pts: list[float] = []
+    pair_evidence = []
+    shot_boundaries: list[BoundaryEvidence] = []
+    previous_frame = None
+    for frame in iter_sparse_frames(
         source,
         index=pts_index,
         interval_sec=sample_interval_sec,
         ffmpeg_executable=ffmpeg_executable,
-    )
-    if len(frames) < 2:
+    ):
+        sampled_pts.append(frame.pts_sec)
+        if previous_frame is not None:
+            evidence = analyze_frame_pair(previous_frame, frame)
+            pair_evidence.append(evidence)
+            shot_boundaries.extend(
+                detect_shot_boundaries(
+                    [previous_frame, frame],
+                    expected_interval_sec=sample_interval_sec,
+                    pair_evidence=[evidence],
+                )
+            )
+        previous_frame = frame
+    if len(sampled_pts) < 2:
         raise ValueError("video analysis requires at least two decoded PTS samples")
-
-    pair_evidence = [analyze_frame_pair(before, after) for before, after in zip(frames, frames[1:])]
-    shot_boundaries = detect_shot_boundaries(
-        frames,
-        expected_interval_sec=sample_interval_sec,
-        pair_evidence=pair_evidence,
-    )
     raw_windows = build_motion_windows(pair_evidence, MotionAnalysisConfig())
     stable_windows, motion_boundaries = stabilize_motion_windows(
         raw_windows, MotionAnalysisConfig()
@@ -210,7 +221,7 @@ def analyze_video(
         )
         recommendation = recommend_workflow(mode, confidence, srt_coverage)
         analysis_start, analysis_end = _analysis_range(
-            frames, interval.start_pts_sec, interval.end_pts_sec
+            sampled_pts, interval.start_pts_sec, interval.end_pts_sec
         )
         clip = LogicalClip(
             project_id=project_id,
@@ -254,7 +265,7 @@ def analyze_video(
         "duration_sec": pts_index.source_end_pts_sec - pts_index.source_start_pts_sec,
         "packet_count": len(pts_index.packets),
         "sample_interval_sec": sample_interval_sec,
-        "sampled_frame_count": len(frames),
+        "sampled_frame_count": len(sampled_pts),
     }
     configuration = {
         "sample_interval_sec": sample_interval_sec,
