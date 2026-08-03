@@ -10,11 +10,17 @@ from .models import (
     ClipsManifest,
     JobsManifest,
     ManifestHeader,
+    OperationIntent,
     ProjectManifest,
     RenderManifest,
     StateReference,
 )
-from .repositories import ManifestMutation, publish_manifests
+from .repositories import (
+    ManifestMutation,
+    ordered_repositories,
+    publish_manifests,
+    stamp_operation_changes,
+)
 
 
 @dataclass(frozen=True)
@@ -29,18 +35,26 @@ class ReconciliationResult:
 def _owned_states(manifest: ManifestHeader) -> dict[str, str]:
     states: dict[str, str] = {}
     if isinstance(manifest, ProjectManifest):
+        for revision, operation_id in manifest.analysis_operation_ids.items():
+            states[f"analysis:{revision}"] = operation_id
         if (
             manifest.active_analysis_revision
             and manifest.active_analysis_operation_id
         ):
-            states[f"analysis:{manifest.active_analysis_revision}"] = (
+            states.setdefault(
+                f"analysis:{manifest.active_analysis_revision}",
                 manifest.active_analysis_operation_id
             )
+            states["active_analysis"] = manifest.active_analysis_operation_id
         if (
             manifest.candidate_analysis_revision
             and manifest.candidate_analysis_operation_id
         ):
-            states[f"analysis:{manifest.candidate_analysis_revision}"] = (
+            states.setdefault(
+                f"analysis:{manifest.candidate_analysis_revision}",
+                manifest.candidate_analysis_operation_id
+            )
+            states["candidate_analysis"] = (
                 manifest.candidate_analysis_operation_id
             )
     elif isinstance(manifest, ClipsManifest):
@@ -67,6 +81,117 @@ def _owned_states(manifest: ManifestHeader) -> dict[str, str]:
             if identifier and item.get("operation_id"):
                 states[f"render:{identifier}"] = str(item["operation_id"])
     return states
+
+
+def _recover_operation_prefix(
+    project_id: str,
+    repositories: ProjectRepositories,
+    manifests: tuple[ManifestHeader, ...],
+) -> tuple[tuple[str, ...], str | None]:
+    repository_by_owner = {
+        repository.owner: repository for repository in repositories.in_lock_order()
+    }
+    manifest_by_owner = {manifest.owner: manifest for manifest in manifests}
+    intents: dict[str, OperationIntent] = {}
+    for manifest in manifests:
+        intent = manifest.operation_intent
+        if intent is None:
+            continue
+        previous = intents.get(intent.operation_id)
+        if previous is not None and previous != intent:
+            raise ValueError("operation intent differs across participant manifests")
+        intents[intent.operation_id] = intent
+
+    changed: list[str] = []
+    recovered_operation_id: str | None = None
+    for intent in intents.values():
+        participants = intent.participants
+        if not intent.operation_id:
+            raise ValueError("operation intent ID must not be empty")
+        if len(participants) != len(set(participants)):
+            raise ValueError("operation intent participants must be unique")
+        try:
+            participant_repositories = tuple(
+                repository_by_owner[owner] for owner in participants
+            )
+        except KeyError as exc:
+            raise ValueError("operation intent contains an unknown owner") from exc
+        canonical_participants = tuple(
+            repository.owner
+            for repository in ordered_repositories(participant_repositories)
+        )
+        if participants != canonical_participants:
+            raise ValueError("operation intent participants are not in lock order")
+        if set(participants) != set(intent.base_revisions) or set(participants) != set(
+            intent.candidates
+        ):
+            raise ValueError("operation intent participant metadata is incomplete")
+        if any(revision < 0 for revision in intent.base_revisions.values()):
+            raise ValueError("operation intent base revisions must be non-negative")
+        candidates = {
+            owner: repository_by_owner[owner]._decode_candidate(
+                project_id,
+                intent.candidates[owner]
+            )
+            for owner in participants
+        }
+        for owner, candidate in candidates.items():
+            if candidate.operation_id != intent.operation_id:
+                raise ValueError("candidate operation ID does not match its intent")
+            if candidate.operation_intent is not None:
+                raise ValueError("intent candidate payload must be non-recursive")
+            if candidate.revision != intent.base_revisions[owner] + 1:
+                raise ValueError("intent candidate revision does not advance once")
+        published: list[str] = []
+        pending: list[str] = []
+        superseded = False
+        for owner in participants:
+            current = manifest_by_owner[owner]
+            candidate = candidates[owner]
+            if (
+                current.revision == candidate.revision
+                and current.operation_id == intent.operation_id
+            ):
+                published.append(owner)
+            elif current.revision == intent.base_revisions[owner]:
+                restamped = stamp_operation_changes(
+                    current, candidate, intent.operation_id
+                )
+                if restamped != candidate:
+                    raise ValueError(
+                        "candidate nested operation state does not match its intent"
+                    )
+                pending.append(owner)
+            elif current.revision > candidate.revision:
+                superseded = True
+            else:
+                raise ValueError(
+                    f"cannot reconcile operation {intent.operation_id} owner {owner}"
+                )
+        if superseded:
+            continue
+        if not published or not pending:
+            continue
+        prepared_pending = {
+            owner: repository_by_owner[owner]._prepare_candidate(
+                project_id,
+                value=replace(candidates[owner], operation_intent=intent),
+            )
+            for owner in pending
+        }
+        for owner in participants:
+            if owner not in pending:
+                continue
+            repository = repository_by_owner[owner]
+            repository._publish_prepared_unchecked(
+                project_id,
+                expected_revision=intent.base_revisions[owner],
+                prepared=prepared_pending[owner],
+            )
+            manifest_by_owner[owner] = prepared_pending[owner].value
+            changed.append(owner)
+        recovered_operation_id = intent.operation_id
+    return tuple(changed), recovered_operation_id
 
 
 def _repair_reference_tuple(
@@ -131,6 +256,13 @@ def reconcile_project(
         original_manifests = tuple(
             repository.load(project_id) for repository in repository_order
         )
+        intent_changed, intent_operation_id = _recover_operation_prefix(
+            project_id, repositories, original_manifests
+        )
+        if intent_changed:
+            original_manifests = tuple(
+                repository.load(project_id) for repository in repository_order
+            )
         manifests = original_manifests
         project = manifests[0]
         clips = manifests[1]
@@ -170,10 +302,10 @@ def reconcile_project(
         if not repairs:
             return ReconciliationResult(
                 project_id,
-                creation_operation_id,
+                intent_operation_id or creation_operation_id,
                 0,
                 0,
-                creation_changed,
+                (*creation_changed, *intent_changed),
             )
 
         result = publish_manifests(
@@ -181,7 +313,7 @@ def reconcile_project(
                 repository,
                 project_id,
                 repaired.revision,
-                lambda _current, repaired=repaired: repaired,
+                lambda _current, _operation_id, repaired=repaired: repaired,
             )
             for repository, repaired in repairs
         )
@@ -192,6 +324,7 @@ def reconcile_project(
             rolled_back_references=rolled_back,
             changed_owners=(
                 *creation_changed,
+                *intent_changed,
                 *(manifest.owner for manifest in result.manifests),
             ),
         )

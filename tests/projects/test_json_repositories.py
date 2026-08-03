@@ -8,14 +8,19 @@ from threading import Barrier, Thread
 
 import pytest
 
-from cadscene.projects.json_repositories import AtomicJsonRepository
+from cadscene.projects.json_repositories import AtomicJsonRepository, project_repositories
 from cadscene.projects.models import (
+    ClipDefinition,
     ClipsManifest,
     JobsManifest,
     ProjectManifest,
+    RenderManifest,
     StateReference,
+    activate_analysis_revision,
+    register_analysis_revision,
 )
 from cadscene.projects.repositories import (
+    ManifestRepository,
     ManifestMutation,
     RevisionConflict,
     ordered_repositories,
@@ -47,6 +52,14 @@ def _jobs_repository(path: Path) -> AtomicJsonRepository[JobsManifest]:
     )
 
 
+def _render_repository(path: Path) -> AtomicJsonRepository[RenderManifest]:
+    return AtomicJsonRepository(
+        path,
+        owner="render",
+        decoder=RenderManifest.from_dict,
+    )
+
+
 def _create_project(repository: AtomicJsonRepository[ProjectManifest]) -> None:
     repository.create(
         "p1",
@@ -75,6 +88,15 @@ def test_update_rejects_stale_expected_revision(tmp_path):
     assert caught.value.expected_revision == 0
     assert caught.value.current_revision == 1
     assert repository.load("p1").project_state == "ready"
+
+
+def test_unchecked_prepared_publication_is_not_a_public_repository_operation(
+    tmp_path,
+):
+    repository = _project_repository(tmp_path / "project_manifest.json")
+
+    assert "publish_prepared" not in ManifestRepository.__dict__
+    assert not hasattr(repository, "publish_prepared")
 
 
 def test_atomic_write_uses_same_directory_flush_fsync_and_replace(tmp_path, monkeypatch):
@@ -199,13 +221,15 @@ def test_cross_manifest_publication_stamps_one_unique_operation_id(tmp_path):
                 project_repository,
                 "p1",
                 0,
-                lambda value: replace(value, project_state="analyzed"),
+                lambda value, _operation_id: replace(
+                    value, project_state="analyzed"
+                ),
             ),
             ManifestMutation(
                 clips_repository,
                 "p1",
                 0,
-                lambda value: value,
+                lambda value, _operation_id: value,
             ),
         )
     )
@@ -215,13 +239,13 @@ def test_cross_manifest_publication_stamps_one_unique_operation_id(tmp_path):
                 project_repository,
                 "p1",
                 1,
-                lambda value: replace(value, project_state="ready"),
+                lambda value, _operation_id: replace(value, project_state="ready"),
             ),
             ManifestMutation(
                 clips_repository,
                 "p1",
                 1,
-                lambda value: value,
+                lambda value, _operation_id: value,
             ),
         )
     )
@@ -256,7 +280,7 @@ def test_cross_manifest_publication_stamps_new_states_and_references(tmp_path):
                 clips_repository,
                 "p1",
                 0,
-                lambda value: replace(
+                lambda value, _operation_id: replace(
                     value,
                     references=(
                         StateReference(
@@ -271,7 +295,7 @@ def test_cross_manifest_publication_stamps_new_states_and_references(tmp_path):
                 jobs_repository,
                 "p1",
                 0,
-                lambda value: replace(
+                lambda value, _operation_id: replace(
                     value,
                     jobs=({"job_id": "job-1", "status": "queued"},),
                 ),
@@ -297,16 +321,20 @@ def test_cross_manifest_publication_is_explicitly_not_a_transaction(tmp_path, mo
         ),
     )
 
-    def interrupt(_value: ClipsManifest) -> None:
+    def interrupt(_path, _serialized) -> None:
         raise OSError("crash between manifest replacements")
 
-    monkeypatch.setattr(clips_repository, "_atomic_write", interrupt)
+    monkeypatch.setattr(clips_repository, "_atomic_write_bytes", interrupt)
 
     with pytest.raises(OSError, match="between manifest replacements"):
         publish_manifests(
             (
-                ManifestMutation(project_repository, "p1", 0, lambda value: value),
-                ManifestMutation(clips_repository, "p1", 0, lambda value: value),
+                ManifestMutation(
+                    project_repository, "p1", 0, lambda value, _operation_id: value
+                ),
+                ManifestMutation(
+                    clips_repository, "p1", 0, lambda value, _operation_id: value
+                ),
             )
         )
 
@@ -332,8 +360,12 @@ def test_cross_manifest_revision_conflicts_are_preflighted_before_any_replace(tm
     with pytest.raises(RevisionConflict):
         publish_manifests(
             (
-                ManifestMutation(project_repository, "p1", 0, lambda value: value),
-                ManifestMutation(clips_repository, "p1", 0, lambda value: value),
+                ManifestMutation(
+                    project_repository, "p1", 0, lambda value, _operation_id: value
+                ),
+                ManifestMutation(
+                    clips_repository, "p1", 0, lambda value, _operation_id: value
+                ),
             )
         )
 
@@ -349,3 +381,340 @@ def test_repository_rejects_a_manifest_serialized_for_another_owner(tmp_path):
 
     with pytest.raises(ValueError, match="manifest_owner"):
         _project_repository(path).load("p1")
+
+
+def test_cross_manifest_mutators_receive_shared_operation_for_analysis_activation(
+    tmp_path,
+):
+    repositories = project_repositories(tmp_path)
+    repositories.create_project("p1", updated_at="2026-08-03T00:00:00Z")
+    project = repositories.project.update(
+        "p1",
+        expected_revision=0,
+        mutate=lambda value: register_analysis_revision(
+            value, "analysis-1", operation_id="op-analysis-1"
+        ),
+    )
+    current_clip = ClipDefinition.from_analysis(
+        {
+            "project_id": "p1",
+            "clip_id": "clip-1",
+            "analysis_revision": "analysis-1",
+            "recommended_workflow": "sfm_only",
+        },
+        generated_display_name="Scene 01",
+    )
+    current_clips = repositories.clips.update(
+        "p1",
+        expected_revision=0,
+        mutate=lambda value: replace(
+            value, analysis_revision="analysis-1", clips=(current_clip,)
+        ),
+    )
+    project = repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: register_analysis_revision(
+            value, "analysis-2", operation_id="op-analysis-2"
+        ),
+    )
+    candidate_clip = ClipDefinition.from_analysis(
+        {
+            "project_id": "p1",
+            "clip_id": "clip-1",
+            "analysis_revision": "analysis-2",
+            "recommended_workflow": "pure_rotation",
+        },
+        generated_display_name="Scene 01 refreshed",
+    )
+    candidate = replace(
+        current_clips, analysis_revision="analysis-2", clips=(candidate_clip,)
+    )
+
+    def activate_clips_with_reference(value, operation_id):
+        _, activated = activate_analysis_revision(
+            project,
+            value,
+            candidate,
+            operation_id=operation_id,
+        )
+        activated_clip = replace(
+            activated.clips[0],
+            references=(
+                StateReference(
+                    owner="project",
+                    key="analysis:analysis-2",
+                    operation_id=operation_id,
+                ),
+            ),
+        )
+        return replace(activated, clips=(activated_clip,))
+
+    result = publish_manifests(
+        (
+            ManifestMutation(
+                repositories.project,
+                "p1",
+                project.revision,
+                lambda value, operation_id: activate_analysis_revision(
+                    value,
+                    current_clips,
+                    candidate,
+                    operation_id=operation_id,
+                )[0],
+            ),
+            ManifestMutation(
+                repositories.clips,
+                "p1",
+                current_clips.revision,
+                activate_clips_with_reference,
+            ),
+        )
+    )
+
+    activated_project = repositories.project.load("p1")
+    activated_clips = repositories.clips.load("p1")
+    assert activated_project.operation_id == result.operation_id
+    assert activated_project.active_analysis_operation_id == result.operation_id
+    assert activated_clips.operation_id == result.operation_id
+    assert activated_clips.clips[0].operation_id == result.operation_id
+    assert (
+        activated_clips.clips[0].references[0].operation_id
+        == result.operation_id
+    )
+
+
+def test_later_mutator_exception_publishes_no_manifest(tmp_path):
+    project_repository = _project_repository(tmp_path / "project.json")
+    clips_repository = _clips_repository(tmp_path / "clips.json")
+    _create_project(project_repository)
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+        ),
+    )
+
+    def reject(_value, _operation_id):
+        raise ValueError("deterministic candidate rejection")
+
+    with pytest.raises(ValueError, match="candidate rejection"):
+        publish_manifests(
+            (
+                ManifestMutation(
+                    project_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value, project_state="must-not-publish"
+                    ),
+                ),
+                ManifestMutation(clips_repository, "p1", 0, reject),
+            )
+        )
+
+    assert project_repository.load("p1").revision == 0
+    assert clips_repository.load("p1").revision == 0
+
+
+def test_later_serialization_error_publishes_no_manifest(tmp_path):
+    project_repository = _project_repository(tmp_path / "project.json")
+    render_repository = _render_repository(tmp_path / "render.json")
+    _create_project(project_repository)
+    render_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=RenderManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+    )
+
+    with pytest.raises(TypeError):
+        publish_manifests(
+            (
+                ManifestMutation(
+                    project_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value, project_state="must-not-publish"
+                    ),
+                ),
+                ManifestMutation(
+                    render_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value,
+                        published_outputs=(
+                            {"output_id": "bad", "not_json": {"a-set"}},
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    assert project_repository.load("p1").revision == 0
+    assert render_repository.load("p1").revision == 0
+
+
+def test_changed_nested_states_are_restamped_but_unchanged_history_is_preserved(
+    tmp_path,
+):
+    clips_repository = _clips_repository(tmp_path / "clips.json")
+    jobs_repository = _jobs_repository(tmp_path / "jobs.json")
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            ClipsManifest.new(
+                "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+            ),
+            references=(
+                StateReference("jobs", "job:changed", "op-old", {"status": "queued"}),
+                StateReference("jobs", "job:stable", "op-old", {"status": "success"}),
+            ),
+        ),
+    )
+    jobs_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            JobsManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+            jobs=(
+                {"job_id": "changed", "status": "queued", "operation_id": "op-old"},
+                {"job_id": "stable", "status": "success", "operation_id": "op-old"},
+            ),
+        ),
+    )
+
+    result = publish_manifests(
+        (
+            ManifestMutation(
+                clips_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: replace(
+                    value,
+                    references=(
+                        replace(value.references[0], value={"status": "running"}),
+                        value.references[1],
+                    ),
+                ),
+            ),
+            ManifestMutation(
+                jobs_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: replace(
+                    value,
+                    jobs=(
+                        {**value.jobs[0], "status": "running"},
+                        value.jobs[1],
+                    ),
+                ),
+            ),
+        )
+    )
+
+    references = clips_repository.load("p1").references
+    jobs = jobs_repository.load("p1").jobs
+    assert references[0].operation_id == result.operation_id
+    assert jobs[0]["operation_id"] == result.operation_id
+    assert references[1].operation_id == "op-old"
+    assert jobs[1]["operation_id"] == "op-old"
+
+
+def test_prevalidated_bytes_are_not_serialized_again_during_publication(tmp_path):
+    project_repository = _project_repository(tmp_path / "project.json")
+    calls = 0
+
+    def stateful_encoder(value: ClipsManifest):
+        nonlocal calls
+        calls += 1
+        if calls > 2:
+            raise ValueError("encoder called after complete prevalidation")
+        return value.to_dict()
+
+    clips_repository = AtomicJsonRepository(
+        tmp_path / "clips.json",
+        owner="clips",
+        decoder=ClipsManifest.from_dict,
+        encoder=stateful_encoder,
+    )
+    _create_project(project_repository)
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+        ),
+    )
+    calls = 0
+
+    publish_manifests(
+        (
+            ManifestMutation(
+                project_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: replace(
+                    value, project_state="published"
+                ),
+            ),
+            ManifestMutation(
+                clips_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: value,
+            ),
+        )
+    )
+
+    assert calls == 2
+    assert project_repository.load("p1").revision == 1
+    assert clips_repository.load("p1").revision == 1
+
+
+def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path):
+    project_repository = _project_repository(tmp_path / "project.json")
+    calls = 0
+
+    def stateful_decoder(value):
+        nonlocal calls
+        calls += 1
+        if calls > 3:
+            raise ValueError("decoder called after complete prevalidation")
+        return ClipsManifest.from_dict(value)
+
+    clips_repository = AtomicJsonRepository(
+        tmp_path / "clips.json",
+        owner="clips",
+        decoder=stateful_decoder,
+    )
+    _create_project(project_repository)
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+        ),
+    )
+
+    publish_manifests(
+        (
+            ManifestMutation(
+                project_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: value,
+            ),
+            ManifestMutation(
+                clips_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: value,
+            ),
+        )
+    )
+
+    assert calls == 3

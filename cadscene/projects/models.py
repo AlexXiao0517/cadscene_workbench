@@ -43,12 +43,49 @@ class StateReference:
 
 
 @dataclass(frozen=True)
+class OperationIntent:
+    """Durable, non-recursive plan for an ordered manifest publication."""
+
+    operation_id: str
+    participants: tuple[str, ...]
+    base_revisions: Mapping[str, int]
+    candidates: Mapping[str, Mapping[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation_id": self.operation_id,
+            "participants": list(self.participants),
+            "base_revisions": dict(self.base_revisions),
+            "candidates": {
+                owner: dict(candidate)
+                for owner, candidate in self.candidates.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> OperationIntent:
+        return cls(
+            operation_id=str(value["operation_id"]),
+            participants=tuple(str(item) for item in value["participants"]),
+            base_revisions={
+                str(owner): int(revision)
+                for owner, revision in value["base_revisions"].items()
+            },
+            candidates={
+                str(owner): dict(candidate)
+                for owner, candidate in value["candidates"].items()
+            },
+        )
+
+
+@dataclass(frozen=True)
 class ManifestHeader:
     schema_version: str
     revision: int
     updated_at: str
     project_id: str
     operation_id: str | None = None
+    operation_intent: OperationIntent | None = None
 
     owner: ClassVar[str] = ""
 
@@ -72,6 +109,11 @@ class ManifestHeader:
             "updated_at": self.updated_at,
             "project_id": self.project_id,
             "operation_id": self.operation_id,
+            "operation_intent": (
+                None
+                if self.operation_intent is None
+                else self.operation_intent.to_dict()
+            ),
         }
 
 
@@ -261,6 +303,35 @@ class ProjectManifest(ManifestHeader):
     analysis_operation_ids: Mapping[str, str] = field(default_factory=dict)
     references: tuple[StateReference, ...] = ()
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if len(self.analysis_revisions) != len(set(self.analysis_revisions)):
+            raise ValueError("analysis_revisions must be unique")
+        if set(self.analysis_revisions) != set(self.analysis_operation_ids):
+            raise ValueError(
+                "analysis_operation_ids must exactly own every analysis revision"
+            )
+        if any(not operation_id for operation_id in self.analysis_operation_ids.values()):
+            raise ValueError("analysis operation IDs must not be empty")
+        for layer, revision, operation_id in (
+            (
+                "active",
+                self.active_analysis_revision,
+                self.active_analysis_operation_id,
+            ),
+            (
+                "candidate",
+                self.candidate_analysis_revision,
+                self.candidate_analysis_operation_id,
+            ),
+        ):
+            if (revision is None) != (operation_id is None):
+                raise ValueError(
+                    f"{layer} analysis revision and operation ID must be paired"
+                )
+            if revision is not None and revision not in self.analysis_operation_ids:
+                raise ValueError(f"{layer} analysis revision must be immutable-owned")
+
     @classmethod
     def new(cls, project_id: str, *, updated_at: str) -> ProjectManifest:
         return cls(
@@ -371,6 +442,14 @@ class JobsManifest(ManifestHeader):
     queue_order: tuple[str, ...] = ()
     references: tuple[StateReference, ...] = ()
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        job_ids = [job.get("job_id") for job in self.jobs]
+        if any(not isinstance(job_id, str) or not job_id for job_id in job_ids):
+            raise ValueError("every job state requires a non-empty job_id")
+        if len(job_ids) != len(set(job_ids)):
+            raise ValueError("job_id values must be unique")
+
     @classmethod
     def new(cls, project_id: str, *, updated_at: str) -> JobsManifest:
         return cls(SCHEMA_VERSION, 0, updated_at, project_id)
@@ -401,6 +480,27 @@ class RenderManifest(ManifestHeader):
     merge_plans: tuple[Mapping[str, Any], ...] = ()
     published_outputs: tuple[Mapping[str, Any], ...] = ()
     references: tuple[StateReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._validate_ids(self.clip_renders, "render_id")
+        self._validate_ids(self.merge_plans, "merge_id")
+        self._validate_ids(self.published_outputs, "output_id")
+
+    @staticmethod
+    def _validate_ids(
+        values: tuple[Mapping[str, Any], ...], identity_key: str
+    ) -> None:
+        identities = [value.get(identity_key) for value in values]
+        if any(
+            not isinstance(identity, str) or not identity
+            for identity in identities
+        ):
+            raise ValueError(
+                f"every render state requires a non-empty {identity_key}"
+            )
+        if len(identities) != len(set(identities)):
+            raise ValueError(f"{identity_key} values must be unique")
 
     @classmethod
     def new(cls, project_id: str, *, updated_at: str) -> RenderManifest:
@@ -442,6 +542,11 @@ def _header_from_dict(
         "updated_at": str(value["updated_at"]),
         "project_id": str(value["project_id"]),
         "operation_id": _optional_str(value.get("operation_id")),
+        "operation_intent": (
+            None
+            if value.get("operation_intent") is None
+            else OperationIntent.from_dict(value["operation_intent"])
+        ),
     }
 
 
@@ -518,6 +623,12 @@ def register_analysis_revision(
         raise ValueError("operation_id must not be empty")
     revisions = project.analysis_revisions
     operation_ids = dict(project.analysis_operation_ids)
+    if analysis_revision in operation_ids:
+        if operation_ids[analysis_revision] != operation_id:
+            raise ValueError(
+                "immutable analysis revision cannot be rebound to another operation"
+            )
+        return project
     if analysis_revision not in revisions:
         revisions = (*revisions, analysis_revision)
         operation_ids[analysis_revision] = operation_id
@@ -581,68 +692,3 @@ def activate_analysis_revision(
 Manifest = TypeVar(
     "Manifest", ProjectManifest, ClipsManifest, JobsManifest, RenderManifest
 )
-
-
-def _stamp_reference(
-    reference: StateReference, operation_id: str
-) -> StateReference:
-    return (
-        reference
-        if reference.operation_id
-        else replace(reference, operation_id=operation_id)
-    )
-
-
-def stamp_new_operation_states(
-    manifest: ManifestHeader, operation_id: str
-) -> ManifestHeader:
-    """Stamp newly introduced states/references without rewriting history."""
-
-    references = tuple(
-        _stamp_reference(reference, operation_id)
-        for reference in manifest.references
-    )
-    stamped: ManifestHeader = replace(
-        manifest, references=references, operation_id=operation_id
-    )
-    if isinstance(manifest, ClipsManifest):
-        clips = tuple(
-            replace(
-                clip,
-                operation_id=clip.operation_id or operation_id,
-                references=tuple(
-                    _stamp_reference(reference, operation_id)
-                    for reference in clip.references
-                ),
-            )
-            for clip in manifest.clips
-        )
-        stamped = replace(stamped, clips=clips)
-    elif isinstance(manifest, JobsManifest):
-        jobs = tuple(
-            {
-                **job,
-                "operation_id": job.get("operation_id") or operation_id,
-            }
-            for job in manifest.jobs
-        )
-        stamped = replace(stamped, jobs=jobs)
-    elif isinstance(manifest, RenderManifest):
-        def stamp_items(
-            items: tuple[Mapping[str, Any], ...]
-        ) -> tuple[Mapping[str, Any], ...]:
-            return tuple(
-                {
-                    **item,
-                    "operation_id": item.get("operation_id") or operation_id,
-                }
-                for item in items
-            )
-
-        stamped = replace(
-            stamped,
-            clip_renders=stamp_items(manifest.clip_renders),
-            merge_plans=stamp_items(manifest.merge_plans),
-            published_outputs=stamp_items(manifest.published_outputs),
-        )
-    return stamped

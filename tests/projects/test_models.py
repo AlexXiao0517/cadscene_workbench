@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from cadscene.projects.models import (
     ClipDefinition,
     ClipsManifest,
@@ -149,6 +151,55 @@ def test_initial_analysis_activates_but_later_analysis_is_only_a_candidate():
         "analysis-1": "op-initial",
         "analysis-2": "op-candidate",
     }
+
+
+def test_register_analysis_revision_is_idempotent_for_the_same_operation():
+    project = ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z")
+    registered = register_analysis_revision(
+        project, "analysis-1", operation_id="op-analysis-1"
+    )
+
+    repeated = register_analysis_revision(
+        registered, "analysis-1", operation_id="op-analysis-1"
+    )
+
+    assert repeated == registered
+
+
+def test_register_analysis_revision_rejects_operation_rebinding():
+    project = ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z")
+    registered = register_analysis_revision(
+        project, "analysis-1", operation_id="op-analysis-1"
+    )
+
+    with pytest.raises(ValueError, match="immutable analysis revision"):
+        register_analysis_revision(
+            registered, "analysis-1", operation_id="different-operation"
+        )
+
+
+def test_project_manifest_rejects_divergent_immutable_analysis_ownership():
+    payload = ProjectManifest.new(
+        "p1", updated_at="2026-08-03T00:00:00Z"
+    ).to_dict()
+    payload["analysis_revisions"] = ["analysis-orphan"]
+
+    with pytest.raises(ValueError, match="analysis_operation_ids"):
+        ProjectManifest.from_dict(payload)
+
+
+def test_job_and_render_states_require_stable_identity():
+    common = {
+        "schema_version": "1.0",
+        "revision": 0,
+        "updated_at": "2026-08-03T00:00:00Z",
+        "project_id": "p1",
+    }
+
+    with pytest.raises(ValueError, match="job_id"):
+        JobsManifest(**common, jobs=({"status": "queued"},))
+    with pytest.raises(ValueError, match="output_id"):
+        RenderManifest(**common, published_outputs=({"status": "planned"},))
 
 
 def test_explicit_candidate_activation_preserves_user_layers():

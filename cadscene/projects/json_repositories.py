@@ -17,7 +17,12 @@ from .models import (
     ProjectManifest,
     RenderManifest,
 )
-from .repositories import RevisionConflict, new_operation_id, ordered_repositories
+from .repositories import (
+    PreparedManifest,
+    RevisionConflict,
+    new_operation_id,
+    ordered_repositories,
+)
 
 
 T = TypeVar("T", bound=ManifestHeader)
@@ -115,16 +120,77 @@ class AtomicJsonRepository(Generic[T]):
                     current_revision=current.revision,
                 )
             candidate = mutate(current)
-            self._validate_identity(project_id, candidate)
-            if candidate.revision != current.revision:
-                raise ValueError("mutators must not manage repository revisions")
-            published = replace(
-                candidate,
-                revision=current.revision + 1,
-                updated_at=_utc_now(),
+            candidate = replace(candidate, operation_intent=None)
+            advanced = self._advance_candidate(
+                project_id,
+                expected_revision=expected_revision,
+                value=candidate,
             )
-            self._atomic_write(published)
-            return published
+            prepared = self._prepare_candidate(project_id, value=advanced)
+            return self._publish_prepared_unchecked(
+                project_id,
+                expected_revision=expected_revision,
+                prepared=prepared,
+            )
+
+    def _advance_candidate(
+        self, project_id: str, *, expected_revision: int, value: T
+    ) -> T:
+        self._validate_identity(project_id, value)
+        if value.revision != expected_revision:
+            raise ValueError("mutators must not manage repository revisions")
+        return replace(
+            value,
+            revision=expected_revision + 1,
+            updated_at=_utc_now(),
+        )
+
+    def _prepare_candidate(
+        self, project_id: str, *, value: T
+    ) -> PreparedManifest[T]:
+        self._validate_identity(project_id, value)
+        payload = self._encoder(value)
+        serialized = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        normalized = json.loads(serialized)
+        decoded = self._decoder(normalized)
+        self._validate_identity(project_id, decoded)
+        return PreparedManifest(
+            value=value,
+            payload=normalized,
+            serialized=serialized.encode("utf-8"),
+        )
+
+    def _decode_candidate(
+        self, project_id: str, value: Mapping[str, Any]
+    ) -> T:
+        candidate = self._decoder(value)
+        self._validate_identity(project_id, candidate)
+        return candidate
+
+    def _publish_prepared_unchecked(
+        self,
+        project_id: str,
+        *,
+        expected_revision: int,
+        prepared: PreparedManifest[T],
+    ) -> T:
+        with self.lock_for(project_id):
+            value = prepared.value
+            self._validate_identity(project_id, value)
+            if value.revision != expected_revision + 1:
+                raise ValueError("prepared manifest revision must advance exactly once")
+            self._atomic_write_bytes(
+                self.path_for(project_id), prepared.serialized
+            )
+            return value
 
     def _validate_identity(self, project_id: str, value: T) -> None:
         if value.project_id != project_id:
@@ -144,27 +210,30 @@ class AtomicJsonRepository(Generic[T]):
 
     def _atomic_write(self, value: T) -> None:
         path = self.path_for(value.project_id)
+        serialized = (
+            json.dumps(
+                self._encoder(value),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        self._atomic_write_bytes(path, serialized)
+
+    def _atomic_write_bytes(self, path: Path, serialized: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                newline="",
+                mode="wb",
                 prefix=f".{path.name}-",
                 suffix=".tmp",
                 dir=path.parent,
                 delete=False,
             ) as stream:
                 temporary_path = Path(stream.name)
-                json.dump(
-                    self._encoder(value),
-                    stream,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                stream.write("\n")
+                stream.write(serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, path)
