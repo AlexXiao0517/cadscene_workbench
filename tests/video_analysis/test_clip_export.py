@@ -208,7 +208,7 @@ def test_export_video_clips_cleans_up_failed_temp_publication(tmp_path: Path) ->
     manifest = _two_clip_manifest(tmp_path)
     output = tmp_path / "clips"
 
-    with pytest.raises(RuntimeError, match="PTS probe failed"):
+    with pytest.raises(RuntimeError, match="decoded-frame probe failed"):
         export_video_clips(video, manifest, output)
 
     assert not output.exists()
@@ -493,6 +493,38 @@ def test_load_export_clips_returns_validated_source_pts_ranges(tmp_path: Path) -
         ("clip-0001", 2.0),
         ("clip-0002", 2.5),
     ]
+
+
+def test_load_export_clips_uses_exact_pts_below_sixty_not_rounded_seconds(
+    tmp_path: Path,
+) -> None:
+    denominator = 10**18
+    end_pts_exclusive = 60 * denominator - 1
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": "clip-0001",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": end_pts_exclusive,
+                "source_time_base": {
+                    "numerator": 1,
+                    "denominator": denominator,
+                },
+            }
+        ],
+    )
+
+    clips = load_export_clips(manifest)
+
+    assert len(clips) == 1
+    assert (
+        Fraction(
+            clips[0].source_end_pts_exclusive - clips[0].source_start_pts
+        )
+        * clips[0].source_time_base
+        < 60
+    )
 
 
 def test_load_export_clips_rejects_casefold_colliding_ids(tmp_path: Path) -> None:

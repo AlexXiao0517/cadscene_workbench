@@ -203,7 +203,6 @@ def analyze_video(
     packet_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
     frame_index = probe_decoded_frame_index(
         source,
-        time_base=packet_index.time_base,
         ffprobe_executable=ffprobe_executable,
         ffmpeg_executable=ffmpeg_executable,
     )

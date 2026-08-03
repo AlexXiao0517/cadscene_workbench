@@ -76,6 +76,61 @@ def test_nonzero_source_start_and_final_frame_are_partitioned_once() -> None:
     segmentation.validate_frame_partition(frame_index, clips)
 
 
+def test_sparse_vfr_planner_rejects_locally_preferred_unreachable_cut() -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1),
+        tuple(
+            DecodedFrameTimestamp(ordinal, pts, 1, "pts")
+            for ordinal, pts in enumerate((0, 52, 55, 113, 169))
+        ),
+    )
+
+    clips = plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[],
+        cut_candidates=[
+            CutCandidate(52.0, motion_magnitude_px=0.0, clarity_score=1.0),
+            CutCandidate(55.0, motion_magnitude_px=0.0, clarity_score=0.1),
+        ],
+    )
+
+    assert [clip.source_end_pts_exclusive for clip in clips] == [55, 113, 170]
+    assert all(
+        Fraction(clip.source_end_pts_exclusive - clip.source_start_pts)
+        * frame_index.time_base
+        < 60
+        for clip in clips
+        if clip.source_start_pts is not None
+        and clip.source_end_pts_exclusive is not None
+    )
+
+
+def test_exact_pts_duration_one_tick_below_sixty_remains_one_clip() -> None:
+    denominator = 10**18
+    end_pts_exclusive = 60 * denominator - 1
+    frame_index = DecodedFrameIndex(
+        Fraction(1, denominator),
+        (
+            DecodedFrameTimestamp(0, 0, None, "pts"),
+            DecodedFrameTimestamp(1, end_pts_exclusive - 1, 1, "pts"),
+        ),
+    )
+
+    clips = plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[],
+        cut_candidates=[],
+    )
+
+    assert len(clips) == 1
+    assert (
+        Fraction(
+            clips[0].source_end_pts_exclusive - clips[0].source_start_pts
+        )
+        * frame_index.time_base
+        < 60
+    )
+
 def test_duration_planner_uses_minimum_number_of_strictly_sub_sixty_clips() -> None:
     candidates = [
         CutCandidate(48.0, motion_magnitude_px=8.0, clarity_score=0.5),

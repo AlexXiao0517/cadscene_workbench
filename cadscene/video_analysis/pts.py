@@ -127,19 +127,15 @@ def probe_decoded_frame_index(
     ffprobe_executable: str | Path | None = None,
     ffmpeg_executable: str | Path | None = None,
 ) -> DecodedFrameIndex:
+    """Probe frames; ``time_base`` remains a non-authoritative compatibility hint."""
     source = Path(video_path)
     if not source.is_file():
         raise FileNotFoundError(f"video not found: {source}")
-    if time_base is None:
-        time_base = probe_video_pts(
-            source, ffmpeg_executable=ffmpeg_executable
-        ).time_base
     try:
         ffprobe = _resolve_ffprobe_executable(ffprobe_executable)
     except RuntimeError:
         return _probe_decoded_frame_index_with_ffmpeg(
             source,
-            time_base=time_base,
             ffmpeg_executable=ffmpeg_executable,
         )
     process = subprocess.run(
@@ -151,7 +147,7 @@ def probe_decoded_frame_index(
             "v:0",
             "-show_frames",
             "-show_entries",
-            "frame=pts,best_effort_timestamp,pkt_duration",
+            "frame=pts,best_effort_timestamp,pkt_duration:stream=time_base",
             "-of",
             "json",
             str(source),
@@ -167,12 +163,33 @@ def probe_decoded_frame_index(
         if ffprobe_executable is None:
             return _probe_decoded_frame_index_with_ffmpeg(
                 source,
-                time_base=time_base,
                 ffmpeg_executable=ffmpeg_executable,
             )
         raise RuntimeError(f"FFprobe decoded-frame probe failed: {process.stderr[-1000:]}")
-    frames = parse_decoded_frame_records(process.stdout, time_base=time_base)
-    return DecodedFrameIndex(time_base, frames)
+    document = json.loads(process.stdout)
+    exact_time_base = _parse_ffprobe_time_base(document)
+    frames = parse_decoded_frame_records(document, time_base=exact_time_base)
+    return DecodedFrameIndex(exact_time_base, frames)
+
+
+def _parse_ffprobe_time_base(document: Mapping[str, Any]) -> Fraction:
+    streams = document.get("streams")
+    if not isinstance(streams, list) or len(streams) != 1:
+        raise ValueError("FFprobe response must contain one selected video stream")
+    stream = streams[0]
+    if not isinstance(stream, Mapping):
+        raise ValueError("FFprobe selected video stream must be an object")
+    return _parse_exact_time_base(stream.get("time_base"), source="FFprobe")
+
+
+def _parse_exact_time_base(value: Any, *, source: str) -> Fraction:
+    if not isinstance(value, str) or not re.fullmatch(r"\d+/\d+", value):
+        raise ValueError(f"{source} exact video time base is missing")
+    numerator_text, denominator_text = value.split("/", 1)
+    numerator, denominator = int(numerator_text), int(denominator_text)
+    if numerator <= 0 or denominator <= 0:
+        raise ValueError(f"{source} exact video time base must be positive")
+    return Fraction(numerator, denominator)
 
 
 def _resolve_ffprobe_executable(explicit: str | Path | None) -> Path:
@@ -194,12 +211,14 @@ _SHOWINFO_FRAME_RE = re.compile(
     r"\bn:\s*(?P<ordinal>\d+)\s+pts:\s*(?P<pts>-?\d+).*?"
     r"\bduration:\s*(?P<duration>-?\d+)"
 )
+_SHOWINFO_TIME_BASE_RE = re.compile(
+    r"\bconfig in time_base:\s*(?P<time_base>\d+/\d+)"
+)
 
 
 def _probe_decoded_frame_index_with_ffmpeg(
     source: Path,
     *,
-    time_base: Fraction,
     ffmpeg_executable: str | Path | None,
 ) -> DecodedFrameIndex:
     ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
@@ -231,6 +250,11 @@ def _probe_decoded_frame_index_with_ffmpeg(
         raise RuntimeError(
             f"FFmpeg decoded-frame probe failed: {process.stderr[-1000:]}"
         )
+    time_base_match = _SHOWINFO_TIME_BASE_RE.search(process.stderr)
+    exact_time_base = _parse_exact_time_base(
+        time_base_match.group("time_base") if time_base_match is not None else None,
+        source="FFmpeg showinfo",
+    )
     frames = tuple(
         DecodedFrameTimestamp(
             ordinal=int(match.group("ordinal")),
@@ -244,7 +268,7 @@ def _probe_decoded_frame_index_with_ffmpeg(
         )
         for match in _SHOWINFO_FRAME_RE.finditer(process.stderr)
     )
-    return DecodedFrameIndex(time_base, frames)
+    return DecodedFrameIndex(exact_time_base, frames)
 
 
 def _integer_field(value: Any, field_name: str) -> int:

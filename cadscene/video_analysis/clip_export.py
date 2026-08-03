@@ -27,7 +27,7 @@ _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
-_MAX_DURATION_SEC = 60.0
+_MAX_DURATION = Fraction(60, 1)
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 X264_PRESETS = (
@@ -110,9 +110,13 @@ def load_export_clips(manifest_path: Path) -> list[ExportClip]:
             source_end_pts_exclusive=end,
             source_time_base=time_base,
         )
-        if clip.duration_sec <= 0:
+        duration = (
+            Fraction(clip.source_end_pts_exclusive - clip.source_start_pts)
+            * clip.source_time_base
+        )
+        if duration <= 0:
             raise ValueError(f"clip {clip_id} must have a positive duration")
-        if clip.duration_sec >= _MAX_DURATION_SEC:
+        if duration >= _MAX_DURATION:
             raise ValueError(f"clip {clip_id} must be shorter than 60 seconds")
         if previous_end is not None and clip.source_start_pts < previous_end:
             raise ValueError(f"clip {clip_id} overlaps the previous clip")

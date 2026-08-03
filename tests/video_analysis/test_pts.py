@@ -66,7 +66,10 @@ def test_frame_index_probe_uses_ffprobe_decoded_frames(
         calls.append(command)
         return SimpleNamespace(
             returncode=0,
-            stdout='{"frames": [{"pts": "5000", "pkt_duration": "40"}]}',
+            stdout=(
+                '{"streams": [{"time_base": "1/1000"}], '
+                '"frames": [{"pts": "5000", "pkt_duration": "40"}]}'
+            ),
             stderr="",
         )
 
@@ -78,7 +81,40 @@ def test_frame_index_probe_uses_ffprobe_decoded_frames(
 
     assert index.source_start_pts == 5000
     assert "-show_frames" in calls[0]
-    assert "frame=pts,best_effort_timestamp,pkt_duration" in calls[0]
+    assert (
+        "frame=pts,best_effort_timestamp,pkt_duration:stream=time_base"
+        in calls[0]
+    )
+
+
+def test_frame_index_probe_uses_exact_stream_time_base_not_rounded_tbn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mkv"
+    video.write_bytes(b"video")
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_bytes(b"probe")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"streams": [{"time_base": "1001/30000"}], '
+                '"frames": [{"pts": "0", "pkt_duration": "1"}]}'
+            ),
+            stderr="",
+        ),
+    )
+
+    index = pts.probe_decoded_frame_index(
+        video,
+        time_base=Fraction(1, 30),
+        ffprobe_executable=ffprobe,
+    )
+
+    assert index.time_base == Fraction(1001, 30000)
 
 
 def test_frame_index_probe_falls_back_to_decoded_ffmpeg_showinfo(
@@ -99,6 +135,8 @@ def test_frame_index_probe_falls_back_to_decoded_ffmpeg_showinfo(
             returncode=0,
             stdout="",
             stderr=(
+                "[Parsed_showinfo_0] config in time_base: 1001/30000, "
+                "frame_rate: 30000/1001\n"
                 "[Parsed_showinfo_0] n: 0 pts: 5000 pts_time:5 "
                 "duration: 40 duration_time:0.04\n"
                 "[Parsed_showinfo_0] n: 1 pts: 5040 pts_time:5.04 "
@@ -110,12 +148,46 @@ def test_frame_index_probe_falls_back_to_decoded_ffmpeg_showinfo(
     monkeypatch.setattr(subprocess, "run", run)
 
     index = pts.probe_decoded_frame_index(
-        video, time_base=Fraction(1, 1000), ffmpeg_executable=ffmpeg
+        video, time_base=Fraction(1, 30), ffmpeg_executable=ffmpeg
     )
 
     assert [frame.pts for frame in index.frames] == [5000, 5040]
+    assert index.time_base == Fraction(1001, 30000)
     assert "showinfo" in calls[0]
     assert "-copyts" in calls[0]
+
+
+def test_frame_index_fallback_rejects_missing_exact_time_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mkv"
+    video.write_bytes(b"video")
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_bytes(b"encoder")
+
+    def unavailable(_: object) -> Path:
+        raise RuntimeError("ffprobe unavailable")
+
+    monkeypatch.setattr(
+        pts,
+        "_resolve_ffprobe_executable",
+        unavailable,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr=(
+                "[Parsed_showinfo_0] n: 0 pts: 0 pts_time:0 "
+                "duration: 1 duration_time:0.04\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exact video time base is missing"):
+        pts.probe_decoded_frame_index(video, ffmpeg_executable=ffmpeg)
 
 
 def test_packet_parser_preserves_irregular_source_pts_without_fps_math() -> None:
