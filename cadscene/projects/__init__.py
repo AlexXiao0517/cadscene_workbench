@@ -17,6 +17,14 @@ from .models import (
 from .repositories import ManifestRepository, RevisionConflict
 from .json_repositories import AtomicJsonRepository, project_repositories
 from .recovery import reconcile_project
+from .adapters import (
+    AdapterProgress,
+    AdapterResult,
+    WorkflowAdapter,
+    WorkflowAdapterRegistry,
+)
+from .queue import AttemptRecord, LocalResourceQueue, QueueJob, TaskQueue
+from .service import ProjectService
 
 __all__ = [
     "ClipDefinition",
@@ -36,4 +44,13 @@ __all__ = [
     "AtomicJsonRepository",
     "project_repositories",
     "reconcile_project",
+    "AdapterProgress",
+    "AdapterResult",
+    "WorkflowAdapter",
+    "WorkflowAdapterRegistry",
+    "AttemptRecord",
+    "LocalResourceQueue",
+    "QueueJob",
+    "TaskQueue",
+    "ProjectService",
 ]
