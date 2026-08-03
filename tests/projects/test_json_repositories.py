@@ -631,7 +631,7 @@ def test_prevalidated_bytes_are_not_serialized_again_during_publication(tmp_path
     def stateful_encoder(value: ClipsManifest):
         nonlocal calls
         calls += 1
-        if calls > 2:
+        if calls > 1:
             raise ValueError("encoder called after complete prevalidation")
         return value.to_dict()
 
@@ -670,9 +670,234 @@ def test_prevalidated_bytes_are_not_serialized_again_during_publication(tmp_path
         )
     )
 
-    assert calls == 2
+    assert calls == 1
     assert project_repository.load("p1").revision == 1
     assert clips_repository.load("p1").revision == 1
+    published_payload = json.loads(
+        clips_repository.path_for("p1").read_text(encoding="utf-8")
+    )
+    intended_payload = published_payload["operation_intent"]["candidates"]["clips"]
+    published_without_intent = {
+        **published_payload,
+        "operation_intent": None,
+    }
+    assert published_without_intent == intended_payload
+
+
+def test_lossy_encoder_is_rejected_before_cross_manifest_publication(tmp_path):
+    project_path = tmp_path / "project.json"
+    creating_repository = _project_repository(project_path)
+    clips_repository = _clips_repository(tmp_path / "clips.json")
+    _create_project(creating_repository)
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+        ),
+    )
+
+    def lossy_encoder(value: ProjectManifest):
+        payload = value.to_dict()
+        payload.pop("project_state")
+        return payload
+
+    lossy_repository = AtomicJsonRepository(
+        project_path,
+        owner="project",
+        decoder=ProjectManifest.from_dict,
+        encoder=lossy_encoder,
+    )
+
+    with pytest.raises(ValueError, match="round-trip semantically"):
+        publish_manifests(
+            (
+                ManifestMutation(
+                    lossy_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value, project_state="must-not-be-lost"
+                    ),
+                ),
+                ManifestMutation(
+                    clips_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: value,
+                ),
+            )
+        )
+
+    assert creating_repository.load("p1").revision == 0
+    assert clips_repository.load("p1").revision == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "delete",
+        "reorder",
+        "rebind",
+        "in_place_rebind",
+        "wrong_new_operation",
+        "wrong_pointer_operation",
+    ],
+)
+def test_single_manifest_update_rejects_invalid_immutable_analysis_transition(
+    tmp_path, corruption
+):
+    repository = _project_repository(tmp_path / "project.json")
+    repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+            operation_id="op-2",
+            analysis_revisions=("analysis-1", "analysis-2"),
+            analysis_operation_ids={
+                "analysis-1": "op-1",
+                "analysis-2": "op-2",
+            },
+        ),
+    )
+
+    def corrupt(value: ProjectManifest) -> ProjectManifest:
+        if corruption == "delete":
+            return replace(
+                value,
+                analysis_revisions=("analysis-1",),
+                analysis_operation_ids={"analysis-1": "op-1"},
+            )
+        if corruption == "reorder":
+            return replace(
+                value,
+                analysis_revisions=("analysis-2", "analysis-1"),
+            )
+        if corruption == "rebind":
+            return replace(
+                value,
+                analysis_operation_ids={
+                    "analysis-1": "op-rebound",
+                    "analysis-2": "op-2",
+                },
+            )
+        if corruption == "in_place_rebind":
+            value.analysis_operation_ids["analysis-1"] = "op-rebound"
+            return value
+        if corruption == "wrong_pointer_operation":
+            return replace(
+                value,
+                operation_id="op-publication",
+                candidate_analysis_revision="analysis-1",
+                candidate_analysis_operation_id="op-not-publication",
+            )
+        return replace(
+            value,
+            operation_id="op-publication",
+            analysis_revisions=(*value.analysis_revisions, "analysis-3"),
+            analysis_operation_ids={
+                **value.analysis_operation_ids,
+                "analysis-3": "op-not-publication",
+            },
+        )
+
+    with pytest.raises(ValueError, match="immutable analysis transition"):
+        repository.update("p1", expected_revision=0, mutate=corrupt)
+
+    assert repository.load("p1").revision == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "delete",
+        "reorder",
+        "rebind",
+        "in_place_rebind",
+        "wrong_new_operation",
+        "wrong_pointer_operation",
+    ],
+)
+def test_cross_manifest_publication_rejects_invalid_immutable_analysis_transition(
+    tmp_path, corruption
+):
+    project_repository = _project_repository(tmp_path / "project.json")
+    clips_repository = _clips_repository(tmp_path / "clips.json")
+    project_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+            operation_id="op-2",
+            analysis_revisions=("analysis-1", "analysis-2"),
+            analysis_operation_ids={
+                "analysis-1": "op-1",
+                "analysis-2": "op-2",
+            },
+        ),
+    )
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
+        ),
+    )
+
+    def corrupt(value: ProjectManifest, operation_id: str) -> ProjectManifest:
+        if corruption == "delete":
+            return replace(
+                value,
+                analysis_revisions=("analysis-1",),
+                analysis_operation_ids={"analysis-1": "op-1"},
+            )
+        if corruption == "reorder":
+            return replace(
+                value,
+                analysis_revisions=("analysis-2", "analysis-1"),
+            )
+        if corruption == "rebind":
+            return replace(
+                value,
+                analysis_operation_ids={
+                    "analysis-1": "op-rebound",
+                    "analysis-2": "op-2",
+                },
+            )
+        if corruption == "in_place_rebind":
+            value.analysis_operation_ids["analysis-1"] = "op-rebound"
+            return value
+        if corruption == "wrong_pointer_operation":
+            return replace(
+                value,
+                candidate_analysis_revision="analysis-1",
+                candidate_analysis_operation_id="not-" + operation_id,
+            )
+        return replace(
+            value,
+            analysis_revisions=(*value.analysis_revisions, "analysis-3"),
+            analysis_operation_ids={
+                **value.analysis_operation_ids,
+                "analysis-3": f"not-{operation_id}",
+            },
+        )
+
+    with pytest.raises(ValueError, match="immutable analysis transition"):
+        publish_manifests(
+            (
+                ManifestMutation(project_repository, "p1", 0, corrupt),
+                ManifestMutation(
+                    clips_repository,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: value,
+                ),
+            )
+        )
+
+    assert project_repository.load("p1").revision == 0
+    assert clips_repository.load("p1").revision == 0
 
 
 def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path):
@@ -699,6 +924,7 @@ def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path
             "p1", analysis_revision=None, updated_at="2026-08-03T00:00:00Z"
         ),
     )
+    calls = 0
 
     publish_manifests(
         (

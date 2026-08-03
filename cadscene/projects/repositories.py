@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from threading import RLock
@@ -12,6 +13,7 @@ from .models import (
     JobsManifest,
     ManifestHeader,
     OperationIntent,
+    ProjectManifest,
     RenderManifest,
     StateReference,
 )
@@ -85,6 +87,15 @@ class _CoordinatedManifestRepository(ManifestRepository[T], Protocol[T]):
         self, project_id: str, value: Mapping[str, Any]
     ) -> T: ...
 
+    def _prepare_intent_candidate(
+        self,
+        project_id: str,
+        *,
+        value: T,
+        payload: Mapping[str, Any],
+        intent: OperationIntent,
+    ) -> PreparedManifest[T]: ...
+
     def _publish_prepared_unchecked(
         self,
         project_id: str,
@@ -125,6 +136,88 @@ def ordered_repositories(
 
 def new_operation_id() -> str:
     return uuid4().hex
+
+
+def validate_manifest_transition(
+    current: ManifestHeader,
+    candidate: ManifestHeader,
+    *,
+    publication_operation_id: str | None,
+) -> None:
+    """Enforce history invariants that require both manifest revisions."""
+
+    if not isinstance(current, ProjectManifest) or not isinstance(
+        candidate, ProjectManifest
+    ):
+        return
+    previous_revisions = current.analysis_revisions
+    if candidate.analysis_revisions[: len(previous_revisions)] != previous_revisions:
+        raise ValueError(
+            "immutable analysis transition cannot delete or reorder revisions"
+        )
+    for revision in previous_revisions:
+        if (
+            candidate.analysis_operation_ids[revision]
+            != current.analysis_operation_ids[revision]
+        ):
+            raise ValueError(
+                "immutable analysis transition cannot rebind operation provenance"
+            )
+    added_revisions = candidate.analysis_revisions[len(previous_revisions) :]
+    if any(
+        candidate.analysis_operation_ids[revision] != publication_operation_id
+        for revision in added_revisions
+    ):
+        raise ValueError(
+            "immutable analysis transition must use the publication operation ID"
+        )
+    current_pointer_states = {
+        (revision, operation_id)
+        for revision, operation_id in (
+            (
+                current.active_analysis_revision,
+                current.active_analysis_operation_id,
+            ),
+            (
+                current.candidate_analysis_revision,
+                current.candidate_analysis_operation_id,
+            ),
+        )
+        if revision is not None and operation_id is not None
+    }
+    for current_pointer, candidate_pointer in (
+        (
+            (
+                current.active_analysis_revision,
+                current.active_analysis_operation_id,
+            ),
+            (
+                candidate.active_analysis_revision,
+                candidate.active_analysis_operation_id,
+            ),
+        ),
+        (
+            (
+                current.candidate_analysis_revision,
+                current.candidate_analysis_operation_id,
+            ),
+            (
+                candidate.candidate_analysis_revision,
+                candidate.candidate_analysis_operation_id,
+            ),
+        ),
+    ):
+        revision, operation_id = candidate_pointer
+        if candidate_pointer == current_pointer or revision is None:
+            continue
+        if (
+            operation_id != publication_operation_id
+            and candidate_pointer not in current_pointer_states
+            and operation_id != candidate.analysis_operation_ids[revision]
+        ):
+            raise ValueError(
+                "immutable analysis transition has unrelated pointer provenance"
+            )
 
 
 def _reference_identity(reference: StateReference) -> tuple[str, str]:
@@ -320,8 +413,13 @@ def publish_manifests(
         for repository in repositories:
             mutation = mutations_by_owner[repository.owner]
             current = current_by_owner[repository.owner]
-            candidate = mutation.mutate(current, operation_id)
+            candidate = mutation.mutate(deepcopy(current), operation_id)
             stamped = stamp_operation_changes(current, candidate, operation_id)
+            validate_manifest_transition(
+                current,
+                stamped,
+                publication_operation_id=operation_id,
+            )
             advanced_by_owner[repository.owner] = repository._advance_candidate(
                 project_id,
                 expected_revision=mutation.expected_revision,
@@ -348,14 +446,12 @@ def publish_manifests(
                 for owner, snapshot in snapshots.items()
             },
         )
-        final_by_owner = {
-            owner: replace(advanced, operation_intent=intent)
-            for owner, advanced in advanced_by_owner.items()
-        }
         final_prepared = {
-            repository.owner: repository._prepare_candidate(
+            repository.owner: repository._prepare_intent_candidate(
                 project_id,
-                value=final_by_owner[repository.owner],
+                value=snapshots[repository.owner].value,
+                payload=snapshots[repository.owner].payload,
+                intent=intent,
             )
             for repository in repositories
         }

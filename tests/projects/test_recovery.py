@@ -311,8 +311,14 @@ def test_analysis_reference_uses_immutable_creation_not_later_activation_operati
     project = register_analysis_revision(
         project, "analysis-1", operation_id="op-analysis-1"
     )
+    project = repositories.project.update(
+        "p1", expected_revision=0, mutate=lambda _value: project
+    )
     project = register_analysis_revision(
         project, "analysis-2", operation_id="op-analysis-2"
+    )
+    project = repositories.project.update(
+        "p1", expected_revision=1, mutate=lambda _value: project
     )
     current = replace(
         repositories.clips.load("p1"), analysis_revision="analysis-1"
@@ -325,7 +331,7 @@ def test_analysis_reference_uses_immutable_creation_not_later_activation_operati
         operation_id="op-activation",
     )
     repositories.project.update(
-        "p1", expected_revision=0, mutate=lambda _value: activated_project
+        "p1", expected_revision=2, mutate=lambda _value: activated_project
     )
     repositories.clips.update(
         "p1", expected_revision=0, mutate=lambda _value: activated_clips
@@ -424,3 +430,110 @@ def test_recovery_validates_complete_intent_before_publishing_any_pending_owner(
     assert repositories.clips.load("p1").revision == 0
     assert repositories.jobs.load("p1").revision == 0
     assert repositories.render.load("p1").revision == 0
+
+
+def test_recovery_rejects_tampered_published_prefix_before_any_pending_write(
+    tmp_path, monkeypatch
+):
+    repositories = _created_repositories(tmp_path)
+
+    def interrupt(_path, _serialized):
+        raise OSError("crash after project")
+
+    monkeypatch.setattr(repositories.clips, "_atomic_write_bytes", interrupt)
+    with pytest.raises(OSError, match="after project"):
+        publish_manifests(
+            (
+                ManifestMutation(
+                    repositories.project,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value, project_state="intended"
+                    ),
+                ),
+                ManifestMutation(
+                    repositories.clips,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: value,
+                ),
+                ManifestMutation(
+                    repositories.jobs,
+                    "p1",
+                    0,
+                    lambda value, _operation_id: replace(
+                        value, jobs=({"job_id": "job-1", "status": "queued"},)
+                    ),
+                ),
+            )
+        )
+    monkeypatch.undo()
+
+    project_path = repositories.project.path_for("p1")
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["project_state"] = "tampered"
+    project_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="published manifest differs"):
+        reconcile_project("p1", repositories=repositories)
+
+    assert repositories.clips.load("p1").revision == 0
+    assert repositories.jobs.load("p1").revision == 0
+
+
+def test_render_ownership_uses_typed_keys_when_id_categories_collide(tmp_path):
+    repositories = _created_repositories(tmp_path)
+    render = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=render.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "shared-id",
+                    "status": "ready",
+                    "operation_id": "op-clip-render",
+                },
+            ),
+            merge_plans=(
+                {
+                    "merge_id": "shared-id",
+                    "status": "ready",
+                    "operation_id": "op-merge",
+                },
+            ),
+            published_outputs=(
+                {
+                    "output_id": "shared-id",
+                    "status": "ready",
+                    "operation_id": "op-output",
+                },
+            ),
+        ),
+    )
+    clips = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            references=(
+                StateReference("render", "clip_render:shared-id", "stale"),
+                StateReference("render", "merge:shared-id", "stale"),
+                StateReference("render", "output:shared-id", "stale"),
+            ),
+        ),
+    )
+
+    result = reconcile_project("p1", repositories=repositories)
+
+    references = repositories.clips.load("p1").references
+    assert result.completed_references == 3
+    assert result.rolled_back_references == 0
+    assert [(reference.key, reference.operation_id) for reference in references] == [
+        ("clip_render:shared-id", "op-clip-render"),
+        ("merge:shared-id", "op-merge"),
+        ("output:shared-id", "op-output"),
+    ]

@@ -20,6 +20,7 @@ from .repositories import (
     ordered_repositories,
     publish_manifests,
     stamp_operation_changes,
+    validate_manifest_transition,
 )
 
 
@@ -67,19 +68,17 @@ def _owned_states(manifest: ManifestHeader) -> dict[str, str]:
             if job.get("job_id") and job.get("operation_id"):
                 states[f"job:{job['job_id']}"] = str(job["operation_id"])
     elif isinstance(manifest, RenderManifest):
-        for item in (
-            *manifest.clip_renders,
-            *manifest.merge_plans,
-            *manifest.published_outputs,
+        for items, identity_key, reference_prefix in (
+            (manifest.clip_renders, "render_id", "clip_render"),
+            (manifest.merge_plans, "merge_id", "merge"),
+            (manifest.published_outputs, "output_id", "output"),
         ):
-            identifier = (
-                item.get("render_id")
-                or item.get("merge_id")
-                or item.get("output_id")
-                or item.get("clip_id")
-            )
-            if identifier and item.get("operation_id"):
-                states[f"render:{identifier}"] = str(item["operation_id"])
+            for item in items:
+                identifier = item.get(identity_key)
+                if identifier and item.get("operation_id"):
+                    states[f"{reference_prefix}:{identifier}"] = str(
+                        item["operation_id"]
+                    )
     return states
 
 
@@ -152,6 +151,10 @@ def _recover_operation_prefix(
                 current.revision == candidate.revision
                 and current.operation_id == intent.operation_id
             ):
+                if replace(current, operation_intent=None) != candidate:
+                    raise ValueError(
+                        "published manifest differs from its intent candidate"
+                    )
                 published.append(owner)
             elif current.revision == intent.base_revisions[owner]:
                 restamped = stamp_operation_changes(
@@ -161,6 +164,11 @@ def _recover_operation_prefix(
                     raise ValueError(
                         "candidate nested operation state does not match its intent"
                     )
+                validate_manifest_transition(
+                    current,
+                    candidate,
+                    publication_operation_id=intent.operation_id,
+                )
                 pending.append(owner)
             elif current.revision > candidate.revision:
                 superseded = True
@@ -173,9 +181,11 @@ def _recover_operation_prefix(
         if not published or not pending:
             continue
         prepared_pending = {
-            owner: repository_by_owner[owner]._prepare_candidate(
+            owner: repository_by_owner[owner]._prepare_intent_candidate(
                 project_id,
-                value=replace(candidates[owner], operation_intent=intent),
+                value=candidates[owner],
+                payload=intent.candidates[owner],
+                intent=intent,
             )
             for owner in pending
         }

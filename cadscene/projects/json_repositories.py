@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from .models import (
     ClipsManifest,
     JobsManifest,
     ManifestHeader,
+    OperationIntent,
     ProjectManifest,
     RenderManifest,
 )
@@ -22,6 +24,7 @@ from .repositories import (
     RevisionConflict,
     new_operation_id,
     ordered_repositories,
+    validate_manifest_transition,
 )
 
 
@@ -101,8 +104,8 @@ class AtomicJsonRepository(Generic[T]):
             self._validate_identity(project_id, value)
             if value.revision != 0:
                 raise ValueError("a newly created manifest must start at revision 0")
-            self._atomic_write(value)
-            return value
+            prepared = self._atomic_write(value)
+            return prepared.value
 
     def update(
         self,
@@ -119,8 +122,13 @@ class AtomicJsonRepository(Generic[T]):
                     expected_revision=expected_revision,
                     current_revision=current.revision,
                 )
-            candidate = mutate(current)
+            candidate = mutate(deepcopy(current))
             candidate = replace(candidate, operation_intent=None)
+            validate_manifest_transition(
+                current,
+                candidate,
+                publication_operation_id=candidate.operation_id,
+            )
             advanced = self._advance_candidate(
                 project_id,
                 expected_revision=expected_revision,
@@ -162,8 +170,45 @@ class AtomicJsonRepository(Generic[T]):
         normalized = json.loads(serialized)
         decoded = self._decoder(normalized)
         self._validate_identity(project_id, decoded)
+        if decoded != value:
+            raise ValueError("manifest encoder must round-trip semantically exactly")
         return PreparedManifest(
-            value=value,
+            value=decoded,
+            payload=normalized,
+            serialized=serialized.encode("utf-8"),
+        )
+
+    def _prepare_intent_candidate(
+        self,
+        project_id: str,
+        *,
+        value: T,
+        payload: Mapping[str, Any],
+        intent: OperationIntent,
+    ) -> PreparedManifest[T]:
+        if value.operation_intent is not None:
+            raise ValueError("intent candidate value must be non-recursive")
+        final_payload = dict(payload)
+        final_payload["operation_intent"] = intent.to_dict()
+        serialized = (
+            json.dumps(
+                final_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        normalized = json.loads(serialized)
+        decoded = self._decoder(normalized)
+        self._validate_identity(project_id, decoded)
+        expected = replace(value, operation_intent=intent)
+        if decoded != expected:
+            raise ValueError(
+                "normalized manifest plus intent must round-trip semantically exactly"
+            )
+        return PreparedManifest(
+            value=decoded,
             payload=normalized,
             serialized=serialized.encode("utf-8"),
         )
@@ -208,18 +253,12 @@ class AtomicJsonRepository(Generic[T]):
         self._validate_identity(project_id, value)
         return value
 
-    def _atomic_write(self, value: T) -> None:
-        path = self.path_for(value.project_id)
-        serialized = (
-            json.dumps(
-                self._encoder(value),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-        self._atomic_write_bytes(path, serialized)
+    def _atomic_write(self, value: T) -> PreparedManifest[T]:
+        prepared = self._prepare_candidate(value.project_id, value=value)
+        self._atomic_write_bytes(
+            self.path_for(value.project_id), prepared.serialized
+        )
+        return prepared
 
     def _atomic_write_bytes(self, path: Path, serialized: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
