@@ -21,19 +21,17 @@ _CLIP_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _MAX_DURATION_SEC = 60.0
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
-_X264_PRESETS = frozenset(
-    {
-        "ultrafast",
-        "superfast",
-        "veryfast",
-        "faster",
-        "fast",
-        "medium",
-        "slow",
-        "slower",
-        "veryslow",
-        "placebo",
-    }
+X264_PRESETS = (
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
 )
 
 
@@ -106,7 +104,7 @@ def export_video_clips(
         raise FileExistsError(f"clip output already exists: {output}")
     if not output.parent.is_dir():
         raise FileNotFoundError(f"clip output parent not found: {output.parent}")
-    if preset not in _X264_PRESETS:
+    if preset not in X264_PRESETS:
         raise ValueError(f"unsupported x264 preset: {preset}")
     if isinstance(crf, bool) or not isinstance(crf, int) or not 0 <= crf <= 51:
         raise ValueError("crf must be an integer from 0 to 51")

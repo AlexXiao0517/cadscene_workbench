@@ -106,6 +106,21 @@ def _two_clip_manifest(tmp_path: Path) -> Path:
     )
 
 
+def test_x264_presets_are_public_and_ordered() -> None:
+    assert clip_export.X264_PRESETS == (
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+    )
+
+
 def test_export_video_clips_reencodes_source_pts_ranges_atomically(
     tmp_path: Path,
 ) -> None:

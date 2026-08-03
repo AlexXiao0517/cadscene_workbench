@@ -3,21 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from cadscene.video_analysis.clip_export import export_video_clips
-
-
-_X264_PRESETS = (
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-    "placebo",
-)
+from cadscene.video_analysis.clip_export import X264_PRESETS, export_video_clips
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--ffmpeg", type=Path)
-    parser.add_argument("--preset", choices=_X264_PRESETS, default="fast")
+    parser.add_argument("--preset", choices=X264_PRESETS, default="fast")
     parser.add_argument("--crf", type=int, default=18)
     return parser
 
