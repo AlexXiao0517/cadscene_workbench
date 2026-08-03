@@ -5,8 +5,10 @@ import numpy as np
 
 from cadscene.video_analysis.pts import DecodedFrame
 from cadscene.video_analysis.shot_detection import (
+    FramePairEvidence,
     ShotDetectionConfig,
     analyze_frame_pair,
+    coalesce_boundaries,
     detect_shot_boundaries,
 )
 
@@ -104,3 +106,142 @@ def test_weak_feature_pair_alone_is_not_mislabeled_as_a_cut() -> None:
     assert evidence.feature_match_count == 0
     assert boundaries == []
 
+
+def _evidence(
+    *,
+    image_change: float,
+    matches: int,
+    coverage: float,
+    homography: float,
+    flow_residual: float,
+    exposure: float = 0.0,
+) -> FramePairEvidence:
+    return FramePairEvidence(
+        from_pts_sec=1.0,
+        to_pts_sec=1.5,
+        image_change_score=image_change,
+        black_frame_score=0.0,
+        exposure_jump_score=exposure,
+        feature_match_count=matches,
+        feature_spatial_coverage=coverage,
+        homography_inlier_ratio=homography,
+        flow_magnitude_px=8.0,
+        flow_residual_px=flow_residual,
+        clarity_score=1.0,
+    )
+
+
+def test_jinhua_annotated_scene_changes_are_detected_from_multisignal_evidence() -> None:
+    # Evidence measured from the seven manually annotated transitions in
+    # jinhuaorigin.mp4 at a 0.5 second sparse decode interval.
+    measured = [
+        _evidence(image_change=.1154, matches=0, coverage=0, homography=0, flow_residual=38.62),
+        _evidence(image_change=.1251, matches=52, coverage=.0908, homography=.8462, flow_residual=34.61),
+        _evidence(image_change=.0984, matches=2, coverage=0, homography=0, flow_residual=6.60),
+        _evidence(image_change=.1161, matches=0, coverage=0, homography=0, flow_residual=33.28),
+        _evidence(image_change=.1263, matches=0, coverage=0, homography=0, flow_residual=44.46),
+        _evidence(image_change=.1318, matches=0, coverage=0, homography=0, flow_residual=55.74),
+        _evidence(image_change=.4000, matches=129, coverage=.2507, homography=.8992, flow_residual=367.15, exposure=.4000),
+    ]
+    frames = [_frame(1.0, np.full((8, 8), 128, np.uint8)), _frame(1.5, np.full((8, 8), 128, np.uint8))]
+
+    for evidence in measured:
+        boundaries = detect_shot_boundaries(
+            frames,
+            expected_interval_sec=.5,
+            pair_evidence=[evidence],
+        )
+        assert boundaries, evidence
+
+
+def test_moderate_image_change_without_geometric_collapse_is_not_a_cut() -> None:
+    evidence = _evidence(
+        image_change=.1603,
+        matches=146,
+        coverage=.28,
+        homography=.68,
+        flow_residual=2.52,
+    )
+    frames = [_frame(1.0, np.full((8, 8), 128, np.uint8)), _frame(1.5, np.full((8, 8), 128, np.uint8))]
+
+    assert detect_shot_boundaries(
+        frames, expected_interval_sec=.5, pair_evidence=[evidence]
+    ) == []
+
+
+def test_low_texture_change_without_flow_break_is_not_a_cut() -> None:
+    evidence = _evidence(
+        image_change=.10,
+        matches=0,
+        coverage=0,
+        homography=0,
+        flow_residual=1.0,
+    )
+    frames = [_frame(1.0, np.full((8, 8), 128, np.uint8)), _frame(1.5, np.full((8, 8), 128, np.uint8))]
+
+    assert detect_shot_boundaries(
+        frames, expected_interval_sec=.5, pair_evidence=[evidence]
+    ) == []
+
+
+def test_low_texture_brightness_change_with_unavailable_flow_is_not_a_cut() -> None:
+    before = np.full((180, 320), 100, dtype=np.uint8)
+    after = np.full((180, 320), 124, dtype=np.uint8)
+
+    evidence = analyze_frame_pair(_frame(1.0, before), _frame(1.5, after))
+    boundaries = detect_shot_boundaries(
+        [_frame(1.0, before), _frame(1.5, after)], expected_interval_sec=.5
+    )
+
+    assert evidence.image_change_score >= .09
+    assert evidence.flow_is_valid is False
+    assert boundaries == []
+
+
+def test_adjacent_transition_evidence_is_coalesced_at_first_source_pts() -> None:
+    from cadscene.video_analysis.models import BoundaryEvidence
+
+    merged = coalesce_boundaries(
+        [
+            BoundaryEvidence(10.0, ("black_frame",), .97),
+            BoundaryEvidence(10.5, ("image_discontinuity",), .91),
+            BoundaryEvidence(20.0, ("image_discontinuity",), .88),
+        ],
+        within_sec=1.0,
+    )
+
+    assert [item.pts_sec for item in merged] == [10.0, 20.0]
+    assert merged[0].reasons == ("black_frame", "image_discontinuity")
+    assert merged[0].confidence == .97
+
+
+def test_chained_transition_evidence_coalesces_by_pairwise_adjacency() -> None:
+    from cadscene.video_analysis.models import BoundaryEvidence
+
+    merged = coalesce_boundaries(
+        [
+            BoundaryEvidence(10.0, ("image_discontinuity",), .90),
+            BoundaryEvidence(10.75, ("exposure_discontinuity",), .91),
+            BoundaryEvidence(11.5, ("black_frame",), .92),
+        ],
+        within_sec=1.0,
+    )
+
+    assert len(merged) == 1
+    assert merged[0].pts_sec == 10.0
+
+
+def test_chained_coalescing_has_bounded_width_for_rapid_cut_sequences() -> None:
+    from cadscene.video_analysis.models import BoundaryEvidence
+
+    merged = coalesce_boundaries(
+        [
+            BoundaryEvidence(10.0, ("image_discontinuity",), .90),
+            BoundaryEvidence(10.75, ("image_discontinuity",), .90),
+            BoundaryEvidence(11.5, ("image_discontinuity",), .90),
+            BoundaryEvidence(12.25, ("image_discontinuity",), .90),
+        ],
+        within_sec=1.0,
+    )
+
+    assert [item.pts_sec for item in merged] == [10.0, 12.25]

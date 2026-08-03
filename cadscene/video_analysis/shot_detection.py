@@ -13,12 +13,15 @@ from .pts import DecodedFrame
 @dataclass(frozen=True)
 class ShotDetectionConfig:
     image_change_threshold: float = 0.30
+    geometric_break_image_floor: float = 0.09
     black_luma_threshold: float = 12.0
     exposure_jump_threshold: float = 0.35
     min_feature_matches: int = 18
     min_feature_coverage: float = 0.08
     min_homography_inlier_ratio: float = 0.35
     max_flow_residual_px: float = 6.0
+    severe_flow_residual_px: float = 15.0
+    catastrophic_feature_matches: int = 4
     pts_gap_factor: float = 3.0
 
 
@@ -36,6 +39,47 @@ class FramePairEvidence:
     flow_residual_px: float
     clarity_score: float
     feature_homography_residual_px: float = 0.0
+    flow_is_valid: bool = True
+
+
+def coalesce_boundaries(
+    boundaries: list[BoundaryEvidence],
+    *,
+    within_sec: float,
+    max_cluster_width_sec: float | None = None,
+) -> list[BoundaryEvidence]:
+    """Collapse adjacent evidence from one transition onto its first source PTS."""
+    if within_sec < 0:
+        raise ValueError("within_sec must be non-negative")
+    max_width = (
+        within_sec * 2.0
+        if max_cluster_width_sec is None
+        else max_cluster_width_sec
+    )
+    if max_width < 0:
+        raise ValueError("max_cluster_width_sec must be non-negative")
+    merged: list[BoundaryEvidence] = []
+    last_observed_pts: float | None = None
+    cluster_start_pts: float | None = None
+    for boundary in sorted(boundaries, key=lambda item: item.pts_sec):
+        if (
+            merged
+            and last_observed_pts is not None
+            and cluster_start_pts is not None
+            and boundary.pts_sec - last_observed_pts <= within_sec
+            and boundary.pts_sec - cluster_start_pts <= max_width
+        ):
+            previous = merged[-1]
+            merged[-1] = BoundaryEvidence(
+                pts_sec=previous.pts_sec,
+                reasons=tuple(dict.fromkeys((*previous.reasons, *boundary.reasons))),
+                confidence=max(previous.confidence, boundary.confidence),
+            )
+        else:
+            merged.append(boundary)
+            cluster_start_pts = boundary.pts_sec
+        last_observed_pts = boundary.pts_sec
+    return merged
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -78,13 +122,13 @@ def _feature_evidence(before: np.ndarray, after: np.ndarray) -> tuple[int, float
     return len(matches), spatial_coverage, inlier_ratio, residual
 
 
-def _flow_evidence(before: np.ndarray, after: np.ndarray) -> tuple[float, float]:
+def _flow_evidence(before: np.ndarray, after: np.ndarray) -> tuple[float, float, bool]:
     points = cv2.goodFeaturesToTrack(
         before, maxCorners=300, qualityLevel=0.01, minDistance=5, blockSize=5
     )
     diagonal = math.hypot(before.shape[1], before.shape[0])
     if points is None or len(points) < 4:
-        return 0.0, diagonal
+        return 0.0, diagonal, False
     tracked, status, _ = cv2.calcOpticalFlowPyrLK(
         before,
         after,
@@ -95,23 +139,23 @@ def _flow_evidence(before: np.ndarray, after: np.ndarray) -> tuple[float, float]
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
     )
     if tracked is None or status is None:
-        return 0.0, diagonal
+        return 0.0, diagonal, False
     valid = status.reshape(-1).astype(bool)
     source = points.reshape(-1, 2)[valid]
     target = tracked.reshape(-1, 2)[valid]
     if len(source) < 4:
-        return 0.0, diagonal
+        return 0.0, diagonal, False
     flow_magnitude = float(np.median(np.linalg.norm(target - source, axis=1)))
     homography, mask = cv2.findHomography(source, target, cv2.RANSAC, 3.0)
     if homography is None:
-        return flow_magnitude, diagonal
+        return flow_magnitude, diagonal, False
     predicted = cv2.perspectiveTransform(source.reshape(-1, 1, 2), homography).reshape(-1, 2)
     residuals = np.linalg.norm(target - predicted, axis=1)
     # A single homography explains a rotating planar view but intentionally
     # leaves foreground/background parallax.  Measuring only RANSAC inliers
     # would erase that evidence, so retain all valid tracks and use a robust
     # upper quantile rather than an outlier-sensitive maximum.
-    return flow_magnitude, float(np.percentile(residuals, 75))
+    return flow_magnitude, float(np.percentile(residuals, 75)), True
 
 
 def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEvidence:
@@ -128,7 +172,7 @@ def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEv
     )
     exposure_jump = abs(mean_b - mean_a) / 255.0
     match_count, coverage, inlier_ratio, feature_residual = _feature_evidence(image_a, image_b)
-    flow_magnitude, flow_residual = _flow_evidence(image_a, image_b)
+    flow_magnitude, flow_residual, flow_is_valid = _flow_evidence(image_a, image_b)
     clarity = min(
         1.0,
         float(cv2.Laplacian(image_a, cv2.CV_64F).var() + cv2.Laplacian(image_b, cv2.CV_64F).var())
@@ -147,6 +191,7 @@ def analyze_frame_pair(before: DecodedFrame, after: DecodedFrame) -> FramePairEv
         flow_residual_px=flow_residual,
         clarity_score=clarity,
         feature_homography_residual_px=feature_residual,
+        flow_is_valid=flow_is_valid,
     )
 
 
@@ -204,6 +249,32 @@ def detect_shot_boundaries(
                 confidence,
                 min(0.98, 0.52 + evidence.image_change_score * 0.6 + weak_signals * 0.04),
             )
+        # Similar-luminance edits can have a modest pixel-difference score even
+        # though temporal geometry collapses completely.  Keep a small image
+        # change floor to reject unchanged/textureless footage, then accept
+        # either catastrophic feature failure or an extreme optical-flow break.
+        catastrophic_features = (
+            evidence.flow_is_valid
+            and evidence.feature_match_count <= settings.catastrophic_feature_matches
+            and evidence.feature_spatial_coverage < settings.min_feature_coverage * 0.25
+            and evidence.homography_inlier_ratio < settings.min_homography_inlier_ratio * 0.5
+            and evidence.flow_residual_px > settings.max_flow_residual_px
+        )
+        severe_flow_break = (
+            evidence.flow_is_valid
+            and evidence.flow_residual_px >= settings.severe_flow_residual_px
+        )
+        if (
+            evidence.image_change_score >= settings.geometric_break_image_floor
+            and (catastrophic_features or severe_flow_break)
+        ):
+            reasons.append("image_discontinuity")
+            geometric_strength = min(
+                0.18,
+                max(0.0, evidence.flow_residual_px - settings.max_flow_residual_px)
+                / 100.0,
+            )
+            confidence = max(confidence, 0.80 + geometric_strength)
         if reasons:
             boundaries.append(
                 BoundaryEvidence(

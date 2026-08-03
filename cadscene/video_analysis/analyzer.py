@@ -21,7 +21,7 @@ from .motion import (
 from .pts import iter_sparse_frames, probe_video_pts
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
 from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
-from .shot_detection import analyze_frame_pair, detect_shot_boundaries
+from .shot_detection import analyze_frame_pair, coalesce_boundaries, detect_shot_boundaries
 
 
 def _new_revision() -> str:
@@ -62,6 +62,35 @@ def _analysis_range(
     if not pts:
         return start_pts_sec, end_pts_sec
     return min(pts), max(pts)
+
+
+def _scene_boundaries_for_segmentation(
+    boundaries: list[BoundaryEvidence],
+    *,
+    source_end_pts_sec: float,
+    recent_frame_lumas: list[float],
+    terminal_guard_sec: float,
+) -> list[BoundaryEvidence]:
+    """Keep terminal fade evidence without creating a meaningless black tail."""
+    if terminal_guard_sec < 0:
+        raise ValueError("terminal_guard_sec must be non-negative")
+    tail = recent_frame_lumas[-3:]
+    # A dark final sample alone may be a genuine hard cut. Suppress a terminal
+    # boundary only when multiple samples establish a monotonic fade-to-black.
+    terminal_fade = (
+        len(tail) == 3
+        and tail[0] > tail[1] > tail[2]
+        and tail[2] <= 24.0
+        and tail[0] - tail[2] >= 12.0
+    )
+    return [
+        boundary
+        for boundary in boundaries
+        if not (
+            terminal_fade
+            and 0.0 <= source_end_pts_sec - boundary.pts_sec <= terminal_guard_sec
+        )
+    ]
 
 
 def _windows_csv(windows: list[MotionWindow]) -> str:
@@ -151,6 +180,7 @@ def analyze_video(
     revision = analysis_revision or _new_revision()
     pts_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
     sampled_pts: list[float] = []
+    sampled_lumas: list[float] = []
     pair_evidence = []
     shot_boundaries: list[BoundaryEvidence] = []
     previous_frame = None
@@ -161,6 +191,7 @@ def analyze_video(
         ffmpeg_executable=ffmpeg_executable,
     ):
         sampled_pts.append(frame.pts_sec)
+        sampled_lumas.append(float(frame.image.mean()))
         if previous_frame is not None:
             evidence = analyze_frame_pair(previous_frame, frame)
             pair_evidence.append(evidence)
@@ -178,7 +209,18 @@ def analyze_video(
     stable_windows, motion_boundaries = stabilize_motion_windows(
         raw_windows, MotionAnalysisConfig()
     )
-    mandatory_boundaries = [*shot_boundaries, *motion_boundaries]
+    shot_boundaries = coalesce_boundaries(
+        shot_boundaries, within_sec=sample_interval_sec * 2.0
+    )
+    # Scene discontinuities are mandatory. Motion changes remain explainable
+    # analysis evidence, but do not create extra fragments by themselves.
+    assert previous_frame is not None
+    mandatory_boundaries = _scene_boundaries_for_segmentation(
+        shot_boundaries,
+        source_end_pts_sec=pts_index.source_end_pts_sec,
+        recent_frame_lumas=sampled_lumas,
+        terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
+    )
     cut_candidates = [
         CutCandidate(
             item.to_pts_sec,
@@ -249,7 +291,7 @@ def analyze_video(
         clip_payloads.append(clip)
 
     detected = sorted(
-        mandatory_boundaries,
+        [*shot_boundaries, *motion_boundaries],
         key=lambda item: (item.pts_sec, item.reasons),
     )
     elapsed = time.perf_counter() - started
@@ -269,6 +311,9 @@ def analyze_video(
     }
     configuration = {
         "sample_interval_sec": sample_interval_sec,
+        "segmentation_strategy": "minimum_count_balanced_strict_lt_hard_max",
+        "motion_boundaries_create_clips": False,
+        "terminal_fade_guard_sec": max(1.0, sample_interval_sec * 2.0),
         "motion_window_sec": MotionAnalysisConfig().window_sec,
         "motion_step_sec": MotionAnalysisConfig().step_sec,
         "motion_min_sustain_sec": MotionAnalysisConfig().min_sustain_sec,

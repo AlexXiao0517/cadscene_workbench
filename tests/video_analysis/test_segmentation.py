@@ -12,7 +12,7 @@ def _pts(end: int) -> list[float]:
     return [float(value) for value in range(end + 1)]
 
 
-def test_duration_planner_prefers_clear_low_motion_candidates_in_target_range() -> None:
+def test_duration_planner_uses_minimum_number_of_strictly_sub_sixty_clips() -> None:
     candidates = [
         CutCandidate(48.0, motion_magnitude_px=8.0, clarity_score=0.5),
         CutCandidate(52.0, motion_magnitude_px=0.3, clarity_score=0.95),
@@ -28,13 +28,9 @@ def test_duration_planner_prefers_clear_low_motion_candidates_in_target_range() 
         cut_candidates=candidates,
     )
 
-    assert [(clip.start_pts_sec, clip.end_pts_sec) for clip in clips] == [
-        (0.0, 52.0),
-        (52.0, 105.0),
-        (105.0, 118.0),
-    ]
+    assert len(clips) == 2
     assert clips[0].end_boundary.reasons == ("duration_preferred_cut",)
-    assert all(clip.end_pts_sec - clip.start_pts_sec <= 60.0 for clip in clips)
+    assert all(clip.end_pts_sec - clip.start_pts_sec < 60.0 for clip in clips)
 
 
 def test_clear_shot_boundary_is_mandatory_even_when_it_creates_short_clip() -> None:
@@ -50,25 +46,25 @@ def test_clear_shot_boundary_is_mandatory_even_when_it_creates_short_clip() -> N
 
     assert clips[0].end_pts_sec == 6.0
     assert clips[0].end_boundary.reasons == ("image_discontinuity",)
-    assert clips[0].needs_review is True
+    assert clips[0].needs_review is False
     assert clips[1].start_pts_sec == 6.0
 
 
-def test_missing_suitable_pts_forces_cut_at_hard_limit_and_flags_short_tail() -> None:
+def test_sixty_one_second_scene_is_balanced_into_two_clips_without_short_tail() -> None:
     clips = plan_clip_intervals(
         source_start_pts_sec=0.0,
         source_end_pts_sec=61.0,
         mandatory_boundaries=[],
-        available_source_pts=[0.0, 60.0, 61.0],
+        available_source_pts=[0.0, 30.0, 31.0, 60.0, 61.0],
         cut_candidates=[],
     )
 
     assert [(clip.start_pts_sec, clip.end_pts_sec) for clip in clips] == [
-        (0.0, 60.0),
-        (60.0, 61.0),
+        (0.0, 30.0),
+        (30.0, 61.0),
     ]
-    assert clips[0].end_boundary.reasons == ("duration_forced_60s",)
-    assert clips[1].needs_review is True
+    assert clips[0].end_boundary.reasons == ("duration_preferred_cut",)
+    assert not any(clip.needs_review for clip in clips)
 
 
 def test_old_short_video_remains_one_logical_clip() -> None:
@@ -95,6 +91,32 @@ def test_long_span_never_produces_clip_over_sixty_seconds() -> None:
         config=SegmentationConfig(),
     )
 
-    assert max(clip.end_pts_sec - clip.start_pts_sec for clip in clips) <= 60.0
+    assert len(clips) == 6
+    assert max(clip.end_pts_sec - clip.start_pts_sec for clip in clips) < 60.0
     assert clips[-1].end_pts_sec == 310.0
 
+
+def test_exactly_sixty_seconds_requires_two_clips_because_limit_is_strict() -> None:
+    clips = plan_clip_intervals(
+        source_start_pts_sec=0.0,
+        source_end_pts_sec=60.0,
+        mandatory_boundaries=[],
+        available_source_pts=_pts(60),
+        cut_candidates=[],
+    )
+
+    assert len(clips) == 2
+    assert all(clip.end_pts_sec - clip.start_pts_sec < 60.0 for clip in clips)
+
+
+def test_explicit_nonzero_minimum_remains_a_review_policy_override() -> None:
+    clips = plan_clip_intervals(
+        source_start_pts_sec=0.0,
+        source_end_pts_sec=6.0,
+        mandatory_boundaries=[],
+        available_source_pts=[0.0, 6.0],
+        cut_candidates=[],
+        config=SegmentationConfig(min_clip_sec=8.0),
+    )
+
+    assert clips[0].needs_review is True

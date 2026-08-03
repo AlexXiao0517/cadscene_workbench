@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .models import BoundaryEvidence
 
@@ -11,7 +12,7 @@ class SegmentationConfig:
     target_max_sec: float = 55.0
     target_sec: float = 50.0
     hard_max_sec: float = 60.0
-    min_clip_sec: float = 8.0
+    min_clip_sec: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -48,49 +49,43 @@ def _candidate_score(candidate: CutCandidate, duration: float, target: float) ->
     return candidate.clarity_score - motion_penalty - distance_penalty
 
 
-def _choose_duration_boundary(
-    cursor: float,
+def _choose_balanced_boundary(
+    span_start: float,
     span_end: float,
+    previous_cut: float,
+    cut_index: int,
+    piece_count: int,
     available_pts: list[float],
     candidates: list[CutCandidate],
     config: SegmentationConfig,
 ) -> BoundaryEvidence:
-    preferred = [
+    ideal = span_start + (span_end - span_start) * cut_index / piece_count
+    remaining_pieces = piece_count - cut_index
+    epsilon = 1e-9
+    lower = max(previous_cut, span_end - remaining_pieces * config.hard_max_sec) + epsilon
+    upper = min(span_end, previous_cut + config.hard_max_sec) - epsilon
+    feasible_candidates = [
         item
         for item in candidates
-        if config.target_min_sec <= item.pts_sec - cursor <= config.target_max_sec
-        and item.pts_sec < span_end
+        if lower < item.pts_sec < upper
     ]
-    if preferred:
+    if feasible_candidates:
         chosen = max(
-            preferred,
-            key=lambda item: _candidate_score(item, item.pts_sec - cursor, config.target_sec),
+            feasible_candidates,
+            key=lambda item: _candidate_score(item, item.pts_sec, ideal),
         )
-        score = _candidate_score(chosen, chosen.pts_sec - cursor, config.target_sec)
+        score = _candidate_score(chosen, chosen.pts_sec, ideal)
         return BoundaryEvidence(
             chosen.pts_sec,
             ("duration_preferred_cut",),
             max(0.55, min(0.9, 0.72 + score * 0.15)),
         )
 
-    target_pts = [
-        pts
-        for pts in available_pts
-        if config.target_min_sec <= pts - cursor <= config.target_max_sec and pts < span_end
-    ]
-    if target_pts:
-        chosen_pts = min(target_pts, key=lambda pts: abs((pts - cursor) - config.target_sec))
+    feasible_pts = [pts for pts in available_pts if lower < pts < upper]
+    if feasible_pts:
+        chosen_pts = min(feasible_pts, key=lambda pts: abs(pts - ideal))
         return BoundaryEvidence(chosen_pts, ("duration_preferred_cut",), 0.62)
-
-    allowed = [
-        pts
-        for pts in available_pts
-        if config.min_clip_sec <= pts - cursor <= config.hard_max_sec and pts < span_end
-    ]
-    if not allowed:
-        raise ValueError("no authoritative source PTS is available before the 60 second limit")
-    chosen_pts = max(allowed)
-    return BoundaryEvidence(chosen_pts, ("duration_forced_60s",), 0.5)
+    raise ValueError("no authoritative source PTS can satisfy the strict duration limit")
 
 
 def plan_clip_intervals(
@@ -128,18 +123,23 @@ def plan_clip_intervals(
     all_boundaries: list[BoundaryEvidence] = [source_start]
 
     for span_start, span_end_boundary in zip(span_boundaries, span_boundaries[1:]):
-        cursor = span_start.pts_sec
+        previous_cut = span_start.pts_sec
         span_end = span_end_boundary.pts_sec
-        while span_end - cursor > settings.hard_max_sec:
-            duration_boundary = _choose_duration_boundary(
-                cursor,
+        span_duration = span_end - previous_cut
+        piece_count = math.floor(span_duration / settings.hard_max_sec) + 1
+        for cut_index in range(1, piece_count):
+            duration_boundary = _choose_balanced_boundary(
+                span_start.pts_sec,
                 span_end,
+                previous_cut,
+                cut_index,
+                piece_count,
                 available,
                 cut_candidates,
                 settings,
             )
             all_boundaries.append(duration_boundary)
-            cursor = duration_boundary.pts_sec
+            previous_cut = duration_boundary.pts_sec
         all_boundaries.append(span_end_boundary)
 
     clips: list[PlannedClip] = []
@@ -147,7 +147,7 @@ def plan_clip_intervals(
         duration = end_boundary.pts_sec - start_boundary.pts_sec
         if duration <= 0:
             continue
-        if duration > settings.hard_max_sec + 1e-9:
+        if duration >= settings.hard_max_sec:
             raise ValueError("planned clip exceeds hard duration limit")
         clips.append(
             PlannedClip(
@@ -159,4 +159,3 @@ def plan_clip_intervals(
             )
         )
     return clips
-

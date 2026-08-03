@@ -4,8 +4,12 @@ import json
 from pathlib import Path
 import subprocess
 
-from cadscene.video_analysis.analyzer import analyze_video
+from cadscene.video_analysis.analyzer import (
+    _scene_boundaries_for_segmentation,
+    analyze_video,
+)
 from cadscene.video_analysis.artifacts import REQUIRED_ARTIFACTS
+from cadscene.video_analysis.models import BoundaryEvidence
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
 
@@ -123,3 +127,47 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
     assert clip["srt_coverage"]["kind"] == "full_pose"
     assert clip["recommended_workflow"] == "srt_full_pose"
     assert clip["workflow_recommendation"]["auto_selected"] is False
+
+
+def test_terminal_fade_is_reported_but_does_not_create_tiny_tail_clip() -> None:
+    boundaries = [
+        BoundaryEvidence(40.0, ("image_discontinuity",), .9),
+        BoundaryEvidence(99.5, ("image_discontinuity",), .9),
+    ]
+
+    selected = _scene_boundaries_for_segmentation(
+        boundaries,
+        source_end_pts_sec=100.0,
+        # Includes the measured terminal sparse-frame luma (15.82) from
+        # jinhuaorigin.mp4 and confirms a multi-sample monotonic fade.
+        recent_frame_lumas=[82.0, 44.0, 15.82],
+        terminal_guard_sec=1.0,
+    )
+
+    assert [item.pts_sec for item in selected] == [40.0]
+
+
+def test_terminal_boundary_is_kept_when_video_does_not_end_on_black() -> None:
+    boundary = BoundaryEvidence(99.5, ("image_discontinuity",), .9)
+
+    selected = _scene_boundaries_for_segmentation(
+        [boundary],
+        source_end_pts_sec=100.0,
+        recent_frame_lumas=[90.0, 90.0, 90.0],
+        terminal_guard_sec=1.0,
+    )
+
+    assert selected == [boundary]
+
+
+def test_single_hard_cut_to_dark_near_end_remains_mandatory() -> None:
+    boundary = BoundaryEvidence(99.5, ("image_discontinuity",), .9)
+
+    selected = _scene_boundaries_for_segmentation(
+        [boundary],
+        source_end_pts_sec=100.0,
+        recent_frame_lumas=[90.0, 90.0, 10.0],
+        terminal_guard_sec=1.0,
+    )
+
+    assert selected == [boundary]
