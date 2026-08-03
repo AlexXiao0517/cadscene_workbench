@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import errno
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -190,17 +190,16 @@ def test_export_video_clips_preserves_destination_created_during_publish(
     video, ffmpeg = _make_ffv1_video(tmp_path)
     manifest = _two_clip_manifest(tmp_path)
     output = tmp_path / "clips"
-    original_rename = os.rename
+    original_publish = clip_export._publish_output_directory
 
-    def create_destination_before_rename(source: str | bytes | Path, destination: str | bytes | Path) -> None:
-        destination_path = Path(destination)
-        destination_path.mkdir()
-        (destination_path / "sentinel.txt").write_text("keep", encoding="utf-8")
-        original_rename(source, destination)
+    def create_destination_before_publish(
+        temporary_dir: Path, destination: Path, *, strategy: str
+    ) -> None:
+        destination.mkdir()
+        (destination / "sentinel.txt").write_text("keep", encoding="utf-8")
+        original_publish(temporary_dir, destination, strategy=strategy)
 
-    monkeypatch.setattr(
-        "cadscene.video_analysis.clip_export.os.rename", create_destination_before_rename
-    )
+    monkeypatch.setattr(clip_export, "_publish_output_directory", create_destination_before_publish)
 
     with pytest.raises(FileExistsError):
         export_video_clips(video, manifest, output, ffmpeg_executable=ffmpeg)
@@ -303,6 +302,52 @@ def test_publish_output_directory_dispatches_linux_no_replace(
     assert calls == [(temporary, output)]
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or clip_export._linux_renameat2() is None,
+    reason="requires Linux renameat2",
+)
+def test_publish_output_directory_linux_renames_without_clobbering_destination(
+    tmp_path: Path,
+) -> None:
+    temporary = tmp_path / "temporary"
+    output = tmp_path / "clips"
+    temporary.mkdir()
+    (temporary / "clip.mp4").write_bytes(b"clip")
+
+    clip_export._publish_output_directory(temporary, output, strategy="linux")
+
+    assert not temporary.exists()
+    assert (output / "clip.mp4").read_bytes() == b"clip"
+
+    next_temporary = tmp_path / "next-temporary"
+    next_temporary.mkdir()
+    (next_temporary / "new-clip.mp4").write_bytes(b"new clip")
+    sentinel = output / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        clip_export._publish_output_directory(next_temporary, output, strategy="linux")
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not (output / "new-clip.mp4").exists()
+    assert next_temporary.is_dir()
+
+
+def test_ffmpeg_clip_command_disables_overwrite_and_stdin() -> None:
+    command = clip_export._build_ffmpeg_clip_command(
+        ffmpeg=Path("ffmpeg"),
+        source=Path("source.mp4"),
+        clip=clip_export.ExportClip("clip-0001", 1.0, 3.0),
+        clip_path=Path("clip-0001.mp4"),
+        preset="fast",
+        crf=18,
+    )
+
+    assert "-n" in command
+    assert "-nostdin" in command
+    assert command[-1] == "clip-0001.mp4"
+
+
 @pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
 def test_publish_output_directory_maps_linux_existing_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int
@@ -363,6 +408,48 @@ def test_load_export_clips_returns_validated_source_pts_ranges(tmp_path: Path) -
         ("clip-0001", 2.0),
         ("clip-0002", 2.5),
     ]
+
+
+def test_load_export_clips_rejects_casefold_colliding_ids(tmp_path: Path) -> None:
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": "Clip",
+                "source_start_pts_sec": 0.0,
+                "source_end_pts_sec": 1.0,
+            },
+            {
+                "clip_id": "clip",
+                "source_start_pts_sec": 1.0,
+                "source_end_pts_sec": 2.0,
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicated"):
+        load_export_clips(manifest)
+
+
+@pytest.mark.parametrize(
+    "clip_id", ["CON", "prn.txt", "Aux.log", "nul.data", "COM1.mp4", "lpt9.csv"]
+)
+def test_load_export_clips_rejects_windows_reserved_device_basenames(
+    tmp_path: Path, clip_id: str
+) -> None:
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": clip_id,
+                "source_start_pts_sec": 0.0,
+                "source_end_pts_sec": 1.0,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unsafe"):
+        load_export_clips(manifest)
 
 
 @pytest.mark.parametrize(

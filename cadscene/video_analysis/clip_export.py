@@ -18,6 +18,11 @@ from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
 
 _CLIP_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{number}" for number in range(1, 10)}
+    | {f"lpt{number}" for number in range(1, 10)}
+)
 _MAX_DURATION_SEC = 60.0
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
@@ -63,9 +68,14 @@ def load_export_clips(manifest_path: Path) -> list[ExportClip]:
             raise ValueError("each clip must be a JSON object")
 
         clip_id = item.get("clip_id")
-        if not isinstance(clip_id, str) or not _CLIP_ID_PATTERN.fullmatch(clip_id):
+        if (
+            not isinstance(clip_id, str)
+            or not _CLIP_ID_PATTERN.fullmatch(clip_id)
+            or _is_windows_reserved_device_basename(clip_id)
+        ):
             raise ValueError("clip_id is unsafe")
-        if clip_id in seen_ids:
+        casefolded_clip_id = clip_id.casefold()
+        if casefolded_clip_id in seen_ids:
             raise ValueError(f"clip_id is duplicated: {clip_id}")
 
         start = _finite_number(item.get("source_start_pts_sec"), "source_start_pts_sec")
@@ -79,7 +89,7 @@ def load_export_clips(manifest_path: Path) -> list[ExportClip]:
             raise ValueError(f"clip {clip_id} overlaps the previous clip")
 
         clips.append(clip)
-        seen_ids.add(clip_id)
+        seen_ids.add(casefolded_clip_id)
         previous_end = clip.end_pts_sec
     return clips
 
@@ -122,41 +132,14 @@ def export_video_clips(
         for clip in clips:
             clip_path = temporary_dir / f"{clip.clip_id}.mp4"
             process = subprocess.run(
-                [
-                    str(ffmpeg),
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-seek_timestamp",
-                    "1",
-                    "-ss",
-                    str(clip.start_pts_sec),
-                    "-i",
-                    str(source),
-                    "-t",
-                    str(clip.duration_sec),
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "0:a?",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    preset,
-                    "-crf",
-                    str(crf),
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "192k",
-                    "-movflags",
-                    "+faststart",
-                    "-avoid_negative_ts",
-                    "make_zero",
-                    str(clip_path),
-                ],
+                _build_ffmpeg_clip_command(
+                    ffmpeg=ffmpeg,
+                    source=source,
+                    clip=clip,
+                    clip_path=clip_path,
+                    preset=preset,
+                    crf=crf,
+                ),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -195,6 +178,54 @@ def _reserve_output_directory(output: Path) -> Path:
         reservation.rmdir()
         raise
     return reservation
+
+
+def _build_ffmpeg_clip_command(
+    *,
+    ffmpeg: str | Path,
+    source: Path,
+    clip: ExportClip,
+    clip_path: Path,
+    preset: str,
+    crf: int,
+) -> list[str]:
+    return [
+        str(ffmpeg),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-n",
+        "-nostdin",
+        "-seek_timestamp",
+        "1",
+        "-ss",
+        str(clip.start_pts_sec),
+        "-i",
+        str(source),
+        "-t",
+        str(clip.duration_sec),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-avoid_negative_ts",
+        "make_zero",
+        str(clip_path),
+    ]
 
 
 def _publication_strategy(platform: str | None = None) -> str:
@@ -242,6 +273,11 @@ def _linux_renameat2():
     ]
     renameat2.restype = ctypes.c_int
     return renameat2
+
+
+def _is_windows_reserved_device_basename(clip_id: str) -> bool:
+    basename, _, _ = clip_id.partition(".")
+    return basename.casefold() in _WINDOWS_RESERVED_DEVICE_BASENAMES
 
 
 def _linux_rename_noreplace(temporary_dir: Path, output: Path) -> None:
