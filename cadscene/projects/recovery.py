@@ -17,6 +17,7 @@ from .models import (
 )
 from .repositories import (
     ManifestMutation,
+    _publish_recovery_restoration,
     ordered_repositories,
     publish_manifests,
     stamp_operation_changes,
@@ -278,7 +279,9 @@ def reconcile_project(
         clips = manifests[1]
         assert isinstance(project, ProjectManifest)
         assert isinstance(clips, ClipsManifest)
+        restore_analysis_pointers = False
         if project.active_analysis_revision != clips.analysis_revision:
+            restore_analysis_pointers = True
             failed_activation = project.active_analysis_revision
             project = replace(
                 project,
@@ -318,7 +321,7 @@ def reconcile_project(
                 (*creation_changed, *intent_changed),
             )
 
-        result = publish_manifests(
+        mutations = tuple(
             ManifestMutation(
                 repository,
                 project_id,
@@ -326,6 +329,14 @@ def reconcile_project(
                 lambda _current, _operation_id, repaired=repaired: repaired,
             )
             for repository, repaired in repairs
+        )
+        result = (
+            _publish_recovery_restoration(
+                mutations,
+                restored_analysis_revision=clips.analysis_revision,
+            )
+            if restore_analysis_pointers
+            else publish_manifests(mutations)
         )
         return ReconciliationResult(
             project_id=project_id,

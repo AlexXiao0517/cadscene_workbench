@@ -741,7 +741,6 @@ def test_lossy_encoder_is_rejected_before_cross_manifest_publication(tmp_path):
         "rebind",
         "in_place_rebind",
         "wrong_new_operation",
-        "wrong_pointer_operation",
     ],
 )
 def test_single_manifest_update_rejects_invalid_immutable_analysis_transition(
@@ -785,13 +784,6 @@ def test_single_manifest_update_rejects_invalid_immutable_analysis_transition(
         if corruption == "in_place_rebind":
             value.analysis_operation_ids["analysis-1"] = "op-rebound"
             return value
-        if corruption == "wrong_pointer_operation":
-            return replace(
-                value,
-                operation_id="op-publication",
-                candidate_analysis_revision="analysis-1",
-                candidate_analysis_operation_id="op-not-publication",
-            )
         return replace(
             value,
             operation_id="op-publication",
@@ -816,7 +808,6 @@ def test_single_manifest_update_rejects_invalid_immutable_analysis_transition(
         "rebind",
         "in_place_rebind",
         "wrong_new_operation",
-        "wrong_pointer_operation",
     ],
 )
 def test_cross_manifest_publication_rejects_invalid_immutable_analysis_transition(
@@ -868,12 +859,6 @@ def test_cross_manifest_publication_rejects_invalid_immutable_analysis_transitio
         if corruption == "in_place_rebind":
             value.analysis_operation_ids["analysis-1"] = "op-rebound"
             return value
-        if corruption == "wrong_pointer_operation":
-            return replace(
-                value,
-                candidate_analysis_revision="analysis-1",
-                candidate_analysis_operation_id="not-" + operation_id,
-            )
         return replace(
             value,
             analysis_revisions=(*value.analysis_revisions, "analysis-3"),
@@ -898,6 +883,104 @@ def test_cross_manifest_publication_rejects_invalid_immutable_analysis_transitio
 
     assert project_repository.load("p1").revision == 0
     assert clips_repository.load("p1").revision == 0
+
+
+def test_single_update_restamps_direct_candidate_to_active_pointer(tmp_path):
+    repository = _project_repository(tmp_path / "project.json")
+    repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+            operation_id="op-register-2",
+            active_analysis_revision="analysis-1",
+            active_analysis_operation_id="op-activate-1",
+            candidate_analysis_revision="analysis-2",
+            candidate_analysis_operation_id="op-register-2",
+            analysis_revisions=("analysis-1", "analysis-2"),
+            analysis_operation_ids={
+                "analysis-1": "op-register-1",
+                "analysis-2": "op-register-2",
+            },
+        ),
+    )
+
+    published = repository.update(
+        "p1",
+        expected_revision=0,
+        mutate=lambda value: replace(
+            value,
+            active_analysis_revision="analysis-2",
+            active_analysis_operation_id="op-register-2",
+            candidate_analysis_revision=None,
+            candidate_analysis_operation_id=None,
+        ),
+    )
+
+    assert published.active_analysis_operation_id == published.operation_id
+    assert published.active_analysis_operation_id != "op-register-2"
+    assert published.analysis_operation_ids["analysis-2"] == "op-register-2"
+
+
+def test_cross_publication_restamps_direct_candidate_to_active_pointer(tmp_path):
+    project_repository = _project_repository(tmp_path / "project.json")
+    clips_repository = _clips_repository(tmp_path / "clips.json")
+    project_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=replace(
+            ProjectManifest.new("p1", updated_at="2026-08-03T00:00:00Z"),
+            operation_id="op-register-2",
+            active_analysis_revision="analysis-1",
+            active_analysis_operation_id="op-activate-1",
+            candidate_analysis_revision="analysis-2",
+            candidate_analysis_operation_id="op-register-2",
+            analysis_revisions=("analysis-1", "analysis-2"),
+            analysis_operation_ids={
+                "analysis-1": "op-register-1",
+                "analysis-2": "op-register-2",
+            },
+        ),
+    )
+    clips_repository.create(
+        "p1",
+        expected_revision=-1,
+        value=ClipsManifest.new(
+            "p1",
+            analysis_revision="analysis-1",
+            updated_at="2026-08-03T00:00:00Z",
+        ),
+    )
+
+    result = publish_manifests(
+        (
+            ManifestMutation(
+                project_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: replace(
+                    value,
+                    active_analysis_revision="analysis-2",
+                    active_analysis_operation_id="op-register-2",
+                    candidate_analysis_revision=None,
+                    candidate_analysis_operation_id=None,
+                ),
+            ),
+            ManifestMutation(
+                clips_repository,
+                "p1",
+                0,
+                lambda value, _operation_id: replace(
+                    value, analysis_revision="analysis-2"
+                ),
+            ),
+        )
+    )
+
+    published = project_repository.load("p1")
+    assert published.active_analysis_operation_id == result.operation_id
+    assert published.active_analysis_operation_id != "op-register-2"
+    assert published.analysis_operation_ids["analysis-2"] == "op-register-2"
 
 
 def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path):

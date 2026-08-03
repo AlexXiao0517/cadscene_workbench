@@ -138,11 +138,42 @@ def new_operation_id() -> str:
     return uuid4().hex
 
 
-def validate_manifest_transition(
+@dataclass(frozen=True)
+class _AnalysisPointerRestoration:
+    restored_revision: str | None
+
+
+def _is_analysis_pointer_restoration(
+    current: ProjectManifest,
+    candidate: ProjectManifest,
+    restoration: _AnalysisPointerRestoration | None,
+) -> bool:
+    if (
+        restoration is None
+        or candidate.active_analysis_revision != restoration.restored_revision
+    ):
+        return False
+    restored_revision = candidate.active_analysis_revision
+    restored_operation_id = (
+        None
+        if restored_revision is None
+        else candidate.analysis_operation_ids[restored_revision]
+    )
+    return (
+        candidate.active_analysis_operation_id == restored_operation_id
+        and candidate.candidate_analysis_revision
+        == current.active_analysis_revision
+        and candidate.candidate_analysis_operation_id
+        == current.active_analysis_operation_id
+    )
+
+
+def _validate_manifest_transition(
     current: ManifestHeader,
     candidate: ManifestHeader,
     *,
     publication_operation_id: str | None,
+    analysis_pointer_restoration: _AnalysisPointerRestoration | None,
 ) -> None:
     """Enforce history invariants that require both manifest revisions."""
 
@@ -171,20 +202,11 @@ def validate_manifest_transition(
         raise ValueError(
             "immutable analysis transition must use the publication operation ID"
         )
-    current_pointer_states = {
-        (revision, operation_id)
-        for revision, operation_id in (
-            (
-                current.active_analysis_revision,
-                current.active_analysis_operation_id,
-            ),
-            (
-                current.candidate_analysis_revision,
-                current.candidate_analysis_operation_id,
-            ),
-        )
-        if revision is not None and operation_id is not None
-    }
+    is_restoration = _is_analysis_pointer_restoration(
+        current,
+        candidate,
+        analysis_pointer_restoration,
+    )
     for current_pointer, candidate_pointer in (
         (
             (
@@ -210,14 +232,24 @@ def validate_manifest_transition(
         revision, operation_id = candidate_pointer
         if candidate_pointer == current_pointer or revision is None:
             continue
-        if (
-            operation_id != publication_operation_id
-            and candidate_pointer not in current_pointer_states
-            and operation_id != candidate.analysis_operation_ids[revision]
-        ):
+        if operation_id != publication_operation_id and not is_restoration:
             raise ValueError(
                 "immutable analysis transition has unrelated pointer provenance"
             )
+
+
+def validate_manifest_transition(
+    current: ManifestHeader,
+    candidate: ManifestHeader,
+    *,
+    publication_operation_id: str | None,
+) -> None:
+    _validate_manifest_transition(
+        current,
+        candidate,
+        publication_operation_id=publication_operation_id,
+        analysis_pointer_restoration=None,
+    )
 
 
 def _reference_identity(reference: StateReference) -> tuple[str, str]:
@@ -295,10 +327,12 @@ def _stamp_mapping_items(
     return tuple(stamped)
 
 
-def stamp_operation_changes(
+def _stamp_operation_changes(
     current: ManifestHeader,
     candidate: ManifestHeader,
     operation_id: str,
+    *,
+    analysis_pointer_restoration: _AnalysisPointerRestoration | None,
 ) -> ManifestHeader:
     """Stamp changed/new owned state while retaining unchanged history markers."""
 
@@ -310,7 +344,45 @@ def stamp_operation_changes(
             current.references, candidate.references, operation_id
         ),
     )
-    if isinstance(current, ClipsManifest) and isinstance(candidate, ClipsManifest):
+    if isinstance(current, ProjectManifest) and isinstance(candidate, ProjectManifest):
+        is_restoration = _is_analysis_pointer_restoration(
+            current,
+            candidate,
+            analysis_pointer_restoration,
+        )
+        if not is_restoration:
+            active_pointer = (
+                candidate.active_analysis_revision,
+                candidate.active_analysis_operation_id,
+            )
+            current_active_pointer = (
+                current.active_analysis_revision,
+                current.active_analysis_operation_id,
+            )
+            candidate_pointer = (
+                candidate.candidate_analysis_revision,
+                candidate.candidate_analysis_operation_id,
+            )
+            current_candidate_pointer = (
+                current.candidate_analysis_revision,
+                current.candidate_analysis_operation_id,
+            )
+            stamped = replace(
+                stamped,
+                active_analysis_operation_id=(
+                    operation_id
+                    if active_pointer != current_active_pointer
+                    and candidate.active_analysis_revision is not None
+                    else candidate.active_analysis_operation_id
+                ),
+                candidate_analysis_operation_id=(
+                    operation_id
+                    if candidate_pointer != current_candidate_pointer
+                    and candidate.candidate_analysis_revision is not None
+                    else candidate.candidate_analysis_operation_id
+                ),
+            )
+    elif isinstance(current, ClipsManifest) and isinstance(candidate, ClipsManifest):
         current_by_id = {clip.clip_id: clip for clip in current.clips}
         clips: list[ClipDefinition] = []
         for clip in candidate.clips:
@@ -366,8 +438,23 @@ def stamp_operation_changes(
     return stamped
 
 
-def publish_manifests(
+def stamp_operation_changes(
+    current: ManifestHeader,
+    candidate: ManifestHeader,
+    operation_id: str,
+) -> ManifestHeader:
+    return _stamp_operation_changes(
+        current,
+        candidate,
+        operation_id,
+        analysis_pointer_restoration=None,
+    )
+
+
+def _publish_manifests(
     mutations: Iterable[ManifestMutation[ManifestHeader]],
+    *,
+    analysis_pointer_restoration: _AnalysisPointerRestoration | None,
 ) -> CrossManifestResult:
     """Publish ordered atomic files carrying one recovery marker.
 
@@ -414,11 +501,17 @@ def publish_manifests(
             mutation = mutations_by_owner[repository.owner]
             current = current_by_owner[repository.owner]
             candidate = mutation.mutate(deepcopy(current), operation_id)
-            stamped = stamp_operation_changes(current, candidate, operation_id)
-            validate_manifest_transition(
+            stamped = _stamp_operation_changes(
+                current,
+                candidate,
+                operation_id,
+                analysis_pointer_restoration=analysis_pointer_restoration,
+            )
+            _validate_manifest_transition(
                 current,
                 stamped,
                 publication_operation_id=operation_id,
+                analysis_pointer_restoration=analysis_pointer_restoration,
             )
             advanced_by_owner[repository.owner] = repository._advance_candidate(
                 project_id,
@@ -465,3 +558,27 @@ def publish_manifests(
                 )
             )
     return CrossManifestResult(operation_id, tuple(published))
+
+
+def publish_manifests(
+    mutations: Iterable[ManifestMutation[ManifestHeader]],
+) -> CrossManifestResult:
+    return _publish_manifests(
+        mutations,
+        analysis_pointer_restoration=None,
+    )
+
+
+def _publish_recovery_restoration(
+    mutations: Iterable[ManifestMutation[ManifestHeader]],
+    *,
+    restored_analysis_revision: str | None,
+) -> CrossManifestResult:
+    """Publish the exact historical pointer rollback constructed by recovery."""
+
+    return _publish_manifests(
+        mutations,
+        analysis_pointer_restoration=_AnalysisPointerRestoration(
+            restored_analysis_revision
+        ),
+    )

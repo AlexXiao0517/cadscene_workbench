@@ -24,6 +24,7 @@ from .repositories import (
     RevisionConflict,
     new_operation_id,
     ordered_repositories,
+    stamp_operation_changes,
     validate_manifest_transition,
 )
 
@@ -124,10 +125,24 @@ class AtomicJsonRepository(Generic[T]):
                 )
             candidate = mutate(deepcopy(current))
             candidate = replace(candidate, operation_intent=None)
+            publication_operation_id = candidate.operation_id
+            if isinstance(current, ProjectManifest) and isinstance(
+                candidate, ProjectManifest
+            ):
+                if (
+                    publication_operation_id is None
+                    or publication_operation_id == current.operation_id
+                ):
+                    publication_operation_id = new_operation_id()
+                candidate = stamp_operation_changes(
+                    current,
+                    candidate,
+                    publication_operation_id,
+                )
             validate_manifest_transition(
                 current,
                 candidate,
-                publication_operation_id=candidate.operation_id,
+                publication_operation_id=publication_operation_id,
             )
             advanced = self._advance_candidate(
                 project_id,
