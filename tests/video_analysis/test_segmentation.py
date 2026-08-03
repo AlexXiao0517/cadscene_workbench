@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from fractions import Fraction
+
+import cadscene.video_analysis.segmentation as segmentation
 from cadscene.video_analysis.models import BoundaryEvidence
+from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.video_analysis.segmentation import (
     CutCandidate,
     SegmentationConfig,
@@ -10,6 +14,66 @@ from cadscene.video_analysis.segmentation import (
 
 def _pts(end: int) -> list[float]:
     return [float(value) for value in range(end + 1)]
+
+
+def _frame_index(*pts_values: int, duration_pts: int = 40) -> DecodedFrameIndex:
+    return DecodedFrameIndex(
+        Fraction(1, 1000),
+        tuple(
+            DecodedFrameTimestamp(ordinal, pts, duration_pts, "pts")
+            for ordinal, pts in enumerate(pts_values)
+        ),
+    )
+
+
+def test_hard_cut_first_new_scene_frame_belongs_only_to_next_clip() -> None:
+    frame_index = _frame_index(8800, 8840, 8880, 9000, 9040, 9080)
+
+    clips = plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[BoundaryEvidence(9.0, ("image_discontinuity",), 0.98)],
+        cut_candidates=[],
+    )
+
+    assert clips[0].source_end_pts_exclusive == 9000
+    assert clips[1].source_start_pts == 9000
+    assert 9000 not in segmentation.frames_for_interval(frame_index, clips[0])
+    assert 9000 in segmentation.frames_for_interval(frame_index, clips[1])
+    segmentation.validate_frame_partition(frame_index, clips)
+
+
+def test_short_black_transition_belongs_to_preceding_clip() -> None:
+    frame_index = _frame_index(5000, 5040, 5080, 5120, 5160)
+
+    clips = plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[
+            BoundaryEvidence(5.04, ("black_frame",), 0.97),
+            BoundaryEvidence(5.12, ("black_frame", "image_discontinuity"), 0.98),
+        ],
+        cut_candidates=[],
+    )
+
+    assert [(clip.source_start_pts, clip.source_end_pts_exclusive) for clip in clips] == [
+        (5000, 5120),
+        (5120, 5200),
+    ]
+    assert segmentation.frames_for_interval(frame_index, clips[0]) == (5000, 5040, 5080)
+
+
+def test_nonzero_source_start_and_final_frame_are_partitioned_once() -> None:
+    frame_index = _frame_index(5000, 5040, 5080)
+
+    clips = plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[],
+        cut_candidates=[],
+    )
+
+    assert clips[0].source_start_pts == 5000
+    assert clips[-1].source_end_pts_exclusive == 5120
+    assert segmentation.frames_for_interval(frame_index, clips[-1])[-1] == 5080
+    segmentation.validate_frame_partition(frame_index, clips)
 
 
 def test_duration_planner_uses_minimum_number_of_strictly_sub_sixty_clips() -> None:

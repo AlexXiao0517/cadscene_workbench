@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+from fractions import Fraction
 import json
 from pathlib import Path
 import re
@@ -11,7 +12,12 @@ import pytest
 
 import cadscene.video_analysis.clip_export as clip_export
 from cadscene.video_analysis.clip_export import export_video_clips, load_export_clips
-from cadscene.video_analysis.pts import probe_video_pts, resolve_ffmpeg_executable
+from cadscene.video_analysis.pts import (
+    DecodedFrameIndex,
+    DecodedFrameTimestamp,
+    probe_video_pts,
+    resolve_ffmpeg_executable,
+)
 
 
 def _write_manifest(tmp_path: Path, clips: object) -> Path:
@@ -94,16 +100,31 @@ def _two_clip_manifest(tmp_path: Path) -> Path:
         [
             {
                 "clip_id": "clip-0001",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": 2000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 2.0,
+                "source_end_pts_exclusive_sec": 2.0,
             },
             {
                 "clip_id": "clip-0002",
+                "source_start_pts": 2000,
+                "source_end_pts_exclusive": 4000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 2.0,
-                "source_end_pts_sec": 4.0,
+                "source_end_pts_exclusive_sec": 4.0,
             },
         ],
     )
+
+
+def _integer_pts_clip(clip_id: str, start: object, end: object) -> dict[str, object]:
+    return {
+        "clip_id": clip_id,
+        "source_start_pts": start,
+        "source_end_pts_exclusive": end,
+        "source_time_base": {"numerator": 1, "denominator": 1000},
+    }
 
 
 def test_x264_presets_are_public_and_ordered() -> None:
@@ -132,6 +153,10 @@ def test_export_video_clips_reencodes_source_pts_ranges_atomically(
 
     assert [path.name for path in paths] == ["clip-0001.mp4", "clip-0002.mp4"]
     assert all(abs(_probe_duration(path, ffmpeg) - 2.0) < 0.25 for path in paths)
+    sidecar = json.loads(
+        (output / "clip_frame_map.json").read_text(encoding="utf-8")
+    )
+    assert [len(item["frames"]) for item in sidecar["clips"]] == [20, 20]
     assert output.is_dir()
     assert not list(tmp_path.glob(".clips.tmp-*"))
 
@@ -143,13 +168,19 @@ def test_export_video_clips_seeks_absolute_nonzero_source_pts(tmp_path: Path) ->
         [
             {
                 "clip_id": "clip-0001",
+                "source_start_pts": 10000,
+                "source_end_pts_exclusive": 12000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 10.0,
-                "source_end_pts_sec": 12.0,
+                "source_end_pts_exclusive_sec": 12.0,
             },
             {
                 "clip_id": "clip-0002",
+                "source_start_pts": 12000,
+                "source_end_pts_exclusive": 14000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 12.0,
-                "source_end_pts_sec": 14.0,
+                "source_end_pts_exclusive_sec": 14.0,
             },
         ],
     )
@@ -177,7 +208,7 @@ def test_export_video_clips_cleans_up_failed_temp_publication(tmp_path: Path) ->
     manifest = _two_clip_manifest(tmp_path)
     output = tmp_path / "clips"
 
-    with pytest.raises(RuntimeError, match="FFmpeg clip export failed"):
+    with pytest.raises(RuntimeError, match="PTS probe failed"):
         export_video_clips(video, manifest, output)
 
     assert not output.exists()
@@ -221,6 +252,16 @@ def test_export_video_clips_reports_temporary_cleanup_failure(
         raise OSError("simulated cleanup failure")
 
     monkeypatch.setattr("cadscene.video_analysis.clip_export.shutil.rmtree", fail_remove)
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        tuple(
+            DecodedFrameTimestamp(ordinal, pts, 100, "pts")
+            for ordinal, pts in enumerate(range(0, 4000, 100))
+        ),
+    )
+    monkeypatch.setattr(
+        clip_export, "probe_decoded_frame_index", lambda *_args, **_kwargs: frame_index
+    )
 
     with pytest.raises(OSError, match="simulated cleanup failure"):
         export_video_clips(video, manifest, tmp_path / "clips")
@@ -337,7 +378,7 @@ def test_ffmpeg_clip_command_disables_overwrite_and_stdin() -> None:
     command = clip_export._build_ffmpeg_clip_command(
         ffmpeg=Path("ffmpeg"),
         source=Path("source.mp4"),
-        clip=clip_export.ExportClip("clip-0001", 1.0, 3.0),
+        clip=clip_export.ExportClip("clip-0001", 1000, 3000, Fraction(1, 1000)),
         clip_path=Path("clip-0001.mp4"),
         preset="fast",
         crf=18,
@@ -346,6 +387,44 @@ def test_ffmpeg_clip_command_disables_overwrite_and_stdin() -> None:
     assert "-n" in command
     assert "-nostdin" in command
     assert command[-1] == "clip-0001.mp4"
+
+
+def test_export_command_uses_absolute_pts_trim_and_passthrough() -> None:
+    command = clip_export._build_ffmpeg_clip_command(
+        ffmpeg=Path("ffmpeg"),
+        source=Path("source.mp4"),
+        clip=clip_export.ExportClip("clip-0001", 5000, 9000, Fraction(1, 1000)),
+        clip_path=Path("clip-0001.mp4"),
+        preset="fast",
+        crf=18,
+    )
+
+    assert "trim=start_pts=5000:end_pts=9000,setpts=PTS-STARTPTS" in command
+    assert "-fps_mode" in command and "passthrough" in command
+    assert "-ss" not in command and "-t" not in command
+
+
+def test_adjacent_export_maps_partition_source_frames_once() -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        tuple(
+            DecodedFrameTimestamp(ordinal, pts, 40, "pts")
+            for ordinal, pts in enumerate((5000, 5040, 5080, 5120))
+        ),
+    )
+    clips = [
+        clip_export.ExportClip("clip-0001", 5000, 5080, frame_index.time_base),
+        clip_export.ExportClip("clip-0002", 5080, 5160, frame_index.time_base),
+    ]
+
+    sidecar = clip_export.build_clip_frame_map(frame_index, clips)
+    mapped = [
+        (frame["ordinal"], frame["pts"])
+        for clip in sidecar["clips"]
+        for frame in clip["frames"]
+    ]
+
+    assert mapped == [(frame.ordinal, frame.pts) for frame in frame_index.frames]
 
 
 @pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
@@ -391,13 +470,19 @@ def test_load_export_clips_returns_validated_source_pts_ranges(tmp_path: Path) -
         [
             {
                 "clip_id": "clip-0001",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": 2000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 2.0,
+                "source_end_pts_exclusive_sec": 2.0,
             },
             {
                 "clip_id": "clip-0002",
+                "source_start_pts": 2000,
+                "source_end_pts_exclusive": 4500,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
                 "source_start_pts_sec": 2.0,
-                "source_end_pts_sec": 4.5,
+                "source_end_pts_exclusive_sec": 4.5,
             },
         ],
     )
@@ -456,72 +541,20 @@ def test_load_export_clips_rejects_windows_reserved_device_basenames(
     "clips",
     [
         [],
+        [_integer_pts_clip("../escape", 0, 2000)],
+        [_integer_pts_clip("clip-0001", float("nan"), 2000)],
+        [_integer_pts_clip("clip-0001", float("inf"), 2000)],
+        [_integer_pts_clip("clip-0001", -float("inf"), 2000)],
+        [_integer_pts_clip("clip-0001", 2000, 2000)],
         [
-            {
-                "clip_id": "../escape",
-                "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 2.0,
-            }
+            _integer_pts_clip("clip-0001", 0, 2000),
+            _integer_pts_clip("clip-0002", 1500, 3000),
         ],
         [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": float("nan"),
-                "source_end_pts_sec": 2.0,
-            }
+            _integer_pts_clip("clip-0001", 0, 2000),
+            _integer_pts_clip("clip-0001", 2000, 3000),
         ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": float("inf"),
-                "source_end_pts_sec": 2.0,
-            }
-        ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": -float("inf"),
-                "source_end_pts_sec": 2.0,
-            }
-        ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": 2.0,
-                "source_end_pts_sec": 2.0,
-            }
-        ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 2.0,
-            },
-            {
-                "clip_id": "clip-0002",
-                "source_start_pts_sec": 1.5,
-                "source_end_pts_sec": 3.0,
-            },
-        ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 2.0,
-            },
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": 2.0,
-                "source_end_pts_sec": 3.0,
-            },
-        ],
-        [
-            {
-                "clip_id": "clip-0001",
-                "source_start_pts_sec": 0.0,
-                "source_end_pts_sec": 60.0,
-            }
-        ],
+        [_integer_pts_clip("clip-0001", 0, 60000)],
     ],
     ids=[
         "empty",

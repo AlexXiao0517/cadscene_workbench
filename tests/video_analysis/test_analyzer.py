@@ -57,18 +57,32 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
         (output / "video_analysis_manifest.json").read_text(encoding="utf-8")
     )
 
-    assert metadata["timestamp_authority"] == "source_packet_and_decoded_frame_pts"
+    assert metadata["timestamp_authority"] == "decoded_frame_presentation_order_pts"
+    assert metadata["source_start_pts"] == 0
+    assert metadata["source_end_pts_exclusive"] > metadata["source_start_pts"]
     assert metadata["source_start_pts_sec"] == 0.0
-    assert metadata["source_end_pts_sec"] == 4.0
+    assert metadata["source_end_pts_exclusive_sec"] == 4.0
     assert metadata["sample_interval_sec"] == 0.5
     assert metadata["sampled_frame_count"] > 1
     assert len(clips) == 1
     clip = clips[0]
     assert clip["project_id"] == "project-short"
     assert clip["clip_id"] == "clip-0001"
+    assert clip["source_start_pts"] == metadata["source_start_pts"]
+    assert (
+        clip["source_end_pts_exclusive"]
+        == metadata["source_end_pts_exclusive"]
+    )
+    assert clip["source_time_base"] == metadata["time_base"]
+    assert clip["interval_semantics"] == "half_open"
     assert clip["source_start_pts_sec"] == metadata["source_start_pts_sec"]
-    assert clip["source_end_pts_sec"] == metadata["source_end_pts_sec"]
-    assert clip["source_end_pts_sec"] - clip["source_start_pts_sec"] <= 60.0
+    assert (
+        clip["source_end_pts_exclusive_sec"]
+        == metadata["source_end_pts_exclusive_sec"]
+    )
+    assert (
+        clip["source_end_pts_exclusive_sec"] - clip["source_start_pts_sec"] < 60.0
+    )
     assert clip["analysis_start_pts_sec"] >= clip["source_start_pts_sec"]
     assert clip["analysis_end_pts_sec"] <= clip["source_end_pts_sec"]
     assert clip["start_boundary"]["reasons"] == ["source_start"]
@@ -88,6 +102,8 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
     assert clip["workflow_recommendation"]["auto_selected"] is False
     assert clip["pts_mapping"]["clip_to_source_pts_offset_sec"] == 0.0
     assert clip["render_order"] == 0
+    assert clip["scene_index"] == 1
+    assert clip["segment_index"] == 1
     assert clip["analysis_revision"] == "analysis-test-0001"
     assert manifest["executes_workflow"] is False
     assert not list(output.rglob("*.mp4"))
@@ -171,3 +187,20 @@ def test_single_hard_cut_to_dark_near_end_remains_mandatory() -> None:
     )
 
     assert selected == [boundary]
+
+
+def test_short_black_transition_uses_first_stable_nonblack_boundary() -> None:
+    selected = _scene_boundaries_for_segmentation(
+        [
+            BoundaryEvidence(5.04, ("black_frame",), 0.97),
+            BoundaryEvidence(
+                5.12, ("black_frame", "image_discontinuity"), 0.98
+            ),
+            BoundaryEvidence(20.0, ("image_discontinuity",), 0.91),
+        ],
+        source_end_pts_sec=30.0,
+        recent_frame_lumas=[90.0, 90.0, 90.0],
+        terminal_guard_sec=1.0,
+    )
+
+    assert [boundary.pts_sec for boundary in selected] == [5.12, 20.0]

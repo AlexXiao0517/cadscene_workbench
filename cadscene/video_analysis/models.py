@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+from fractions import Fraction
 from typing import Any
 
 
@@ -57,9 +58,14 @@ class LogicalClip:
     pts_mapping: PtsMapping
     render_order: int
     analysis_revision: str
+    source_start_pts: int | None = None
+    source_end_pts_exclusive: int | None = None
+    source_time_base: Fraction | None = None
+    scene_index: int = 1
+    segment_index: int = 1
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "project_id": self.project_id,
             "clip_id": self.clip_id,
             "source_start_pts_sec": self.source_start_pts_sec,
@@ -75,5 +81,24 @@ class LogicalClip:
             "pts_mapping": self.pts_mapping.to_dict(),
             "render_order": self.render_order,
             "analysis_revision": self.analysis_revision,
+            "scene_index": self.scene_index,
+            "segment_index": self.segment_index,
         }
-
+        if (
+            self.source_start_pts is not None
+            and self.source_end_pts_exclusive is not None
+            and self.source_time_base is not None
+        ):
+            payload.update(
+                {
+                    "source_start_pts": self.source_start_pts,
+                    "source_end_pts_exclusive": self.source_end_pts_exclusive,
+                    "source_time_base": {
+                        "numerator": self.source_time_base.numerator,
+                        "denominator": self.source_time_base.denominator,
+                    },
+                    "source_end_pts_exclusive_sec": self.source_end_pts_sec,
+                    "interval_semantics": "half_open",
+                }
+            )
+        return payload

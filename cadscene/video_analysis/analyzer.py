@@ -18,7 +18,7 @@ from .motion import (
     build_motion_windows,
     stabilize_motion_windows,
 )
-from .pts import iter_sparse_frames, probe_video_pts
+from .pts import iter_sparse_frames, probe_decoded_frame_index, probe_video_pts
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
 from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
 from .shot_detection import analyze_frame_pair, coalesce_boundaries, detect_shot_boundaries
@@ -58,7 +58,7 @@ def _dominant_motion(
 def _analysis_range(
     sampled_pts: list[float], start_pts_sec: float, end_pts_sec: float
 ) -> tuple[float, float]:
-    pts = [pts for pts in sampled_pts if start_pts_sec <= pts <= end_pts_sec]
+    pts = [pts for pts in sampled_pts if start_pts_sec <= pts < end_pts_sec]
     if not pts:
         return start_pts_sec, end_pts_sec
     return min(pts), max(pts)
@@ -83,7 +83,7 @@ def _scene_boundaries_for_segmentation(
         and tail[2] <= 24.0
         and tail[0] - tail[2] >= 12.0
     )
-    return [
+    retained = [
         boundary
         for boundary in boundaries
         if not (
@@ -91,6 +91,27 @@ def _scene_boundaries_for_segmentation(
             and 0.0 <= source_end_pts_sec - boundary.pts_sec <= terminal_guard_sec
         )
     ]
+    normalized: list[BoundaryEvidence] = []
+    index = 0
+    while index < len(retained):
+        boundary = retained[index]
+        if "black_frame" not in boundary.reasons:
+            normalized.append(boundary)
+            index += 1
+            continue
+        run = [boundary]
+        index += 1
+        while index < len(retained) and "black_frame" in retained[index].reasons:
+            run.append(retained[index])
+            index += 1
+        normalized.append(
+            BoundaryEvidence(
+                run[-1].pts_sec,
+                tuple(dict.fromkeys(reason for item in run for reason in item.reasons)),
+                max(item.confidence for item in run),
+            )
+        )
+    return normalized
 
 
 def _windows_csv(windows: list[MotionWindow]) -> str:
@@ -174,11 +195,18 @@ def analyze_video(
     analysis_revision: str | None = None,
     sample_interval_sec: float = 0.5,
     ffmpeg_executable: str | Path | None = None,
+    ffprobe_executable: str | Path | None = None,
 ) -> Path:
     started = time.perf_counter()
     source = Path(video_path)
     revision = analysis_revision or _new_revision()
-    pts_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
+    packet_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
+    frame_index = probe_decoded_frame_index(
+        source,
+        time_base=packet_index.time_base,
+        ffprobe_executable=ffprobe_executable,
+        ffmpeg_executable=ffmpeg_executable,
+    )
     sampled_pts: list[float] = []
     sampled_lumas: list[float] = []
     pair_evidence = []
@@ -186,7 +214,7 @@ def analyze_video(
     previous_frame = None
     for frame in iter_sparse_frames(
         source,
-        index=pts_index,
+        index=frame_index,
         interval_sec=sample_interval_sec,
         ffmpeg_executable=ffmpeg_executable,
     ):
@@ -209,17 +237,17 @@ def analyze_video(
     stable_windows, motion_boundaries = stabilize_motion_windows(
         raw_windows, MotionAnalysisConfig()
     )
-    shot_boundaries = coalesce_boundaries(
-        shot_boundaries, within_sec=sample_interval_sec * 2.0
-    )
     # Scene discontinuities are mandatory. Motion changes remain explainable
     # analysis evidence, but do not create extra fragments by themselves.
     assert previous_frame is not None
     mandatory_boundaries = _scene_boundaries_for_segmentation(
         shot_boundaries,
-        source_end_pts_sec=pts_index.source_end_pts_sec,
+        source_end_pts_sec=frame_index.source_end_pts_exclusive_sec,
         recent_frame_lumas=sampled_lumas,
         terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
+    )
+    mandatory_boundaries = coalesce_boundaries(
+        mandatory_boundaries, within_sec=sample_interval_sec * 2.0
     )
     cut_candidates = [
         CutCandidate(
@@ -230,12 +258,13 @@ def analyze_video(
         for item in pair_evidence
     ]
     planned = plan_clip_intervals(
-        source_start_pts_sec=pts_index.source_start_pts_sec,
-        source_end_pts_sec=pts_index.source_end_pts_sec,
+        frame_index=frame_index,
         mandatory_boundaries=mandatory_boundaries,
-        available_source_pts=[packet.pts_sec for packet in pts_index.packets],
         cut_candidates=cut_candidates,
         config=SegmentationConfig(),
+    )
+    shot_boundaries = coalesce_boundaries(
+        shot_boundaries, within_sec=sample_interval_sec * 2.0
     )
 
     srt_records: list[dict[str, Any]] = []
@@ -245,8 +274,8 @@ def analyze_video(
             srt_analysis = analyze_srt_stream(
                 stream,
                 srt_source.name,
-                video_duration_sec=pts_index.source_end_pts_sec
-                - pts_index.source_start_pts_sec,
+                video_duration_sec=frame_index.source_end_pts_exclusive_sec
+                - frame_index.source_start_pts_sec,
             )
         srt_records = list(srt_analysis.get("records", []))
 
@@ -259,7 +288,7 @@ def analyze_video(
             srt_records,
             clip_source_start_pts_sec=interval.start_pts_sec,
             clip_source_end_pts_sec=interval.end_pts_sec,
-            video_source_start_pts_sec=pts_index.source_start_pts_sec,
+            video_source_start_pts_sec=frame_index.source_start_pts_sec,
         )
         recommendation = recommend_workflow(mode, confidence, srt_coverage)
         analysis_start, analysis_end = _analysis_range(
@@ -281,6 +310,11 @@ def analyze_video(
             pts_mapping=PtsMapping(interval.start_pts_sec),
             render_order=index - 1,
             analysis_revision=revision,
+            source_start_pts=interval.source_start_pts,
+            source_end_pts_exclusive=interval.source_end_pts_exclusive,
+            source_time_base=frame_index.time_base,
+            scene_index=interval.scene_index,
+            segment_index=interval.segment_index,
         ).to_dict()
         clip["srt_coverage"] = srt_coverage.to_dict()
         clip["workflow_recommendation"] = {
@@ -297,15 +331,21 @@ def analyze_video(
     elapsed = time.perf_counter() - started
     metadata = {
         "source_path": str(source.resolve()),
-        "timestamp_authority": "source_packet_and_decoded_frame_pts",
+        "timestamp_authority": "decoded_frame_presentation_order_pts",
         "time_base": {
-            "numerator": pts_index.time_base.numerator,
-            "denominator": pts_index.time_base.denominator,
+            "numerator": frame_index.time_base.numerator,
+            "denominator": frame_index.time_base.denominator,
         },
-        "source_start_pts_sec": pts_index.source_start_pts_sec,
-        "source_end_pts_sec": pts_index.source_end_pts_sec,
-        "duration_sec": pts_index.source_end_pts_sec - pts_index.source_start_pts_sec,
-        "packet_count": len(pts_index.packets),
+        "source_start_pts": frame_index.source_start_pts,
+        "source_end_pts_exclusive": frame_index.source_end_pts_exclusive,
+        "source_start_pts_sec": frame_index.source_start_pts_sec,
+        "source_end_pts_exclusive_sec": frame_index.source_end_pts_exclusive_sec,
+        # Legacy seconds alias remains for the Stage 8A artifact validator.
+        "source_end_pts_sec": frame_index.source_end_pts_exclusive_sec,
+        "duration_sec": frame_index.source_end_pts_exclusive_sec
+        - frame_index.source_start_pts_sec,
+        "decoded_frame_count": len(frame_index.frames),
+        "packet_count": len(packet_index.packets),
         "sample_interval_sec": sample_interval_sec,
         "sampled_frame_count": len(sampled_pts),
     }
