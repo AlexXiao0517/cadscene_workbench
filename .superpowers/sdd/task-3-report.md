@@ -384,6 +384,51 @@ pytest -q
 685 passed, 1 skipped, 1 warning in 33.73s
 ```
 
+## Fifth closure-review remediation
+
+The final two Windows recovery/lease findings against `29bb829` were reproduced
+before production changes and closed:
+
+- A successful terminal cancellation now compare-and-removes the exact
+  attempt's process controller, execution claim and adopted-attempt lease in
+  one queue-locked state transition. A worker's later `finally` release is an
+  idempotent no-op when the terminal job has no lease, while a stale callback
+  still cannot release a newer retry lease. Failed or unverified cancellation
+  retains all ownership and continues to block retry.
+- Windows descendant enumeration and liveness no longer depend on optional
+  `psutil`. Native `CreateToolhelp32Snapshot`/`PROCESSENTRY32W` traversal finds
+  recursive descendants; `OpenProcess` plus `GetExitCodeProcess` determines
+  liveness. `ERROR_INVALID_PARAMETER`/`ERROR_NOT_FOUND` prove absence, whereas
+  `ERROR_ACCESS_DENIED` and all other inspection errors raise and are handled
+  fail-closed by queue recovery. Every opened process/snapshot handle is closed
+  in `finally`, and invalid snapshots or enumeration errors are never treated
+  as an empty verified tree.
+
+Fifth-review RED evidence:
+
+```text
+pytest -q tests/projects/test_queue.py -k "successful_cancel_releases_adopted or failed_cancel_retains_adopted or native_windows"
+5 failed initially: four behavioral failures (adopted cancel leaked its
+execution lease; native Win32 API was not injectable and Windows
+enumeration/liveness still depended on psutil) plus one test matcher corrected
+to the existing fail-closed claim error before production changes
+pytest -q tests/projects/test_queue.py -k "successful_worker_cancel"
+1 failed (the worker's late finally release raised after terminal CAS cleanup)
+```
+
+Fresh fifth-review verification:
+
+```text
+pytest -q tests/projects/test_queue.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/projects/test_workflow_adapters.py
+84 passed in 2.73s
+pytest -q tests/projects
+141 passed in 3.13s
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/workflow tests/pure_rotation tests/video_analysis/test_clip_export.py tests/video_analysis/test_cli.py
+254 passed, 1 skipped, 1 warning in 7.17s
+pytest -q
+689 passed, 1 skipped, 1 warning in 34.35s
+```
+
 ## Self-review
 
 - Confirmed Task 2 repository/model invariants were consumed rather than
@@ -401,8 +446,12 @@ pytest -q
 - Confirmed `cancelling` holds resource and exclusive capacity until termination
   is complete, while the blocking terminator itself holds no repository or
   queue lock.
-- Confirmed stale old progress, finish and finally/controller-release paths are
-  rejected by the attempt lease and cannot release a new retry.
+- Confirmed stale old progress and finish callbacks are rejected by the attempt
+  lease. A terminal worker's late finally release is idempotent, and an old
+  callback cannot release a new retry lease.
+- Confirmed the Win32 native snapshot and liveness paths close every valid
+  handle, treat PID 0/nonexistent as absent, and keep protected PID 4 or other
+  access-denied/inspection failures fail-closed.
 - Confirmed per-clip physical export produces a complete decoded-frame sidecar
   for the requested interval without claiming that it covers the whole source.
 - Confirmed the three runnable adapters reference existing CLI module names

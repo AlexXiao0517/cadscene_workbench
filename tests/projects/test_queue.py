@@ -390,7 +390,9 @@ def test_idempotency_reuses_only_identical_input_and_adapter_identity() -> None:
     assert changed.job_id == "c"
 
 
-def test_cancel_blocks_retry_until_old_attempt_claim_is_released() -> None:
+def test_successful_worker_cancel_releases_claim_and_late_finally_is_idempotent() -> (
+    None
+):
     queue = LocalResourceQueue()
     queue.submit(
         job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
@@ -400,9 +402,7 @@ def test_cancel_blocks_retry_until_old_attempt_claim_is_released() -> None:
     lease = claimed.attempts[-1]
 
     queue.cancel("a")
-
-    with pytest.raises(ValueError, match="claim.*active"):
-        queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    assert "a" not in queue._execution_claims
     queue.release_execution_claim(
         "a", attempt_number=lease.number, claim_token=lease.worker_claim_token
     )
@@ -677,37 +677,79 @@ def test_windows_fallback_rediscovers_children_before_terminating_parent(
     assert terminated == [201, 202, 123]
 
 
-def test_windows_descendant_access_denied_is_not_treated_as_an_empty_tree(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import psutil
+class _FakeWin32ProcessApi:
+    def __init__(
+        self,
+        *,
+        processes: tuple[tuple[int, int], ...] = (),
+        open_handle: object | None = object(),
+        last_error: int = 0,
+        exit_code: int = 259,
+    ) -> None:
+        self.processes = processes
+        self.open_handle = open_handle
+        self.error = last_error
+        self.exit_code = exit_code
+        self.closed: list[object] = []
+
+    def snapshot_processes(self) -> tuple[tuple[int, int], ...]:
+        return self.processes
+
+    def open_process(self, desired_access: int, pid: int) -> object | None:
+        assert desired_access == 0x1000
+        assert pid == 123
+        return self.open_handle
+
+    def get_exit_code(self, handle: object) -> int:
+        assert handle is self.open_handle
+        return self.exit_code
+
+    def terminate_process(self, handle: object, exit_code: int) -> bool:
+        raise AssertionError("liveness inspection must not terminate a process")
+
+    def close_handle(self, handle: object) -> None:
+        self.closed.append(handle)
+
+    def get_last_error(self) -> int:
+        return self.error
+
+
+def test_native_windows_snapshot_finds_recursive_descendants_without_psutil() -> None:
     import cadscene.projects.queue as queue_module
 
-    class InaccessibleProcess:
-        def children(self, *, recursive: bool):
-            assert recursive is True
-            raise psutil.AccessDenied(pid=123)
-
-    monkeypatch.setattr(queue_module.os, "name", "nt")
-    monkeypatch.setattr(psutil, "Process", lambda _pid: InaccessibleProcess())
-
-    with pytest.raises(RuntimeError, match="descendant.*verified"):
-        queue_module._descendant_pids(123)
-
-
-def test_windows_access_denied_does_not_prove_a_process_is_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import psutil
-    import cadscene.projects.queue as queue_module
-
-    monkeypatch.setattr(
-        psutil,
-        "Process",
-        lambda _pid: (_ for _ in ()).throw(psutil.AccessDenied(pid=123)),
+    api = _FakeWin32ProcessApi(
+        processes=((4, 0), (123, 4), (201, 123), (202, 201), (300, 4))
     )
 
-    assert queue_module._pid_alive(123) is True
+    assert queue_module._descendant_pids(123, windows_api=api) == {201, 202}
+
+
+def test_native_windows_liveness_access_denied_fails_closed() -> None:
+    import cadscene.projects.queue as queue_module
+
+    api = _FakeWin32ProcessApi(open_handle=None, last_error=5)
+
+    with pytest.raises(PermissionError, match="access denied.*PID 123"):
+        queue_module._pid_alive(123, windows_api=api)
+
+
+def test_native_windows_liveness_invalid_parameter_proves_nonexistent() -> None:
+    import cadscene.projects.queue as queue_module
+
+    api = _FakeWin32ProcessApi(open_handle=None, last_error=87)
+
+    assert queue_module._pid_alive(123, windows_api=api) is False
+    assert api.closed == []
+
+
+def test_native_windows_liveness_always_closes_open_handle() -> None:
+    import cadscene.projects.queue as queue_module
+
+    handle = object()
+    api = _FakeWin32ProcessApi(open_handle=handle)
+
+    assert queue_module._pid_alive(123, windows_api=api) is True
+    assert api.closed == [handle]
 
 
 def test_restore_blocks_capacity_when_changed_process_identity_is_unverified() -> None:
@@ -937,6 +979,92 @@ def test_cancel_can_retry_the_retained_controller_after_unverified_failure() -> 
 
     assert queue.cancel("a").status == "cancelled"
     assert calls == 2
+
+
+def test_successful_cancel_releases_adopted_lease_before_retry() -> None:
+    identity = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    running = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                **identity,
+            )
+        )
+        .with_status("running")
+    )
+    alive = [True]
+    terminated: list[int] = []
+
+    def terminate(pid: int) -> None:
+        terminated.append(pid)
+        alive[0] = False
+
+    queue = LocalResourceQueue.restore(
+        [running],
+        queue_order=("a",),
+        process_probe=lambda _pid: identity,
+        process_alive=lambda _pid: alive[0],
+        process_tree_terminator=terminate,
+    )
+    old_lease = queue._execution_claims["a"]
+
+    assert queue.cancel("a").status == "cancelled"
+    assert terminated == [123]
+    assert "a" not in queue._execution_claims
+    assert "a" not in queue._adopted_attempts
+
+    retried = queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    claimed = queue.claim_next_unstarted()
+
+    assert retried.status == "running"
+    assert claimed is not None
+    new_lease = claimed.attempts[-1]
+    assert (new_lease.number, new_lease.worker_claim_token) != old_lease
+
+
+def test_failed_cancel_retains_adopted_lease_and_blocks_retry() -> None:
+    identity = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    running = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                **identity,
+            )
+        )
+        .with_status("running")
+    )
+    queue = LocalResourceQueue.restore(
+        [running],
+        queue_order=("a",),
+        process_probe=lambda _pid: identity,
+        process_alive=lambda _pid: True,
+        process_tree_terminator=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("tree still alive")
+        ),
+    )
+    old_lease = queue._execution_claims["a"]
+
+    cancelled = queue.cancel("a")
+
+    assert cancelled.status == "cancelling"
+    assert queue._execution_claims["a"] == old_lease
+    assert queue._adopted_attempts["a"] == old_lease
+    with pytest.raises(ValueError, match="claim.*active"):
+        queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
 
 
 def test_restore_resumes_verified_cancelling_cleanup_as_interrupted() -> None:

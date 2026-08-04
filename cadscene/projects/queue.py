@@ -251,6 +251,26 @@ class TaskQueue(Protocol):
         ...
 
 
+class _Win32ProcessApi(Protocol):
+    def snapshot_processes(self) -> tuple[tuple[int, int], ...]:
+        ...
+
+    def open_process(self, desired_access: int, pid: int) -> object | None:
+        ...
+
+    def get_exit_code(self, handle: object) -> int:
+        ...
+
+    def terminate_process(self, handle: object, exit_code: int) -> bool:
+        ...
+
+    def close_handle(self, handle: object) -> None:
+        ...
+
+    def get_last_error(self) -> int:
+        ...
+
+
 class LocalResourceQueue:
     def __init__(
         self,
@@ -665,6 +685,11 @@ class LocalResourceQueue:
         self, job_id: str, *, attempt_number: int, claim_token: str | None
     ) -> None:
         with self._lock:
+            if (
+                job_id not in self._execution_claims
+                and self._jobs[job_id].status in TERMINAL_STATUSES
+            ):
+                return
             self._require_claim_locked(job_id, attempt_number, claim_token)
             self._execution_claims.pop(job_id, None)
             self._adopted_attempts.pop(job_id, None)
@@ -1021,6 +1046,10 @@ class LocalResourceQueue:
                 target_terminal_status=None,
             )
             if reservation.attempt_number is not None and reservation.claim_token:
+                lease = (
+                    reservation.attempt_number,
+                    str(reservation.claim_token),
+                )
                 self._process_controllers.pop(
                     (
                         reservation.job_id,
@@ -1029,6 +1058,10 @@ class LocalResourceQueue:
                     ),
                     None,
                 )
+                if self._execution_claims.get(reservation.job_id) == lease:
+                    self._execution_claims.pop(reservation.job_id, None)
+                if self._adopted_attempts.get(reservation.job_id) == lease:
+                    self._adopted_attempts.pop(reservation.job_id, None)
             self._cancel_reservations.discard(reservation.job_id)
             self._schedule_locked()
             return self._jobs[reservation.job_id]
@@ -1245,9 +1278,24 @@ def _terminate_windows_process_tree(
     sleep: Callable[[float], None] | None = None,
 ) -> None:
     """Fallback tree cancellation with repeated discovery and quiescence proof."""
-    descendants = descendant_resolver or _descendant_pids
-    is_alive = alive or _pid_alive
-    terminate_one = terminate or _terminate_windows_process
+    windows_api = (
+        None
+        if descendant_resolver is not None
+        and alive is not None
+        and terminate is not None
+        else _CtypesWin32ProcessApi()
+    )
+    descendants = descendant_resolver or (
+        lambda process_id: _descendant_pids(process_id, windows_api=windows_api)
+    )
+    is_alive = alive or (
+        lambda process_id: _pid_alive(process_id, windows_api=windows_api)
+    )
+    terminate_one = terminate or (
+        lambda process_id: _terminate_windows_process(
+            process_id, windows_api=windows_api
+        )
+    )
     pause = sleep or time.sleep
     deadline = time.monotonic() + timeout
     known: set[int] = set()
@@ -1318,33 +1366,43 @@ def probe_process_identity(pid: int) -> Mapping[str, object] | None:
         return None
 
 
-def _terminate_windows_process(pid: int) -> None:
-    try:
-        import psutil
-    except ImportError:
-        psutil = None
-    if psutil is not None:
-        try:
-            psutil.Process(pid).terminate()
-            return
-        except (OSError, psutil.Error):
-            if not _pid_alive(pid):
-                return
-    import ctypes
-
-    handle = ctypes.windll.kernel32.OpenProcess(0x0001, False, pid)
+def _terminate_windows_process(
+    pid: int, *, windows_api: _Win32ProcessApi | None = None
+) -> None:
+    api = windows_api or _CtypesWin32ProcessApi()
+    handle = api.open_process(0x0001, pid)
     if not handle:
-        if _pid_alive(pid):
-            raise RuntimeError(f"access denied terminating PID {pid}")
-        return
+        error = api.get_last_error()
+        if error in {_ERROR_INVALID_PARAMETER, _ERROR_NOT_FOUND}:
+            return
+        _raise_windows_process_error("opening for termination", pid, error)
     try:
-        if not ctypes.windll.kernel32.TerminateProcess(handle, 1):
-            raise RuntimeError(f"failed terminating PID {pid}")
+        if not api.terminate_process(handle, 1):
+            error = api.get_last_error()
+            if api.get_exit_code(handle) != _STILL_ACTIVE:
+                return
+            _raise_windows_process_error("terminating", pid, error)
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        api.close_handle(handle)
 
 
-def _descendant_pids(pid: int) -> set[int]:
+def _descendant_pids(
+    pid: int, *, windows_api: _Win32ProcessApi | None = None
+) -> set[int]:
+    if os.name == "nt" or windows_api is not None:
+        api = windows_api or _CtypesWin32ProcessApi()
+        parents = {
+            process_id: parent_id for process_id, parent_id in api.snapshot_processes()
+        }
+        descendants: set[int] = set()
+        pending = [pid]
+        while pending:
+            parent = pending.pop()
+            children = [child for child, owner in parents.items() if owner == parent]
+            new_children = [child for child in children if child not in descendants]
+            descendants.update(new_children)
+            pending.extend(new_children)
+        return descendants
     try:
         import psutil
     except ImportError:
@@ -1353,12 +1411,7 @@ def _descendant_pids(pid: int) -> set[int]:
         try:
             return {child.pid for child in psutil.Process(pid).children(recursive=True)}
         except (OSError, psutil.Error):
-            if os.name == "nt":
-                raise RuntimeError(
-                    f"descendant process tree for PID {pid} could not be verified"
-                )
-    if os.name == "nt":
-        return set()
+            pass
     parents: dict[int, int] = {}
     for stat in Path("/proc").glob("[0-9]*/stat"):
         try:
@@ -1376,7 +1429,19 @@ def _descendant_pids(pid: int) -> set[int]:
     return descendants
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid: int, *, windows_api: _Win32ProcessApi | None = None) -> bool:
+    if os.name == "nt" or windows_api is not None:
+        api = windows_api or _CtypesWin32ProcessApi()
+        handle = api.open_process(0x1000, pid)
+        if not handle:
+            error = api.get_last_error()
+            if error in {_ERROR_INVALID_PARAMETER, _ERROR_NOT_FOUND}:
+                return False
+            _raise_windows_process_error("inspecting liveness", pid, error)
+        try:
+            return api.get_exit_code(handle) == _STILL_ACTIVE
+        finally:
+            api.close_handle(handle)
     try:
         import psutil
     except ImportError:
@@ -1391,29 +1456,134 @@ def _pid_alive(pid: int) -> bool:
             # AccessDenied and other inspection failures are not proof that the
             # PID is absent. Recovery must retain capacity until absence is known.
             return True
-    if os.name == "nt":
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(0x100000, False, pid)
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            return (
-                bool(
-                    ctypes.windll.kernel32.GetExitCodeProcess(
-                        handle, ctypes.byref(code)
-                    )
-                )
-                and code.value == 259
-            )
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     return True
+
+
+_ERROR_ACCESS_DENIED = 5
+_ERROR_NO_MORE_FILES = 18
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_NOT_FOUND = 1168
+_STILL_ACTIVE = 259
+
+
+def _raise_windows_process_error(action: str, pid: int, error: int) -> None:
+    message = (
+        f"{action} access denied for PID {pid}"
+        if error == _ERROR_ACCESS_DENIED
+        else (f"{action} failed for PID {pid} with Win32 error {error}")
+    )
+    if error == _ERROR_ACCESS_DENIED:
+        raise PermissionError(error, message)
+    raise OSError(error, message)
+
+
+class _CtypesWin32ProcessApi:
+    """Small native Win32 process API with no psutil dependency."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        self._ctypes = ctypes
+        self._kernel32 = kernel32
+        self._entry_type = PROCESSENTRY32W
+
+    def snapshot_processes(self) -> tuple[tuple[int, int], ...]:
+        snapshot = self._kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if snapshot in (None, self._ctypes.c_void_p(-1).value):
+            error = self.get_last_error()
+            raise OSError(error, f"process snapshot failed with Win32 error {error}")
+        processes: list[tuple[int, int]] = []
+        try:
+            entry = self._entry_type()
+            entry.dwSize = self._ctypes.sizeof(self._entry_type)
+            if not self._kernel32.Process32FirstW(snapshot, self._ctypes.byref(entry)):
+                error = self.get_last_error()
+                if error == _ERROR_NO_MORE_FILES:
+                    return ()
+                raise OSError(
+                    error,
+                    f"process snapshot enumeration failed with Win32 error {error}",
+                )
+            while True:
+                processes.append(
+                    (int(entry.th32ProcessID), int(entry.th32ParentProcessID))
+                )
+                if self._kernel32.Process32NextW(snapshot, self._ctypes.byref(entry)):
+                    continue
+                error = self.get_last_error()
+                if error != _ERROR_NO_MORE_FILES:
+                    raise OSError(
+                        error,
+                        f"process snapshot enumeration failed with Win32 error {error}",
+                    )
+                break
+        finally:
+            self.close_handle(snapshot)
+        return tuple(processes)
+
+    def open_process(self, desired_access: int, pid: int) -> object | None:
+        return self._kernel32.OpenProcess(desired_access, False, pid)
+
+    def get_exit_code(self, handle: object) -> int:
+        value = self._ctypes.c_ulong()
+        if not self._kernel32.GetExitCodeProcess(handle, self._ctypes.byref(value)):
+            error = self.get_last_error()
+            raise OSError(error, f"GetExitCodeProcess failed with Win32 error {error}")
+        return int(value.value)
+
+    def terminate_process(self, handle: object, exit_code: int) -> bool:
+        return bool(self._kernel32.TerminateProcess(handle, exit_code))
+
+    def close_handle(self, handle: object) -> None:
+        if not self._kernel32.CloseHandle(handle):
+            error = self.get_last_error()
+            raise OSError(error, f"CloseHandle failed with Win32 error {error}")
+
+    def get_last_error(self) -> int:
+        return int(self._ctypes.get_last_error())
 
 
 def _optional_string(value: object) -> str | None:
