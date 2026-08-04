@@ -2183,6 +2183,7 @@ class ProjectService:
                 return None
             return _fingerprint(
                 _analysis_identity_payload(
+                    project_id=job.project_id,
                     phase=job.job_type.removesuffix("_analysis"),
                     request_key=request_key,
                     project_assets=project.source_assets,
@@ -2491,6 +2492,7 @@ def _job_identity_payload(
 
 def _analysis_identity_payload(
     *,
+    project_id: str,
     phase: str,
     request_key: str,
     project_assets: Mapping[str, object],
@@ -2506,6 +2508,7 @@ def _analysis_identity_payload(
             "sha256": None if value.get("sha256") is None else str(value.get("sha256")),
         }
     return {
+        "project_id": project_id,
         "job_type": f"{phase}_analysis",
         "request_key": request_key,
         "source_assets": assets,
@@ -2524,6 +2527,7 @@ def _analysis_job_contract(
     if phase not in {"cad", "video"}:
         raise ValueError(f"unsupported analysis phase: {phase}")
     identity_payload = _analysis_identity_payload(
+        project_id=project_id,
         phase=phase,
         request_key=request_key,
         project_assets=project_assets,

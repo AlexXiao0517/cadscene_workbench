@@ -90,6 +90,61 @@ def test_analysis_enqueue_persists_explicit_lightweight_dag(tmp_path: Path) -> N
     assert repeated.job_ids == result.job_ids
 
 
+@pytest.mark.parametrize("with_srt", (False, True))
+def test_identical_analysis_inputs_are_idempotent_only_within_each_project(
+    tmp_path: Path, with_srt: bool
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    if with_srt:
+        _add_srt_asset(repositories, tmp_path)
+    p1_assets = repositories.project.load("p1").source_assets
+    repositories.create_project("p2", updated_at="now")
+    p2_project = repositories.project.load("p2")
+    repositories.project.update(
+        "p2",
+        expected_revision=p2_project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                name: (dict(asset) if isinstance(asset, dict) else asset)
+                for name, asset in p1_assets.items()
+            },
+            project_state="analyzing",
+        ),
+    )
+
+    p1 = service.enqueue_analysis_jobs("p1")
+    p1_jobs_before = repositories.jobs.load("p1")
+    p1_queue_before = {
+        job_id: queue.get(job_id).to_dict() for job_id in p1.job_ids
+    }
+
+    p2 = service.enqueue_analysis_jobs("p2")
+
+    assert set(p1.job_ids).isdisjoint(p2.job_ids)
+    p2_jobs = tuple(queue.get(job_id) for job_id in p2.job_ids)
+    assert [job.job_type for job in p2_jobs] == [
+        "cad_analysis",
+        "video_analysis",
+    ]
+    assert all(job.project_id == "p2" for job in p2_jobs)
+    assert p2_jobs[0].depends_on_job_ids == ()
+    assert p2_jobs[1].depends_on_job_ids == (p2_jobs[0].job_id,)
+    assert p2_jobs[0].exclusive_key == "analysis:p2:cad"
+    assert p2_jobs[1].exclusive_key == "analysis:p2:video"
+    p2_manifest = repositories.jobs.load("p2")
+    assert tuple(item["job_id"] for item in p2_manifest.jobs) == p2.job_ids
+    assert all(item["project_id"] == "p2" for item in p2_manifest.jobs)
+    assert repositories.jobs.load("p1") == p1_jobs_before
+    assert {
+        job_id: queue.get(job_id).to_dict() for job_id in p1.job_ids
+    } == p1_queue_before
+    for p1_job_id, p2_job in zip(p1.job_ids, p2_jobs):
+        p1_job = queue.get(p1_job_id)
+        assert p1_job.input_fingerprint != p2_job.input_fingerprint
+        assert p1_job.idempotency_key != p2_job.idempotency_key
+
+
 @pytest.mark.parametrize("recorded_count", (0, 1))
 def test_enqueue_repairs_incomplete_analysis_job_refs_without_rewriting_reused_jobs(
     tmp_path: Path, recorded_count: int

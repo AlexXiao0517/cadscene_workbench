@@ -603,3 +603,35 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Tenth formal review closure (base `c993ce8`)
+
+### Review finding map: 1 Important
+
+1. **Important - analysis idempotency crossed project ownership:**
+   `_analysis_identity_payload` now includes `project_id` in its signature and
+   canonical payload. The shared analysis job contract therefore derives
+   project-scoped input fingerprints and idempotency keys, while
+   `_current_input_fingerprint` uses the same source for runtime validation.
+   Projects using byte-for-byte identical video/CAD and optional SRT inputs plus
+   the same request key receive independent CAD/video DAGs. Each jobs manifest
+   contains only jobs owned by that project, dependencies and exclusive keys
+   remain project-local, and submitting the second project does not rewrite the
+   first project's queue or durable provenance.
+
+### Tenth-round TDD and verification evidence
+
+- Initial RED: `2 failed` - identical cross-project inputs without and with SRT
+  both reused p1 job IDs for p2.
+- Review reproductions GREEN: `2 passed`, including distinct corresponding
+  input fingerprints and idempotency keys.
+- Analysis-job test module: `53 passed`.
+- Focused analysis/queue/project-API suite: `119 passed`.
+- All project tests: `241 passed`.
+- Final fresh full suite: `818 passed, 1 skipped` in 39.69 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
