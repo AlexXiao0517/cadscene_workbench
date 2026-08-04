@@ -103,11 +103,13 @@ Review TDD evidence:
   its current interval/source/media revisions and immutable output identity.
 - Ready segment validation uses production rendered-media/frame-map and media
   compatibility contracts, additionally requiring source-equivalent frame
-  timing. Media differences become explicit `needs_normalize` fields; zero-start,
+  timing and every frame duration, including the final frame through the
+  half-open interval end. Media differences become explicit `needs_normalize` fields; zero-start,
   negative/non-monotonic PTS or frame identity defects are blockers, not
   normalization candidates.
 - A plan cannot be built while any blocker remains. It always names the original
-  long video as its audio source and never consumes per-clip audio. The pure final
+  long video as its audio source, binds its source-asset fingerprint, and never
+  consumes per-clip audio. The pure final
   frame-map builder rechecks that concatenated output ordinals map exactly to the
   complete authoritative source frame sequence with no duplicate or omission.
 
@@ -115,9 +117,9 @@ TDD evidence:
 
 - RED: `tests/projects/test_concat.py` initially failed collection because the
   pure concat module did not exist.
-- Focused concat contract: `27 passed`.
-- Focused concat/media/source-fallback/render: `195 passed, 1 skipped`.
-- Related project/render/service/PTS/export regression: `479 passed, 2 skipped`.
+- Focused concat contract: `28 passed`.
+- Focused concat/media/source-fallback/render: `196 passed, 1 skipped`.
+- Related project/render/service/PTS/export regression: `651 passed, 2 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
 ### Exact render-prerequisite binding closure

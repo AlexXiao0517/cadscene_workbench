@@ -229,6 +229,8 @@ def test_exact_rendered_preflight_builds_source_order_plan_and_final_map() -> No
     assert plan.entries[0].input_output_revision == "render-clip-1"
     assert plan.entries[0].input_publication_operation_id == "operation-clip-1"
     assert plan.audio_source == "C:/project/original.mp4"
+    assert plan.source_asset_fingerprint == "f" * 64
+    assert plan.to_dict()["source_asset_fingerprint"] == "f" * 64
     assert [item["source_pts"] for item in final_map["frames"]] == [
         1000, 1040, 1080, 1120
     ]
@@ -436,6 +438,23 @@ def test_segment_frame_timing_must_match_authoritative_source_deltas() -> None:
 
     assert report.blockers == ("clip-2",)
     assert "timing" in report.entries[1].reason
+
+
+def test_segment_last_frame_duration_must_match_half_open_interval_end() -> None:
+    first, second = _clips()
+    invalid = _candidate(second, probe=_probe())
+    invalid_media = replace(
+        invalid.media,
+        video=replace(invalid.media.video, frame_duration_pts=(40, 4000)),
+    )
+    invalid = replace(invalid, media=invalid_media)
+
+    report = preflight_concat(
+        _request(renders={first.clip_id: _candidate(first), second.clip_id: invalid})
+    )
+
+    assert report.blockers == ("clip-2",)
+    assert "duration" in report.entries[1].reason
 
 
 def test_nonzero_or_nonmonotonic_segment_pts_is_a_blocker_not_normalization() -> None:

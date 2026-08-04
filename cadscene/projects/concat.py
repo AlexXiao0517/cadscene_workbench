@@ -373,6 +373,7 @@ class ConcatPlan:
     project_revision: int
     clips_revision: int
     project_media_spec_revision: str
+    source_asset_fingerprint: str
     entries: tuple[ConcatPlanEntry, ...]
     audio_source: str
 
@@ -382,6 +383,7 @@ class ConcatPlan:
             "project_revision": self.project_revision,
             "clips_revision": self.clips_revision,
             "project_media_spec_revision": self.project_media_spec_revision,
+            "source_asset_fingerprint": self.source_asset_fingerprint,
             "entries": [entry.to_dict() for entry in self.entries],
             "audio_source": self.audio_source,
             "audio_policy": "original_video",
@@ -518,6 +520,7 @@ def build_concat_plan(request: ConcatPreflightRequest) -> ConcatPlan:
         project_revision=request.project_revision,
         clips_revision=request.clips_revision,
         project_media_spec_revision=request.project_media_spec_revision,
+        source_asset_fingerprint=request.source_asset_fingerprint,
         entries=report.entries,
         audio_source=request.original_video_path,
     )
@@ -634,7 +637,12 @@ def _ready_entry(
         expected_source_frames=source_frames,
         expected_source_time_base=clip.source_time_base,
     )
-    _validate_frame_timing(media, source_frames, clip.source_time_base)
+    _validate_frame_timing(
+        media,
+        source_frames,
+        clip.source_time_base,
+        clip.source_end_pts_exclusive,
+    )
     compatibility = media_compatibility(media.video, request.project_media_spec)
     return _base_entry(
         clip,
@@ -728,6 +736,7 @@ def _validate_frame_timing(
     media: ProbedMedia,
     source_frames: tuple[DecodedFrameTimestamp, ...],
     source_time_base: Fraction,
+    source_end_pts_exclusive: int,
 ) -> None:
     output_deltas = tuple(
         Fraction(current - previous) * media.video.time_base
@@ -741,6 +750,25 @@ def _validate_frame_timing(
     )
     if output_deltas != source_deltas:
         raise ValueError("rendered frame timing differs from authoritative source")
+    output_durations = media.video.frame_duration_pts
+    if len(output_durations) != len(source_frames):
+        raise ValueError("rendered frame durations are incomplete")
+    expected_duration_pts = tuple(
+        next_frame.pts - frame.pts
+        for frame, next_frame in zip(source_frames, source_frames[1:])
+    ) + (source_end_pts_exclusive - source_frames[-1].pts,)
+    for output_duration, expected_duration in zip(
+        output_durations, expected_duration_pts
+    ):
+        if type(output_duration) is not int or output_duration <= 0:
+            raise ValueError("rendered frame duration is missing or invalid")
+        if (
+            Fraction(output_duration) * media.video.time_base
+            != Fraction(expected_duration) * source_time_base
+        ):
+            raise ValueError(
+                "rendered frame duration differs from authoritative source"
+            )
 
 
 def _base_entry(
