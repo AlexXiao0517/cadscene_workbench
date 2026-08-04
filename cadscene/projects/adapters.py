@@ -52,6 +52,7 @@ class AdapterResult:
     outputs: Mapping[str, str] = field(default_factory=dict)
     error: str | None = None
     progress: tuple[AdapterProgress, ...] = ()
+    validation_proof: Mapping[str, object] | None = None
 
     @classmethod
     def success(
@@ -61,6 +62,7 @@ class AdapterResult:
         output_fingerprint: str,
         outputs: Mapping[str, str],
         progress: Sequence[AdapterProgress] = (),
+        validation_proof: Mapping[str, object] | None = None,
     ) -> AdapterResult:
         return cls(
             status="success",
@@ -68,6 +70,9 @@ class AdapterResult:
             output_fingerprint=output_fingerprint,
             outputs=dict(outputs),
             progress=tuple(progress),
+            validation_proof=(
+                None if validation_proof is None else dict(validation_proof)
+            ),
         )
 
     @classmethod

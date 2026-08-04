@@ -244,3 +244,72 @@ Final minor hardening:
   Python numeric equality when compared with the frame map.
 - The new four-case regression failed before the check and now passes. Media plus
   authoritative PTS/export/frame-map regression: `109 passed, 1 skipped`.
+
+## Substage 2c: clip-render execution and atomic publication
+
+This substage closes only the queued `clip_render` execution lifecycle. It does
+not add real FFmpeg commands, fallback export, normalization, concat, HTTP API,
+or UI behavior.
+
+- Preparation revalidates the current render identity, exact successful
+  trajectory dependency, immutable saved workbench output, physical clip and
+  authoritative frame map, project media specification, adapter identity, and
+  the job-owned attempt directory before constructing manifest-free
+  `RenderInputs`.
+- Completion distinguishes stale input and adapter failure from validation or
+  publication failure. A successful adapter result must provide output files
+  inside the immutable attempt plus structured proof for exact source frame
+  ordinals/PTS, time base, project media specification, monotonic output PTS,
+  frame count, and artifact hashes.
+- Validated artifacts are copied through a same-parent temporary directory and
+  atomically published as an immutable render output revision. Attempt files
+  and diagnostics remain intact; cancellation and invalid results publish no
+  render state.
+- Jobs and render state are published together with one operation ID. If an
+  interruption occurs after durable publication but before the in-memory queue
+  acknowledges it, the existing operation-intent reconciler restores the exact
+  durable success proof instead of misclassifying it as an algorithm failure.
+- Queue serialization preserves the structured validation proof and clears it
+  whenever an old success becomes stale, superseded, cancelled, or retried.
+
+Substage 2c TDD evidence:
+
+- RED: prepare initially rejected `clip_render` as unsupported; completion
+  initially accepted missing proof, could not persist proof, and marked a
+  durably published result failed after a simulated interruption.
+- Focused render-job tests: `24 passed`.
+- Render/service/queue/repository/recovery/workbench/workflow/media related
+  regression: `332 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+Crash coverage note: the render-specific suite injects an interruption after
+both participant manifests are durable but before in-memory queue acknowledgement.
+Generic repository recovery tests cover partial multi-manifest owner publication.
+This substage does not inject process death during the artifact-directory
+`os.replace`; atomic rename behavior and orphan staging cleanup remain integration
+coverage for the later real media adapter stage.
+
+### Substage 2c immutable-publication review closure
+
+- Reusing an existing render revision now fails closed unless the target is a
+  real directory and its video, frame map, and manifest are contained regular
+  files rather than symlinks or missing/non-file replacements.
+- The existing manifest must match the current project, clip, job, input
+  revision/fingerprint, adapter name/version, output revision/fingerprint,
+  schema, and validation proof exactly. Both media files are rehashed and must
+  match the current validated proof before idempotent reuse.
+- Tests first publish a real successful render, then mutate the video, remove or
+  replace the frame map, or alter each durable identity field. Republishing is
+  rejected and the single old success record remains distinguishable; no new
+  success record is added. Exact untouched content is still reused idempotently.
+- Staged files are fsynced before rename. The parent directory is fsynced after
+  rename on hosts that support directory descriptors; Windows returns an
+  explicit unsupported result rather than claiming directory durability.
+
+Review-fix TDD evidence:
+
+- RED: all `9` tamper/incomplete/identity-collision cases reused the existing
+  revision and therefore failed their fail-closed assertions.
+- Focused render-job tests: `33 passed`.
+- Related regression: `332 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

@@ -8,13 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.media import ProjectMediaSpec
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
-from cadscene.projects.render_adapters import RenderAdapterRegistry
+from cadscene.projects.render_adapters import RenderAdapterRegistry, RenderExecutionPlan
 from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _render_identity_payload
+import cadscene.projects.service as service_module
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
 
@@ -23,8 +25,15 @@ class FakeRenderAdapter:
     name = "fake-render"
     version = "1"
 
-    def prepare(self, inputs):  # pragma: no cover - execution is out of substage scope
-        raise AssertionError("enqueue must not prepare or execute the adapter")
+    def __init__(self) -> None:
+        self.prepared_inputs = []
+
+    def prepare(self, inputs):
+        self.prepared_inputs.append(inputs)
+        return RenderExecutionPlan(
+            commands=(("fake-render", str(inputs.physical_video_path)),),
+            validate=lambda: AdapterResult.failed("test validator not configured"),
+        )
 
 
 def _media_spec() -> ProjectMediaSpec:
@@ -55,20 +64,41 @@ def _clip(
     physical = tmp_path / f"{clip_id}.mp4"
     physical.write_bytes(b"clip")
     frame_map = tmp_path / f"{clip_id}-frame-map.json"
-    frame_map.write_text("{}", encoding="utf-8")
+    start_pts = len(clip_id) * 100
+    frame_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 1000},
+                "clips": [
+                    {
+                        "clip_id": clip_id,
+                        "frames": [
+                            {"ordinal": 0, "pts": start_pts, "duration_pts": 40},
+                            {
+                                "ordinal": 1,
+                                "pts": start_pts + 40,
+                                "duration_pts": 40,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return ClipDefinition.from_analysis(
         {
             "project_id": "p1",
             "clip_id": clip_id,
             "analysis_revision": "analysis-1",
-            "source_start_pts": len(clip_id) * 100,
-            "source_end_pts_exclusive": len(clip_id) * 100 + 100,
+            "source_start_pts": start_pts,
+            "source_end_pts_exclusive": start_pts + 100,
             "source_time_base": {"numerator": 1, "denominator": 1000},
             "interval_semantics": "half_open",
             "recommended_workflow": workflow,
             "needs_review": needs_review,
             "physical_mp4_path": str(physical),
-            "clip_frame_map_path": str(frame_map),
+            "frame_map_path": str(frame_map),
             "input_snapshot": {
                 "request_key": "analysis-request-1",
                 "video": {"path": str(tmp_path / "source.mp4"), "sha256": "a" * 64},
@@ -653,6 +683,365 @@ def test_restore_supersedes_render_when_any_bound_input_changes(
     restored = rebuilt.restore_jobs("p1")
 
     assert restored.get(render_id).status == "superseded"
+
+
+def test_prepare_clip_render_builds_manifest_free_immutable_adapter_inputs(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    jobs_before = repositories.jobs.load("p1")
+    render_before = repositories.render.load("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+
+    plan = service.prepare_job_execution(
+        "p1",
+        render_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert plan.commands[0][0] == "fake-render"
+    inputs = adapter.prepared_inputs[-1]
+    assert inputs.project_id == "p1"
+    assert inputs.clip_id == "ready"
+    assert inputs.workflow == "sfm_only"
+    assert inputs.attempt_directory == Path(lease.directory).resolve()
+    assert [frame.pts for frame in inputs.authoritative_source_frames] == [
+        500,
+        540,
+    ]
+    assert inputs.source_time_base == Fraction(1, 1000)
+    assert inputs.workbench_artifact_path.name == "camera_track.json"
+    assert not hasattr(inputs, "repositories")
+    assert repositories.jobs.load("p1") == jobs_before
+    assert repositories.render.load("p1") == render_before
+
+
+def _validated_render_result(service: ProjectService, job) -> AdapterResult:
+    attempt = Path(job.attempts[-1].directory)
+    video = attempt / "rendered.mp4"
+    video.write_bytes(b"validated-rendered-video")
+    frame_map = attempt / "render_frame_map.json"
+    source_start = 500
+    frame_map_payload = {
+        "schema_version": 1,
+        "source_time_base": {"numerator": 1, "denominator": 1000},
+        "frames": [
+            {
+                "output_frame_ordinal": 0,
+                "source_decoded_frame_ordinal": 0,
+                "source_pts": source_start,
+            },
+            {
+                "output_frame_ordinal": 1,
+                "source_decoded_frame_ordinal": 1,
+                "source_pts": source_start + 40,
+            },
+        ],
+    }
+    frame_map.write_text(json.dumps(frame_map_payload), encoding="utf-8")
+    project = service.repositories.project.load(job.project_id)
+    proof = {
+        "rendered_frame_count": 2,
+        "output_pts": [0, 40],
+        "source_ordinals": [0, 1],
+        "source_pts": [500, 540],
+        "source_time_base": {"numerator": 1, "denominator": 1000},
+        "project_media_spec": project.media_spec,
+        "video_sha256": sha256(video.read_bytes()).hexdigest(),
+        "frame_map_sha256": sha256(frame_map.read_bytes()).hexdigest(),
+    }
+    output_fingerprint = sha256(
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return AdapterResult(
+        status="success",
+        output_revision="render-output-ready-1",
+        output_fingerprint=output_fingerprint,
+        outputs={"video": str(video), "frame_map": str(frame_map)},
+        validation_proof=proof,
+    )
+
+
+def test_finish_clip_render_validates_and_publishes_jobs_and_render_together(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "success", finished.error
+    stored_job = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == render_id
+    )
+    render = repositories.render.load("p1").clip_renders[-1]
+    assert stored_job["publication_operation_id"] == render["operation_id"]
+    assert stored_job["operation_id"] == render["operation_id"]
+    assert stored_job["validation_proof"] == result.validation_proof
+    assert render["status"] == "success"
+    assert render["workflow"] == "sfm_only"
+    assert render["validation_proof"] == result.validation_proof
+    assert Path(render["outputs"]["video"]).is_file()
+    assert Path(render["outputs"]["frame_map"]).is_file()
+    assert Path(render["outputs"]["video"]).parent != Path(lease.directory)
+    assert (Path(lease.directory) / "rendered.mp4").is_file()
+
+
+def test_finish_clip_render_recovers_when_publication_is_durable_before_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    publish = service_module.publish_manifests
+
+    def publish_then_interrupt(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise OSError("simulated interruption after durable publication")
+
+    monkeypatch.setattr(service_module, "publish_manifests", publish_then_interrupt)
+
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "success"
+    assert queue.get(render_id).status == "success"
+    assert len(repositories.render.load("p1").clip_renders) == 1
+
+
+def test_finish_clip_render_changed_input_is_stale_and_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    project = repositories.project.load("p1")
+    service.set_project_media_spec(
+        "p1",
+        replace(_media_spec(), width=1280, height=720),
+        media_spec_revision="media-spec-new",
+        expected_revision=project.revision,
+    )
+
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "stale_input"
+    assert repositories.render.load("p1").clip_renders == ()
+    assert (Path(lease.directory) / "rendered.mp4").is_file()
+
+
+def test_finish_clip_render_rejects_missing_structured_validation_proof(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    invalid = AdapterResult.success(
+        output_revision="unvalidated",
+        output_fingerprint="f" * 64,
+        outputs={"video": str(Path(lease.directory) / "rendered.mp4")},
+    )
+
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        invalid,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "failed"
+    assert repositories.render.load("p1").clip_renders == ()
+
+
+def test_cancel_clip_render_preserves_attempt_and_publishes_no_render(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    attempt = Path(service.queue.get(render_id).attempts[-1].directory)
+    diagnostic = attempt / "partial.log"
+    diagnostic.write_text("partial", encoding="utf-8")
+
+    cancelled = service.cancel_job("p1", render_id)
+
+    assert cancelled.status == "cancelled"
+    assert diagnostic.read_text(encoding="utf-8") == "partial"
+    assert repositories.render.load("p1").clip_renders == ()
+
+
+def _publish_successful_render(
+    service: ProjectService,
+    repositories,
+    queue: LocalResourceQueue,
+    render_id: str,
+):
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    assert finished.status == "success"
+    target = (
+        service.projects_root
+        / "p1"
+        / "render_outputs"
+        / "ready"
+        / str(result.output_revision)
+    )
+    return claimed, result, target
+
+
+@pytest.mark.parametrize("damage", ["video_content", "missing_map", "map_directory"])
+def test_republication_rejects_tampered_or_incomplete_immutable_render_revision(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed, result, target = _publish_successful_render(
+        service, repositories, queue, render_id
+    )
+    render_before = repositories.render.load("p1")
+    if damage == "video_content":
+        (target / "rendered.mp4").write_bytes(b"tampered")
+    else:
+        frame_map = target / "render_frame_map.json"
+        frame_map.unlink()
+        if damage == "map_directory":
+            frame_map.mkdir()
+
+    with pytest.raises(ValueError, match="immutable render revision"):
+        service._publish_render_artifacts(
+            claimed, result, dict(result.validation_proof or {})
+        )
+    assert repositories.render.load("p1") == render_before
+    assert len(render_before.clip_renders) == 1
+    assert render_before.clip_renders[0]["job_id"] == render_id
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("project_id", "other-project"),
+        ("clip_id", "other-clip"),
+        ("input_revision", "other-input"),
+        ("adapter_name", "other-adapter"),
+        ("adapter_version", "999"),
+        ("output_revision", "other-output"),
+    ],
+)
+def test_republication_rejects_immutable_render_revision_identity_collision(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed, result, target = _publish_successful_render(
+        service, repositories, queue, render_id
+    )
+    render_before = repositories.render.load("p1")
+    manifest_path = target / "render_output_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload[field] = replacement
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="immutable render revision"):
+        service._publish_render_artifacts(
+            claimed, result, dict(result.validation_proof or {})
+        )
+    assert repositories.render.load("p1") == render_before
+
+
+def test_published_render_is_idempotent_and_restores_only_with_exact_proof(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    reused = service._publish_render_artifacts(
+        claimed, result, dict(result.validation_proof or {})
+    )
+    assert Path(reused["video"]).read_bytes() == b"validated-rendered-video"
+
+    repeated = service.enqueue_render_jobs("p1", clip_ids=("ready",))
+    assert repeated.job_ids == (render_id,)
+    assert len(repositories.render.load("p1").clip_renders) == 1
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:04Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+    )
+    restored = rebuilt.restore_jobs("p1")
+    assert restored.get(render_id).status == "success"
+    assert restored.get(render_id).validation_proof == result.validation_proof
 
 
 def test_enqueue_render_jobs_builds_media_dag_identity_and_is_idempotent(

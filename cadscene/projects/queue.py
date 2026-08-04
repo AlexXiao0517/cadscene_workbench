@@ -118,6 +118,7 @@ class QueueJob:
     output_validated: bool = False
     validated_input_fingerprint: str | None = None
     published_outputs: Mapping[str, str] = field(default_factory=dict)
+    validation_proof: Mapping[str, object] | None = None
     progress: Mapping[str, object] | None = None
     error: str | None = None
     cleanup_reason: str | None = None
@@ -187,6 +188,9 @@ class QueueJob:
             "publication_operation_id": self.publication_operation_id,
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "published_outputs": dict(self.published_outputs),
+            "validation_proof": (
+                None if self.validation_proof is None else dict(self.validation_proof)
+            ),
             "progress": None if self.progress is None else dict(self.progress),
             "error": self.error,
             "cleanup_reason": self.cleanup_reason,
@@ -234,6 +238,11 @@ class QueueJob:
                 str(key): str(item)
                 for key, item in dict(value.get("published_outputs", {})).items()  # type: ignore[arg-type]
             },
+            validation_proof=(
+                None
+                if value.get("validation_proof") is None
+                else dict(value["validation_proof"])  # type: ignore[arg-type]
+            ),
             progress=(
                 None
                 if value.get("progress") is None
@@ -957,6 +966,7 @@ class LocalResourceQueue:
         output_fingerprint: str | None = None,
         output_validated: bool = True,
         published_outputs: Mapping[str, str] | None = None,
+        validation_proof: Mapping[str, object] | None = None,
     ) -> QueueJob:
         with self._lock:
             current = self._require_active_claim_locked(
@@ -975,6 +985,9 @@ class LocalResourceQueue:
                     current.input_fingerprint if output_validated else None
                 ),
                 published_outputs=dict(published_outputs or {}),
+                validation_proof=(
+                    None if validation_proof is None else dict(validation_proof)
+                ),
                 error=None,
             )
             self._schedule_locked()
@@ -990,6 +1003,7 @@ class LocalResourceQueue:
         output_fingerprint: str | None = None,
         output_validated: bool = True,
         published_outputs: Mapping[str, str] | None = None,
+        validation_proof: Mapping[str, object] | None = None,
     ) -> QueueJob:
         with self._lock:
             current = self._require_active_claim_locked(
@@ -1008,6 +1022,9 @@ class LocalResourceQueue:
                     current.input_fingerprint if output_validated else None
                 ),
                 published_outputs=dict(published_outputs or {}),
+                validation_proof=(
+                    None if validation_proof is None else dict(validation_proof)
+                ),
                 error=None,
             )
 
@@ -1086,6 +1103,7 @@ class LocalResourceQueue:
                 output_validated=False,
                 validated_input_fingerprint=None,
                 published_outputs={},
+                validation_proof=None,
                 error=None,
             )
             self._schedule_locked()
@@ -1105,6 +1123,7 @@ class LocalResourceQueue:
                 output_validated=False,
                 validated_input_fingerprint=None,
                 published_outputs={},
+                validation_proof=None,
                 error=None,
             )
             self._schedule_locked()
@@ -1223,6 +1242,7 @@ class LocalResourceQueue:
                     output_validated=False,
                     validated_input_fingerprint=None,
                     published_outputs={},
+                    validation_proof=None,
                 )
                 self._cancel_reservations.discard(reservation.job_id)
                 return self._jobs[reservation.job_id]
@@ -1235,6 +1255,7 @@ class LocalResourceQueue:
                 output_validated=False,
                 validated_input_fingerprint=None,
                 published_outputs={},
+                validation_proof=None,
                 cleanup_reason=None,
                 target_terminal_status=None,
             )
@@ -1288,6 +1309,7 @@ class LocalResourceQueue:
                 output_validated=False,
                 validated_input_fingerprint=None,
                 published_outputs={},
+                validation_proof=None,
                 error=None,
                 cleanup_reason=None,
                 target_terminal_status=None,
@@ -1404,6 +1426,7 @@ class LocalResourceQueue:
                         output_validated=False,
                         validated_input_fingerprint=None,
                         published_outputs={},
+                        validation_proof=None,
                     )
                 self._adopted_attempts.pop(job_id, None)
                 self._execution_claims.pop(job_id, None)
@@ -1813,6 +1836,7 @@ def _invalidated_job(job: QueueJob) -> QueueJob:
         output_validated=False,
         validated_input_fingerprint=None,
         published_outputs={},
+        validation_proof=None,
         error=None,
         cleanup_reason=None,
         target_terminal_status=None,
@@ -1834,6 +1858,7 @@ def _cleanup_terminal_job(job: QueueJob, status: str) -> QueueJob:
         output_validated=False,
         validated_input_fingerprint=None,
         published_outputs={},
+        validation_proof=None,
         error=error,
         cleanup_reason=None,
         target_terminal_status=None,
