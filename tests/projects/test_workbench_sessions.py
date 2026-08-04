@@ -1210,6 +1210,10 @@ def test_retry_repairs_saved_session_when_clip_reference_publication_failed(
     reference = repositories.clips.load("project-1").clips[0].references[-1]
     assert reference.operation_id == session.operation_id
     assert reference.value["workbench_output_revision"] == session.workbench_output_revision
+    assert (
+        reference.value["trajectory_output_fingerprint"]
+        == session.trajectory_output_fingerprint
+    )
     with pytest.raises(ReplayedWorkbenchSave):
         api.workbench.save(
             "project-1",

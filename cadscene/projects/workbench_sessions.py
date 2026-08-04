@@ -1255,6 +1255,9 @@ class ProjectWorkbenchService:
                         "input_fingerprint": session.input_fingerprint,
                         "trajectory_job_id": session.trajectory_job_id,
                         "trajectory_output_revision": session.trajectory_output_revision,
+                        "trajectory_output_fingerprint": (
+                            session.trajectory_output_fingerprint
+                        ),
                         "expires_at": session.expires_at,
                         "workbench_output_revision": session.workbench_output_revision,
                         "workbench_output_fingerprint": session.workbench_output_fingerprint,

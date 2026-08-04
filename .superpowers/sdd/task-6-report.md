@@ -80,6 +80,36 @@ Review TDD evidence:
   `96 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
+### Exact render-prerequisite binding closure
+
+- A trajectory proof now includes the bytes of the named
+  `published_outputs["trajectory"]` artifact: its SHA-256 must exactly equal the
+  job `output_fingerprint`; a missing, substituted diagnostic, or subsequently
+  modified file fails render preflight.
+- New Task 5 saved clip references include
+  `trajectory_output_fingerprint`. Render preflight requires it to equal the
+  selected current trajectory fingerprint. Existing legacy workbench references
+  remain readable by the workbench subsystem but fail closed for new renders.
+- Render preflight retains the complete `StateReference`, requires the immutable
+  workbench manifest `operation_id` to match the reference operation, and binds
+  that operation ID into render input/idempotency identity.
+- Enqueue repeats the full trajectory/reference/immutable-output verification
+  under the project state guard immediately before constructing each job.
+- Workbench manifest `source_output_revision` and `source_output_fingerprint`
+  intentionally remain the independently validated manual/pure workbench output
+  identity; they are not incorrectly equated with trajectory output identity.
+
+Exact-binding TDD evidence:
+
+- RED: trajectory byte tampering, reference trajectory-fingerprint mismatch,
+  immutable-manifest operation mismatch, missing Task 5 reference fingerprint,
+  and missing render-identity operation provenance each failed before its
+  production change.
+- Focused GREEN: render jobs `8 passed`; Task 5 saved-reference repair
+  `1 passed, 58 deselected`.
+- Related render/service/queue/workbench/workflow/media regression:
+  `235 passed`.
+
 ## Substage 2a: manifest-free render adapter contracts
 
 This narrowed substage adds only the fake-friendly adapter boundary in
@@ -106,6 +136,44 @@ Substage 2a TDD evidence:
   `cadscene.projects.render_adapters` existed.
 - Focused GREEN: `21 passed`.
 - Related media/workflow-adapter/executor/queue regression: `143 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+## Substage 2b: render preflight and enqueue DAG
+
+This substage adds only server-owned render preflight and durable queue
+submission. It intentionally does not prepare or execute adapters, publish
+render results, or write `render_manifest.json`.
+
+- `ProjectService` accepts an optional render registry and a paired injected
+  `ProjectMediaSpec` plus immutable media-spec revision; existing construction
+  remains valid when rendering is not configured.
+- Per-clip preflight requires a supported current resolved workflow, a current
+  trajectory with exact success/validation/input proof and real output, and a
+  saved workbench reference bound to that workflow, clip input, trajectory job,
+  and trajectory output revision.
+- The immutable workbench output manifest is revalidated from the project-owned
+  revision directory. Its self-fingerprint, artifact SHA-256/size, identity,
+  and resolved-path containment must all match before a clip is eligible.
+- Preflight returns `eligible`, `confirmation_required`, and `skipped` clip
+  groups with per-clip reasons and permits partial enqueue.
+- Enqueued jobs use `clip_render`, `media_io`, an explicit trajectory dependency,
+  `render:<project>:<clip>` exclusivity, and adapter name/version. Their input
+  and idempotency identities bind project/clips revisions, the half-open clip
+  interval, workflow, trajectory proof, workbench output identity, project
+  media specification/revision, and adapter version.
+- Repeated requests reuse the same job. Default `media_io` capacity starts one
+  render and leaves the next queued; changing the adapter version creates a new
+  queued identity without concurrent execution for the same clip.
+
+Substage 2b TDD evidence:
+
+- RED: the first `3` focused tests failed because `ProjectService` had no render
+  dependency injection or render preflight/enqueue APIs. A fourth exact-proof
+  test then failed because a diagnostic file could stand in for the required
+  published trajectory artifact.
+- Focused GREEN: `4 passed`.
+- Related render-adapter/service/queue/workbench/workflow/media regression:
+  `231 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
 Substage 2a minor hardening:

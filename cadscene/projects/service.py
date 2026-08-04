@@ -28,8 +28,11 @@ from .models import (
     JobsManifest,
     ProjectManifest,
     RenderManifest,
+    StateReference,
     register_analysis_revision,
 )
+from .media import ProjectMediaSpec
+from .render_adapters import RenderAdapterRegistry
 from .repositories import ManifestMutation, RevisionConflict, publish_manifests
 from .uploads import PublishedUpload
 from .queue import (
@@ -68,6 +71,21 @@ class EnqueueTrajectoryResult:
 
 
 @dataclass(frozen=True)
+class RenderPreflight:
+    eligible: tuple[str, ...]
+    confirmation_required: tuple[str, ...]
+    skipped: tuple[str, ...]
+    reasons: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EnqueueRenderResult:
+    enqueued_clip_ids: tuple[str, ...]
+    job_ids: tuple[str, ...]
+    preflight: RenderPreflight
+
+
+@dataclass(frozen=True)
 class EnqueueAnalysisResult:
     job_ids: tuple[str, str]
     request_key: str
@@ -100,6 +118,9 @@ class ProjectService:
         projects_root: Path,
         now: Callable[[], str],
         identity: Callable[[], str] | None = None,
+        render_adapters: RenderAdapterRegistry | None = None,
+        project_media_spec: ProjectMediaSpec | None = None,
+        project_media_spec_revision: str | None = None,
     ) -> None:
         self.repositories = repositories
         self.queue = queue
@@ -108,6 +129,18 @@ class ProjectService:
         self.storage_root = self.projects_root.parent
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
+        self.render_adapters = render_adapters or RenderAdapterRegistry(())
+        if (project_media_spec is None) != (project_media_spec_revision is None):
+            raise ValueError(
+                "project media spec and project media spec revision must be paired"
+            )
+        if project_media_spec_revision is not None and (
+            not isinstance(project_media_spec_revision, str)
+            or not project_media_spec_revision.strip()
+        ):
+            raise ValueError("project media spec revision must not be empty")
+        self.project_media_spec = project_media_spec
+        self.project_media_spec_revision = project_media_spec_revision
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
             projects_root=self.projects_root,
@@ -725,6 +758,175 @@ class ProjectService:
             skipped=tuple(skipped),
             reasons=reasons,
         )
+
+    def preflight_render_jobs(
+        self,
+        project_id: str,
+        *,
+        clip_ids: Sequence[str] | None = None,
+    ) -> RenderPreflight:
+        clips_manifest = self.repositories.clips.load(project_id)
+        jobs_manifest = self.repositories.jobs.load(project_id)
+        selected = _select_clips(clips_manifest.clips, clip_ids)
+        stored_jobs = tuple(QueueJob.from_dict(item) for item in jobs_manifest.jobs)
+        eligible: list[str] = []
+        confirmation: list[str] = []
+        skipped: list[str] = []
+        reasons: dict[str, str] = {}
+        if self.project_media_spec is None or self.project_media_spec_revision is None:
+            clip_ids_without_spec = tuple(clip.clip_id for clip in selected)
+            return RenderPreflight(
+                eligible=(),
+                confirmation_required=(),
+                skipped=clip_ids_without_spec,
+                reasons={
+                    clip_id: "project media specification is unavailable"
+                    for clip_id in clip_ids_without_spec
+                },
+            )
+        for clip in selected:
+            workflow = clip.resolved_workflow
+            if workflow is None:
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = "clip has no resolved workflow"
+                continue
+            try:
+                self.render_adapters.for_workflow(workflow)
+            except KeyError:
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = (
+                    f"render adapter is unavailable for workflow: {workflow}"
+                )
+                continue
+            trajectory = self._current_trajectory_for_render(clip, stored_jobs)
+            if trajectory is None:
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = (
+                    "current trajectory has no exact validated success proof"
+                )
+                continue
+            workbench = _saved_workbench_reference(clip)
+            if workbench is None or not _workbench_binds_trajectory(
+                clip, trajectory, workbench.value
+            ):
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = (
+                    "clip has no saved workbench output bound to current trajectory"
+                )
+                continue
+            if not _validate_workbench_immutable_output(
+                self.projects_root, project_id, clip, workbench
+            ):
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = "immutable workbench output validation failed"
+                continue
+            if bool(clip.analysis.get("needs_review", False)):
+                confirmation.append(clip.clip_id)
+                reasons[clip.clip_id] = "clip analysis requires confirmation"
+            else:
+                eligible.append(clip.clip_id)
+        return RenderPreflight(
+            eligible=tuple(eligible),
+            confirmation_required=tuple(confirmation),
+            skipped=tuple(skipped),
+            reasons=reasons,
+        )
+
+    def enqueue_render_jobs(
+        self,
+        project_id: str,
+        *,
+        clip_ids: Sequence[str] | None = None,
+        confirmed_clip_ids: Sequence[str] = (),
+        expected_jobs_revision: int | None = None,
+    ) -> EnqueueRenderResult:
+        with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
+            preflight = self.preflight_render_jobs(project_id, clip_ids=clip_ids)
+            confirmed = set(confirmed_clip_ids)
+            invalid_confirmations = confirmed - set(preflight.confirmation_required)
+            if invalid_confirmations:
+                raise ValueError(
+                    f"clips do not require confirmation: {sorted(invalid_confirmations)}"
+                )
+            accepted_ids = (
+                *preflight.eligible,
+                *(
+                    clip_id
+                    for clip_id in preflight.confirmation_required
+                    if clip_id in confirmed
+                ),
+            )
+            clips_manifest = self.repositories.clips.load(project_id)
+            jobs_manifest = self.repositories.jobs.load(project_id)
+            project = self.repositories.project.load(project_id)
+            by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
+            stored_jobs = tuple(
+                QueueJob.from_dict(item) for item in jobs_manifest.jobs
+            )
+            job_ids: list[str] = []
+            for clip_id in accepted_ids:
+                clip = by_id[clip_id]
+                trajectory = self._current_trajectory_for_render(clip, stored_jobs)
+                workbench = _saved_workbench_reference(clip)
+                if (
+                    trajectory is None
+                    or workbench is None
+                    or not _workbench_binds_trajectory(
+                        clip, trajectory, workbench.value
+                    )
+                    or not _validate_workbench_immutable_output(
+                        self.projects_root, project_id, clip, workbench
+                    )
+                ):
+                    raise RuntimeError("render prerequisites changed after preflight")
+                adapter = self.render_adapters.for_workflow(
+                    str(clip.resolved_workflow)
+                )
+                render = self._new_render_job(
+                    project_id,
+                    clip,
+                    trajectory=trajectory,
+                    workbench=workbench,
+                    adapter_name=adapter.name,
+                    adapter_version=adapter.version,
+                    project_revision=project.revision,
+                    clips_revision=clips_manifest.revision,
+                )
+                submitted = self.queue.submit(render)
+                if submitted.job_id == render.job_id:
+                    Path(submitted.attempts[-1].directory).mkdir(
+                        parents=True, exist_ok=False
+                    )
+                job_ids.append(submitted.job_id)
+            if job_ids:
+                self._publish_queue_locked(project_id)
+            return EnqueueRenderResult(
+                enqueued_clip_ids=tuple(accepted_ids),
+                job_ids=tuple(job_ids),
+                preflight=preflight,
+            )
+
+    def _current_trajectory_for_render(
+        self,
+        clip: ClipDefinition,
+        jobs: Sequence[QueueJob],
+    ) -> QueueJob | None:
+        for job in reversed(jobs):
+            if (
+                job.job_type != "trajectory"
+                or job.clip_id != clip.clip_id
+                or job.adapter_name != clip.resolved_workflow
+                or job.input_revision != clip.analysis_revision
+                or not _has_exact_success_proof(job)
+                or not job.output_revision
+                or not job.output_fingerprint
+                or not _trajectory_artifact_matches_proof(job)
+            ):
+                continue
+            if self._current_input_fingerprint(job) == job.input_fingerprint:
+                return job
+        return None
 
     def enqueue_trajectory_jobs(
         self,
@@ -2336,6 +2538,66 @@ class ProjectService:
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
         )
 
+    def _new_render_job(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        *,
+        trajectory: QueueJob,
+        workbench: StateReference,
+        adapter_name: str,
+        adapter_version: str,
+        project_revision: int,
+        clips_revision: int,
+    ) -> QueueJob:
+        if self.project_media_spec is None or self.project_media_spec_revision is None:
+            raise RuntimeError("project media specification is unavailable")
+        identity_payload = _render_identity_payload(
+            clip=clip,
+            project_revision=project_revision,
+            clips_revision=clips_revision,
+            trajectory=trajectory,
+            workbench=workbench,
+            media_spec=self.project_media_spec,
+            media_spec_revision=self.project_media_spec_revision,
+            adapter_name=adapter_name,
+            adapter_version=adapter_version,
+        )
+        input_fingerprint = _fingerprint(identity_payload)
+        revision_fingerprint = _fingerprint(
+            {
+                "analysis_revision": clip.analysis_revision,
+                "workbench_output_revision": str(
+                    workbench.value["workbench_output_revision"]
+                ),
+                "media_spec_revision": self.project_media_spec_revision,
+            }
+        )
+        job_id = self._identity()
+        attempt_dir = self._attempt_directory(project_id, job_id, 1)
+        return QueueJob(
+            job_id=job_id,
+            project_id=project_id,
+            clip_id=clip.clip_id,
+            job_type="clip_render",
+            resource_class="media_io",
+            status="queued",
+            stage="queued",
+            priority=0,
+            depends_on_job_ids=(trajectory.job_id,),
+            exclusive_key=f"render:{project_id}:{clip.clip_id}",
+            idempotency_key=_fingerprint(
+                {**identity_payload, "purpose": "idempotency"}
+            ),
+            input_revision=revision_fingerprint,
+            input_fingerprint=input_fingerprint,
+            adapter_name=adapter_name,
+            adapter_version=adapter_version,
+            output_revision=None,
+            operation_id=self._identity(),
+            attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+        )
+
     def _current_input_fingerprint(self, job: QueueJob) -> str | None:
         project = self.repositories.project.load(job.project_id)
         if job.job_type in {"cad_analysis", "video_analysis"}:
@@ -2611,6 +2873,167 @@ def _clip_input_identity(
         }
     identity["request_key"] = snapshot.get("request_key")
     return identity
+
+
+def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
+    trajectory_path = job.published_outputs.get("trajectory")
+    if not isinstance(trajectory_path, str) or not job.output_fingerprint:
+        return False
+    try:
+        path = Path(trajectory_path)
+        return path.is_file() and sha256(path.read_bytes()).hexdigest() == job.output_fingerprint
+    except OSError:
+        return False
+
+
+def _saved_workbench_reference(clip: ClipDefinition) -> StateReference | None:
+    for reference in reversed(clip.references):
+        if (
+            reference.owner == "clips"
+            and reference.key == f"workbench:{clip.clip_id}"
+            and reference.value.get("status") == "saved"
+        ):
+            return reference
+    return None
+
+
+def _workbench_binds_trajectory(
+    clip: ClipDefinition,
+    trajectory: QueueJob,
+    workbench: Mapping[str, object],
+) -> bool:
+    revision = workbench.get("workbench_output_revision")
+    fingerprint = workbench.get("workbench_output_fingerprint")
+    return (
+        workbench.get("workflow") == clip.resolved_workflow
+        and workbench.get("input_revision") == clip.analysis_revision
+        and workbench.get("input_fingerprint") == trajectory.input_fingerprint
+        and workbench.get("trajectory_job_id") == trajectory.job_id
+        and workbench.get("trajectory_output_revision")
+        == trajectory.output_revision
+        and workbench.get("trajectory_output_fingerprint")
+        == trajectory.output_fingerprint
+        and isinstance(revision, str)
+        and bool(revision)
+        and isinstance(fingerprint, str)
+        and len(fingerprint) == 64
+    )
+
+
+def _validate_workbench_immutable_output(
+    projects_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    workbench: StateReference,
+) -> bool:
+    revision = workbench.value.get("workbench_output_revision")
+    expected_fingerprint = workbench.value.get("workbench_output_fingerprint")
+    if not isinstance(revision, str) or not isinstance(expected_fingerprint, str):
+        return False
+    try:
+        output_root = (projects_root / project_id / "workbench_outputs").resolve(
+            strict=True
+        )
+        revision_root = (output_root / revision).resolve(strict=True)
+        revision_root.relative_to(output_root)
+        manifest_path = (revision_root / "workbench_output_manifest.json").resolve(
+            strict=True
+        )
+        manifest_path.relative_to(revision_root)
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            return False
+        expected = {
+            "project_id": project_id,
+            "clip_id": clip.clip_id,
+            "workflow": clip.resolved_workflow,
+            "workbench_output_revision": revision,
+            "workbench_output_fingerprint": expected_fingerprint,
+            "operation_id": workbench.operation_id,
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            return False
+        unhashed = dict(payload)
+        unhashed.pop("workbench_output_fingerprint", None)
+        serialized = (
+            json.dumps(unhashed, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        if sha256(serialized).hexdigest() != expected_fingerprint:
+            return False
+        artifacts = payload.get("artifacts")
+        camera_track = (
+            artifacts.get("camera_track") if isinstance(artifacts, Mapping) else None
+        )
+        if not isinstance(camera_track, Mapping):
+            return False
+        relative_path = camera_track.get("path")
+        artifact_hash = camera_track.get("sha256")
+        size_bytes = camera_track.get("size_bytes")
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or Path(relative_path).is_absolute()
+            or not isinstance(artifact_hash, str)
+            or len(artifact_hash) != 64
+            or isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+        ):
+            return False
+        artifact_path = (revision_root / relative_path).resolve(strict=True)
+        artifact_path.relative_to(revision_root)
+        if not artifact_path.is_file():
+            return False
+        artifact_bytes = artifact_path.read_bytes()
+        return (
+            len(artifact_bytes) == size_bytes
+            and sha256(artifact_bytes).hexdigest() == artifact_hash
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _render_identity_payload(
+    *,
+    clip: ClipDefinition,
+    project_revision: int,
+    clips_revision: int,
+    trajectory: QueueJob,
+    workbench: StateReference,
+    media_spec: ProjectMediaSpec,
+    media_spec_revision: str,
+    adapter_name: str,
+    adapter_version: str,
+) -> Mapping[str, object]:
+    return {
+        "job_type": "clip_render",
+        "clip_id": clip.clip_id,
+        "project_manifest_revision": project_revision,
+        "clips_manifest_revision": clips_revision,
+        "clip_interval": _authoritative_interval(clip),
+        "analysis_revision": clip.analysis_revision,
+        "resolved_workflow": clip.resolved_workflow,
+        "parameters": dict(clip.manual_definition),
+        "trajectory": {
+            "job_id": trajectory.job_id,
+            "input_revision": trajectory.input_revision,
+            "input_fingerprint": trajectory.input_fingerprint,
+            "output_revision": trajectory.output_revision,
+            "output_fingerprint": trajectory.output_fingerprint,
+            "validated_input_fingerprint": trajectory.validated_input_fingerprint,
+        },
+        "workbench": {
+            "operation_id": workbench.operation_id,
+            "output_revision": workbench.value.get("workbench_output_revision"),
+            "output_fingerprint": workbench.value.get(
+                "workbench_output_fingerprint"
+            ),
+        },
+        "project_media_spec_revision": media_spec_revision,
+        "project_media_spec": media_spec.to_dict(),
+        "adapter_name": adapter_name,
+        "adapter_version": adapter_version,
+    }
 
 
 def _fingerprint(value: Mapping[str, object]) -> str:
