@@ -497,7 +497,10 @@ def media_compatibility(
         "color_primaries",
     )
     differences = tuple(
-        field for field in fields if getattr(actual, field) != getattr(expected, field)
+        field
+        for field in fields
+        if not (field == "nominal_frame_rate" and expected.nominal_frame_rate is None)
+        and getattr(actual, field) != getattr(expected, field)
     )
     return MediaCompatibility(compatible=not differences, differences=differences)
 

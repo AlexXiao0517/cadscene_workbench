@@ -450,6 +450,16 @@ def test_media_compatibility_reports_each_standard_video_difference() -> None:
     assert media_compatibility(_standard_spec(), _standard_spec()).compatible is True
 
 
+def test_media_compatibility_allows_vfr_rate_when_project_nominal_rate_is_unset() -> None:
+    actual = _standard_spec(nominal_frame_rate=Fraction(50, 3))
+    expected = _standard_spec(nominal_frame_rate=None)
+
+    result = media_compatibility(actual, expected)
+
+    assert result.compatible is True
+    assert result.differences == ()
+
+
 def test_audio_video_tolerance_is_max_of_50ms_and_max_source_frame_duration() -> None:
     assert audio_video_duration_tolerance_sec(0.040) == pytest.approx(0.050)
     assert audio_video_duration_tolerance_sec(0.080) == pytest.approx(0.080)

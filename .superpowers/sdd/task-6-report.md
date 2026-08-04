@@ -445,3 +445,54 @@ Review-fix TDD evidence:
 - Focused queue/render: `107 passed`.
 - Related regression: `364 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+### Decoded-frame integer-PTS source interval fallback
+
+- Added a standalone `SourceIntervalRenderInputs` contract, manifest-free
+  `SourceIntervalRenderAdapter`, and `cadscene.cli.render_source_interval` CLI.
+  This is a merge fallback media adapter, not a fifth user workflow and not a
+  value written to `resolved_workflow`.
+- The adapter/CLI probes the complete presentation-order decoded-frame index and
+  reuses the Stage 8A `ExportClip`/`build_clip_frame_map` half-open contract.
+  `render_frame_map.json` is atomically written before encoding and maps output
+  ordinal to authoritative source decoded ordinal and integer PTS.
+- FFmpeg receives the original long video without input-level seek, trims with
+  absolute integer `start_pts`/`end_pts`, resets only output PTS, uses
+  `fps_mode passthrough`, and emits video-only output. It does not use `-ss`,
+  `-t`, `-r`, or a forced frame rate. Auto-rotation is baked through the filter
+  path and rotation metadata is cleared.
+- H.264 output is configured to the explicit project resolution, SAR, pixel
+  format, profile, time base, and color metadata. Exact MP4 time base is enforced
+  with encoder time base plus track timescale and then checked by production
+  `probe_media`, `validate_rendered_media`, and `media_compatibility`; unsupported
+  codec or non-unit time-base numerator fails explicitly.
+- A project media spec with `nominal_frame_rate=None` now denotes VFR timing and
+  does not compare container-derived average frame rate. This avoids violating
+  one-source-frame/one-output-frame timing with forced CFR; all other media fields
+  remain strict.
+- The service exposes a manifest-free plan method backed by the independent
+  adapter. Neither adapter nor CLI writes project manifests; verified attempt
+  outputs are only `rendered.mp4` and `render_frame_map.json`. Adapter commands
+  carry the real project ID, preset/CRF fail at adapter construction, and the
+  public command builder fixes its destination inside the attempt directory.
+  CLI time bases require an explicit positive numerator/denominator rational;
+  decimal, boolean-like, zero numerator/denominator, and either negative
+  component fail closed. FFmpeg/FFprobe adapter values intentionally remain
+  unresolved at construction so deployments may supply PATH command names;
+  execution and validation still fail explicitly if they cannot be resolved.
+
+TDD evidence:
+
+- RED: the source fallback module/CLI did not exist; decoded-frame selection,
+  safe FFmpeg command construction, pre-encode frame-map generation, structured
+  adapter validation, and service invocation initially failed at import.
+- RED: real adjacent VFR interval validation exposed inappropriate strict
+  comparison of container-derived average frame rate when the project leaves the
+  nominal rate unspecified.
+- Real FFmpeg/CLI fixture: non-zero source PTS and irregular frame deltas; two
+  adjacent half-open outputs flatten to the exact full source ordinal/PTS
+  sequence, the boundary PTS appears once, both outputs start at zero, contain no
+  audio, and probe at exact project time base.
+- Focused source fallback/media: `81 passed`.
+- Related source/media/render/service/PTS/export regression: `449 passed, 1 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

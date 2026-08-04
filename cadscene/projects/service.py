@@ -44,6 +44,7 @@ from .media import (
 from .identifiers import is_safe_stable_id
 from .render_adapters import RenderAdapterRegistry
 from .render_adapters import RenderInputs
+from .source_fallback import SourceIntervalRenderAdapter, SourceIntervalRenderInputs
 from .repositories import ManifestMutation, RevisionConflict, publish_manifests
 from .uploads import PublishedUpload
 from .queue import (
@@ -156,6 +157,7 @@ class ProjectService:
         now: Callable[[], str],
         identity: Callable[[], str] | None = None,
         render_adapters: RenderAdapterRegistry | None = None,
+        source_interval_render_adapter: SourceIntervalRenderAdapter | None = None,
         media_probe: Callable[[Path], ProbedMedia] | None = None,
     ) -> None:
         self.repositories = repositories
@@ -166,6 +168,9 @@ class ProjectService:
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
         self.render_adapters = render_adapters or RenderAdapterRegistry(())
+        self.source_interval_render_adapter = (
+            source_interval_render_adapter or SourceIntervalRenderAdapter()
+        )
         self.media_probe = media_probe or probe_media
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
@@ -2404,6 +2409,14 @@ class ProjectService:
             },
         )
         plan = adapter.prepare(inputs)
+        return JobExecutionPlan(commands=plan.commands, validate=plan.validate)
+
+    def prepare_source_interval_render(
+        self, inputs: SourceIntervalRenderInputs
+    ) -> JobExecutionPlan:
+        """Build a manifest-free fallback plan for later merge orchestration."""
+
+        plan = self.source_interval_render_adapter.prepare(inputs)
         return JobExecutionPlan(commands=plan.commands, validate=plan.validate)
 
     def record_job_process(
