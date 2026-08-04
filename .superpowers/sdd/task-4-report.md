@@ -182,3 +182,76 @@ http://127.0.0.1:8318/apps/project_workspace/?projectId=<project_id>
 - Frame-exact project render, fallback, normalization, and concat are Task 6.
 - Their buttons are present only through server capabilities and remain disabled
   until those services exist.
+
+## Second formal review closure (base `059489e`)
+
+This section supersedes the earlier automatic-analysis implementation notes.
+The production server no longer creates an in-memory analysis executor or owns
+analysis through a `Future`.
+
+### Review finding map: 2 Critical + 4 Important + 1 Minor
+
+1. **Critical — non-durable automatic analysis:** fixed by persisting an
+   explicit `cad_analysis -> video_analysis` DAG in `jobs_manifest.json`.
+   Both tasks use `light_compute`, explicit dependency IDs, exclusive keys,
+   idempotency/input identities, adapter version, immutable attempt directories,
+   and the normal `LocalJobExecutor`. `serve_viewer` now directly enqueues this
+   DAG through `ProjectService`; restart restoration uses the same queue path.
+2. **Critical — superseded CAD polluted formal data:** fixed by running
+   `import_cad` only under the CAD job attempt directory. The video completion
+   path rechecks the authoritative request fingerprint, validates the successful
+   CAD dependency and both output paths against their owning attempt roots, then
+   lets `ProjectService` publish immutable formal CAD and video-analysis trees.
+   Superseded/stale input never activates or creates a candidate revision.
+3. **Important — failed upload changed the canonical pointer:** fixed by
+   publishing media, then the immutable published-attempt report, and only then
+   atomically switching the canonical validation-report pointer. Injected report
+   failure preserves the preceding canonical publication.
+4. **Important — empty manifest restore retained stale jobs:** fixed by making
+   `merge_restored` require the target `project_id`. An empty authoritative
+   manifest clears only that project's in-memory jobs; foreign jobs are rejected
+   and other projects remain intact.
+5. **Important — Windows project-directory aliases:** fixed by the shared
+   project-ID validator rejecting trailing dots/spaces and Windows device names
+   (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`), including extensions and
+   case variants.
+6. **Important — cancelling advertised as cancellable:** fixed by removing
+   `cancelling` from the server-provided `can_cancel` capability.
+7. **Minor — case-sensitive conditional request header:** fixed by normalizing
+   inbound API header names and honoring lowercase or mixed-case
+   `If-None-Match`; a matching ETag returns HTTP 304 with no body.
+
+### Additional publication and recovery hardening
+
+- Analysis-busy gating is enforced in `ProjectService` preflight/enqueue, not
+  only in UI capabilities, so direct API/service calls cannot launch trajectory
+  jobs against old active clips while reanalysis is queued or running.
+- CAD manifests are structurally rebased to a canonical immutable dataset ID;
+  `dataset`, `data/<old>/...` references, and referenced design files are
+  validated through a real `load_dataset_manifest` round trip after publication.
+- Existing formal directories left by a crash are reused only after identity,
+  structure, referenced-file, and content validation. A retry no longer fails
+  permanently on a valid orphan, while conflicting content still fails closed.
+- Adapter result paths and the successful CAD dependency path are resolved and
+  required to remain beneath the exact immutable job attempt directory.
+- Real subprocess failure, retry, cancellation, supersession, structured stage
+  updates, and restart interruption synchronize `_analysis.status/error`; the UI
+  can reanalyze after terminal interruption instead of remaining stuck.
+- The compatibility `ProjectAnalysisCoordinator` is stateless and queue-backed;
+  production wiring does not instantiate it.
+
+### TDD and verification evidence for this closure
+
+- Initial review RED: `4 failed, 17 passed` (missing durable analysis enqueue and
+  service/UI analysis-busy gate).
+- Durable analysis/API/project/runtime focused suite: `58 passed`.
+- Upload, queue-restore, stable-ID, ETag and capability regressions are included
+  in the full suite.
+- Pre-final full suite after the 2C+4I+1M fixes: `763 passed, 1 skipped`.
+- Final focused suite after conflicting-orphan coverage: `159 passed`.
+- Final fresh full suite: `764 passed, 1 skipped` in 38.63 seconds.
+- `python -m compileall -q cadscene`: pass.
+- `python -m pyflakes` over every changed Python file: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

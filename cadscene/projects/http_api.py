@@ -95,7 +95,7 @@ class ProjectApi:
         json_body: Mapping[str, object] | None = None,
         upload: UploadRequest | None = None,
     ) -> ApiResponse:
-        headers = headers or {}
+        headers = {str(key).lower(): value for key, value in (headers or {}).items()}
         payload = json_body or {}
         try:
             if method == "POST" and path == "/api/projects":
@@ -310,7 +310,7 @@ class ProjectApi:
         snapshot = self._build_snapshot(project_id)
         etag = f'"{snapshot["snapshot_revision"]}"'
         response_headers = {"ETag": etag, "Cache-Control": "no-store"}
-        if headers.get("If-None-Match") == etag:
+        if headers.get("if-none-match") == etag:
             return ApiResponse(304, None, response_headers)
         return ApiResponse(200, snapshot, response_headers)
 
@@ -325,6 +325,18 @@ class ProjectApi:
         clips = self.repositories.clips.load(project_id)
         jobs = self.repositories.jobs.load(project_id)
         render = self.repositories.render.load(project_id)
+        analysis_state = project.source_assets.get("_analysis")
+        analysis_status = (
+            str(analysis_state.get("status"))
+            if isinstance(analysis_state, Mapping)
+            else None
+        )
+        analysis_busy = analysis_status in {
+            "queued",
+            "preparing",
+            "running",
+            "validating",
+        }
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=[clip.clip_id for clip in clips.clips]
         )
@@ -347,7 +359,9 @@ class ProjectApi:
         can_start_any = False
         for clip in clips.clips:
             job = job_by_clip.get(clip.clip_id)
-            capability = self._clip_capability(clip, preflight, job)
+            capability = self._clip_capability(
+                clip, preflight, job, analysis_busy=analysis_busy
+            )
             can_start_any = can_start_any or bool(
                 capability["can_start_trajectory"]
                 or capability["trajectory_needs_confirmation"]
@@ -383,12 +397,6 @@ class ProjectApi:
                     },
                 }
             )
-        analysis_state = project.source_assets.get("_analysis")
-        analysis_status = (
-            str(analysis_state.get("status"))
-            if isinstance(analysis_state, Mapping)
-            else None
-        )
         return {
             "project_id": project_id,
             "snapshot_revision": snapshot_revision,
@@ -402,7 +410,7 @@ class ProjectApi:
                 "can_merge": False,
                 "can_reanalyze": _analysis_request_key(project.source_assets)
                 is not None
-                and analysis_status not in {"queued", "running"},
+                and not analysis_busy,
             },
             "clips": clip_payloads,
         }
@@ -412,10 +420,16 @@ class ProjectApi:
         clip: ClipDefinition,
         preflight: TrajectoryPreflight,
         job: Mapping[str, object] | None,
+        *,
+        analysis_busy: bool = False,
     ) -> dict[str, object]:
-        can_start = clip.clip_id in preflight.eligible
-        needs_confirmation = clip.clip_id in preflight.needs_confirmation
+        can_start = not analysis_busy and clip.clip_id in preflight.eligible
+        needs_confirmation = (
+            not analysis_busy and clip.clip_id in preflight.needs_confirmation
+        )
         reason = preflight.reasons.get(clip.clip_id)
+        if analysis_busy:
+            reason = "project analysis is still running"
         status = None if job is None else str(job.get("status"))
         return {
             "can_start_trajectory": can_start,
@@ -426,7 +440,7 @@ class ProjectApi:
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
             "can_cancel": status
-            in {"queued", "preparing", "running", "validating", "cancelling"},
+            in {"queued", "preparing", "running", "validating"},
         }
 
     def _update_workflow(

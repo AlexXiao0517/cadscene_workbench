@@ -481,6 +481,7 @@ class LocalResourceQueue:
         self,
         jobs: Iterable[QueueJob | Mapping[str, object]],
         *,
+        project_id: str,
         queue_order: Sequence[str],
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
         current_fingerprint_resolver: Callable[[QueueJob], str | None] | None = None,
@@ -492,6 +493,8 @@ class LocalResourceQueue:
             for item in jobs
         ]
         incoming_projects = {item.project_id for item in incoming_values}
+        if incoming_projects - {project_id}:
+            raise ValueError("restored job does not belong to target project")
         restored = LocalResourceQueue.restore(
             incoming_values,
             queue_order=queue_order,
@@ -508,7 +511,7 @@ class LocalResourceQueue:
             retained_order = [
                 job_id
                 for job_id in self._queue_order
-                if self._jobs[job_id].project_id not in incoming_projects
+                if self._jobs[job_id].project_id != project_id
             ]
             retained_jobs = {job_id: self._jobs[job_id] for job_id in retained_order}
             retained_controllers = {

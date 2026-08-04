@@ -29,6 +29,9 @@ def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() ->
     assert "ProjectRuntime(" in source
     assert "project_runtime.start()" in source
     assert "project_runtime.close()" in source
+    assert "ProjectAnalysisCoordinator" not in source
+    assert "project_service.enqueue_analysis_jobs" in source
+    assert "analysis=None" in source
 
 
 def _clip(
@@ -137,6 +140,14 @@ def test_snapshot_etag_returns_304_with_an_empty_body(tmp_path: Path) -> None:
     assert second.body is None
     assert second.encoded_body == b""
 
+    lowercase = api.handle(
+        "GET",
+        "/api/projects/p1/snapshot",
+        headers={"if-none-match": first.headers["ETag"]},
+    )
+    assert lowercase.status == 304
+    assert lowercase.encoded_body == b""
+
 
 def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     tmp_path: Path,
@@ -174,6 +185,37 @@ def test_project_can_start_trajectory_when_only_review_confirmation_is_needed(
     assert response.body["capabilities"]["can_start_trajectory"] is True
     clip = response.body["clips"][0]
     assert clip["capabilities"]["trajectory_needs_confirmation"] is True
+
+
+def test_analysis_queued_disables_all_trajectory_capabilities(tmp_path: Path) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    project = repositories.project.load("p1")
+    video = tmp_path / "source.mp4"
+    cad = tmp_path / "design.dxf"
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {"path": str(video), "sha256": "a" * 64},
+                "cad": {"path": str(cad), "sha256": "b" * 64},
+                "_analysis": {"request_key": "request", "status": "queued"},
+            },
+            project_state="analyzing",
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert snapshot.body["capabilities"]["can_start_trajectory"] is False
+    assert snapshot.body["clips"][0]["capabilities"]["can_start_trajectory"] is False
+    preflight = api.service.preflight_trajectory_jobs("p1")
+    assert preflight.eligible == ()
+    assert preflight.skipped == ("ready",)
+    assert "analysis is still running" in preflight.reasons["ready"]
+    enqueue = api.service.enqueue_trajectory_jobs("p1")
+    assert enqueue.job_ids == ()
 
 
 def test_snapshot_reads_all_manifests_under_fixed_lock_order(
@@ -324,6 +366,27 @@ def test_cancel_and_retry_job_routes_delegate_through_project_service(
     )
     assert retried.status == 202
     assert queue.status(job_id) in {"queued", "preparing"}
+
+
+def test_cancelling_job_does_not_offer_a_second_cancel_action(tmp_path: Path) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("ready"),))
+    api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("p1").revision,
+            "clip_ids": ["ready"],
+            "enqueue": True,
+        },
+    )
+    job_id = next(item.job_id for item in queue.jobs() if item.job_type == "trajectory")
+    queue.begin_cancel(job_id)
+    api.service._publish_queue("p1")
+
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert snapshot.body["clips"][0]["status"] == "cancelling"
+    assert snapshot.body["clips"][0]["capabilities"]["can_cancel"] is False
 
 
 def test_unknown_project_route_is_rejected_by_project_api(tmp_path: Path) -> None:

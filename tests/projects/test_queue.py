@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import threading
 
@@ -378,6 +379,27 @@ def test_restore_preserves_persistent_queued_order() -> None:
 
     assert queue.running_ids() == ["a"]
     assert queue.status("b") == "queued"
+
+
+def test_merge_restored_empty_manifest_clears_only_explicit_target_project() -> None:
+    queue = LocalResourceQueue()
+    queue.submit(replace(job("p1-job"), project_id="p1"))
+    queue.submit(replace(job("p2-job"), project_id="p2"))
+
+    queue.merge_restored((), queue_order=(), project_id="p1")
+
+    assert tuple(item.job_id for item in queue.jobs()) == ("p2-job",)
+
+
+def test_merge_restored_rejects_job_from_another_target_project() -> None:
+    queue = LocalResourceQueue()
+
+    with pytest.raises(ValueError, match="target project"):
+        queue.merge_restored(
+            (replace(job("foreign"), project_id="p2"),),
+            queue_order=("foreign",),
+            project_id="p1",
+        )
 
 
 def test_idempotency_reuses_only_identical_input_and_adapter_identity() -> None:

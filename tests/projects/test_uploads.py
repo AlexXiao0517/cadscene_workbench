@@ -182,7 +182,13 @@ def test_cad_zip_rejects_drive_paths_and_symlinks_before_publication(
         assert not store.published_path("p1", "cad").exists()
 
 
-@pytest.mark.parametrize("project_id", [".", "..", "../escape", "C:escape"])
+@pytest.mark.parametrize(
+    "project_id",
+    [
+        ".", "..", "../escape", "C:escape", "project.", "CON", "con.json",
+        "PrN", "AUX.txt", "NUL", "COM1", "com9.log", "LPT1", "lpt9.data",
+    ],
+)
 def test_upload_store_rejects_project_ids_that_can_escape_root(
     tmp_path: Path, project_id: str
 ) -> None:
@@ -215,3 +221,29 @@ def test_video_validation_rejects_decode_error_even_when_ffmpeg_returns_zero(
         _validate_video(video, "video")
 
     assert "-xerror" in observed[0]
+
+
+def test_failed_immutable_publish_report_keeps_previous_canonical_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "projects"
+    store = ValidatedUploadStore(root, validators={"video": _accept})
+    first = store.begin("p1", "video", "first.mp4", expected_size=5)
+    first.write(b"first")
+    previous = first.complete()
+    original = store._write_attempt_report
+
+    def fail_published_report(project_id, asset_type, payload):
+        if payload.get("status") == "published":
+            raise OSError("injected immutable report failure")
+        return original(project_id, asset_type, payload)
+
+    monkeypatch.setattr(store, "_write_attempt_report", fail_published_report)
+    replacement = store.begin("p1", "video", "second.mp4", expected_size=6)
+    replacement.write(b"second")
+
+    with pytest.raises(UploadValidationError, match="immutable report failure"):
+        replacement.complete()
+
+    assert store.published_path("p1", "video") == previous.path
+    assert previous.path.read_bytes() == b"first"

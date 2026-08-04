@@ -1029,7 +1029,9 @@ def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path
     assert calls == 3
 
 
-@pytest.mark.parametrize("project_id", [".", "..", "../escape", "C:escape"])
+@pytest.mark.parametrize(
+    "project_id", [".", "..", "../escape", "C:escape", "project.", "CON", "com1.log"]
+)
 def test_project_repository_rejects_ids_that_can_escape_root(
     tmp_path: Path, project_id: str
 ) -> None:

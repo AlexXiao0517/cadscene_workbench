@@ -129,10 +129,10 @@ class PendingUpload:
                 "sha256": digest,
                 "validation": validation,
             }
-            self._store._write_report(
+            report_path = self._store._write_attempt_report(
                 self.project_id, self.asset_type, report
             )
-            report_path = self._store._write_attempt_report(
+            self._store._write_report(
                 self.project_id, self.asset_type, report
             )
         except Exception as exc:
