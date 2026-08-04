@@ -108,6 +108,16 @@ Substage 2a TDD evidence:
 - Related media/workflow-adapter/executor/queue regression: `143 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
+Substage 2a minor hardening:
+
+- Adapter parameters are recursively copied into JSON-safe immutable mappings
+  and tuples. Non-string keys, non-JSON values, and non-finite numbers fail
+  closed, preventing queued input fingerprints from drifting before execution.
+- Authoritative adapter frames independently require real non-bool integer
+  ordinals and PTS values. Workbench output revisions are normalized text.
+- Eight focused cases failed before the hardening; the adapter/media/workflow/
+  executor/queue regression now passes (`151 passed`).
+
 ## Narrow media-contract review closure
 
 - The publishing-level `validate_rendered_media()` boundary now rejects a

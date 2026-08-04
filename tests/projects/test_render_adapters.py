@@ -147,6 +147,51 @@ def test_render_inputs_require_existing_immutable_inputs(tmp_path: Path) -> None
         RenderInputs(**{**valid.__dict__, "physical_video_path": missing})
 
 
+def test_render_inputs_recursively_snapshot_json_parameters(tmp_path: Path) -> None:
+    nested = {"quality": {"levels": [1, 2]}}
+    valid = _render_inputs(tmp_path)
+
+    inputs = RenderInputs(**{**valid.__dict__, "parameters": nested})
+    nested["quality"]["levels"].append(3)
+
+    assert tuple(inputs.parameters["quality"]["levels"]) == (1, 2)
+    with pytest.raises(TypeError):
+        inputs.parameters["quality"]["changed"] = True
+
+
+@pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf")])
+def test_render_inputs_reject_non_json_or_nonfinite_parameters(
+    tmp_path: Path, invalid: object,
+) -> None:
+    valid = _render_inputs(tmp_path)
+
+    with pytest.raises((TypeError, ValueError), match="parameters"):
+        RenderInputs(**{**valid.__dict__, "parameters": {"invalid": invalid}})
+
+
+@pytest.mark.parametrize(
+    "field,value", [("ordinal", 0.0), ("ordinal", True), ("pts", 5000.0), ("pts", True)]
+)
+def test_render_inputs_require_integer_authoritative_frame_identity(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    valid = _render_inputs(tmp_path)
+    values = {
+        "ordinal": 0,
+        "pts": 5000,
+        "duration_pts": 40,
+        "timestamp_source": "pts",
+    }
+    values[field] = value
+    frames = (
+        DecodedFrameTimestamp(**values),
+        DecodedFrameTimestamp(1, 5040, 40, "pts"),
+    )
+
+    with pytest.raises(ValueError, match="integer identity"):
+        RenderInputs(**{**valid.__dict__, "authoritative_source_frames": frames})
+
+
 def test_registry_routes_by_workflow_and_unknown_workflow_fails_closed() -> None:
     adapter = _FakeRenderAdapter()
     registry = RenderAdapterRegistry((adapter,))

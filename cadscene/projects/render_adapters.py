@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
+import math
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
@@ -65,6 +66,13 @@ class RenderInputs:
                 "authoritative source frames must be a non-empty sequence"
             )
         normalized_frames = tuple(frames)
+        if any(
+            type(frame.ordinal) is not int or type(frame.pts) is not int
+            for frame in normalized_frames
+        ):
+            raise ValueError(
+                "authoritative source frames require integer identity"
+            )
         for previous, current in zip(normalized_frames, normalized_frames[1:]):
             if current.ordinal != previous.ordinal + 1 or current.pts <= previous.pts:
                 raise ValueError(
@@ -78,6 +86,7 @@ class RenderInputs:
         if (
             not isinstance(self.workbench_output_revision, str)
             or not self.workbench_output_revision.strip()
+            or self.workbench_output_revision != self.workbench_output_revision.strip()
         ):
             raise ValueError("workbench output revision must not be empty")
         fingerprint = self.workbench_output_fingerprint
@@ -92,7 +101,7 @@ class RenderInputs:
         if not isinstance(self.parameters, Mapping):
             raise TypeError("parameters must be a mapping")
         object.__setattr__(self, "authoritative_source_frames", normalized_frames)
-        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
+        object.__setattr__(self, "parameters", _freeze_json_mapping(self.parameters))
 
 
 @dataclass(frozen=True)
@@ -176,3 +185,26 @@ class RenderAdapterRegistry:
 
     def workflows(self) -> tuple[str, ...]:
         return tuple(self._by_workflow)
+
+
+def _freeze_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("parameters keys must be strings")
+        frozen[key] = _freeze_json_value(item)
+    return MappingProxyType(frozen)
+
+
+def _freeze_json_value(value: object) -> object:
+    if value is None or type(value) in {bool, int, str}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("parameters numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        return _freeze_json_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item) for item in value)
+    raise TypeError("parameters values must be JSON-compatible")
