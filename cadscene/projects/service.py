@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from hashlib import sha256
@@ -7,7 +8,7 @@ import json
 from pathlib import Path
 import sys
 import threading
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .adapters import AdapterInputs, AdapterResult, WorkflowAdapterRegistry
@@ -82,7 +83,9 @@ class ProjectService:
                 continue
             if not adapter.available:
                 skipped.append(clip.clip_id)
-                reasons[clip.clip_id] = adapter.unavailable_reason or "adapter unavailable"
+                reasons[clip.clip_id] = (
+                    adapter.unavailable_reason or "adapter unavailable"
+                )
                 continue
             if adapter.requires_physical_mp4 and (
                 video_path is None or not video_path.is_file()
@@ -94,9 +97,9 @@ class ProjectService:
                 srt_path is None or not srt_path.is_file()
             ):
                 skipped.append(clip.clip_id)
-                reasons[clip.clip_id] = (
-                    f"physical SRT with {adapter.srt_requirement} coverage is missing"
-                )
+                reasons[
+                    clip.clip_id
+                ] = f"physical SRT with {adapter.srt_requirement} coverage is missing"
                 continue
             if bool(clip.analysis.get("needs_review", False)):
                 confirmation.append(clip.clip_id)
@@ -117,6 +120,20 @@ class ProjectService:
         clip_ids: Sequence[str] | None = None,
         confirmed_clip_ids: Sequence[str] = (),
     ) -> EnqueueTrajectoryResult:
+        with self._state_guard(project_id):
+            return self._enqueue_trajectory_jobs_locked(
+                project_id,
+                clip_ids=clip_ids,
+                confirmed_clip_ids=confirmed_clip_ids,
+            )
+
+    def _enqueue_trajectory_jobs_locked(
+        self,
+        project_id: str,
+        *,
+        clip_ids: Sequence[str] | None,
+        confirmed_clip_ids: Sequence[str],
+    ) -> EnqueueTrajectoryResult:
         preflight = self.preflight_trajectory_jobs(project_id, clip_ids=clip_ids)
         confirmed = set(confirmed_clip_ids)
         invalid_confirmations = confirmed - set(preflight.needs_confirmation)
@@ -124,7 +141,10 @@ class ProjectService:
             raise ValueError(
                 f"clips do not require confirmation: {sorted(invalid_confirmations)}"
             )
-        accepted_ids = (*preflight.eligible, *(item for item in preflight.needs_confirmation if item in confirmed))
+        accepted_ids = (
+            *preflight.eligible,
+            *(item for item in preflight.needs_confirmation if item in confirmed),
+        )
         clips_manifest = self.repositories.clips.load(project_id)
         project = self.repositories.project.load(project_id)
         by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
@@ -137,12 +157,11 @@ class ProjectService:
                 or not _clip_output_path(by_id[clip_id]).is_file()
             )
         ]
-        export_dependency: tuple[str, ...] = ()
-        if needs_export:
+        export_dependencies: dict[str, tuple[str, ...]] = {}
+        for export_clip in needs_export:
             export = self._new_export_job(
                 project_id,
-                clips_manifest.clips,
-                analysis_revision=clips_manifest.analysis_revision or "unversioned",
+                export_clip,
                 project_assets=project.source_assets,
                 project_revision=project.revision,
                 clips_revision=clips_manifest.revision,
@@ -152,13 +171,13 @@ class ProjectService:
                 Path(submitted_export.attempts[-1].directory).mkdir(
                     parents=True, exist_ok=False
                 )
-            export_dependency = (submitted_export.job_id,)
+            export_dependencies[export_clip.clip_id] = (submitted_export.job_id,)
         for clip_id in accepted_ids:
             clip = by_id[clip_id]
             adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
             physical_clip = _clip_output_path(clip)
             dependency_ids = (
-                export_dependency
+                export_dependencies[clip.clip_id]
                 if physical_clip is None or not physical_clip.is_file()
                 else ()
             )
@@ -181,7 +200,7 @@ class ProjectService:
                     parents=True, exist_ok=False
                 )
             trajectory_ids.append(submitted_solve.job_id)
-        self._publish_queue(project_id)
+        self._publish_queue_locked(project_id)
         return EnqueueTrajectoryResult(
             enqueued_clip_ids=tuple(accepted_ids),
             job_ids=tuple(trajectory_ids),
@@ -195,60 +214,93 @@ class ProjectService:
         result: AdapterResult,
         *,
         current_fingerprint: str | None = None,
+        attempt_number: int,
+        claim_token: str,
     ) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        authoritative_fingerprint = self._current_input_fingerprint(current)
-        if authoritative_fingerprint != current.input_fingerprint:
-            finished = self.queue.mark_stale_input(job_id)
-        elif result.status != "success":
-            finished = self.queue.mark_failed(
-                job_id, result.error or "adapter execution failed"
-            )
-        else:
-            if result.output_revision is None or result.output_fingerprint is None:
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            authoritative_fingerprint = self._current_input_fingerprint(current)
+            lease = {
+                "attempt_number": attempt_number,
+                "claim_token": claim_token,
+            }
+            if authoritative_fingerprint != current.input_fingerprint:
+                finished = self.queue.mark_stale_input(job_id, **lease)
+            elif result.status != "success":
                 finished = self.queue.mark_failed(
-                    job_id, "adapter returned an unvalidated output identity"
+                    job_id, result.error or "adapter execution failed", **lease
                 )
             else:
-                if current.status == "running":
-                    self.queue.mark_validating(job_id)
-                finished = self.queue.mark_success(
-                    job_id,
-                    output_revision=result.output_revision,
-                    output_fingerprint=result.output_fingerprint,
-                    output_validated=True,
-                    published_outputs=result.outputs,
-                )
-        self._publish_queue(project_id)
-        return finished
+                if result.output_revision is None or result.output_fingerprint is None:
+                    finished = self.queue.mark_failed(
+                        job_id,
+                        "adapter returned an unvalidated output identity",
+                        **lease,
+                    )
+                else:
+                    if current.status == "running":
+                        self.queue.mark_validating(job_id, **lease)
+                    finished = self.queue.mark_success(
+                        job_id,
+                        output_revision=result.output_revision,
+                        output_fingerprint=result.output_fingerprint,
+                        output_validated=True,
+                        published_outputs=result.outputs,
+                        **lease,
+                    )
+            self._publish_queue_locked(project_id)
+            return finished
 
     def cancel_job(self, project_id: str, job_id: str) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        cancelled = self.queue.cancel(job_id)
-        self._publish_queue(project_id)
-        return cancelled
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            reservation = self.queue.begin_cancel(job_id)
+            if reservation is None:
+                return current
+            self._publish_queue_locked(project_id)
+        error: Exception | None = None
+        try:
+            self.queue.terminate_cancel_reservation(reservation)
+        except Exception as exc:
+            error = exc
+        with self._state_guard(project_id):
+            cancelled = self.queue.complete_cancel(reservation, error=error)
+            self._publish_queue_locked(project_id)
+            return cancelled
 
     def prepare_job_execution(
-        self, project_id: str, job_id: str
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        attempt_number: int,
+        claim_token: str,
     ) -> JobExecutionPlan:
-        job = self.queue.get(job_id)
-        if job.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        if self._current_input_fingerprint(job) != job.input_fingerprint:
-            self.queue.mark_superseded(job_id)
-            self._publish_queue(project_id)
-            raise RuntimeError("job input changed before execution")
+        with self._state_guard(project_id):
+            job = self.queue.get(job_id)
+            if job.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            if self._current_input_fingerprint(job) != job.input_fingerprint:
+                self.queue.mark_superseded(
+                    job_id,
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
+                )
+                self._publish_queue_locked(project_id)
+                raise RuntimeError("job input changed before execution")
         if job.job_type == "clip_export":
             return self._prepare_clip_export(job)
         if job.job_type != "trajectory":
             raise ValueError(f"unsupported executable job type: {job.job_type}")
         clips_manifest = self.repositories.clips.load(project_id)
         project = self.repositories.project.load(project_id)
-        clip = next(item for item in clips_manifest.clips if item.clip_id == job.clip_id)
+        clip = next(
+            item for item in clips_manifest.clips if item.clip_id == job.clip_id
+        )
         adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
         video_path = _clip_output_path(clip)
         frame_map_path = _clip_frame_map_path(clip)
@@ -271,9 +323,7 @@ class ProjectService:
             attempt_directory=Path(job.attempts[-1].directory),
             parameters=dict(clip.manual_definition),
             source_start_pts=int(clip.analysis["source_start_pts"]),
-            source_end_pts_exclusive=int(
-                clip.analysis["source_end_pts_exclusive"]
-            ),
+            source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
             source_time_base=time_base,
             frame_map_path=frame_map_path,
         )
@@ -293,70 +343,130 @@ class ProjectService:
         command_fingerprint: str,
         task_token: str,
         log_path: str,
+        attempt_number: int,
+        claim_token: str,
         terminate=None,
     ) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        updated = self.queue.record_process(
-            job_id,
-            pid=pid,
-            process_start_time=process_start_time,
-            command_fingerprint=command_fingerprint,
-            task_token=task_token,
-            log_path=log_path,
-            terminate=terminate,
-        )
-        self._publish_queue(project_id)
-        return updated
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            updated = self.queue.record_process(
+                job_id,
+                pid=pid,
+                process_start_time=process_start_time,
+                command_fingerprint=command_fingerprint,
+                task_token=task_token,
+                log_path=log_path,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+                terminate=terminate,
+            )
+            self._publish_queue_locked(project_id)
+            return updated
 
     def update_job_progress(
-        self, project_id: str, job_id: str, progress
+        self,
+        project_id: str,
+        job_id: str,
+        progress,
+        *,
+        attempt_number: int,
+        claim_token: str,
     ) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        updated = self.queue.update_progress(job_id, progress)
-        self._publish_queue(project_id)
-        return updated
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            updated = self.queue.update_progress(
+                job_id,
+                progress,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
+            self._publish_queue_locked(project_id)
+            return updated
 
-    def fail_job(self, project_id: str, job_id: str, error: str) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        failed = self.queue.mark_failed(job_id, error)
-        self._publish_queue(project_id)
-        return failed
+    def fail_job(
+        self,
+        project_id: str,
+        job_id: str,
+        error: str,
+        *,
+        attempt_number: int,
+        claim_token: str,
+    ) -> QueueJob:
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            failed = self.queue.mark_failed(
+                job_id,
+                error,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
+            self._publish_queue_locked(project_id)
+            return failed
 
     def register_job_process_controller(
-        self, project_id: str, job_id: str, terminate
+        self,
+        project_id: str,
+        job_id: str,
+        terminate,
+        *,
+        attempt_number: int,
+        claim_token: str,
     ) -> None:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        self.queue.register_process_controller(job_id, terminate)
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            self.queue.register_process_controller(
+                job_id,
+                terminate,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
 
     def release_job_process_controller(
-        self, project_id: str, job_id: str, pid: int
+        self,
+        project_id: str,
+        job_id: str,
+        pid: int,
+        *,
+        attempt_number: int,
+        claim_token: str,
     ) -> None:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        self.queue.release_process_controller(pid)
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            self.queue.release_process_controller(
+                job_id,
+                pid,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
 
     def retry_job(self, project_id: str, job_id: str) -> QueueJob:
-        current = self.queue.get(job_id)
-        if current.project_id != project_id:
-            raise KeyError(f"job {job_id} does not belong to {project_id}")
-        number = len(current.attempts) + 1
-        directory = self._attempt_directory(project_id, job_id, number)
-        directory.mkdir(parents=True, exist_ok=False)
-        retried = self.queue.retry(
-            job_id,
-            AttemptRecord(number=number, directory=str(directory)),
-        )
-        self._publish_queue(project_id)
-        return retried
+        with self._state_guard(project_id):
+            current = self.queue.get(job_id)
+            if current.project_id != project_id:
+                raise KeyError(f"job {job_id} does not belong to {project_id}")
+            number = len(current.attempts) + 1
+            directory = self._attempt_directory(project_id, job_id, number)
+            directory.mkdir(parents=True, exist_ok=False)
+            try:
+                retried = self.queue.retry(
+                    job_id,
+                    AttemptRecord(number=number, directory=str(directory)),
+                )
+            except Exception:
+                directory.rmdir()
+                raise
+            self._publish_queue_locked(project_id)
+            return retried
 
     def restore_jobs(
         self,
@@ -364,15 +474,23 @@ class ProjectService:
         *,
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
     ) -> LocalResourceQueue:
-        manifest = self.repositories.jobs.load(project_id)
-        restored = self.queue.merge_restored(
-            manifest.jobs,
-            queue_order=manifest.queue_order,
-            process_probe=process_probe,
-            current_fingerprint_resolver=self._current_input_fingerprint,
-        )
-        self._publish_queue(project_id)
-        return restored
+        with self._state_guard(project_id):
+            manifest = self.repositories.jobs.load(project_id)
+            restored = self.queue.merge_restored(
+                manifest.jobs,
+                queue_order=manifest.queue_order,
+                process_probe=process_probe,
+                current_fingerprint_resolver=self._current_input_fingerprint,
+            )
+            self._publish_queue_locked(project_id)
+            return restored
+
+    def reap_adopted_jobs(self) -> tuple[str, ...]:
+        reaped = self.queue.poll_adopted_processes()
+        project_ids = {self.queue.get(job_id).project_id for job_id in reaped}
+        for project_id in sorted(project_ids):
+            self._publish_queue(project_id)
+        return reaped
 
     def _new_job(
         self,
@@ -427,15 +545,14 @@ class ProjectService:
     def _new_export_job(
         self,
         project_id: str,
-        clips: Sequence[ClipDefinition],
+        clip: ClipDefinition,
         *,
-        analysis_revision: str,
         project_assets: Mapping[str, object],
         project_revision: int,
         clips_revision: int,
     ) -> QueueJob:
         identity_payload = _export_identity_payload(
-            clips=clips,
+            clip=clip,
             project_assets=project_assets,
             project_revision=project_revision,
             clips_revision=clips_revision,
@@ -446,7 +563,7 @@ class ProjectService:
         return QueueJob(
             job_id=job_id,
             project_id=project_id,
-            clip_id="__all_clips__",
+            clip_id=clip.clip_id,
             job_type="clip_export",
             resource_class="media_io",
             status="queued",
@@ -457,7 +574,7 @@ class ProjectService:
             idempotency_key=_fingerprint(
                 {**identity_payload, "purpose": "idempotency"}
             ),
-            input_revision=analysis_revision,
+            input_revision=clip.analysis_revision,
             input_fingerprint=input_fingerprint,
             adapter_name="clip_export",
             adapter_version="1",
@@ -470,9 +587,15 @@ class ProjectService:
         project = self.repositories.project.load(job.project_id)
         clips_manifest = self.repositories.clips.load(job.project_id)
         if job.job_type == "clip_export":
+            clip = next(
+                (item for item in clips_manifest.clips if item.clip_id == job.clip_id),
+                None,
+            )
+            if clip is None:
+                return None
             return _fingerprint(
                 _export_identity_payload(
-                    clips=clips_manifest.clips,
+                    clip=clip,
                     project_assets=project.source_assets,
                     project_revision=project.revision,
                     clips_revision=clips_manifest.revision,
@@ -508,6 +631,12 @@ class ProjectService:
     def _prepare_clip_export(self, job: QueueJob) -> JobExecutionPlan:
         project = self.repositories.project.load(job.project_id)
         clips_manifest = self.repositories.clips.load(job.project_id)
+        clip = next(
+            (item for item in clips_manifest.clips if item.clip_id == job.clip_id),
+            None,
+        )
+        if clip is None:
+            raise KeyError(f"clip no longer exists: {job.clip_id}")
         video_path = _asset_path(project.source_assets, "video")
         if video_path is None or not video_path.is_file():
             raise FileNotFoundError("physical MP4 source is missing")
@@ -523,7 +652,6 @@ class ProjectService:
                             "clip_id": clip.clip_id,
                             **_authoritative_interval(clip),
                         }
-                        for clip in clips_manifest.clips
                     ]
                 },
                 ensure_ascii=False,
@@ -541,41 +669,53 @@ class ProjectService:
             str(manifest_path),
             "--output-dir",
             str(output_dir),
+            "--allow-subset",
         )
         return JobExecutionPlan(
             commands=(command,),
-            validate=lambda: _validate_clip_export_outputs(
-                clips_manifest.clips, output_dir
-            ),
+            validate=lambda: _validate_clip_export_outputs((clip,), output_dir),
         )
 
-    def _attempt_directory(
-        self, project_id: str, job_id: str, number: int
-    ) -> Path:
+    def _attempt_directory(self, project_id: str, job_id: str, number: int) -> Path:
         return self.projects_root / project_id / "jobs" / job_id / f"attempt-{number}"
 
-    def _publish_queue(self, project_id: str) -> JobsManifest:
+    @contextmanager
+    def _state_guard(self, project_id: str) -> Iterator[None]:
+        """Serialize project/clips/jobs snapshots before acquiring queue state."""
         with self._publication_lock:
-            current = self.repositories.jobs.load(project_id)
-            jobs = tuple(
-                job.to_dict()
-                for job in self.queue.jobs()
-                if job.project_id == project_id
-            )
-            order = tuple(
-                job_id
-                for job_id in self.queue.queue_order()
-                if self.queue.get(job_id).project_id == project_id
-            )
-            return self.repositories.jobs.update(
-                project_id,
-                expected_revision=current.revision,
-                mutate=lambda manifest: replace(
-                    manifest,
-                    jobs=jobs,
-                    queue_order=order,
-                ),
-            )
+            with ExitStack() as stack:
+                for repository in (
+                    self.repositories.project,
+                    self.repositories.clips,
+                    self.repositories.jobs,
+                ):
+                    stack.enter_context(repository.lock_for(project_id))
+                stack.enter_context(self.queue.process_lock)
+                yield
+
+    def _publish_queue(self, project_id: str) -> JobsManifest:
+        with self._state_guard(project_id):
+            return self._publish_queue_locked(project_id)
+
+    def _publish_queue_locked(self, project_id: str) -> JobsManifest:
+        current = self.repositories.jobs.load(project_id)
+        jobs = tuple(
+            job.to_dict() for job in self.queue.jobs() if job.project_id == project_id
+        )
+        order = tuple(
+            job_id
+            for job_id in self.queue.queue_order()
+            if self.queue.get(job_id).project_id == project_id
+        )
+        return self.repositories.jobs.update(
+            project_id,
+            expected_revision=current.revision,
+            mutate=lambda manifest: replace(
+                manifest,
+                jobs=jobs,
+                queue_order=order,
+            ),
+        )
 
 
 def _select_clips(
@@ -688,21 +828,16 @@ def _job_identity_payload(
 
 def _export_identity_payload(
     *,
-    clips: Sequence[ClipDefinition],
+    clip: ClipDefinition,
     project_assets: Mapping[str, object],
     project_revision: int,
     clips_revision: int,
 ) -> Mapping[str, object]:
     return {
         "job_type": "clip_export",
-        "clip_intervals": [
-            {
-                "clip_id": clip.clip_id,
-                "analysis_revision": clip.analysis_revision,
-                **_authoritative_interval(clip),
-            }
-            for clip in clips
-        ],
+        "clip_id": clip.clip_id,
+        "analysis_revision": clip.analysis_revision,
+        "clip_interval": _authoritative_interval(clip),
         "source_assets": _asset_fingerprints(project_assets),
         "project_manifest_revision": project_revision,
         "clips_manifest_revision": clips_revision,
@@ -721,9 +856,7 @@ def _validate_clip_export_outputs(
         payload = json.loads(frame_map_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return AdapterResult.failed(f"invalid clip export frame map: {exc}")
-    mapped = {
-        str(item.get("clip_id")): item for item in payload.get("clips", ())
-    }
+    mapped = {str(item.get("clip_id")): item for item in payload.get("clips", ())}
     outputs: dict[str, str] = {}
     digest = sha256(frame_map_path.read_bytes())
     for clip in clips:

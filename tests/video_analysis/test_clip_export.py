@@ -153,12 +153,43 @@ def test_export_video_clips_reencodes_source_pts_ranges_atomically(
 
     assert [path.name for path in paths] == ["clip-0001.mp4", "clip-0002.mp4"]
     assert all(abs(_probe_duration(path, ffmpeg) - 2.0) < 0.25 for path in paths)
-    sidecar = json.loads(
-        (output / "clip_frame_map.json").read_text(encoding="utf-8")
-    )
+    sidecar = json.loads((output / "clip_frame_map.json").read_text(encoding="utf-8"))
     assert [len(item["frames"]) for item in sidecar["clips"]] == [20, 20]
     assert output.is_dir()
     assert not list(tmp_path.glob(".clips.tmp-*"))
+
+
+def test_export_video_clips_can_publish_one_requested_subinterval(
+    tmp_path: Path,
+) -> None:
+    video, ffmpeg = _make_ffv1_video(tmp_path)
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": "clip-0002",
+                "source_start_pts": 2000,
+                "source_end_pts_exclusive": 4000,
+                "source_time_base": {"numerator": 1, "denominator": 1000},
+            }
+        ],
+    )
+    output = tmp_path / "selected"
+
+    paths = export_video_clips(
+        video,
+        manifest,
+        output,
+        ffmpeg_executable=ffmpeg,
+        require_full_source_partition=False,
+    )
+
+    assert [path.name for path in paths] == ["clip-0002.mp4"]
+    sidecar = json.loads((output / "clip_frame_map.json").read_text(encoding="utf-8"))
+    assert sidecar["full_source_partition"] is False
+    assert [item["pts"] for item in sidecar["clips"][0]["frames"]] == list(
+        range(2000, 4000, 100)
+    )
 
 
 def test_export_video_clips_seeks_absolute_nonzero_source_pts(tmp_path: Path) -> None:
@@ -230,7 +261,9 @@ def test_export_video_clips_preserves_destination_created_during_publish(
         (destination / "sentinel.txt").write_text("keep", encoding="utf-8")
         original_publish(temporary_dir, destination, strategy=strategy)
 
-    monkeypatch.setattr(clip_export, "_publish_output_directory", create_destination_before_publish)
+    monkeypatch.setattr(
+        clip_export, "_publish_output_directory", create_destination_before_publish
+    )
 
     with pytest.raises(FileExistsError):
         export_video_clips(video, manifest, output, ffmpeg_executable=ffmpeg)
@@ -251,7 +284,9 @@ def test_export_video_clips_reports_temporary_cleanup_failure(
         assert not ignore_errors
         raise OSError("simulated cleanup failure")
 
-    monkeypatch.setattr("cadscene.video_analysis.clip_export.shutil.rmtree", fail_remove)
+    monkeypatch.setattr(
+        "cadscene.video_analysis.clip_export.shutil.rmtree", fail_remove
+    )
     frame_index = DecodedFrameIndex(
         Fraction(1, 1000),
         tuple(
@@ -284,7 +319,9 @@ def test_export_video_clips_releases_reservation_when_temp_creation_fails(
     )
 
     with pytest.raises(OSError, match="simulated temp creation failure"):
-        export_video_clips(video, manifest, tmp_path / "clips", ffmpeg_executable=ffmpeg)
+        export_video_clips(
+            video, manifest, tmp_path / "clips", ffmpeg_executable=ffmpeg
+        )
 
     assert not list(tmp_path.glob(".clips.lock"))
 
@@ -308,7 +345,9 @@ def test_export_video_clips_rejects_unavailable_publication_before_encoding(
     monkeypatch.setattr(clip_export.tempfile, "mkdtemp", should_not_run)
 
     with pytest.raises(OSError, match="atomic no-clobber publication is unavailable"):
-        export_video_clips(video, manifest, tmp_path / "clips", ffmpeg_executable=ffmpeg)
+        export_video_clips(
+            video, manifest, tmp_path / "clips", ffmpeg_executable=ffmpeg
+        )
 
     assert not list(tmp_path.glob(".clips.lock"))
     assert not list(tmp_path.glob(".clips.tmp-*"))
@@ -427,6 +466,28 @@ def test_adjacent_export_maps_partition_source_frames_once() -> None:
     assert mapped == [(frame.ordinal, frame.pts) for frame in frame_index.frames]
 
 
+def test_subset_frame_map_keeps_exact_requested_frames_without_full_source_claim() -> (
+    None
+):
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        tuple(
+            DecodedFrameTimestamp(ordinal, pts, 40, "pts")
+            for ordinal, pts in enumerate((5000, 5040, 5080, 5120))
+        ),
+    )
+    selected = [clip_export.ExportClip("clip-0002", 5080, 5160, frame_index.time_base)]
+
+    with pytest.raises(ValueError, match="partition"):
+        clip_export.build_clip_frame_map(frame_index, selected)
+    sidecar = clip_export.build_clip_frame_map(
+        frame_index, selected, require_full_source_partition=False
+    )
+
+    assert [item["pts"] for item in sidecar["clips"][0]["frames"]] == [5080, 5120]
+    assert sidecar["full_source_partition"] is False
+
+
 @pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
 def test_publish_output_directory_maps_linux_existing_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int
@@ -446,7 +507,9 @@ def test_publish_output_directory_maps_linux_existing_destination(
         clip_export._publish_output_directory(temporary, output, strategy="linux")
 
 
-@pytest.mark.parametrize("preset,crf", [("ultrafast", -1), ("unknown", 18), ("fast", 52)])
+@pytest.mark.parametrize(
+    "preset,crf", [("ultrafast", -1), ("unknown", 18), ("fast", 52)]
+)
 def test_export_video_clips_rejects_invalid_x264_options(
     tmp_path: Path, preset: str, crf: int
 ) -> None:
@@ -519,9 +582,7 @@ def test_load_export_clips_uses_exact_pts_below_sixty_not_rounded_seconds(
 
     assert len(clips) == 1
     assert (
-        Fraction(
-            clips[0].source_end_pts_exclusive - clips[0].source_start_pts
-        )
+        Fraction(clips[0].source_end_pts_exclusive - clips[0].source_start_pts)
         * clips[0].source_time_base
         < 60
     )

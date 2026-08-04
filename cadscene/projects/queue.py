@@ -7,12 +7,14 @@ import signal
 import threading
 import time
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
+from uuid import uuid4
 
 from .adapters import AdapterProgress
 
 
 RESOURCE_CLASSES = ("heavy_compute", "light_compute", "media_io", "control")
 ACTIVE_STATUSES = {"preparing", "running", "validating"}
+RESOURCE_HOLDING_STATUSES = ACTIVE_STATUSES | {"cancelling"}
 TERMINAL_STATUSES = {
     "success",
     "failed",
@@ -32,6 +34,7 @@ class AttemptRecord:
     command_fingerprint: str | None = None
     task_token: str | None = None
     log_path: str | None = None
+    worker_claim_token: str | None = None
 
     def __post_init__(self) -> None:
         if self.number < 1:
@@ -48,6 +51,7 @@ class AttemptRecord:
             "command_fingerprint": self.command_fingerprint,
             "task_token": self.task_token,
             "log_path": self.log_path,
+            "worker_claim_token": self.worker_claim_token,
         }
 
     @classmethod
@@ -60,7 +64,20 @@ class AttemptRecord:
             command_fingerprint=_optional_string(value.get("command_fingerprint")),
             task_token=_optional_string(value.get("task_token")),
             log_path=_optional_string(value.get("log_path")),
+            worker_claim_token=_optional_string(value.get("worker_claim_token")),
         )
+
+
+@dataclass(frozen=True)
+class CancelReservation:
+    job_id: str
+    attempt_number: int | None
+    claim_token: str | None
+    pid: int | None
+    process_start_time: str | None
+    command_fingerprint: str | None
+    task_token: str | None
+    controller: Callable[[], None] | None
 
 
 @dataclass(frozen=True)
@@ -196,13 +213,17 @@ class QueueJob:
 
 
 class TaskQueue(Protocol):
-    def submit(self, job: QueueJob) -> QueueJob: ...
+    def submit(self, job: QueueJob) -> QueueJob:
+        ...
 
-    def status(self, job_id: str) -> str: ...
+    def status(self, job_id: str) -> str:
+        ...
 
-    def running_ids(self) -> list[str]: ...
+    def running_ids(self) -> list[str]:
+        ...
 
-    def cancel(self, job_id: str) -> QueueJob: ...
+    def cancel(self, job_id: str) -> QueueJob:
+        ...
 
 
 class LocalResourceQueue:
@@ -212,21 +233,34 @@ class LocalResourceQueue:
         capacities: Mapping[str, int] | None = None,
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
         process_tree_terminator: Callable[[int], None] | None = None,
+        process_alive: Callable[[int], bool] | None = None,
+        claim_token_factory: Callable[[], str] | None = None,
     ) -> None:
         configured = {name: 1 for name in RESOURCE_CLASSES}
         configured.update(capacities or {})
         if set(configured) != set(RESOURCE_CLASSES):
             raise ValueError("capacities must use only static resource classes")
-        if any(isinstance(value, bool) or int(value) < 1 for value in configured.values()):
+        if any(
+            isinstance(value, bool) or int(value) < 1 for value in configured.values()
+        ):
             raise ValueError("resource capacities must be positive integers")
         self.capacities = {name: int(value) for name, value in configured.items()}
         self._jobs: dict[str, QueueJob] = {}
         self._queue_order: list[str] = []
         self._terminate_tree = process_tree_terminator or terminate_process_tree
         self._process_probe = process_probe or probe_process_identity
-        self._process_controllers: dict[int, Callable[[], None]] = {}
-        self._execution_claims: set[str] = set()
+        self._process_alive = process_alive or _pid_alive
+        self._claim_token_factory = claim_token_factory or (lambda: uuid4().hex)
+        self._process_controllers: dict[
+            tuple[str, int, str], tuple[int, Callable[[], None]]
+        ] = {}
+        self._execution_claims: dict[str, tuple[int, str]] = {}
+        self._adopted_attempts: dict[str, tuple[int, str]] = {}
         self._lock = threading.RLock()
+
+    @property
+    def process_lock(self) -> threading.RLock:
+        return self._lock
 
     @classmethod
     def restore(
@@ -238,12 +272,14 @@ class LocalResourceQueue:
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
         current_fingerprint_resolver: Callable[[QueueJob], str | None] | None = None,
         process_tree_terminator: Callable[[int], None] | None = None,
+        process_alive: Callable[[int], bool] | None = None,
         schedule: bool = True,
     ) -> LocalResourceQueue:
         queue = cls(
             capacities=capacities,
             process_probe=process_probe,
             process_tree_terminator=process_tree_terminator,
+            process_alive=process_alive,
         )
         records = [
             item if isinstance(item, QueueJob) else QueueJob.from_dict(item)
@@ -269,8 +305,7 @@ class LocalResourceQueue:
                     if current.status in {"stale_input", "superseded"}:
                         continue
                     if any(
-                        queue._jobs[dependency].status
-                        in {"stale_input", "superseded"}
+                        queue._jobs[dependency].status in {"stale_input", "superseded"}
                         for dependency in current.depends_on_job_ids
                     ):
                         queue._jobs[job_id] = _invalidated_job(current)
@@ -278,7 +313,7 @@ class LocalResourceQueue:
         probe = process_probe or (lambda _pid: None)
         for job_id in queue._queue_order:
             current = queue._jobs[job_id]
-            if current.status not in {"preparing", "running", "validating"}:
+            if current.status not in RESOURCE_HOLDING_STATUSES:
                 continue
             attempt = current.attempts[-1] if current.attempts else None
             if attempt is None or attempt.pid is None:
@@ -291,12 +326,39 @@ class LocalResourceQueue:
                 "command_fingerprint": attempt.command_fingerprint,
                 "task_token": attempt.task_token,
             }
-            if (
+            identity_matches = not (
                 any(value in (None, "") for value in expected.values())
                 or observed is None
                 or any(observed.get(key) != value for key, value in expected.items())
-            ):
+            )
+            if current.status == "cancelling":
+                cleanup_error: str | None = None
+                if identity_matches:
+                    try:
+                        queue._terminate_tree(attempt.pid)
+                    except Exception as exc:
+                        cleanup_error = str(exc)
+                queue._jobs[job_id] = replace(
+                    current.with_status("interrupted"),
+                    error=cleanup_error
+                    or "cancellation interrupted by service restart",
+                )
+            elif not identity_matches:
                 queue._jobs[job_id] = current.with_status("interrupted")
+            else:
+                claim_token = current.attempts[-1].worker_claim_token or uuid4().hex
+                if current.attempts[-1].worker_claim_token is None:
+                    adopted_attempt = replace(
+                        current.attempts[-1], worker_claim_token=claim_token
+                    )
+                    current = replace(
+                        current,
+                        attempts=(*current.attempts[:-1], adopted_attempt),
+                    )
+                    queue._jobs[job_id] = current
+                lease = (current.attempts[-1].number, claim_token)
+                queue._execution_claims[job_id] = lease
+                queue._adopted_attempts[job_id] = lease
         if schedule:
             queue._schedule()
         return queue
@@ -321,69 +383,93 @@ class LocalResourceQueue:
             process_probe=process_probe,
             current_fingerprint_resolver=current_fingerprint_resolver,
             process_tree_terminator=self._terminate_tree,
+            process_alive=self._process_alive,
             schedule=False,
         )
-        retained_order = [
-            job_id
-            for job_id in self._queue_order
-            if self._jobs[job_id].project_id not in incoming_projects
-        ]
-        retained_jobs = {job_id: self._jobs[job_id] for job_id in retained_order}
-        retained_controllers = {
-            pid: controller
-            for pid, controller in self._process_controllers.items()
-            if any(
-                attempt.pid == pid
-                for job in retained_jobs.values()
-                for attempt in job.attempts
-            )
-        }
-        self._jobs = {**retained_jobs, **restored._jobs}
-        self._queue_order = [*retained_order, *restored._queue_order]
-        self._process_controllers = retained_controllers
-        if process_probe is not None:
-            self._process_probe = process_probe
-        self._schedule()
-        return self
+        with self._lock:
+            retained_order = [
+                job_id
+                for job_id in self._queue_order
+                if self._jobs[job_id].project_id not in incoming_projects
+            ]
+            retained_jobs = {job_id: self._jobs[job_id] for job_id in retained_order}
+            retained_controllers = {
+                lease: record
+                for lease, record in self._process_controllers.items()
+                if lease[0] in retained_jobs
+            }
+            retained_claims = {
+                job_id: lease
+                for job_id, lease in self._execution_claims.items()
+                if job_id in retained_jobs
+            }
+            retained_adopted = {
+                job_id: lease
+                for job_id, lease in self._adopted_attempts.items()
+                if job_id in retained_jobs
+            }
+            self._jobs = {**retained_jobs, **restored._jobs}
+            self._queue_order = [*retained_order, *restored._queue_order]
+            self._process_controllers = retained_controllers
+            self._execution_claims = {
+                **retained_claims,
+                **restored._execution_claims,
+            }
+            self._adopted_attempts = {
+                **retained_adopted,
+                **restored._adopted_attempts,
+            }
+            if process_probe is not None:
+                self._process_probe = process_probe
+            self._schedule_locked()
+            return self
 
     def submit(self, job: QueueJob) -> QueueJob:
-        for existing in self._jobs.values():
-            if existing.idempotency_key == job.idempotency_key:
-                if (
-                    existing.input_fingerprint != job.input_fingerprint
-                    or existing.adapter_name != job.adapter_name
-                    or existing.adapter_version != job.adapter_version
-                ):
-                    raise ValueError("idempotency key collision across input or adapter identity")
-                return existing
-        if job.job_id in self._jobs:
-            raise ValueError(f"duplicate job_id: {job.job_id}")
-        missing = set(job.depends_on_job_ids) - set(self._jobs)
-        if missing:
-            raise ValueError(f"unknown dependencies: {sorted(missing)}")
-        self._jobs[job.job_id] = job
-        self._queue_order.append(job.job_id)
-        self._schedule()
-        return self._jobs[job.job_id]
+        with self._lock:
+            for existing in self._jobs.values():
+                if existing.idempotency_key == job.idempotency_key:
+                    if (
+                        existing.input_fingerprint != job.input_fingerprint
+                        or existing.adapter_name != job.adapter_name
+                        or existing.adapter_version != job.adapter_version
+                    ):
+                        raise ValueError(
+                            "idempotency key collision across input or adapter identity"
+                        )
+                    return existing
+            if job.job_id in self._jobs:
+                raise ValueError(f"duplicate job_id: {job.job_id}")
+            missing = set(job.depends_on_job_ids) - set(self._jobs)
+            if missing:
+                raise ValueError(f"unknown dependencies: {sorted(missing)}")
+            self._jobs[job.job_id] = job
+            self._queue_order.append(job.job_id)
+            self._schedule_locked()
+            return self._jobs[job.job_id]
 
     def status(self, job_id: str) -> str:
-        return self._jobs[job_id].status
+        with self._lock:
+            return self._jobs[job_id].status
 
     def get(self, job_id: str) -> QueueJob:
-        return self._jobs[job_id]
+        with self._lock:
+            return self._jobs[job_id]
 
     def jobs(self) -> tuple[QueueJob, ...]:
-        return tuple(self._jobs[job_id] for job_id in self._queue_order)
+        with self._lock:
+            return tuple(self._jobs[job_id] for job_id in self._queue_order)
 
     def queue_order(self) -> tuple[str, ...]:
-        return tuple(self._queue_order)
+        with self._lock:
+            return tuple(self._queue_order)
 
     def running_ids(self) -> list[str]:
-        return [
-            job_id
-            for job_id in self._queue_order
-            if self._jobs[job_id].status in ACTIVE_STATUSES
-        ]
+        with self._lock:
+            return [
+                job_id
+                for job_id in self._queue_order
+                if self._jobs[job_id].status in ACTIVE_STATUSES
+            ]
 
     def claim_next_unstarted(self) -> QueueJob | None:
         """Atomically claim one queue-reserved attempt for a local worker."""
@@ -393,41 +479,66 @@ class LocalResourceQueue:
                 attempt = current.attempts[-1] if current.attempts else None
                 if (
                     current.status in ACTIVE_STATUSES
-                    and (attempt is None or attempt.pid is None)
+                    and attempt is not None
+                    and attempt.pid is None
                     and job_id not in self._execution_claims
                 ):
-                    self._execution_claims.add(job_id)
-                    return current
+                    token = self._claim_token_factory()
+                    claimed_attempt = replace(attempt, worker_claim_token=token)
+                    claimed = replace(
+                        current,
+                        attempts=(*current.attempts[:-1], claimed_attempt),
+                    )
+                    self._jobs[job_id] = claimed
+                    self._execution_claims[job_id] = (claimed_attempt.number, token)
+                    return claimed
         return None
 
-    def release_execution_claim(self, job_id: str) -> None:
+    def release_execution_claim(
+        self, job_id: str, *, attempt_number: int, claim_token: str | None
+    ) -> None:
         with self._lock:
-            self._execution_claims.discard(job_id)
+            self._require_claim_locked(job_id, attempt_number, claim_token)
+            self._execution_claims.pop(job_id, None)
+            self._adopted_attempts.pop(job_id, None)
 
-    def mark_validating(self, job_id: str) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status != "running":
-            raise ValueError("only running jobs can begin validation")
-        self._jobs[job_id] = current.with_status("validating")
-        return self._jobs[job_id]
+    def mark_validating(
+        self, job_id: str, *, attempt_number: int, claim_token: str | None
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            if current.status != "running":
+                raise ValueError("only running jobs can begin validation")
+            self._jobs[job_id] = current.with_status("validating")
+            return self._jobs[job_id]
 
     def update_progress(
-        self, job_id: str, progress: AdapterProgress
+        self,
+        job_id: str,
+        progress: AdapterProgress,
+        *,
+        attempt_number: int,
+        claim_token: str | None,
     ) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status not in ACTIVE_STATUSES:
-            raise ValueError("progress can be updated only for an active job")
-        self._jobs[job_id] = replace(
-            current,
-            stage=progress.stage,
-            progress=progress.to_dict(),
-        )
-        return self._jobs[job_id]
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            self._jobs[job_id] = replace(
+                current,
+                stage=progress.stage,
+                progress=progress.to_dict(),
+            )
+            return self._jobs[job_id]
 
     def record_process(
         self,
         job_id: str,
         *,
+        attempt_number: int,
+        claim_token: str | None,
         pid: int,
         process_start_time: str,
         command_fingerprint: str,
@@ -436,9 +547,9 @@ class LocalResourceQueue:
         terminate: Callable[[], None] | None = None,
     ) -> QueueJob:
         with self._lock:
-            current = self._jobs[job_id]
-            if current.status not in ACTIVE_STATUSES or not current.attempts:
-                raise ValueError("process identity requires an active attempt")
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
             previous = current.attempts[-1]
             if previous.pid is not None:
                 raise ValueError("attempt process identity is immutable once recorded")
@@ -457,191 +568,326 @@ class LocalResourceQueue:
                 stage="running",
             )
             if terminate is not None:
-                self._process_controllers[pid] = terminate
+                self._process_controllers[
+                    (job_id, attempt_number, str(claim_token))
+                ] = (
+                    pid,
+                    terminate,
+                )
             return self._jobs[job_id]
 
     def register_process_controller(
-        self, job_id: str, terminate: Callable[[], None]
+        self,
+        job_id: str,
+        terminate: Callable[[], None],
+        *,
+        attempt_number: int,
+        claim_token: str | None,
     ) -> None:
         with self._lock:
-            current = self._jobs[job_id]
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
             attempt = current.attempts[-1] if current.attempts else None
             if attempt is None or attempt.pid is None:
-                raise ValueError("process controller requires recorded process identity")
-            self._process_controllers[attempt.pid] = terminate
+                raise ValueError(
+                    "process controller requires recorded process identity"
+                )
+            self._process_controllers[(job_id, attempt_number, str(claim_token))] = (
+                attempt.pid,
+                terminate,
+            )
 
-    def release_process_controller(self, pid: int) -> None:
+    def release_process_controller(
+        self,
+        job_id: str,
+        pid: int,
+        *,
+        attempt_number: int,
+        claim_token: str | None,
+    ) -> None:
         """Forget a completed attempt's in-memory cancellation callback."""
         with self._lock:
-            self._process_controllers.pop(pid, None)
+            lease = self._execution_claims.get(job_id)
+            if lease != (attempt_number, claim_token):
+                return
+            record = self._process_controllers.get(
+                (job_id, attempt_number, str(claim_token))
+            )
+            if record is not None and record[0] == pid:
+                self._process_controllers.pop(
+                    (job_id, attempt_number, str(claim_token)), None
+                )
 
     def mark_success(
         self,
         job_id: str,
         *,
+        attempt_number: int,
+        claim_token: str | None,
         output_revision: str,
         output_fingerprint: str | None = None,
         output_validated: bool = True,
         published_outputs: Mapping[str, str] | None = None,
     ) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status != "validating":
-            raise ValueError("only validating jobs can succeed")
-        self._jobs[job_id] = replace(
-            current,
-            status="success",
-            stage="success",
-            output_revision=output_revision,
-            output_fingerprint=output_fingerprint,
-            output_validated=output_validated,
-            validated_input_fingerprint=(
-                current.input_fingerprint if output_validated else None
-            ),
-            published_outputs=dict(published_outputs or {}),
-            error=None,
-        )
-        self._schedule()
-        return self._jobs[job_id]
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            if current.status != "validating":
+                raise ValueError("only validating jobs can succeed")
+            self._jobs[job_id] = replace(
+                current,
+                status="success",
+                stage="success",
+                output_revision=output_revision,
+                output_fingerprint=output_fingerprint,
+                output_validated=output_validated,
+                validated_input_fingerprint=(
+                    current.input_fingerprint if output_validated else None
+                ),
+                published_outputs=dict(published_outputs or {}),
+                error=None,
+            )
+            self._schedule_locked()
+            return self._jobs[job_id]
 
     def validate_output(
         self, job_id: str, *, current_input_fingerprint: str
     ) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status != "success":
-            raise ValueError("only successful output can be validated")
-        if current.input_fingerprint != current_input_fingerprint:
-            raise ValueError("output does not match current input fingerprint")
-        self._jobs[job_id] = replace(
-            current,
-            output_validated=True,
-            validated_input_fingerprint=current_input_fingerprint,
-        )
-        self._schedule()
-        return self._jobs[job_id]
+        with self._lock:
+            current = self._jobs[job_id]
+            if current.status != "success":
+                raise ValueError("only successful output can be validated")
+            if current.input_fingerprint != current_input_fingerprint:
+                raise ValueError("output does not match current input fingerprint")
+            self._jobs[job_id] = replace(
+                current,
+                output_validated=True,
+                validated_input_fingerprint=current_input_fingerprint,
+            )
+            self._schedule_locked()
+            return self._jobs[job_id]
 
-    def mark_failed(self, job_id: str, error: str) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status not in ACTIVE_STATUSES:
-            raise ValueError("only active jobs can fail")
-        self._jobs[job_id] = replace(
-            current.with_status("failed"), error=error, output_validated=False
-        )
-        self._schedule()
-        return self._jobs[job_id]
+    def mark_failed(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        attempt_number: int,
+        claim_token: str | None,
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            self._jobs[job_id] = replace(
+                current.with_status("failed"), error=error, output_validated=False
+            )
+            self._schedule_locked()
+            return self._jobs[job_id]
 
-    def mark_stale_input(self, job_id: str) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status not in ACTIVE_STATUSES:
-            raise ValueError("only active jobs can become stale")
-        self._jobs[job_id] = replace(
-            current.with_status("stale_input"),
-            output_revision=None,
-            output_fingerprint=None,
-            output_validated=False,
-            validated_input_fingerprint=None,
-            published_outputs={},
-            error=None,
-        )
-        self._schedule()
-        return self._jobs[job_id]
+    def mark_stale_input(
+        self, job_id: str, *, attempt_number: int, claim_token: str | None
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            self._jobs[job_id] = replace(
+                current.with_status("stale_input"),
+                output_revision=None,
+                output_fingerprint=None,
+                output_validated=False,
+                validated_input_fingerprint=None,
+                published_outputs={},
+                error=None,
+            )
+            self._schedule_locked()
+            return self._jobs[job_id]
 
-    def mark_superseded(self, job_id: str) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status in TERMINAL_STATUSES:
-            return current
-        self._jobs[job_id] = replace(
-            current.with_status("superseded"),
-            output_revision=None,
-            output_fingerprint=None,
-            output_validated=False,
-            validated_input_fingerprint=None,
-            published_outputs={},
-            error=None,
-        )
-        self._schedule()
-        return self._jobs[job_id]
+    def mark_superseded(
+        self, job_id: str, *, attempt_number: int, claim_token: str | None
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            self._jobs[job_id] = replace(
+                current.with_status("superseded"),
+                output_revision=None,
+                output_fingerprint=None,
+                output_validated=False,
+                validated_input_fingerprint=None,
+                published_outputs={},
+                error=None,
+            )
+            self._schedule_locked()
+            return self._jobs[job_id]
 
     def cancel(self, job_id: str) -> QueueJob:
-        current = self._jobs[job_id]
-        if current.status in TERMINAL_STATUSES:
-            return current
-        attempt = current.attempts[-1] if current.attempts else None
-        if attempt is not None and attempt.pid is not None:
-            try:
-                controller = self._process_controllers.pop(attempt.pid, None)
-                if controller is not None:
-                    controller()
-                else:
-                    observed = self._process_probe(attempt.pid)
-                    expected = {
-                        "pid": attempt.pid,
-                        "process_start_time": attempt.process_start_time,
-                        "command_fingerprint": attempt.command_fingerprint,
-                        "task_token": attempt.task_token,
-                    }
-                    if (
-                        any(value in (None, "") for value in expected.values())
-                        or observed is None
-                        or any(
-                            observed.get(key) != value
-                            for key, value in expected.items()
-                        )
-                    ):
-                        raise RuntimeError(
-                            "refusing PID fallback because process identity could not be verified"
-                        )
-                    self._terminate_tree(attempt.pid)
-            except Exception as exc:
-                self._jobs[job_id] = replace(
-                    current.with_status("interrupted"),
-                    error=str(exc),
-                    output_revision=None,
-                    output_fingerprint=None,
-                    output_validated=False,
-                    published_outputs={},
+        reservation = self.begin_cancel(job_id)
+        if reservation is None:
+            return self.get(job_id)
+        error: Exception | None = None
+        try:
+            self.terminate_cancel_reservation(reservation)
+        except Exception as exc:
+            error = exc
+        return self.complete_cancel(reservation, error=error)
+
+    def begin_cancel(self, job_id: str) -> CancelReservation | None:
+        with self._lock:
+            current = self._jobs[job_id]
+            if current.status in TERMINAL_STATUSES:
+                return None
+            if current.status == "cancelling":
+                raise ValueError("job cancellation is already in progress")
+            attempt = current.attempts[-1] if current.attempts else None
+            number = None if attempt is None else attempt.number
+            claim = self._execution_claims.get(job_id)
+            claim_token = None if claim is None else claim[1]
+            controller_record = (
+                None
+                if number is None or claim_token is None
+                else self._process_controllers.pop(
+                    (job_id, number, str(claim_token)), None
                 )
-                self._schedule()
-                return self._jobs[job_id]
-        self._jobs[job_id] = replace(
-            current.with_status("cancelled"),
-            output_revision=None,
-            output_fingerprint=None,
-            output_validated=False,
-            published_outputs={},
-        )
-        self._schedule()
-        return self._jobs[job_id]
+            )
+            self._jobs[job_id] = current.with_status("cancelling")
+            return CancelReservation(
+                job_id=job_id,
+                attempt_number=number,
+                claim_token=claim_token,
+                pid=None if attempt is None else attempt.pid,
+                process_start_time=None
+                if attempt is None
+                else attempt.process_start_time,
+                command_fingerprint=None
+                if attempt is None
+                else attempt.command_fingerprint,
+                task_token=None if attempt is None else attempt.task_token,
+                controller=None if controller_record is None else controller_record[1],
+            )
+
+    def terminate_cancel_reservation(self, reservation: CancelReservation) -> None:
+        if reservation.pid is None:
+            return
+        if reservation.controller is not None:
+            reservation.controller()
+            return
+        observed = self._process_probe(reservation.pid)
+        expected = {
+            "pid": reservation.pid,
+            "process_start_time": reservation.process_start_time,
+            "command_fingerprint": reservation.command_fingerprint,
+            "task_token": reservation.task_token,
+        }
+        if (
+            any(value in (None, "") for value in expected.values())
+            or observed is None
+            or any(observed.get(key) != value for key, value in expected.items())
+        ):
+            raise RuntimeError(
+                "refusing PID fallback because process identity could not be verified"
+            )
+        self._terminate_tree(reservation.pid)
+
+    def complete_cancel(
+        self, reservation: CancelReservation, *, error: Exception | None
+    ) -> QueueJob:
+        with self._lock:
+            current = self._jobs[reservation.job_id]
+            attempt = current.attempts[-1] if current.attempts else None
+            if (
+                current.status != "cancelling"
+                or (None if attempt is None else attempt.number)
+                != reservation.attempt_number
+            ):
+                raise ValueError("cancel reservation no longer owns the active attempt")
+            status = "interrupted" if error is not None else "cancelled"
+            self._jobs[reservation.job_id] = replace(
+                current.with_status(status),
+                error=None if error is None else str(error),
+                output_revision=None,
+                output_fingerprint=None,
+                output_validated=False,
+                validated_input_fingerprint=None,
+                published_outputs={},
+            )
+            self._schedule_locked()
+            return self._jobs[reservation.job_id]
 
     def retry(self, job_id: str, attempt: AttemptRecord) -> QueueJob:
+        with self._lock:
+            current = self._jobs[job_id]
+            if job_id in self._execution_claims:
+                raise ValueError("old attempt claim is still active")
+            if current.status not in {
+                "failed",
+                "interrupted",
+                "cancelled",
+                "stale_input",
+                "superseded",
+            }:
+                raise ValueError("only terminal unsuccessful jobs can be retried")
+            previous = current.attempts[-1] if current.attempts else None
+            if (
+                previous is not None
+                and previous.pid is not None
+                and self._process_alive(previous.pid)
+            ):
+                raise ValueError("old process is not proven gone; retry is blocked")
+            retried = replace(
+                current.with_attempt(attempt),
+                status="queued",
+                stage="queued",
+                output_revision=None,
+                output_fingerprint=None,
+                output_validated=False,
+                validated_input_fingerprint=None,
+                published_outputs={},
+                error=None,
+            )
+            self._jobs[job_id] = retried
+            self._schedule_locked()
+            return self._jobs[job_id]
+
+    def _require_claim_locked(
+        self, job_id: str, attempt_number: int, claim_token: str | None
+    ) -> QueueJob:
+        if not claim_token or self._execution_claims.get(job_id) != (
+            attempt_number,
+            claim_token,
+        ):
+            raise ValueError("attempt lease does not match the current worker claim")
         current = self._jobs[job_id]
-        if current.status not in {
-            "failed",
-            "interrupted",
-            "cancelled",
-            "stale_input",
-            "superseded",
-        }:
-            raise ValueError("only terminal unsuccessful jobs can be retried")
-        retried = replace(
-            current.with_attempt(attempt),
-            status="queued",
-            stage="queued",
-            output_revision=None,
-            output_fingerprint=None,
-            output_validated=False,
-            validated_input_fingerprint=None,
-            published_outputs={},
-            error=None,
-        )
-        self._jobs[job_id] = retried
-        self._schedule()
-        return self._jobs[job_id]
+        attempt = current.attempts[-1] if current.attempts else None
+        if (
+            attempt is None
+            or attempt.number != attempt_number
+            or attempt.worker_claim_token != claim_token
+        ):
+            raise ValueError("attempt lease does not match the current attempt")
+        return current
+
+    def _require_active_claim_locked(
+        self, job_id: str, attempt_number: int, claim_token: str | None
+    ) -> QueueJob:
+        current = self._require_claim_locked(job_id, attempt_number, claim_token)
+        if current.status not in ACTIVE_STATUSES:
+            raise ValueError("transition requires an active attempt")
+        return current
 
     def _schedule(self) -> None:
+        with self._lock:
+            self._schedule_locked()
+
+    def _schedule_locked(self) -> None:
         usage = {name: 0 for name in RESOURCE_CLASSES}
         exclusive = set()
         for current in self._jobs.values():
-            if current.status in ACTIVE_STATUSES:
+            if current.status in RESOURCE_HOLDING_STATUSES:
                 usage[current.resource_class] += 1
                 if current.exclusive_key is not None:
                     exclusive.add(current.exclusive_key)
@@ -666,6 +912,52 @@ class LocalResourceQueue:
             if current.exclusive_key is not None:
                 exclusive.add(current.exclusive_key)
 
+    def poll_adopted_processes(self) -> tuple[str, ...]:
+        with self._lock:
+            snapshots = tuple(
+                (job_id, lease, self._jobs[job_id])
+                for job_id, lease in self._adopted_attempts.items()
+            )
+        exited: list[tuple[str, int, str]] = []
+        for job_id, (attempt_number, claim_token), current in snapshots:
+            attempt = current.attempts[-1]
+            observed = None if attempt.pid is None else self._process_probe(attempt.pid)
+            expected = {
+                "pid": attempt.pid,
+                "process_start_time": attempt.process_start_time,
+                "command_fingerprint": attempt.command_fingerprint,
+                "task_token": attempt.task_token,
+            }
+            if observed is None or any(
+                observed.get(key) != value for key, value in expected.items()
+            ):
+                exited.append((job_id, attempt_number, claim_token))
+        reaped: list[str] = []
+        with self._lock:
+            for job_id, attempt_number, claim_token in exited:
+                if self._adopted_attempts.get(job_id) != (
+                    attempt_number,
+                    claim_token,
+                ):
+                    continue
+                current = self._jobs[job_id]
+                if current.status in ACTIVE_STATUSES:
+                    self._jobs[job_id] = replace(
+                        current.with_status("interrupted"),
+                        error="adopted process exited without a validated completion sidecar",
+                        output_revision=None,
+                        output_fingerprint=None,
+                        output_validated=False,
+                        validated_input_fingerprint=None,
+                        published_outputs={},
+                    )
+                self._adopted_attempts.pop(job_id, None)
+                self._execution_claims.pop(job_id, None)
+                reaped.append(job_id)
+            if reaped:
+                self._schedule_locked()
+        return tuple(reaped)
+
     def _dependencies_valid(self, job: QueueJob) -> bool:
         for dependency_id in job.depends_on_job_ids:
             dependency = self._jobs[dependency_id]
@@ -679,17 +971,16 @@ class LocalResourceQueue:
 def terminate_process_tree(pid: int, *, timeout: float = 5.0) -> None:
     if pid <= 0:
         raise ValueError("pid must be positive")
+    if os.name == "nt":
+        _terminate_windows_process_tree(pid, timeout=timeout)
+        return
     descendants = _descendant_pids(pid)
     targets = {pid, *descendants}
-    if os.name == "nt":
-        for target in (*descendants, pid):
-            _terminate_windows_process(target)
-    else:
-        try:
-            process_group = os.getpgid(pid)
-        except ProcessLookupError:
-            return
-        os.killpg(process_group, signal.SIGTERM)
+    try:
+        process_group = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    os.killpg(process_group, signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and any(_pid_alive(item) for item in targets):
         time.sleep(0.02)
@@ -716,11 +1007,70 @@ def terminate_process_tree(pid: int, *, timeout: float = 5.0) -> None:
         )
 
 
+def _terminate_windows_process_tree(
+    pid: int,
+    *,
+    timeout: float,
+    descendant_resolver: Callable[[int], set[int]] | None = None,
+    alive: Callable[[int], bool] | None = None,
+    terminate: Callable[[int], None] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    """Fallback tree cancellation with repeated discovery and quiescence proof."""
+    descendants = descendant_resolver or _descendant_pids
+    is_alive = alive or _pid_alive
+    terminate_one = terminate or _terminate_windows_process
+    pause = sleep or time.sleep
+    deadline = time.monotonic() + timeout
+    known: set[int] = set()
+    quiet_descendant_scans = 0
+    while time.monotonic() < deadline and is_alive(pid):
+        discovered = descendants(pid)
+        known.update(discovered)
+        live_children = {item for item in discovered if is_alive(item)}
+        for child in sorted(live_children):
+            terminate_one(child)
+        rediscovered = {item for item in descendants(pid) if is_alive(item)}
+        known.update(rediscovered)
+        for child in sorted(rediscovered):
+            terminate_one(child)
+        if not live_children and not rediscovered:
+            quiet_descendant_scans += 1
+            if quiet_descendant_scans >= 2:
+                terminate_one(pid)
+                break
+        else:
+            quiet_descendant_scans = 0
+        pause(0.02)
+    targets = {pid, *known}
+    quiet_tree_scans = 0
+    while time.monotonic() < deadline:
+        remaining = {item for item in targets if is_alive(item)}
+        if not remaining:
+            quiet_tree_scans += 1
+            if quiet_tree_scans >= 2:
+                return
+        else:
+            quiet_tree_scans = 0
+            for item in sorted(remaining - {pid}):
+                terminate_one(item)
+            if pid in remaining:
+                terminate_one(pid)
+        pause(0.02)
+    remaining = {item for item in targets if is_alive(item)}
+    if remaining:
+        raise RuntimeError(
+            f"process tree did not terminate; remaining PIDs: {sorted(remaining)}"
+        )
+
+
 def probe_process_identity(pid: int) -> Mapping[str, object] | None:
     """Read the durable identity embedded in an executor wrapper command line."""
     try:
         import psutil
-
+    except ImportError:
+        return None
+    try:
         process = psutil.Process(pid)
         command = process.cmdline()
         values: dict[str, object] = {
@@ -736,20 +1086,22 @@ def probe_process_identity(pid: int) -> Mapping[str, object] | None:
             except (ValueError, IndexError):
                 values[key] = None
         return values
-    except (ImportError, OSError):
+    except (OSError, psutil.Error):
         return None
 
 
 def _terminate_windows_process(pid: int) -> None:
     try:
         import psutil
-
-        psutil.Process(pid).terminate()
-        return
     except ImportError:
-        pass
-    except OSError:
-        return
+        psutil = None
+    if psutil is not None:
+        try:
+            psutil.Process(pid).terminate()
+            return
+        except (OSError, psutil.Error):
+            if not _pid_alive(pid):
+                return
     import ctypes
 
     handle = ctypes.windll.kernel32.OpenProcess(0x0001, False, pid)
@@ -767,38 +1119,44 @@ def _terminate_windows_process(pid: int) -> None:
 def _descendant_pids(pid: int) -> set[int]:
     try:
         import psutil
-
-        return {child.pid for child in psutil.Process(pid).children(recursive=True)}
-    except (ImportError, OSError):
-        if os.name == "nt":
-            return set()
-        parents: dict[int, int] = {}
-        for stat in Path("/proc").glob("[0-9]*/stat"):
-            try:
-                fields = stat.read_text(encoding="ascii").split()
-                parents[int(fields[0])] = int(fields[3])
-            except (OSError, ValueError, IndexError):
-                continue
-        descendants: set[int] = set()
-        pending = [pid]
-        while pending:
-            parent = pending.pop()
-            children = [child for child, owner in parents.items() if owner == parent]
-            descendants.update(children)
-            pending.extend(children)
-        return descendants
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            return {child.pid for child in psutil.Process(pid).children(recursive=True)}
+        except (OSError, psutil.Error):
+            if os.name == "nt":
+                return set()
+    if os.name == "nt":
+        return set()
+    parents: dict[int, int] = {}
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text(encoding="ascii").split()
+            parents[int(fields[0])] = int(fields[3])
+        except (OSError, ValueError, IndexError):
+            continue
+    descendants: set[int] = set()
+    pending = [pid]
+    while pending:
+        parent = pending.pop()
+        children = [child for child, owner in parents.items() if owner == parent]
+        descendants.update(children)
+        pending.extend(children)
+    return descendants
 
 
 def _pid_alive(pid: int) -> bool:
     try:
         import psutil
-
-        process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except ImportError:
-        pass
-    except OSError:
-        return False
+        psutil = None
+    if psutil is not None:
+        try:
+            process = psutil.Process(pid)
+            return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        except (OSError, psutil.Error):
+            return False
     if os.name == "nt":
         import ctypes
 
@@ -807,9 +1165,14 @@ def _pid_alive(pid: int) -> bool:
             return False
         try:
             code = ctypes.c_ulong()
-            return bool(
-                ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            ) and code.value == 259
+            return (
+                bool(
+                    ctypes.windll.kernel32.GetExitCodeProcess(
+                        handle, ctypes.byref(code)
+                    )
+                )
+                and code.value == 259
+            )
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
     try:

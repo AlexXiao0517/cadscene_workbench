@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -65,13 +66,28 @@ def test_each_static_resource_class_has_an_independent_default_capacity() -> Non
 
 def test_dependency_must_be_validated_success_for_current_output() -> None:
     queue = LocalResourceQueue()
-    queue.submit(job("export", resource_class="media_io"))
+    queue.submit(
+        job("export", resource_class="media_io").with_attempt(
+            AttemptRecord(number=1, directory="jobs/export/attempt-1")
+        )
+    )
     queue.submit(job("solve", depends_on_job_ids=("export",)))
 
     assert queue.status("solve") == "queued"
 
-    queue.mark_validating("export")
-    queue.mark_success("export", output_revision="out-1", output_validated=False)
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    queue.mark_validating(
+        "export", attempt_number=lease.number, claim_token=lease.worker_claim_token
+    )
+    queue.mark_success(
+        "export",
+        output_revision="out-1",
+        output_validated=False,
+        attempt_number=lease.number,
+        claim_token=lease.worker_claim_token,
+    )
     assert queue.status("solve") == "queued"
 
     queue.validate_output("export", current_input_fingerprint="input-v1")
@@ -101,10 +117,18 @@ def test_progress_never_invents_a_fraction() -> None:
 
 def test_queue_persists_stage_only_progress_without_fabricated_fraction() -> None:
     queue = LocalResourceQueue()
-    queue.submit(job("a"))
+    queue.submit(
+        job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
 
     updated = queue.update_progress(
-        "a", AdapterProgress(stage="matching", message="matching frames")
+        "a",
+        AdapterProgress(stage="matching", message="matching frames"),
+        attempt_number=lease.number,
+        claim_token=lease.worker_claim_token,
     )
 
     assert updated.stage == "matching"
@@ -178,7 +202,9 @@ def test_cancel_that_cannot_terminate_tree_becomes_interrupted() -> None:
     assert cancelled.error == "descendant remained alive"
 
 
-def test_cancel_refuses_pid_fallback_when_full_process_identity_does_not_match() -> None:
+def test_cancel_refuses_pid_fallback_when_full_process_identity_does_not_match() -> (
+    None
+):
     terminated: list[int] = []
     running = job("a").with_attempt(
         AttemptRecord(
@@ -212,31 +238,64 @@ def test_retry_releases_old_controller_and_uses_only_new_attempt_controller() ->
     calls: list[str] = []
     queue = LocalResourceQueue()
     queue.submit(
-        job("a").with_attempt(
-            AttemptRecord(number=1, directory="jobs/a/attempt-1")
-        )
+        job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
     )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    first_lease = claimed.attempts[-1]
     queue.record_process(
         "a",
+        attempt_number=first_lease.number,
+        claim_token=first_lease.worker_claim_token,
         pid=101,
         process_start_time="start-1",
         command_fingerprint="command-1",
         task_token="token-1",
         log_path="attempt-1.log",
     )
-    queue.register_process_controller("a", lambda: calls.append("old"))
-    queue.mark_failed("a", "failed")
-    queue.release_process_controller(101)
+    queue.register_process_controller(
+        "a",
+        lambda: calls.append("old"),
+        attempt_number=first_lease.number,
+        claim_token=first_lease.worker_claim_token,
+    )
+    queue.mark_failed(
+        "a",
+        "failed",
+        attempt_number=first_lease.number,
+        claim_token=first_lease.worker_claim_token,
+    )
+    queue.release_process_controller(
+        "a",
+        101,
+        attempt_number=first_lease.number,
+        claim_token=first_lease.worker_claim_token,
+    )
+    queue.release_execution_claim(
+        "a",
+        attempt_number=first_lease.number,
+        claim_token=first_lease.worker_claim_token,
+    )
     queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    second_lease = claimed.attempts[-1]
     queue.record_process(
         "a",
+        attempt_number=second_lease.number,
+        claim_token=second_lease.worker_claim_token,
         pid=202,
         process_start_time="start-2",
         command_fingerprint="command-2",
         task_token="token-2",
         log_path="attempt-2.log",
     )
-    queue.register_process_controller("a", lambda: calls.append("new"))
+    queue.register_process_controller(
+        "a",
+        lambda: calls.append("new"),
+        attempt_number=second_lease.number,
+        claim_token=second_lease.worker_claim_token,
+    )
 
     queue.cancel("a")
 
@@ -329,3 +388,234 @@ def test_idempotency_reuses_only_identical_input_and_adapter_identity() -> None:
 
     assert repeated.job_id == first.job_id
     assert changed.job_id == "c"
+
+
+def test_cancel_blocks_retry_until_old_attempt_claim_is_released() -> None:
+    queue = LocalResourceQueue()
+    queue.submit(
+        job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+
+    queue.cancel("a")
+
+    with pytest.raises(ValueError, match="claim.*active"):
+        queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    queue.release_execution_claim(
+        "a", attempt_number=lease.number, claim_token=lease.worker_claim_token
+    )
+    retried = queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    new_claim = queue.claim_next_unstarted()
+    assert new_claim is not None
+    new_lease = new_claim.attempts[-1]
+
+    with pytest.raises(ValueError, match="attempt lease"):
+        queue.update_progress(
+            "a",
+            AdapterProgress(stage="late", message="old worker callback"),
+            attempt_number=lease.number,
+            claim_token=lease.worker_claim_token,
+        )
+    with pytest.raises(ValueError, match="attempt lease"):
+        queue.release_execution_claim(
+            "a",
+            attempt_number=lease.number,
+            claim_token=lease.worker_claim_token,
+        )
+    with pytest.raises(ValueError, match="attempt lease"):
+        queue.mark_validating(
+            "a",
+            attempt_number=lease.number,
+            claim_token=lease.worker_claim_token,
+        )
+    updated = queue.update_progress(
+        "a",
+        AdapterProgress(stage="new", message="new worker"),
+        attempt_number=new_lease.number,
+        claim_token=new_lease.worker_claim_token,
+    )
+    assert retried.attempts[-1].number == 2
+    assert updated.stage == "new"
+
+
+def test_cancel_reserves_state_before_blocking_process_termination() -> None:
+    termination_started = threading.Event()
+    allow_termination = threading.Event()
+
+    def terminate(_pid: int) -> None:
+        termination_started.set()
+        assert allow_termination.wait(5)
+
+    queue = LocalResourceQueue(
+        process_tree_terminator=terminate,
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+    )
+    queue.submit(
+        job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    queue.record_process(
+        "a",
+        attempt_number=lease.number,
+        claim_token=lease.worker_claim_token,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt-1.log",
+    )
+
+    thread = threading.Thread(target=lambda: queue.cancel("a"))
+    thread.start()
+    assert termination_started.wait(5)
+    assert queue.status("a") == "cancelling"
+    with pytest.raises(ValueError, match="active attempt"):
+        queue.update_progress(
+            "a",
+            AdapterProgress(stage="late", message="late"),
+            attempt_number=lease.number,
+            claim_token=lease.worker_claim_token,
+        )
+    allow_termination.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert queue.status("a") == "cancelled"
+
+
+def test_verified_adopted_process_is_reaped_when_it_exits() -> None:
+    observed = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    running = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+    queue = LocalResourceQueue.restore(
+        [running, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: observed or None,
+    )
+    assert queue.status("b") == "queued"
+
+    observed.clear()
+    reaped = queue.poll_adopted_processes()
+
+    assert reaped == ("a",)
+    assert queue.status("a") == "interrupted"
+    assert queue.status("b") == "running"
+
+
+def test_windows_fallback_rediscovers_children_before_terminating_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cadscene.projects.queue as queue_module
+
+    discoveries = iter(({201}, {202}, set(), set(), set(), set()))
+    alive = {123, 201, 202}
+    terminated: list[int] = []
+
+    def descendants(_pid: int) -> set[int]:
+        return next(discoveries, set())
+
+    def terminate(pid: int) -> None:
+        terminated.append(pid)
+        alive.discard(pid)
+
+    queue_module._terminate_windows_process_tree(
+        123,
+        timeout=1,
+        descendant_resolver=descendants,
+        alive=lambda pid: pid in alive,
+        terminate=terminate,
+        sleep=lambda _seconds: None,
+    )
+
+    assert terminated == [201, 202, 123]
+
+
+def test_retry_refuses_unverified_old_process_after_cancel_failure() -> None:
+    queue = LocalResourceQueue(
+        process_tree_terminator=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("descendant remained alive")
+        ),
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+        process_alive=lambda _pid: True,
+    )
+    queue.submit(
+        job("a").with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+    )
+    interrupted = queue.cancel("a")
+
+    assert interrupted.status == "interrupted"
+    with pytest.raises(ValueError, match="old process.*not proven gone"):
+        queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+
+
+def test_restore_resumes_verified_cancelling_cleanup_as_interrupted() -> None:
+    terminated: list[int] = []
+    cancelling = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("cancelling")
+    )
+
+    queue = LocalResourceQueue.restore(
+        [cancelling, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+        process_tree_terminator=terminated.append,
+    )
+
+    assert terminated == [123]
+    assert queue.status("a") == "interrupted"
+    assert queue.status("b") == "running"

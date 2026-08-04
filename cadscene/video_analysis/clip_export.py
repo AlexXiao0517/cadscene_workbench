@@ -134,6 +134,7 @@ def export_video_clips(
     ffmpeg_executable: str | Path | None = None,
     preset: str = "fast",
     crf: int = 18,
+    require_full_source_partition: bool = True,
 ) -> list[Path]:
     source = Path(video_path)
     manifest = Path(manifest_path)
@@ -158,7 +159,11 @@ def export_video_clips(
         source,
         ffmpeg_executable=ffmpeg,
     )
-    frame_map = build_clip_frame_map(frame_index, clips)
+    frame_map = build_clip_frame_map(
+        frame_index,
+        clips,
+        require_full_source_partition=require_full_source_partition,
+    )
     reservation = _reserve_output_directory(output)
     temporary_dir: Path | None = None
     published = False
@@ -223,7 +228,9 @@ def _reserve_output_directory(output: Path) -> Path:
     try:
         reservation.mkdir()
     except FileExistsError as exc:
-        raise FileExistsError(f"clip output is already being exported: {output}") from exc
+        raise FileExistsError(
+            f"clip output is already being exported: {output}"
+        ) from exc
     try:
         if output.exists():
             raise FileExistsError(f"clip output already exists: {output}")
@@ -289,7 +296,10 @@ def _build_ffmpeg_clip_command(
 
 
 def build_clip_frame_map(
-    frame_index: DecodedFrameIndex, clips: list[ExportClip]
+    frame_index: DecodedFrameIndex,
+    clips: list[ExportClip],
+    *,
+    require_full_source_partition: bool = True,
 ) -> dict[str, Any]:
     if not clips:
         raise ValueError("frame map requires at least one clip")
@@ -301,14 +311,11 @@ def build_clip_frame_map(
         frames = [
             frame
             for frame in frame_index.frames
-            if clip.source_start_pts
-            <= frame.pts
-            < clip.source_end_pts_exclusive
+            if clip.source_start_pts <= frame.pts < clip.source_end_pts_exclusive
         ]
-        entries = [
-            {"ordinal": frame.ordinal, "pts": frame.pts}
-            for frame in frames
-        ]
+        if not frames:
+            raise ValueError(f"clip {clip.clip_id} contains no decoded frames")
+        entries = [{"ordinal": frame.ordinal, "pts": frame.pts} for frame in frames]
         mapped_frames.extend((frame.ordinal, frame.pts) for frame in frames)
         clip_maps.append(
             {
@@ -318,12 +325,26 @@ def build_clip_frame_map(
                 "frames": entries,
             }
         )
-    expected = [(frame.ordinal, frame.pts) for frame in frame_index.frames]
+    expected = [
+        (frame.ordinal, frame.pts)
+        for frame in frame_index.frames
+        if require_full_source_partition
+        or any(
+            clip.source_start_pts <= frame.pts < clip.source_end_pts_exclusive
+            for clip in clips
+        )
+    ]
     if mapped_frames != expected:
         raise ValueError("export clips do not partition decoded frames exactly once")
-    if clips[0].source_start_pts != frame_index.source_start_pts:
+    if (
+        require_full_source_partition
+        and clips[0].source_start_pts != frame_index.source_start_pts
+    ):
         raise ValueError("export clips omit the first decoded frame")
-    if clips[-1].source_end_pts_exclusive != frame_index.source_end_pts_exclusive:
+    if (
+        require_full_source_partition
+        and clips[-1].source_end_pts_exclusive != frame_index.source_end_pts_exclusive
+    ):
         raise ValueError("export clips omit the exclusive source end")
     return {
         "schema_version": 1,
@@ -334,6 +355,7 @@ def build_clip_frame_map(
         },
         "source_start_pts": frame_index.source_start_pts,
         "source_end_pts_exclusive": frame_index.source_end_pts_exclusive,
+        "full_source_partition": require_full_source_partition,
         "clips": clip_maps,
     }
 

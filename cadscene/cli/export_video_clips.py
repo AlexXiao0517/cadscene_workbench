@@ -7,13 +7,20 @@ from cadscene.video_analysis.clip_export import X264_PRESETS, export_video_clips
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export physical MP4 clips from a manifest.")
+    parser = argparse.ArgumentParser(
+        description="Export physical MP4 clips from a manifest."
+    )
     parser.add_argument("--video", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--ffmpeg", type=Path)
     parser.add_argument("--preset", choices=X264_PRESETS, default="fast")
     parser.add_argument("--crf", type=int, default=18)
+    parser.add_argument(
+        "--allow-subset",
+        action="store_true",
+        help="export only manifest intervals without claiming full-source partition",
+    )
     return parser
 
 
@@ -26,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         ffmpeg_executable=args.ffmpeg,
         preset=args.preset,
         crf=args.crf,
+        require_full_source_partition=not args.allow_subset,
     )
     print(args.output_dir.resolve())
     print(f"Exported {len(exported)} clips")

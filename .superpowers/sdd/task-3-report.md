@@ -138,6 +138,58 @@ Expected reasons: manifest revisions were absent from the key, and the first
 adapter draft expected `02_srt_fusion` rather than the existing CLI's actual
 `02_fusion` directory.
 
+## Second closure-review remediation
+
+The six Important race, recovery, integrity and export findings against
+`49ff70d` were reproduced and fixed:
+
+- Every executing attempt now owns an immutable `worker_claim_token`. Process
+  identity, progress, validation, success, failure and controller release all
+  require the exact attempt number and claim token. Retry is refused while an
+  old claim remains, and an old callback/finally cannot mutate or release a
+  later retry.
+- All queue reads/transitions/scheduling are serialized by one reentrant lock.
+  Service terminal operations acquire locks in the fixed order service
+  operation lock -> project -> clips -> jobs -> queue. Cancellation first
+  publishes `cancelling`, performs blocking tree termination without repository
+  or queue locks, then uses the reserved attempt identity to publish the final
+  state. A concurrent clips mutation therefore completes before the terminal
+  authoritative fingerprint check and produces `stale_input`, never an old
+  publication.
+- Fully verified restored processes receive an adopted attempt lease. Scheduler
+  polling reaps an exited adopted process, conservatively records
+  `interrupted` because no identity-bound completion sidecar exists, releases
+  resource/exclusive capacity, and asks `ProjectService` to publish the state.
+  A service crash after publishing `cancelling` resumes verified cleanup on
+  restore and also ends as `interrupted`, never permanently `cancelling`.
+- `process_worker` recomputes SHA256 from canonical normalized `commands.json`
+  before starting any child and compares it to `--command-fingerprint`.
+- Clip export dependencies are per permanent `clip_id`. Their attempt manifest,
+  validator and output map contain only the requested clip. The Stage 8A API
+  retains strict full-source partition validation by default and adds an
+  explicit subset mode whose sidecar still maps every decoded source frame in
+  the requested half-open interval exactly once.
+- Windows fallback cancellation repeatedly discovers and terminates descendants
+  until two quiescent scans, terminates the parent last, and verifies the known
+  tree is gone. Failed/unverifiable termination stays `interrupted`; retry is
+  refused while the prior process is not proven gone. Windows Job Objects
+  remain the primary executor path.
+
+Second-review RED evidence included:
+
+```text
+pytest -q tests/projects/test_queue.py -k "cancel_blocks_retry or cancel_reserves_state"
+2 failed (retry was accepted and no worker_claim_token existed)
+pytest -q tests/projects/test_executor.py -k tampered_plan
+1 failed (tampered child command executed)
+pytest -q tests/video_analysis/test_clip_export.py -k subset_frame_map
+1 failed (subset mapping API did not exist)
+pytest -q tests/projects/test_queue.py -k restore_resumes_verified_cancelling
+1 failed (cancelling survived restore and retained the resource slot)
+```
+
+Each test was then observed GREEN after the corresponding minimal fix.
+
 ## GREEN verification
 
 Focused Task 3 tests after implementation and self-review:
@@ -147,11 +199,25 @@ pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py 
 49 passed in 2.87s
 ```
 
+Second-review focused set:
+
+```text
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py
+61 passed in 2.26s
+```
+
 All project repository/service tests:
 
 ```text
 pytest -q tests/projects
 105 passed in 3.58s
+```
+
+After second-review remediation:
+
+```text
+pytest -q tests/projects
+118 passed in 2.77s
 ```
 
 Requested workflow and pure-rotation regression set:
@@ -161,11 +227,25 @@ pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py 
 170 passed, 1 warning in 8.35s
 ```
 
+Expanded second-review related set, including Stage 8A physical export and CLI:
+
+```text
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/workflow tests/pure_rotation tests/video_analysis/test_clip_export.py tests/video_analysis/test_cli.py
+231 passed, 1 skipped, 1 warning in 6.66s
+```
+
 Single full-suite run:
 
 ```text
 pytest -q
 652 passed, 1 skipped, 1 warning in 47.00s
+```
+
+Fresh full-suite run after second-review remediation:
+
+```text
+pytest -q
+666 passed, 1 skipped, 1 warning in 34.03s
 ```
 
 Static/syntax/whitespace verification:
@@ -177,6 +257,8 @@ python -m compileall -q cadscene/projects tests/projects
 exit 0
 git diff --check
 exit 0
+python -m black --check <all changed Python files>
+11 files would be left unchanged
 ```
 
 ## Self-review
@@ -193,6 +275,13 @@ exit 0
 - Confirmed real Windows parent/descendant cancellation performs no
   attempt-directory cleanup, verifies tree exit, and stale results publish no
   output revision or output map.
+- Confirmed `cancelling` holds resource and exclusive capacity until termination
+  is complete, while the blocking terminator itself holds no repository or
+  queue lock.
+- Confirmed stale old progress, finish and finally/controller-release paths are
+  rejected by the attempt lease and cannot release a new retry.
+- Confirmed per-clip physical export produces a complete decoded-frame sidecar
+  for the requested interval without claiming that it covers the whole source.
 - Confirmed the three runnable adapters reference existing CLI module names
   and actual output paths. No workflow mathematical internals changed.
 

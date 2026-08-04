@@ -10,7 +10,10 @@ import pytest
 import cadscene.cli.export_video_clips as export_video_clips_cli
 import cadscene.video_analysis.clip_export as clip_export
 
-def test_video_analysis_cli_exposes_isolated_inputs_without_workflow_execution() -> None:
+
+def test_video_analysis_cli_exposes_isolated_inputs_without_workflow_execution() -> (
+    None
+):
     result = subprocess.run(
         [sys.executable, "-m", "cadscene.cli.analyze_video", "--help"],
         capture_output=True,
@@ -36,7 +39,14 @@ def test_export_video_clips_cli_help_exposes_all_options() -> None:
     )
 
     assert result.returncode == 0
-    for option in ("--video", "--manifest", "--output-dir", "--ffmpeg", "--preset", "--crf"):
+    for option in (
+        "--video",
+        "--manifest",
+        "--output-dir",
+        "--ffmpeg",
+        "--preset",
+        "--crf",
+    ):
         assert option in result.stdout
 
 
@@ -82,7 +92,9 @@ def test_export_video_clips_cli_rejects_invalid_encoding_options(
 
 def test_export_video_clips_cli_uses_public_preset_choices() -> None:
     parser = export_video_clips_cli.build_parser()
-    preset_action = next(action for action in parser._actions if action.dest == "preset")
+    preset_action = next(
+        action for action in parser._actions if action.dest == "preset"
+    )
 
     assert preset_action.choices is clip_export.X264_PRESETS
 
@@ -100,6 +112,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
         ffmpeg_executable: str | Path | None = None,
         preset: str = "fast",
         crf: int = 18,
+        require_full_source_partition: bool = True,
     ) -> list[Path]:
         received.update(
             video_path=video_path,
@@ -108,6 +121,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
             ffmpeg_executable=ffmpeg_executable,
             preset=preset,
             crf=crf,
+            require_full_source_partition=require_full_source_partition,
         )
         return [output_dir / "clip-0001.mp4"]
 
@@ -115,7 +129,14 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
     output_dir = Path("clips")
 
     result = export_video_clips_cli.main(
-        ["--video", "source.mp4", "--manifest", "manifest.json", "--output-dir", str(output_dir)]
+        [
+            "--video",
+            "source.mp4",
+            "--manifest",
+            "manifest.json",
+            "--output-dir",
+            str(output_dir),
+        ]
     )
 
     assert result == 0
@@ -126,6 +147,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
         "ffmpeg_executable": None,
         "preset": "fast",
         "crf": 18,
+        "require_full_source_partition": True,
     }
     assert capsys.readouterr().out.splitlines() == [
         str(output_dir.resolve()),
@@ -146,6 +168,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
         ffmpeg_executable: str | Path | None = None,
         preset: str = "fast",
         crf: int = 18,
+        require_full_source_partition: bool = True,
     ) -> list[Path]:
         received.update(
             video_path=video_path,
@@ -154,6 +177,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
             ffmpeg_executable=ffmpeg_executable,
             preset=preset,
             crf=crf,
+            require_full_source_partition=require_full_source_partition,
         )
         return [output_dir / "clip-0001.mp4", output_dir / "clip-0002.mp4"]
 
@@ -174,6 +198,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
             "veryfast",
             "--crf",
             "20",
+            "--allow-subset",
         ]
     )
 
@@ -185,6 +210,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
         "ffmpeg_executable": Path("ffmpeg-custom.exe"),
         "preset": "veryfast",
         "crf": 20,
+        "require_full_source_partition": False,
     }
     assert capsys.readouterr().out.splitlines() == [
         str(output_dir.resolve()),

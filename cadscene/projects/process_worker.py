@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
+import hmac
 import json
 from pathlib import Path
 import subprocess
@@ -16,10 +18,19 @@ def main(argv: list[str] | None = None) -> int:
     commands = payload.get("commands")
     if not isinstance(commands, list) or not commands:
         raise ValueError("worker plan must contain commands")
+    normalized: list[list[str]] = []
     for command in commands:
         if not isinstance(command, list) or not command:
             raise ValueError("each worker command must be a non-empty list")
-        completed = subprocess.run([str(item) for item in command], check=False)
+        normalized.append([str(item) for item in command])
+    canonical = json.dumps(
+        normalized, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    actual_fingerprint = sha256(canonical).hexdigest()
+    if not hmac.compare_digest(actual_fingerprint, args.command_fingerprint):
+        raise ValueError("worker plan command fingerprint mismatch")
+    for command in normalized:
+        completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
             return int(completed.returncode)
     return 0

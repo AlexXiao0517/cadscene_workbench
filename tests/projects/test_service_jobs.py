@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import threading
 
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
@@ -146,9 +147,10 @@ def test_batch_creates_durable_jobs_but_capacity_starts_only_one_sfm(
     assert result.enqueued_clip_ids == ("one", "two")
     jobs = repositories.jobs.load("p1")
     assert jobs.queue_order == tuple(job["job_id"] for job in jobs.jobs)
-    assert len(jobs.jobs) == 3
+    assert len(jobs.jobs) == 4
     assert len(queue.running_ids()) == 1
     assert sorted(queue.status(job["job_id"]) for job in jobs.jobs) == [
+        "queued",
         "queued",
         "queued",
         "running",
@@ -156,11 +158,12 @@ def test_batch_creates_durable_jobs_but_capacity_starts_only_one_sfm(
     solves = [job for job in jobs.jobs if job["job_type"] == "trajectory"]
     exports = [job for job in jobs.jobs if job["job_type"] == "clip_export"]
     assert len(solves) == 2
-    assert len(exports) == 1
+    assert len(exports) == 2
     assert all(len(job["depends_on_job_ids"]) == 1 for job in solves)
-    assert {job["depends_on_job_ids"][0] for job in solves} == {
-        exports[0]["job_id"]
-    }
+    export_by_clip = {job["clip_id"]: job["job_id"] for job in exports}
+    assert {
+        job["clip_id"]: job["depends_on_job_ids"][0] for job in solves
+    } == export_by_clip
     for stored in jobs.jobs:
         assert {
             "depends_on_job_ids",
@@ -188,6 +191,9 @@ def test_changed_input_marks_active_job_stale_input_and_never_publishes(
         if item["job_type"] == "clip_export"
     )
     export = _queue.get(export_id)
+    claimed_export = _queue.claim_next_unstarted()
+    assert claimed_export is not None and claimed_export.job_id == export_id
+    export_lease = claimed_export.attempts[-1]
     service.finish_job(
         "p1",
         export_id,
@@ -197,8 +203,13 @@ def test_changed_input_marks_active_job_stale_input_and_never_publishes(
             outputs={"video": "attempt/clip.mp4"},
         ),
         current_fingerprint=export.input_fingerprint,
+        attempt_number=export_lease.number,
+        claim_token=str(export_lease.worker_claim_token),
     )
     assert _queue.status(job_id) == "running"
+    claimed_solve = _queue.claim_next_unstarted()
+    assert claimed_solve is not None and claimed_solve.job_id == job_id
+    solve_lease = claimed_solve.attempts[-1]
     (tmp_path / "source.mp4").write_bytes(b"changed-source")
     result = AdapterResult.success(
         output_revision="output-1",
@@ -211,6 +222,8 @@ def test_changed_input_marks_active_job_stale_input_and_never_publishes(
         job_id,
         result,
         current_fingerprint=_queue.get(job_id).input_fingerprint,
+        attempt_number=solve_lease.number,
+        claim_token=str(solve_lease.worker_claim_token),
     )
 
     assert finished.status == "stale_input"
@@ -229,6 +242,9 @@ def test_finish_recomputes_authoritative_identity_instead_of_trusting_caller(
     service.enqueue_trajectory_jobs("p1")
     export_id = queue.running_ids()[0]
     old = queue.get(export_id).input_fingerprint
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == export_id
+    lease = claimed.attempts[-1]
     (tmp_path / "source.mp4").write_bytes(b"new-source-content")
 
     finished = service.finish_job(
@@ -240,11 +256,15 @@ def test_finish_recomputes_authoritative_identity_instead_of_trusting_caller(
             outputs={"video:one": "old-input.mp4"},
         ),
         current_fingerprint=old,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
     )
 
     assert finished.status == "stale_input"
     stored = next(
-        item for item in repositories.jobs.load("p1").jobs if item["job_id"] == export_id
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == export_id
     )
     assert stored["output_revision"] is None
     assert stored["published_outputs"] == {}
@@ -306,9 +326,7 @@ def test_idempotency_isolates_changed_relevant_manifest_revision(
 def test_service_restart_persists_unverifiable_running_job_as_interrupted(
     tmp_path: Path,
 ) -> None:
-    service, repositories, original_queue = service_with_clips(
-        tmp_path, (clip("one"),)
-    )
+    service, repositories, original_queue = service_with_clips(tmp_path, (clip("one"),))
     service.enqueue_trajectory_jobs("p1")
     original_order = original_queue.queue_order()
     restarted = ProjectService(
@@ -335,6 +353,9 @@ def test_recovery_invalidates_old_success_and_supersedes_dependents(
     service.enqueue_trajectory_jobs("p1")
     export_id = queue.running_ids()[0]
     export = queue.get(export_id)
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == export_id
+    lease = claimed.attempts[-1]
     service.finish_job(
         "p1",
         export_id,
@@ -344,6 +365,8 @@ def test_recovery_invalidates_old_success_and_supersedes_dependents(
             outputs={"video:one": "attempt/one.mp4"},
         ),
         current_fingerprint=export.input_fingerprint,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
     )
     solve_id = next(
         item.job_id for item in queue.jobs() if item.job_type == "trajectory"
@@ -398,3 +421,212 @@ def test_restoring_second_project_merges_without_losing_global_queue_state(
     assert len(merged.running_ids()) <= 1
     assert {item["job_id"] for item in repositories.jobs.load("p1").jobs} == p1_ids
     assert {item["job_id"] for item in repositories.jobs.load("p2").jobs} == p2_ids
+
+
+def test_requested_clip_export_plan_never_contains_unselected_clip(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(
+        tmp_path, (clip("one"), clip("two"))
+    )
+
+    result = service.enqueue_trajectory_jobs("p1", clip_ids=("one",))
+
+    assert result.enqueued_clip_ids == ("one",)
+    exports = [item for item in queue.jobs() if item.job_type == "clip_export"]
+    assert len(exports) == 1 and exports[0].clip_id == "one"
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == exports[0].job_id
+    lease = claimed.attempts[-1]
+    plan = service.prepare_job_execution(
+        "p1",
+        exports[0].job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    command = plan.commands[0]
+    assert "--allow-subset" in command
+    payload = __import__("json").loads(
+        Path(command[command.index("--manifest") + 1]).read_text(encoding="utf-8")
+    )
+    assert [item["clip_id"] for item in payload["clips"]] == ["one"]
+    assert not any(item.clip_id == "two" for item in exports)
+    assert len(repositories.jobs.load("p1").jobs) == 2
+
+
+def test_existing_physical_clip_skips_export_without_exporting_other_clips(
+    tmp_path: Path,
+) -> None:
+    physical = tmp_path / "one.mp4"
+    physical.write_bytes(b"clip")
+    one = clip("one")
+    one = replace(one, analysis={**one.analysis, "physical_mp4_path": str(physical)})
+    service, _repositories, queue = service_with_clips(tmp_path, (one, clip("two")))
+
+    service.enqueue_trajectory_jobs("p1", clip_ids=("one",))
+
+    assert [item.job_type for item in queue.jobs()] == ["trajectory"]
+
+
+def test_finish_waits_for_clip_mutation_and_observes_new_fingerprint(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    export = next(item for item in queue.jobs() if item.job_type == "clip_export")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == export.job_id
+    lease = claimed.attempts[-1]
+    mutation_entered = threading.Event()
+    allow_mutation = threading.Event()
+
+    def mutate(current):
+        mutation_entered.set()
+        assert allow_mutation.wait(5)
+        changed = replace(
+            current.clips[0],
+            manual_definition={"changed": True},
+        )
+        return replace(current, clips=(changed,))
+
+    mutation_thread = threading.Thread(
+        target=lambda: repositories.clips.update(
+            "p1",
+            expected_revision=repositories.clips.load("p1").revision,
+            mutate=mutate,
+        )
+    )
+    mutation_thread.start()
+    assert mutation_entered.wait(5)
+    result_box: list[object] = []
+    finish_thread = threading.Thread(
+        target=lambda: result_box.append(
+            service.finish_job(
+                "p1",
+                export.job_id,
+                AdapterResult.success(
+                    output_revision="old", output_fingerprint="old", outputs={}
+                ),
+                attempt_number=lease.number,
+                claim_token=lease.worker_claim_token,
+            )
+        )
+    )
+    finish_thread.start()
+    assert finish_thread.is_alive()
+    allow_mutation.set()
+    mutation_thread.join(5)
+    finish_thread.join(5)
+
+    assert result_box and result_box[0].status == "stale_input"
+    stored = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == export.job_id
+    )
+    assert stored["status"] == "stale_input"
+    assert stored["published_outputs"] == {}
+
+
+def test_adopted_exit_is_published_as_interrupted_by_project_service(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    observed = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+    restarted.restore_jobs("p1", process_probe=lambda _pid: observed or None)
+    observed.clear()
+
+    assert restarted.reap_adopted_jobs() == (claimed.job_id,)
+
+    stored = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == claimed.job_id
+    )
+    assert stored["status"] == "interrupted"
+    assert "completion sidecar" in stored["error"]
+
+
+def test_service_publishes_cancelling_before_blocking_tree_termination(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    termination_started = threading.Event()
+    allow_termination = threading.Event()
+    queue._process_probe = lambda _pid: {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+
+    def terminate(_pid: int) -> None:
+        termination_started.set()
+        assert allow_termination.wait(5)
+
+    queue._terminate_tree = terminate
+    result: list[object] = []
+    thread = threading.Thread(
+        target=lambda: result.append(service.cancel_job("p1", claimed.job_id))
+    )
+    thread.start()
+    assert termination_started.wait(5)
+    stored_during_cancel = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == claimed.job_id
+    )
+    assert stored_during_cancel["status"] == "cancelling"
+    allow_termination.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert result and result[0].status == "cancelled"
+    stored_after_cancel = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == claimed.job_id
+    )
+    assert stored_after_cancel["status"] == "cancelled"

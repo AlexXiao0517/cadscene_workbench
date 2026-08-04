@@ -9,8 +9,15 @@ import sys
 import threading
 import time
 
+import pytest
+
 import cadscene.projects.executor as executor_module
-from cadscene.projects.adapters import AdapterInputs, AdapterResult, WorkflowAdapterRegistry
+import cadscene.projects.process_worker as process_worker
+from cadscene.projects.adapters import (
+    AdapterInputs,
+    AdapterResult,
+    WorkflowAdapterRegistry,
+)
 from cadscene.projects.executor import JobExecutionPlan, LocalJobExecutor
 from tests.projects.test_service_jobs import clip, service_with_clips
 
@@ -80,9 +87,14 @@ def _pid_running(pid: int) -> bool:
             return False
         try:
             code = ctypes.c_ulong()
-            return bool(
-                ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            ) and code.value == 259
+            return (
+                bool(
+                    ctypes.windll.kernel32.GetExitCodeProcess(
+                        handle, ctypes.byref(code)
+                    )
+                )
+                and code.value == 259
+            )
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
     try:
@@ -126,7 +138,9 @@ def test_executor_runs_commands_sequentially_and_service_publishes_validation(
             outputs={"artifact": str(output)},
         ),
     )
-    monkeypatch.setattr(service, "prepare_job_execution", lambda _project, _job: plan)
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
 
     completed = LocalJobExecutor(service).run_next()
 
@@ -171,7 +185,9 @@ def test_executor_claims_a_reserved_job_only_once_across_concurrent_workers(
             output_fingerprint="validated-fingerprint",
         ),
     )
-    monkeypatch.setattr(service, "prepare_job_execution", lambda _project, _job: plan)
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
     executor = LocalJobExecutor(service)
     threads = [threading.Thread(target=executor.run_next) for _ in range(2)]
 
@@ -194,7 +210,9 @@ def test_executor_terminates_launched_wrapper_when_identity_publication_fails(
         commands=((sys.executable, "-c", "pass"),),
         validate=lambda: AdapterResult.failed("must not validate"),
     )
-    monkeypatch.setattr(service, "prepare_job_execution", lambda _project, _job: plan)
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
 
     class FakeProcess:
         pid = 4242
@@ -202,7 +220,9 @@ def test_executor_terminates_launched_wrapper_when_identity_publication_fails(
         def poll(self):
             return None
 
-    monkeypatch.setattr(executor_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+    )
     monkeypatch.setattr(executor_module, "_process_start_time", lambda _pid: "start")
     monkeypatch.setattr(
         executor_module._WindowsJobObject,
@@ -249,7 +269,9 @@ def test_executor_cancel_terminates_real_parent_and_descendant_tree(
         commands=(command,),
         validate=lambda: AdapterResult.failed("cancelled plan must not validate"),
     )
-    monkeypatch.setattr(service, "prepare_job_execution", lambda _project, _job: plan)
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
     executor = LocalJobExecutor(service)
     thread = threading.Thread(target=executor.run_next, daemon=True)
     thread.start()
@@ -326,8 +348,16 @@ def test_service_builds_existing_clip_export_cli_plan_inside_attempt(
     service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
     service.enqueue_trajectory_jobs("p1")
     export_id = queue.running_ids()[0]
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == export_id
+    lease = claimed.attempts[-1]
 
-    plan = service.prepare_job_execution("p1", export_id)
+    plan = service.prepare_job_execution(
+        "p1",
+        export_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
 
     command = plan.commands[0]
     assert command[1:3] == ("-m", "cadscene.cli.export_video_clips")
@@ -337,3 +367,39 @@ def test_service_builds_existing_clip_export_cli_plan_inside_attempt(
     assert output_dir.parent == manifest_path.parent
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["clips"][0]["interval_semantics"] == "half_open"
+
+
+def test_process_worker_refuses_tampered_plan_before_starting_child(
+    tmp_path: Path, monkeypatch
+) -> None:
+    plan = tmp_path / "commands.json"
+    original = [[sys.executable, "-c", "print('safe')"]]
+    canonical = json.dumps(original, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    fingerprint = executor_module.sha256(canonical).hexdigest()
+    plan.write_text(
+        json.dumps({"commands": [[sys.executable, "-c", "print('tampered')"]]}),
+        encoding="utf-8",
+    )
+    calls: list[object] = []
+
+    def record_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(process_worker.subprocess, "run", record_run)
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        process_worker.main(
+            [
+                "--plan",
+                str(plan),
+                "--task-token",
+                "token",
+                "--command-fingerprint",
+                fingerprint,
+            ]
+        )
+
+    assert calls == []

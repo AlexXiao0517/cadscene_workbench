@@ -27,9 +27,18 @@ class JobExecutionPlan:
 class ExecutionCoordinator(Protocol):
     queue: object
 
+    def reap_adopted_jobs(self) -> tuple[str, ...]:
+        ...
+
     def prepare_job_execution(
-        self, project_id: str, job_id: str
-    ) -> JobExecutionPlan: ...
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        attempt_number: int,
+        claim_token: str,
+    ) -> JobExecutionPlan:
+        ...
 
     def record_job_process(
         self,
@@ -41,12 +50,22 @@ class ExecutionCoordinator(Protocol):
         command_fingerprint: str,
         task_token: str,
         log_path: str,
+        attempt_number: int,
+        claim_token: str,
         terminate: Callable[[], None] | None = None,
-    ) -> QueueJob: ...
+    ) -> QueueJob:
+        ...
 
     def update_job_progress(
-        self, project_id: str, job_id: str, progress: AdapterProgress
-    ) -> QueueJob: ...
+        self,
+        project_id: str,
+        job_id: str,
+        progress: AdapterProgress,
+        *,
+        attempt_number: int,
+        claim_token: str,
+    ) -> QueueJob:
+        ...
 
     def finish_job(
         self,
@@ -55,13 +74,32 @@ class ExecutionCoordinator(Protocol):
         result: AdapterResult,
         *,
         current_fingerprint: str | None = None,
-    ) -> QueueJob: ...
+        attempt_number: int,
+        claim_token: str,
+    ) -> QueueJob:
+        ...
 
-    def fail_job(self, project_id: str, job_id: str, error: str) -> QueueJob: ...
+    def fail_job(
+        self,
+        project_id: str,
+        job_id: str,
+        error: str,
+        *,
+        attempt_number: int,
+        claim_token: str,
+    ) -> QueueJob:
+        ...
 
     def release_job_process_controller(
-        self, project_id: str, job_id: str, pid: int
-    ) -> None: ...
+        self,
+        project_id: str,
+        job_id: str,
+        pid: int,
+        *,
+        attempt_number: int,
+        claim_token: str,
+    ) -> None:
+        ...
 
 
 class LocalJobExecutor:
@@ -72,9 +110,14 @@ class LocalJobExecutor:
 
     def run_next(self) -> QueueJob | None:
         queue = self.coordinator.queue
+        self.coordinator.reap_adopted_jobs()
         job = queue.claim_next_unstarted()
         if job is None:
             return None
+        attempt_number = job.attempts[-1].number
+        claim_token = job.attempts[-1].worker_claim_token
+        if claim_token is None:  # queue claim invariant
+            raise RuntimeError("claimed attempt is missing its worker token")
         process: subprocess.Popen | None = None
         controller: _WindowsJobObject | None = None
         log_handle = None
@@ -83,8 +126,15 @@ class LocalJobExecutor:
                 job.project_id,
                 job.job_id,
                 AdapterProgress(stage="preparing", message="preparing adapter inputs"),
+                attempt_number=attempt_number,
+                claim_token=claim_token,
             )
-            plan = self.coordinator.prepare_job_execution(job.project_id, job.job_id)
+            plan = self.coordinator.prepare_job_execution(
+                job.project_id,
+                job.job_id,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
             attempt_dir = Path(job.attempts[-1].directory)
             attempt_dir.mkdir(parents=True, exist_ok=True)
             commands = [[str(item) for item in command] for command in plan.commands]
@@ -134,7 +184,9 @@ class LocalJobExecutor:
                 env=environment,
                 **options,
             )
-            controller = _WindowsJobObject.try_assign(process) if os.name == "nt" else None
+            controller = (
+                _WindowsJobObject.try_assign(process) if os.name == "nt" else None
+            )
             self.coordinator.record_job_process(
                 job.project_id,
                 job.job_id,
@@ -143,27 +195,42 @@ class LocalJobExecutor:
                 command_fingerprint=command_fingerprint,
                 task_token=task_token,
                 log_path=str(log_path),
+                attempt_number=attempt_number,
+                claim_token=claim_token,
                 terminate=None if controller is None else controller.terminate,
             )
             self.coordinator.update_job_progress(
                 job.project_id,
                 job.job_id,
                 AdapterProgress(stage="running", message="adapter process is running"),
+                attempt_number=attempt_number,
+                claim_token=claim_token,
             )
             returncode = process.wait()
             current = queue.get(job.job_id)
-            if current.status in {"cancelled", "interrupted", "superseded", "stale_input"}:
+            if current.status in {
+                "cancelled",
+                "interrupted",
+                "superseded",
+                "stale_input",
+            }:
                 return current
             if returncode != 0:
                 return self.coordinator.fail_job(
                     job.project_id,
                     job.job_id,
                     f"adapter command failed with return code {returncode}",
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
                 )
             self.coordinator.update_job_progress(
                 job.project_id,
                 job.job_id,
-                AdapterProgress(stage="validating", message="validating adapter output"),
+                AdapterProgress(
+                    stage="validating", message="validating adapter output"
+                ),
+                attempt_number=attempt_number,
+                claim_token=claim_token,
             )
             result = plan.validate()
             return self.coordinator.finish_job(
@@ -171,6 +238,8 @@ class LocalJobExecutor:
                 job.job_id,
                 result,
                 current_fingerprint=job.input_fingerprint,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
             )
         except Exception as exc:
             cleanup_error: Exception | None = None
@@ -187,18 +256,35 @@ class LocalJobExecutor:
                 message = str(exc)
                 if cleanup_error is not None:
                     message = f"{message}; process cleanup failed: {cleanup_error}"
-                return self.coordinator.fail_job(job.project_id, job.job_id, message)
+                return self.coordinator.fail_job(
+                    job.project_id,
+                    job.job_id,
+                    message,
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
+                )
             return current
         finally:
             if controller is not None:
                 controller.close()
             if process is not None:
                 self.coordinator.release_job_process_controller(
-                    job.project_id, job.job_id, process.pid
+                    job.project_id,
+                    job.job_id,
+                    process.pid,
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
                 )
             if log_handle is not None:
                 log_handle.close()
-            queue.release_execution_claim(job.job_id)
+            try:
+                queue.release_execution_claim(
+                    job.job_id,
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
+                )
+            except ValueError:
+                pass
 
 
 def _process_start_time(pid: int) -> str:
