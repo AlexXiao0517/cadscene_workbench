@@ -1054,6 +1054,32 @@ class LocalResourceQueue:
             self._schedule_locked()
             return candidate
 
+    def commit_recovered_terminal_candidate(
+        self,
+        job_id: str,
+        *,
+        candidate: QueueJob,
+        attempt_number: int,
+        claim_token: str | None,
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            if current.status != "validating":
+                raise ValueError("only validating jobs can commit recovered state")
+            if (
+                candidate.job_id != current.job_id
+                or candidate.project_id != current.project_id
+                or candidate.input_fingerprint != current.input_fingerprint
+                or candidate.status not in {"failed", "superseded"}
+                or candidate.attempts != current.attempts
+            ):
+                raise ValueError("recovered terminal candidate no longer matches lease")
+            self._jobs[job_id] = candidate
+            self._schedule_locked()
+            return candidate
+
     def validate_output(
         self, job_id: str, *, current_input_fingerprint: str
     ) -> QueueJob:

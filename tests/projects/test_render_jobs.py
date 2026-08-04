@@ -950,6 +950,7 @@ def test_render_publication_recovery_revalidates_durable_success(
             / "rendered.mp4"
         )
         target.write_bytes(b"tampered-after-durable-publication")
+        monkeypatch.setattr(service_module, "publish_manifests", publish)
         raise OSError("simulated interruption after tampering durable output")
 
     monkeypatch.setattr(
@@ -965,7 +966,132 @@ def test_render_publication_recovery_revalidates_durable_success(
 
     assert finished.status == "failed"
     assert queue.get(render_id).status == "failed"
-    assert repositories.render.load("p1").clip_renders[-1]["job_id"] == render_id
+    recovered_job = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == render_id
+    )
+    render_record = repositories.render.load("p1").clip_renders[-1]
+    assert render_record["job_id"] == render_id
+    assert render_record["status"] == "failed_validation"
+    assert render_record["operation_id"] == recovered_job["operation_id"]
+
+
+def test_render_publication_recovery_downgrades_durable_stale_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    publish = service_module.publish_manifests
+
+    def publish_change_input_then_interrupt(*args, **kwargs):
+        publish(*args, **kwargs)
+        Path(clip.analysis["physical_mp4_path"]).write_bytes(
+            b"changed-after-durable-publication"
+        )
+        monkeypatch.setattr(service_module, "publish_manifests", publish)
+        raise OSError("simulated interruption after input changed")
+
+    monkeypatch.setattr(
+        service_module, "publish_manifests", publish_change_input_then_interrupt
+    )
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    stored_job = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == render_id
+    )
+    render_record = repositories.render.load("p1").clip_renders[-1]
+    assert finished.status == "superseded"
+    assert stored_job["status"] == "superseded"
+    assert render_record["status"] == "stale_input"
+    assert stored_job["operation_id"] == render_record["operation_id"]
+
+
+def test_render_publication_recovery_downgrades_stale_jobs_only_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    publish_jobs = repositories.jobs._publish_prepared_unchecked
+    publish_render = repositories.render._publish_prepared_unchecked
+    changed_once = False
+    failed_once = False
+
+    def publish_jobs_then_change_input(*args, **kwargs):
+        nonlocal changed_once
+        published = publish_jobs(*args, **kwargs)
+        if not changed_once:
+            changed_once = True
+            Path(clip.analysis["physical_mp4_path"]).write_bytes(
+                b"changed-after-jobs-prefix"
+            )
+        return published
+
+    def fail_first_render_publication(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("simulated render owner publication crash")
+        return publish_render(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repositories.jobs,
+        "_publish_prepared_unchecked",
+        publish_jobs_then_change_input,
+    )
+    monkeypatch.setattr(
+        repositories.render,
+        "_publish_prepared_unchecked",
+        fail_first_render_publication,
+    )
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    stored_job = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == render_id
+    )
+    render_record = repositories.render.load("p1").clip_renders[-1]
+    assert finished.status == "superseded"
+    assert stored_job["status"] == "superseded"
+    assert render_record["status"] == "stale_input"
+    assert stored_job["operation_id"] == render_record["operation_id"]
 
 
 def test_finish_clip_render_changed_input_is_stale_and_publishes_nothing(
@@ -1072,6 +1198,43 @@ def test_finish_rechecks_current_render_input_after_server_probe(
         return _probe_rendered_video(path)
 
     service.media_probe = probe_and_change_input
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "stale_input"
+    assert repositories.render.load("p1").clip_renders == ()
+
+
+def test_finish_rechecks_input_inside_cross_manifest_candidate_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    physical_video = Path(clip.analysis["physical_mp4_path"])
+    prepare = queue.prepare_success_candidate
+
+    def prepare_then_change_input(*args, **kwargs):
+        candidate = prepare(*args, **kwargs)
+        physical_video.write_bytes(b"changed-after-success-candidate")
+        return candidate
+
+    monkeypatch.setattr(queue, "prepare_success_candidate", prepare_then_change_input)
     claimed = queue.claim_next_unstarted()
     assert claimed is not None and claimed.job_id == render_id
     lease = claimed.attempts[-1]
@@ -1292,10 +1455,58 @@ def test_restore_does_not_trust_tampered_successful_render_publication(
     )
     restored = rebuilt.restore_jobs("p1")
 
-    assert restored.get(render_id).status != "success"
+    restored_job = restored.get(render_id)
+    render_record = repositories.render.load("p1").clip_renders[-1]
+    assert restored_job.status == "failed"
+    assert render_record["status"] == "failed_validation"
+    assert restored_job.operation_id == render_record["operation_id"]
+    assert restored_job.published_outputs
 
 
-@pytest.mark.parametrize("damage", ["missing", "operation", "job_id"])
+def test_restore_downgrades_changed_render_input_and_owner_together(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    Path(clip.analysis["physical_mp4_path"]).write_bytes(b"changed-input")
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:05Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
+    )
+    restored = rebuilt.restore_jobs("p1")
+
+    restored_job = restored.get(render_id)
+    render_record = repositories.render.load("p1").clip_renders[-1]
+    assert restored_job.status == "superseded"
+    assert render_record["status"] == "stale_input"
+    assert restored_job.operation_id == render_record["operation_id"]
+    assert restored_job.published_outputs
+
+
+@pytest.mark.parametrize("damage", ["missing", "operation", "job_id", "extra"])
 def test_restore_requires_unique_exact_render_owner_record(
     tmp_path: Path,
     damage: str,
@@ -1320,6 +1531,8 @@ def test_restore_requires_unique_exact_render_owner_record(
         records = ()
     elif damage == "operation":
         records = ({**record, "operation_id": "wrong-operation"},)
+    elif damage == "extra":
+        records = ({**record, "unexpected": "field"},)
     else:
         records = ({**record, "job_id": "wrong-job"},)
     repositories.render.update(
@@ -1339,7 +1552,16 @@ def test_restore_requires_unique_exact_render_owner_record(
     )
     restored = rebuilt.restore_jobs("p1")
 
-    assert restored.get(render_id).status != "success"
+    restored_job = restored.get(render_id)
+    assert restored_job.status != "success"
+    render_manifest = repositories.render.load("p1")
+    assert render_manifest.operation_id == restored_job.operation_id
+    if render_manifest.clip_renders:
+        assert render_manifest.clip_renders[-1]["status"] != "success"
+        assert (
+            render_manifest.clip_renders[-1]["operation_id"]
+            == restored_job.operation_id
+        )
 
 
 def test_persisted_render_rejects_unsafe_output_revision_before_path_access(

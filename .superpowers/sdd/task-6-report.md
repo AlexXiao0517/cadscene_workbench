@@ -385,3 +385,31 @@ Final restore fail-closed hardening:
   and blocking the entire project startup.
 - Both focused regressions passed after failing before the guard changes.
   Focused render/media: `105 passed`; related: `349 passed`; static checks pass.
+
+### Restore downgrade consistency and activation-window closure
+
+- Restore now preflights every successful clip render before queue hydration.
+  Invalid artifact/owner state becomes job `failed` plus render
+  `failed_validation`; a changed current input becomes job `superseded` plus
+  render `stale_input`. Jobs and render are downgraded through one recoverable
+  `publish_manifests` operation and carry the same new operation ID.
+- Downgrade preserves immutable output revision, fingerprints, published paths,
+  proof, attempts, and logs as diagnostics. Only validation/current status is
+  revoked. A missing owner record still advances both manifest owners under the
+  downgrade operation without blocking project restore.
+- Render owner records use an exact canonical key set; unexpected fields are not
+  accepted as a current successful record.
+- Both jobs/render candidate callbacks recheck the complete input fingerprint
+  after `prepare_success_candidate`. Input changes in that window become
+  `stale_input` before activation. Recovery also handles a jobs-only durable
+  prefix: reconcile completes the prefix, then a second shared operation
+  downgrades both owners, so no successful prefix remains current.
+
+Review-fix TDD evidence:
+
+- RED reproduced unsynchronized restore downgrade, a stale success created from
+  the post-candidate hook, and acceptance of an extra owner-record field.
+- Jobs-only durable-prefix recovery test: pass.
+- Focused render/media/queue: `153 passed`.
+- Related regression: `354 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

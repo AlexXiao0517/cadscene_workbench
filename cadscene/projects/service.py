@@ -126,6 +126,10 @@ class _RenderPublicationPending(RuntimeError):
         self.cause = cause
 
 
+class _RenderInputStaleDuringPublication(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _ValidatedRenderBundle:
     output_revision: str
@@ -1379,6 +1383,8 @@ class ProjectService:
             )
 
             def mutate_jobs(value: JobsManifest, operation_id: str) -> JobsManifest:
+                if self._current_input_fingerprint(current) != current.input_fingerprint:
+                    raise _RenderInputStaleDuringPublication
                 return replace(
                     value,
                     jobs=tuple(
@@ -1414,6 +1420,8 @@ class ProjectService:
             def mutate_render(
                 value: RenderManifest, _operation_id: str
             ) -> RenderManifest:
+                if self._current_input_fingerprint(current) != current.input_fingerprint:
+                    raise _RenderInputStaleDuringPublication
                 retained = tuple(
                     item
                     for item in value.clip_renders
@@ -1461,12 +1469,18 @@ class ProjectService:
                 )
                 self.queue.acknowledge_publication(current.project_id)
                 return committed
+            except _RenderInputStaleDuringPublication:
+                raise
             except Exception as exc:
                 raise _RenderPublicationPending(
                     current.project_id, current.job_id, exc
                 ) from exc
         except _RenderPublicationPending:
             raise
+        except _RenderInputStaleDuringPublication:
+            finished = self.queue.mark_stale_input(current.job_id, **kwargs)
+            self._publish_queue_locked(current.project_id)
+            return finished
         except Exception as exc:
             failed = self.queue.mark_failed(
                 current.job_id,
@@ -1481,6 +1495,11 @@ class ProjectService:
     ) -> QueueJob:
         from .recovery import reconcile_project
 
+        before_reconcile = self.queue.get(pending.job_id)
+        input_was_current = (
+            self._current_input_fingerprint(before_reconcile)
+            == before_reconcile.input_fingerprint
+        )
         reconcile_project(pending.project_id, repositories=self.repositories)
         with self._state_guard(pending.project_id):
             manifest = self.repositories.jobs.load(pending.project_id)
@@ -1498,6 +1517,7 @@ class ProjectService:
             if (
                 persisted is not None
                 and persisted.status == "success"
+                and input_was_current
                 and self._validate_persisted_render_success(persisted)
             ):
                 if current.status == "validating":
@@ -1511,6 +1531,30 @@ class ProjectService:
                     committed = persisted
                 self.queue.acknowledge_publication(pending.project_id)
                 return committed
+            if persisted is not None and persisted.status == "success":
+                downgraded_manifest, downgraded_ids = (
+                    self._downgrade_restored_render_jobs_locked(
+                        pending.project_id,
+                        manifest,
+                        currentness_overrides={pending.job_id: input_was_current},
+                    )
+                )
+                if pending.job_id in downgraded_ids:
+                    downgraded = QueueJob.from_dict(
+                        next(
+                            item
+                            for item in downgraded_manifest.jobs
+                            if item.get("job_id") == pending.job_id
+                        )
+                    )
+                    committed = self.queue.commit_recovered_terminal_candidate(
+                        pending.job_id,
+                        candidate=downgraded,
+                        attempt_number=attempt.number,
+                        claim_token=claim_token,
+                    )
+                    self.queue.acknowledge_publication(pending.project_id)
+                    return committed
             error = (
                 "render publication failed before durable activation: "
                 f"{pending.cause}"
@@ -1824,47 +1868,7 @@ class ProjectService:
                 "frame_map": target / "render_frame_map.json",
                 "manifest": target / "render_output_manifest.json",
             }
-            if dict(job.published_outputs) != {
-                name: str(path) for name, path in paths.items()
-            }:
-                return False
-            render_manifest = self.repositories.render.load(job.project_id)
-            render_id = f"{job.clip_id}:{job.output_revision}"
-            records = tuple(
-                item
-                for item in render_manifest.clip_renders
-                if item.get("render_id") == render_id
-            )
-            if len(records) != 1:
-                return False
-            clip = next(
-                (
-                    item
-                    for item in self.repositories.clips.load(job.project_id).clips
-                    if item.clip_id == job.clip_id
-                ),
-                None,
-            )
-            if clip is None:
-                return False
-            expected_record = {
-                "render_id": render_id,
-                "project_id": job.project_id,
-                "clip_id": job.clip_id,
-                "job_id": job.job_id,
-                "status": "success",
-                "workflow": clip.resolved_workflow,
-                "input_revision": job.input_revision,
-                "input_fingerprint": job.input_fingerprint,
-                "adapter_name": job.adapter_name,
-                "adapter_version": job.adapter_version,
-                "output_revision": job.output_revision,
-                "output_fingerprint": job.output_fingerprint,
-                "outputs": dict(job.published_outputs),
-                "validation_proof": dict(job.validation_proof),
-                "operation_id": job.publication_operation_id,
-            }
-            if any(records[0].get(key) != value for key, value in expected_record.items()):
+            if self._exact_render_owner_record(job) is None:
                 return False
             observed = self._validate_render_files(
                 job,
@@ -1883,6 +1887,100 @@ class ProjectService:
             return True
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return False
+
+    def _validate_persisted_render_artifact_identity(self, job: QueueJob) -> bool:
+        if (
+            not job.output_revision
+            or not is_safe_stable_id(job.output_revision)
+            or not job.output_fingerprint
+            or not isinstance(job.validation_proof, Mapping)
+        ):
+            return False
+        target = (
+            self.projects_root
+            / job.project_id
+            / "render_outputs"
+            / job.clip_id
+            / job.output_revision
+        )
+        try:
+            _validate_existing_render_publication(
+                target,
+                job=job,
+                output_revision=job.output_revision,
+                output_fingerprint=job.output_fingerprint,
+                proof=job.validation_proof,
+            )
+            return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+
+    def _exact_render_owner_record(
+        self, job: QueueJob
+    ) -> Mapping[str, object] | None:
+        if (
+            not job.output_revision
+            or not is_safe_stable_id(job.output_revision)
+            or not isinstance(job.validation_proof, Mapping)
+            or not job.publication_operation_id
+            or job.operation_id != job.publication_operation_id
+        ):
+            return None
+        target = (
+            self.projects_root
+            / job.project_id
+            / "render_outputs"
+            / job.clip_id
+            / job.output_revision
+        )
+        expected_paths = {
+            "video": str(target / "rendered.mp4"),
+            "frame_map": str(target / "render_frame_map.json"),
+            "manifest": str(target / "render_output_manifest.json"),
+        }
+        if dict(job.published_outputs) != expected_paths:
+            return None
+        render_id = f"{job.clip_id}:{job.output_revision}"
+        records = tuple(
+            item
+            for item in self.repositories.render.load(job.project_id).clip_renders
+            if item.get("render_id") == render_id
+        )
+        if len(records) != 1:
+            return None
+        clip = next(
+            (
+                item
+                for item in self.repositories.clips.load(job.project_id).clips
+                if item.clip_id == job.clip_id
+            ),
+            None,
+        )
+        if clip is None:
+            return None
+        expected_record = {
+            "render_id": render_id,
+            "project_id": job.project_id,
+            "clip_id": job.clip_id,
+            "job_id": job.job_id,
+            "status": "success",
+            "workflow": clip.resolved_workflow,
+            "input_revision": job.input_revision,
+            "input_fingerprint": job.input_fingerprint,
+            "adapter_name": job.adapter_name,
+            "adapter_version": job.adapter_version,
+            "output_revision": job.output_revision,
+            "output_fingerprint": job.output_fingerprint,
+            "outputs": expected_paths,
+            "validation_proof": dict(job.validation_proof),
+            "operation_id": job.publication_operation_id,
+        }
+        record = records[0]
+        if set(record) != set(expected_record) or any(
+            record.get(key) != value for key, value in expected_record.items()
+        ):
+            return None
+        return record
 
     def _recover_analysis_publication(
         self, pending: _AnalysisPublicationPending
@@ -2487,33 +2585,19 @@ class ProjectService:
             manifest = self._migrate_legacy_analysis_jobs_locked(
                 project_id, manifest
             )
-            restored_payloads: list[Mapping[str, object]] = []
-            for item in manifest.jobs:
-                job = QueueJob.from_dict(item)
-                if (
-                    job.job_type == "clip_render"
-                    and job.status == "success"
-                    and not self._validate_persisted_render_success(job)
-                ):
-                    job = replace(
-                        job,
-                        status="failed",
-                        stage="failed",
-                        output_revision=None,
-                        output_fingerprint=None,
-                        output_validated=False,
-                        validated_input_fingerprint=None,
-                        published_outputs={},
-                        validation_proof=None,
-                        error="persisted render output failed restore validation",
-                    )
-                restored_payloads.append(job.to_dict())
+            manifest, downgraded_render_ids = self._downgrade_restored_render_jobs_locked(
+                project_id, manifest
+            )
             restored = self.queue.merge_restored(
-                tuple(restored_payloads),
+                manifest.jobs,
                 project_id=project_id,
                 queue_order=manifest.queue_order,
                 process_probe=process_probe,
-                current_fingerprint_resolver=self._current_input_fingerprint,
+                current_fingerprint_resolver=lambda job: (
+                    job.input_fingerprint
+                    if job.job_id in downgraded_render_ids
+                    else self._current_input_fingerprint(job)
+                ),
                 defer_cleanup=True,
                 unverified_process_policy=unverified_process_policy,
             )
@@ -2537,6 +2621,123 @@ class ProjectService:
                     )
                 self._publish_queue_locked(project_id)
         return restored
+
+    def _downgrade_restored_render_jobs_locked(
+        self,
+        project_id: str,
+        jobs_manifest: JobsManifest,
+        *,
+        currentness_overrides: Mapping[str, bool] | None = None,
+    ) -> tuple[JobsManifest, frozenset[str]]:
+        decisions: dict[str, str] = {}
+        render_ids: dict[str, str] = {}
+        for item in jobs_manifest.jobs:
+            job = QueueJob.from_dict(item)
+            if job.job_type != "clip_render" or job.status != "success":
+                continue
+            if job.output_revision:
+                render_ids[f"{job.clip_id}:{job.output_revision}"] = job.job_id
+            try:
+                owner_valid = self._exact_render_owner_record(job) is not None
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                owner_valid = False
+            if not owner_valid:
+                decisions[job.job_id] = "failed"
+                continue
+            if not self._validate_persisted_render_artifact_identity(job):
+                decisions[job.job_id] = "failed"
+                continue
+            is_current = (
+                currentness_overrides[job.job_id]
+                if currentness_overrides is not None
+                and job.job_id in currentness_overrides
+                else self._current_input_fingerprint(job) == job.input_fingerprint
+            )
+            if not is_current:
+                decisions[job.job_id] = "superseded"
+                continue
+            if not self._validate_persisted_render_success(job):
+                decisions[job.job_id] = "failed"
+        if not decisions:
+            return jobs_manifest, frozenset()
+        render_manifest = self.repositories.render.load(project_id)
+
+        def mutate_jobs(value: JobsManifest, operation_id: str) -> JobsManifest:
+            changed: list[Mapping[str, object]] = []
+            for payload in value.jobs:
+                status = decisions.get(str(payload.get("job_id")))
+                if status is None:
+                    changed.append(dict(payload))
+                    continue
+                job = QueueJob.from_dict(payload)
+                changed.append(
+                    replace(
+                        job,
+                        status=status,
+                        stage=status,
+                        operation_id=operation_id,
+                        publication_operation_id=operation_id,
+                        output_validated=False,
+                        validated_input_fingerprint=None,
+                        error=(
+                            "persisted render output failed restore validation"
+                            if status == "failed"
+                            else "persisted render input is no longer current"
+                        ),
+                    ).to_dict()
+                )
+            return replace(value, jobs=tuple(changed), updated_at=self.now())
+
+        def mutate_render(value: RenderManifest, operation_id: str) -> RenderManifest:
+            changed: list[Mapping[str, object]] = []
+            for record in value.clip_renders:
+                job_id = render_ids.get(str(record.get("render_id")))
+                status = decisions.get(job_id or str(record.get("job_id")))
+                if status is None:
+                    changed.append(dict(record))
+                    continue
+                changed.append(
+                    {
+                        **record,
+                        "status": (
+                            "failed_validation"
+                            if status == "failed"
+                            else "stale_input"
+                        ),
+                        "operation_id": operation_id,
+                        "validation_error": (
+                            "persisted_output_invalid"
+                            if status == "failed"
+                            else "input_fingerprint_changed"
+                        ),
+                    }
+                )
+            return replace(
+                value,
+                clip_renders=tuple(changed),
+                updated_at=self.now(),
+            )
+
+        publication = publish_manifests(
+            (
+                ManifestMutation(
+                    repository=self.repositories.jobs,
+                    project_id=project_id,
+                    expected_revision=jobs_manifest.revision,
+                    mutate=mutate_jobs,
+                ),
+                ManifestMutation(
+                    repository=self.repositories.render,
+                    project_id=project_id,
+                    expected_revision=render_manifest.revision,
+                    mutate=mutate_render,
+                ),
+            )
+        )
+        persisted = next(
+            item for item in publication.manifests if isinstance(item, JobsManifest)
+        )
+        return persisted, frozenset(decisions)
 
     def _migrate_legacy_analysis_jobs_locked(
         self,
