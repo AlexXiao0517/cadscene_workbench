@@ -80,6 +80,46 @@ Review TDD evidence:
   `96 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
+### Pure concat preflight, plan, and frame-map contracts
+
+- Added a side-effect-free `cadscene.projects.concat` module. It does not import
+  repositories, project services, queue state, or `QueueJob`, and performs no
+  filesystem or subprocess work. `RenderCandidate` and `FallbackArtifact` are
+  immutable canonical snapshots that the service must construct only after its
+  authoritative job/owner/output validation.
+- Clip `render_order` must be exactly `0..N-1`, unique, and identical to source
+  PTS order. Exact source time bases, contiguous half-open intervals, per-clip
+  authoritative frame maps, and the flattened complete source decoded ordinal /
+  integer-PTS sequence are all validated before candidate preflight.
+- Canonical rendered candidates bind project, clip, workflow, current input
+  fingerprint, immutable output revision/fingerprint, proof fingerprint,
+  publication operation, paths, probed media, and render frame map. Non-current
+  candidates become explanatory per-clip blockers rather than current inputs.
+- Source fallback confirmations bind project/clips revisions, clip analysis
+  revision, interval fingerprint, source-asset fingerprint, and project media
+  spec revision. Every field has an independent stale-confirmation regression.
+  A valid confirmation with no artifact creates a truthful
+  `dependency_required` entry with no fake paths; a ready fallback must also bind
+  its current interval/source/media revisions and immutable output identity.
+- Ready segment validation uses production rendered-media/frame-map and media
+  compatibility contracts, additionally requiring source-equivalent frame
+  timing. Media differences become explicit `needs_normalize` fields; zero-start,
+  negative/non-monotonic PTS or frame identity defects are blockers, not
+  normalization candidates.
+- A plan cannot be built while any blocker remains. It always names the original
+  long video as its audio source and never consumes per-clip audio. The pure final
+  frame-map builder rechecks that concatenated output ordinals map exactly to the
+  complete authoritative source frame sequence with no duplicate or omission.
+
+TDD evidence:
+
+- RED: `tests/projects/test_concat.py` initially failed collection because the
+  pure concat module did not exist.
+- Focused concat contract: `27 passed`.
+- Focused concat/media/source-fallback/render: `195 passed, 1 skipped`.
+- Related project/render/service/PTS/export regression: `479 passed, 2 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
 ### Exact render-prerequisite binding closure
 
 - A trajectory proof now includes the bytes of the named
