@@ -171,6 +171,8 @@ class VideoMediaInfo:
     nominal_frame_rate: Fraction | None
     frame_pts: tuple[int, ...]
     frame_duration_pts: tuple[int | None, ...]
+    duration_pts: int | None = None
+    duration_sec: float | None = None
 
     @property
     def frame_count(self) -> int:
@@ -312,6 +314,12 @@ def parse_ffprobe(payload: str | Mapping[str, Any]) -> ProbedMedia:
         ),
         frame_pts=frame_pts,
         frame_duration_pts=frame_durations,
+        duration_pts=_optional_integer(
+            video_stream.get("duration_ts"), "video.duration_ts", minimum=0
+        ),
+        duration_sec=_optional_finite_float(
+            video_stream.get("duration"), "video.duration"
+        ),
     )
     audio_stream = next(
         (item for item in streams if isinstance(item, Mapping) and item.get("codec_type") == "audio"),
@@ -625,8 +633,12 @@ def _integer(value: object, field: str, *, minimum: int | None = None) -> int:
     return result
 
 
-def _optional_integer(value: object, field: str) -> int | None:
-    return None if value in (None, "N/A") else _integer(value, field)
+def _optional_integer(
+    value: object, field: str, *, minimum: int | None = None
+) -> int | None:
+    return None if value in (None, "N/A") else _integer(
+        value, field, minimum=minimum
+    )
 
 
 def _text(value: object, field: str) -> str:

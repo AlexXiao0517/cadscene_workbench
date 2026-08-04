@@ -231,3 +231,10 @@ def test_prepare_rejects_ambiguous_execution_state(tmp_path: Path, change: str):
 
     with pytest.raises(ValueError, match="normalize|render_order"):
         ConcatMediaAdapter().prepare(inputs)
+
+
+def test_execution_snapshot_rejects_output_path_escape(tmp_path: Path):
+    execution = ConcatMediaAdapter().prepare(_fixture(tmp_path))
+
+    with pytest.raises(ValueError, match="attempt directory"):
+        replace(execution, final_frame_map_path=tmp_path / "escaped-map.json")

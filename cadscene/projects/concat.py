@@ -722,7 +722,6 @@ def _ready_entry(
         media,
         source_frames,
         clip.source_time_base,
-        clip.source_end_pts_exclusive,
     )
     compatibility = media_compatibility(media.video, request.project_media_spec)
     return _base_entry(
@@ -819,7 +818,6 @@ def _validate_frame_timing(
     media: ProbedMedia,
     source_frames: tuple[DecodedFrameTimestamp, ...],
     source_time_base: Fraction,
-    source_end_pts_exclusive: int,
 ) -> None:
     output_deltas = tuple(
         Fraction(current - previous) * media.video.time_base
@@ -833,25 +831,6 @@ def _validate_frame_timing(
     )
     if output_deltas != source_deltas:
         raise ValueError("rendered frame timing differs from authoritative source")
-    output_durations = media.video.frame_duration_pts
-    if len(output_durations) != len(source_frames):
-        raise ValueError("rendered frame durations are incomplete")
-    expected_duration_pts = tuple(
-        next_frame.pts - frame.pts
-        for frame, next_frame in zip(source_frames, source_frames[1:])
-    ) + (source_end_pts_exclusive - source_frames[-1].pts,)
-    for output_duration, expected_duration in zip(
-        output_durations, expected_duration_pts
-    ):
-        if type(output_duration) is not int or output_duration <= 0:
-            raise ValueError("rendered frame duration is missing or invalid")
-        if (
-            Fraction(output_duration) * media.video.time_base
-            != Fraction(expected_duration) * source_time_base
-        ):
-            raise ValueError(
-                "rendered frame duration differs from authoritative source"
-            )
 
 
 def _base_entry(

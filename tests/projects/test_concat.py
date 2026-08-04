@@ -446,12 +446,15 @@ def test_segment_frame_timing_must_match_authoritative_source_deltas() -> None:
     assert "timing" in report.entries[1].reason
 
 
-def test_segment_last_frame_duration_must_match_half_open_interval_end() -> None:
+@pytest.mark.parametrize("packet_durations", ((40, 4000), (None, None)))
+def test_packet_duration_is_diagnostic_when_pts_and_interval_are_authoritative(
+    packet_durations: tuple[int | None, int | None],
+) -> None:
     first, second = _clips()
     invalid = _candidate(second, probe=_probe())
     invalid_media = replace(
         invalid.media,
-        video=replace(invalid.media.video, frame_duration_pts=(40, 4000)),
+        video=replace(invalid.media.video, frame_duration_pts=packet_durations),
     )
     invalid = replace(invalid, media=invalid_media)
 
@@ -459,8 +462,8 @@ def test_segment_last_frame_duration_must_match_half_open_interval_end() -> None
         _request(renders={first.clip_id: _candidate(first), second.clip_id: invalid})
     )
 
-    assert report.blockers == ("clip-2",)
-    assert "duration" in report.entries[1].reason
+    assert report.blockers == ()
+    assert report.entries[1].status == "ready"
 
 
 def test_nonzero_or_nonmonotonic_segment_pts_is_a_blocker_not_normalization() -> None:

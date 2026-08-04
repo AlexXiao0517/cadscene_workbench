@@ -104,8 +104,9 @@ Review TDD evidence:
   its current interval/source/media revisions and immutable output identity.
 - Ready segment validation uses production rendered-media/frame-map and media
   compatibility contracts, additionally requiring source-equivalent frame
-  timing and every frame duration, including the final frame through the
-  half-open interval end. Media differences become explicit `needs_normalize` fields; zero-start,
+  PTS deltas. Packet duration remains diagnostic rather than authoritative;
+  half-open segment durations come from the decoded source PTS contract and are
+  written explicitly into the concat plan. Media differences become explicit `needs_normalize` fields; zero-start,
   negative/non-monotonic PTS or frame identity defects are blockers, not
   normalization candidates.
 - A plan cannot be built while any blocker remains. It always names the original
@@ -395,6 +396,88 @@ Review-fix TDD evidence:
 - Focused render/media tests: `96 passed`.
 - Related regression: `340 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+### Substage 4b-2: real concat media executor
+
+- Added a manifest-free executor and CLI that consume the frozen
+  `ConcatMediaExecutionPlan` snapshot. The JSON loader is strict, restores no
+  callable authority, and every source/segment hash is checked before, between,
+  and after media commands.
+- The execution snapshot also binds the canonical project-media-spec fingerprint
+  and names its attempt directory. The CLI independently requires the scheduler's
+  authorized attempt directory and rejects a self-declared snapshot root, changed
+  spec, escaped sidecar path, or symlink root before any media command.
+- Incompatible segments are normalized to the project media specification with
+  passthrough frame timing, no forced frame rate, no frame synthesis/drop, no
+  audio, no B-frame reordering, zero-start PTS, baked orientation, explicit
+  color/SAR/time-base metadata, and post-encode frame-map validation.
+- Compatible segments are stream-concatenated in source order. The concat
+  demuxer list includes each authoritative source-interval duration; it does not
+  infer the next segment offset from an isolated MP4's often-missing last-frame
+  packet duration. This preserves a VFR gap that crosses a clip boundary.
+- Before concat, the executor flattens the actual immutable per-segment frame maps
+  and requires exact equality with the final authoritative map, preventing a
+  duplicate/omitted segment map from being hidden by a correct generated sidecar.
+- Per-segment audio is never concatenated. When the original source contains
+  audio, it is trimmed once to the authoritative final video duration, rebased,
+  encoded, and muxed without `-shortest`; a source without audio produces an
+  explicit video-only result. Final media is checked for exact frame identity,
+  zero/non-negative/monotonic PTS, VFR deltas, project media spec, exact duration,
+  audio/video tolerance, and source/segment/output hashes.
+- Commands write only to a random directory inside the immutable attempt.
+  `final.mp4` and `final_frame_map.json` are fsynced inside one complete immutable
+  bundle directory, then the directory is installed with one atomic rename after
+  validation. A crash can therefore expose either neither output or both outputs,
+  never a half-published pair; failed attempts retain their temporary diagnostics.
+  Directory fsync is applied where the platform supports it. If parent-directory
+  fsync reports an error after the atomic rename, the already complete bundle is
+  not misreported as unpublished; restart recovery can revalidate that immutable
+  directory. Progress is structured by stage and does not invent a fraction.
+- All proof construction and output hashing completes before the first atomic
+  bundle install; no fallible validation remains after publication.
+- The standalone restart/recovery validator rechecks the frozen media-spec
+  fingerprint and every source/segment byte binding before and after probing.
+  It independently probes the authoritative long video to preserve the
+  original-audio-only policy, so a substituted video-only final cannot be
+  recovered as successful when the source contains audio.
+
+TDD and real-media evidence:
+
+- RED: the executor module did not exist; command, revalidation, atomic failure,
+  video-only, strict snapshot, CLI, and final-timing tests failed at import.
+- A real first concat lost an 80 ms VFR interval across the clip boundary when
+  it relied on isolated MP4 duration. The final validator rejected it. Adding
+  authoritative `duration` entries to the concat list produced exact final PTS
+  `(0, 40, 120, 160)` at time base `1/1000` without relaxing validation.
+- Real FFmpeg fixture: non-zero source PTS, irregular timing, adjacent half-open
+  intervals, one 32-to-64-pixel normalization, source-order video concat, and one
+  original-source audio mux. Final video/audio duration is 0.200 s and the final
+  frame map exactly equals the complete source decoded-frame sequence.
+- A dedicated fail-closed regression proves that a correct frame map cannot hide
+  incorrect final PTS timing.
+- Exact final video duration is the final output PTS plus that frame's packet
+  duration; earlier packet durations are not summed and cannot hide an incorrect
+  final-frame end. When the final packet duration is absent, the only accepted
+  fallback is the video stream's integer `duration_ts` in its exact time base.
+  Decimal stream duration and container duration remain diagnostic only.
+- Focused executor: `22 passed`; concat/media/source-fallback focused:
+  `151 passed, 2 skipped`; project plus PTS/export related regression:
+  `627 passed, 3 skipped, 1 unrelated deprecation warning`; full suite:
+  `1161 passed, 3 skipped, 1 unrelated deprecation warning`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+- Independent final review: approved with no remaining Critical, Important, or
+  Minor finding. The strict snapshot loader additionally rejects unsafe or
+  duplicate segment `clip_id` values so proof maps cannot collapse identities.
+
+Preflight integration closure:
+
+- Pure concat preflight now treats packet duration as diagnostic, matching the
+  decoded-frame PTS authority contract. It validates zero-start output PTS and
+  all observable internal PTS deltas; the exact half-open segment duration comes
+  from the authoritative source interval and is written into the concat list.
+  Final output remains fail-closed on the complete source PTS sequence and exact
+  authoritative total duration, so missing `pkt_duration` is supported without
+  accepting a compressed or expanded final timeline.
 
 Crash coverage note: the render-specific suite injects an interruption after
 both participant manifests are durable but before in-memory queue acknowledgement.

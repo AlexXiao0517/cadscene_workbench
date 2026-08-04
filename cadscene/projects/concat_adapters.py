@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from hashlib import sha256
+import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -81,9 +82,11 @@ class ConcatMediaExecutionPlan:
     project_revision: int
     clips_revision: int
     project_media_spec_revision: str
+    project_media_spec_fingerprint: str
     source_asset_fingerprint: str
     segments: tuple[ConcatSegmentExecution, ...]
     audio_source: Path
+    attempt_directory: Path
     video_only_output: Path
     final_output: Path
     final_frame_map_path: Path
@@ -96,6 +99,64 @@ class ConcatMediaExecutionPlan:
         validator = self.validate
         if not callable(validator):
             raise TypeError("concat validator must be callable")
+        _required_sha(
+            self.project_media_spec_fingerprint,
+            "project media spec fingerprint",
+        )
+        _required_sha(self.source_asset_fingerprint, "source asset fingerprint")
+        if (
+            not isinstance(self.segments, Sequence)
+            or isinstance(self.segments, (str, bytes, bytearray))
+            or not self.segments
+            or any(
+                not isinstance(item, ConcatSegmentExecution)
+                for item in self.segments
+            )
+        ):
+            raise ValueError("concat execution segments must be explicit")
+        object.__setattr__(self, "segments", tuple(self.segments))
+        if [item.render_order for item in self.segments] != list(
+            range(len(self.segments))
+        ):
+            raise ValueError("concat execution render_order must be contiguous")
+        for name in (
+            "audio_source",
+            "attempt_directory",
+            "video_only_output",
+            "final_output",
+            "final_frame_map_path",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, Path) or not value.is_absolute():
+                raise ValueError(f"{name} must be an absolute path")
+        attempt_directory = self.attempt_directory
+        if attempt_directory.is_symlink() or not attempt_directory.is_dir():
+            raise ValueError(
+                "attempt_directory must be an existing regular directory"
+            )
+        bundle_directory = self.final_output.parent
+        if (
+            self.video_only_output.parent != attempt_directory
+            or bundle_directory.parent != attempt_directory
+            or self.final_frame_map_path.parent != bundle_directory
+        ):
+            raise ValueError("concat outputs must remain in the attempt directory")
+        if len(
+            {self.video_only_output, self.final_output, self.final_frame_map_path}
+        ) != 3:
+            raise ValueError("concat attempt outputs must be distinct")
+        if not isinstance(self.final_frame_map, Mapping):
+            raise TypeError("final frame map must be a mapping")
+        object.__setattr__(
+            self, "final_frame_map", _freeze_mapping(self.final_frame_map)
+        )
+        if (
+            not isinstance(self.expected_video_duration, Fraction)
+            or self.expected_video_duration <= 0
+            or not isinstance(self.audio_video_tolerance, Fraction)
+            or self.audio_video_tolerance <= 0
+        ):
+            raise ValueError("concat durations must be positive exact rationals")
 
         def checked_validate() -> AdapterResult:
             result = validator()
@@ -111,10 +172,12 @@ class ConcatMediaExecutionPlan:
             "project_revision": self.project_revision,
             "clips_revision": self.clips_revision,
             "project_media_spec_revision": self.project_media_spec_revision,
+            "project_media_spec_fingerprint": self.project_media_spec_fingerprint,
             "source_asset_fingerprint": self.source_asset_fingerprint,
             "segments": [item.to_dict() for item in self.segments],
             "audio_source": str(self.audio_source),
             "audio_policy": "original_video",
+            "attempt_directory": str(self.attempt_directory),
             "video_only_output": str(self.video_only_output),
             "final_output": str(self.final_output),
             "final_frame_map_path": str(self.final_frame_map_path),
@@ -218,17 +281,22 @@ class ConcatMediaAdapter:
             _validate_execution_bindings(holder["plan"])
             return result
 
+        bundle_directory = inputs.attempt_directory / "final_bundle"
         execution = ConcatMediaExecutionPlan(
             project_id=plan.project_id,
             project_revision=plan.project_revision,
             clips_revision=plan.clips_revision,
             project_media_spec_revision=plan.project_media_spec_revision,
+            project_media_spec_fingerprint=project_media_spec_fingerprint(
+                inputs.project_media_spec
+            ),
             source_asset_fingerprint=plan.source_asset_fingerprint,
             segments=tuple(segments),
             audio_source=inputs.source_video_path,
+            attempt_directory=inputs.attempt_directory,
             video_only_output=inputs.attempt_directory / "video_only.mp4",
-            final_output=inputs.attempt_directory / "final.mp4",
-            final_frame_map_path=inputs.attempt_directory / "final_frame_map.json",
+            final_output=bundle_directory / "final.mp4",
+            final_frame_map_path=bundle_directory / "final_frame_map.json",
             final_frame_map=_freeze_mapping(final_map),
             expected_video_duration=expected_duration,
             audio_video_tolerance=tolerance,
@@ -246,6 +314,15 @@ def _frame_duration_seconds(index: DecodedFrameIndex, ordinal: int) -> Fraction:
         else index.source_end_pts_exclusive
     )
     return Fraction(end_pts - frame.pts) * index.time_base
+
+
+def project_media_spec_fingerprint(spec: ProjectMediaSpec) -> str:
+    if not isinstance(spec, ProjectMediaSpec):
+        raise TypeError("project media spec must be a ProjectMediaSpec")
+    payload = json.dumps(
+        spec.to_dict(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
 
 
 def _validate_plan_input_bindings(inputs: ConcatMediaInputs) -> None:

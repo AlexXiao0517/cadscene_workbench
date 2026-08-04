@@ -88,6 +88,7 @@ def _probe_payload(*, pts: tuple[int, ...] = (0, 40, 80)) -> dict[str, object]:
                 "sample_aspect_ratio": "1:1",
                 "pix_fmt": "yuv420p",
                 "time_base": "1/1000",
+                "duration_ts": "120",
                 "avg_frame_rate": "25/1",
                 "color_range": "tv",
                 "color_space": "bt709",
@@ -210,10 +211,22 @@ def test_ffprobe_parser_selects_video_audio_frames_and_exact_rationals() -> None
     assert probe.video.display_orientation_baked is True
     assert probe.video.frame_pts == (0, 40, 80)
     assert probe.video.frame_duration_pts == (40, 40, 40)
+    assert probe.video.duration_pts == 120
     assert probe.audio is not None
     assert probe.audio.sample_rate == 48000
     assert probe.audio.channels == 2
     assert probe.audio.time_base == Fraction(1, 48000)
+
+
+@pytest.mark.parametrize("duration_ts", [True, -1, "1.5"])
+def test_ffprobe_parser_rejects_invalid_video_duration_ts(
+    duration_ts: object,
+) -> None:
+    payload = _probe_payload()
+    payload["streams"][0]["duration_ts"] = duration_ts
+
+    with pytest.raises(InvalidMediaContract, match="duration_ts"):
+        parse_ffprobe(payload)
 
 
 def test_ffprobe_parser_marks_rotation_metadata_as_not_baked() -> None:
