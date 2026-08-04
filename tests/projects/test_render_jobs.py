@@ -6,6 +6,8 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
+import pytest
+
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.media import ProjectMediaSpec
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
@@ -162,8 +164,13 @@ def _system(tmp_path: Path):
         projects_root=projects_root,
         now=lambda: "2026-08-04T00:00:01Z",
         render_adapters=RenderAdapterRegistry((render_adapter,)),
-        project_media_spec=_media_spec(),
-        project_media_spec_revision="media-spec-1",
+    )
+    project_for_spec = repositories.project.load("p1")
+    service.set_project_media_spec(
+        "p1",
+        _media_spec(),
+        media_spec_revision="media-spec-1",
+        expected_revision=project_for_spec.revision,
     )
     project = repositories.project.load("p1")
     trajectories = []
@@ -183,7 +190,8 @@ def _system(tmp_path: Path):
             project_revision=project.revision,
             clips_revision=clips_manifest.revision,
         )
-        trajectory_path = tmp_path / f"{clip.clip_id}-trajectory.json"
+        trajectory_path = Path(job.attempts[-1].directory) / "camera_trajectory.json"
+        trajectory_path.parent.mkdir(parents=True)
         trajectory_path.write_text("{}", encoding="utf-8")
         job = replace(
             job,
@@ -331,6 +339,37 @@ def test_preflight_rejects_trajectory_file_tampered_after_validation(
     assert "trajectory" in result.reasons["ready"]
 
 
+def test_preflight_rejects_trajectory_artifact_outside_current_attempt(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, trajectories = _system(tmp_path)
+    ready = next(job for job in trajectories if job.clip_id == "ready")
+    outside = tmp_path / "outside-trajectory.json"
+    outside.write_bytes(Path(ready.published_outputs["trajectory"]).read_bytes())
+    current = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "published_outputs": {"trajectory": str(outside)},
+                }
+                if item["job_id"] == ready.job_id
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+
+    result = service.preflight_render_jobs("p1", clip_ids=("ready",))
+
+    assert result.skipped == ("ready",)
+    assert "trajectory" in result.reasons["ready"]
+
+
 def test_preflight_rejects_workbench_reference_trajectory_fingerprint_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -442,13 +481,178 @@ def test_render_identity_includes_saved_workbench_operation_id(tmp_path: Path) -
         clips_revision=clips.revision,
         trajectory=trajectory,
         workbench=clip.references[0],
-        media_spec=service.project_media_spec,
-        media_spec_revision=str(service.project_media_spec_revision),
+        media_spec=ProjectMediaSpec.from_dict(project.media_spec),
+        media_spec_revision=str(project.media_spec_revision),
         adapter_name=adapter.name,
         adapter_version=adapter.version,
     )
 
     assert payload["workbench"]["operation_id"] == "save-ready"
+
+
+def test_project_media_specs_survive_service_rebuild_and_remain_project_scoped(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    repositories.create_project("p2", updated_at="2026-08-04T00:00:00Z")
+    p2 = repositories.project.load("p2")
+    service.set_project_media_spec(
+        "p2",
+        replace(_media_spec(), width=1280, height=720),
+        media_spec_revision="media-spec-p2",
+        expected_revision=p2.revision,
+    )
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:02Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+    )
+    rebuilt.restore_jobs("p1")
+    rebuilt.restore_jobs("p2")
+
+    p1_restored = repositories.project.load("p1")
+    p2_restored = repositories.project.load("p2")
+    assert ProjectMediaSpec.from_dict(p1_restored.media_spec).width == 1920
+    assert p1_restored.media_spec_revision == "media-spec-1"
+    assert ProjectMediaSpec.from_dict(p2_restored.media_spec).width == 1280
+    assert p2_restored.media_spec_revision == "media-spec-p2"
+    assert rebuilt.preflight_render_jobs("p1", clip_ids=("ready",)).eligible == (
+        "ready",
+    )
+
+
+def _enqueue_ready_render(tmp_path: Path):
+    service, repositories, queue, adapter, trajectories = _system(tmp_path)
+    result = service.enqueue_render_jobs("p1", clip_ids=("ready",))
+    return service, repositories, queue, adapter, trajectories, result.job_ids[0]
+
+
+def test_restore_keeps_current_render_input_and_only_interrupts_unstarted_run(
+    tmp_path: Path,
+) -> None:
+    _service, repositories, _queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:03Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+    )
+
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status == "interrupted"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "workflow",
+        "workbench",
+        "trajectory",
+        "media_spec",
+        "adapter_version",
+        "trajectory_file",
+    ],
+)
+def test_restore_supersedes_render_when_any_bound_input_changes(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    service, repositories, _queue, _adapter, trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    adapter = FakeRenderAdapter()
+    if change == "workflow":
+        current = repositories.clips.load("p1")
+        repositories.clips.update(
+            "p1",
+            expected_revision=current.revision,
+            mutate=lambda value: replace(
+                value,
+                clips=tuple(
+                    clip.with_workflow_override("pure_rotation")
+                    if clip.clip_id == "ready"
+                    else clip
+                    for clip in value.clips
+                ),
+            ),
+        )
+    elif change == "workbench":
+        current = repositories.clips.load("p1")
+        repositories.clips.update(
+            "p1",
+            expected_revision=current.revision,
+            mutate=lambda value: replace(
+                value,
+                clips=tuple(
+                    replace(
+                        clip,
+                        references=(
+                            replace(
+                                clip.references[0],
+                                value={
+                                    **clip.references[0].value,
+                                    "workbench_output_fingerprint": "e" * 64,
+                                },
+                            ),
+                        ),
+                    )
+                    if clip.clip_id == "ready"
+                    else clip
+                    for clip in value.clips
+                ),
+            ),
+        )
+    elif change == "trajectory":
+        dependency = next(job for job in trajectories if job.clip_id == "ready")
+        current = repositories.jobs.load("p1")
+        repositories.jobs.update(
+            "p1",
+            expected_revision=current.revision,
+            mutate=lambda value: replace(
+                value,
+                jobs=tuple(
+                    {**item, "output_revision": "trajectory-replaced"}
+                    if item["job_id"] == dependency.job_id
+                    else item
+                    for item in value.jobs
+                ),
+            ),
+        )
+    elif change == "media_spec":
+        current = repositories.project.load("p1")
+        service.set_project_media_spec(
+            "p1",
+            replace(_media_spec(), width=1280, height=720),
+            media_spec_revision="media-spec-2",
+            expected_revision=current.revision,
+        )
+    elif change == "adapter_version":
+        adapter.version = "2"
+    elif change == "trajectory_file":
+        dependency = next(job for job in trajectories if job.clip_id == "ready")
+        Path(dependency.published_outputs["trajectory"]).write_bytes(b"tampered")
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:03Z",
+        render_adapters=RenderAdapterRegistry((adapter,)),
+    )
+
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status == "superseded"
 
 
 def test_enqueue_render_jobs_builds_media_dag_identity_and_is_idempotent(

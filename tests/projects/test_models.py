@@ -248,3 +248,27 @@ def test_explicit_candidate_activation_preserves_user_layers():
     assert activated_clips.clips[0].custom_display_name == "Permanent user name"
     assert activated_clips.clips[0].workflow_override == "pure_rotation"
     assert activated_project.operation_id == activated_clips.operation_id == "op-activate"
+
+
+def test_project_media_spec_pairing_and_roundtrip_are_backward_compatible() -> None:
+    project = ProjectManifest.new("p1", updated_at="2026-08-04T00:00:00Z")
+    assert project.media_spec_revision is None
+    assert project.media_spec is None
+    assert ProjectManifest.from_dict(project.to_dict()) == project
+
+    media_spec = {
+        "width": 1920,
+        "height": 1080,
+        "display_orientation_baked": True,
+    }
+    configured = replace(
+        project,
+        media_spec_revision="media-spec-1",
+        media_spec=media_spec,
+    )
+    assert ProjectManifest.from_dict(configured.to_dict()) == configured
+
+    with pytest.raises(ValueError, match="media spec"):
+        replace(project, media_spec_revision="media-spec-1")
+    with pytest.raises(ValueError, match="media spec"):
+        replace(project, media_spec=media_spec)

@@ -110,6 +110,38 @@ Exact-binding TDD evidence:
 - Related render/service/queue/workbench/workflow/media regression:
   `235 passed`.
 
+### Render preflight main-review closure
+
+- `ProjectManifest` now owns the paired `media_spec_revision` and JSON-safe
+  `media_spec` value. Older manifests without either field remain readable;
+  partial pairs fail model validation.
+- `ProjectService.set_project_media_spec()` performs an expected-revision,
+  project-locked update. Preflight, enqueue, and current-input validation always
+  reload and parse the media spec for the addressed project; there is no
+  process-global project media specification.
+- Distinct project media specs survive service reconstruction and queue restore
+  without cross-project leakage.
+- `clip_render` current-input fingerprint resolution reuses the exact enqueue
+  identity payload. It revalidates the current clip/workflow and adapter
+  name/version, exact persisted trajectory dependency and artifact hash, saved
+  workbench binding and immutable operation, and current project media spec.
+- A current unstarted render becomes `interrupted` on restart rather than being
+  falsely superseded. Workflow, workbench, trajectory, media-spec, adapter
+  version, or trajectory-file changes produce `superseded`.
+- The authoritative trajectory output must resolve inside the exact current
+  immutable attempt directory and its bytes must match the recorded SHA-256;
+  an equally hashed file outside that directory is rejected.
+
+Main-review TDD evidence:
+
+- RED: missing ProjectManifest fields, missing service media-spec setter, false
+  superseding of a current render on restore, and acceptance of an out-of-attempt
+  trajectory artifact each failed before production changes.
+- GREEN: model media-spec roundtrip `1 passed`; render tests `17 passed`,
+  including one current restore plus six independent invalidation cases.
+- Related models/repositories/recovery/render/service/queue/workbench/workflow/
+  media regression: `309 passed`.
+
 ## Substage 2a: manifest-free render adapter contracts
 
 This narrowed substage adds only the fake-friendly adapter boundary in

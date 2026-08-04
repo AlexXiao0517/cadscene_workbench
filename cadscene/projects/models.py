@@ -294,6 +294,8 @@ class ProjectManifest(ManifestHeader):
     owner: ClassVar[str] = "project"
 
     source_assets: Mapping[str, Any] = field(default_factory=dict)
+    media_spec_revision: str | None = None
+    media_spec: Mapping[str, Any] | None = None
     project_state: str = "new"
     active_analysis_revision: str | None = None
     candidate_analysis_revision: str | None = None
@@ -305,6 +307,12 @@ class ProjectManifest(ManifestHeader):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if (self.media_spec_revision is None) != (self.media_spec is None):
+            raise ValueError("project media spec revision and value must be paired")
+        if self.media_spec_revision is not None and (
+            not self.media_spec_revision.strip() or not self.media_spec
+        ):
+            raise ValueError("project media spec revision and value must be explicit")
         if len(self.analysis_revisions) != len(set(self.analysis_revisions)):
             raise ValueError("analysis_revisions must be unique")
         if set(self.analysis_revisions) != set(self.analysis_operation_ids):
@@ -345,6 +353,8 @@ class ProjectManifest(ManifestHeader):
         return {
             **self._header_dict(),
             "source_assets": dict(self.source_assets),
+            "media_spec_revision": self.media_spec_revision,
+            "media_spec": None if self.media_spec is None else dict(self.media_spec),
             "project_state": self.project_state,
             "active_analysis_revision": self.active_analysis_revision,
             "candidate_analysis_revision": self.candidate_analysis_revision,
@@ -360,6 +370,12 @@ class ProjectManifest(ManifestHeader):
         return cls(
             **_header_from_dict(value, cls.owner),
             source_assets=_copy_mapping(value.get("source_assets")),
+            media_spec_revision=_optional_str(value.get("media_spec_revision")),
+            media_spec=(
+                None
+                if value.get("media_spec") is None
+                else _copy_mapping(value.get("media_spec"))
+            ),
             project_state=str(value.get("project_state", "new")),
             active_analysis_revision=_optional_str(
                 value.get("active_analysis_revision")

@@ -119,8 +119,6 @@ class ProjectService:
         now: Callable[[], str],
         identity: Callable[[], str] | None = None,
         render_adapters: RenderAdapterRegistry | None = None,
-        project_media_spec: ProjectMediaSpec | None = None,
-        project_media_spec_revision: str | None = None,
     ) -> None:
         self.repositories = repositories
         self.queue = queue
@@ -130,17 +128,6 @@ class ProjectService:
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
         self.render_adapters = render_adapters or RenderAdapterRegistry(())
-        if (project_media_spec is None) != (project_media_spec_revision is None):
-            raise ValueError(
-                "project media spec and project media spec revision must be paired"
-            )
-        if project_media_spec_revision is not None and (
-            not isinstance(project_media_spec_revision, str)
-            or not project_media_spec_revision.strip()
-        ):
-            raise ValueError("project media spec revision must not be empty")
-        self.project_media_spec = project_media_spec
-        self.project_media_spec_revision = project_media_spec_revision
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
             projects_root=self.projects_root,
@@ -148,6 +135,46 @@ class ProjectService:
         )
         self._publication_lock = threading.RLock()
         self.queue.enable_publication_gate()
+
+    def set_project_media_spec(
+        self,
+        project_id: str,
+        media_spec: ProjectMediaSpec,
+        *,
+        media_spec_revision: str,
+        expected_revision: int,
+    ) -> ProjectManifest:
+        if not isinstance(media_spec, ProjectMediaSpec):
+            raise TypeError("media_spec must be a ProjectMediaSpec")
+        if (
+            not isinstance(media_spec_revision, str)
+            or not media_spec_revision.strip()
+            or media_spec_revision != media_spec_revision.strip()
+        ):
+            raise ValueError("media_spec_revision must be explicit")
+        with self._state_guard(project_id):
+            current = self.repositories.project.load(project_id)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=current.revision,
+                )
+            if (
+                current.media_spec_revision == media_spec_revision
+                and current.media_spec == media_spec.to_dict()
+            ):
+                return current
+            return self.repositories.project.update(
+                project_id,
+                expected_revision=expected_revision,
+                mutate=lambda value: replace(
+                    value,
+                    media_spec_revision=media_spec_revision,
+                    media_spec=media_spec.to_dict(),
+                    updated_at=self.now(),
+                ),
+            )
 
     def register_uploaded_asset(
         self,
@@ -765,6 +792,7 @@ class ProjectService:
         *,
         clip_ids: Sequence[str] | None = None,
     ) -> RenderPreflight:
+        project = self.repositories.project.load(project_id)
         clips_manifest = self.repositories.clips.load(project_id)
         jobs_manifest = self.repositories.jobs.load(project_id)
         selected = _select_clips(clips_manifest.clips, clip_ids)
@@ -773,7 +801,8 @@ class ProjectService:
         confirmation: list[str] = []
         skipped: list[str] = []
         reasons: dict[str, str] = {}
-        if self.project_media_spec is None or self.project_media_spec_revision is None:
+        media_binding = _project_media_binding(project)
+        if media_binding is None:
             clip_ids_without_spec = tuple(clip.clip_id for clip in selected)
             return RenderPreflight(
                 eligible=(),
@@ -860,6 +889,10 @@ class ProjectService:
             clips_manifest = self.repositories.clips.load(project_id)
             jobs_manifest = self.repositories.jobs.load(project_id)
             project = self.repositories.project.load(project_id)
+            media_binding = _project_media_binding(project)
+            if media_binding is None:
+                raise RuntimeError("project media specification changed after preflight")
+            media_spec_revision, media_spec = media_binding
             by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
             stored_jobs = tuple(
                 QueueJob.from_dict(item) for item in jobs_manifest.jobs
@@ -892,6 +925,8 @@ class ProjectService:
                     adapter_version=adapter.version,
                     project_revision=project.revision,
                     clips_revision=clips_manifest.revision,
+                    media_spec=media_spec,
+                    media_spec_revision=media_spec_revision,
                 )
                 submitted = self.queue.submit(render)
                 if submitted.job_id == render.job_id:
@@ -2549,17 +2584,17 @@ class ProjectService:
         adapter_version: str,
         project_revision: int,
         clips_revision: int,
+        media_spec: ProjectMediaSpec,
+        media_spec_revision: str,
     ) -> QueueJob:
-        if self.project_media_spec is None or self.project_media_spec_revision is None:
-            raise RuntimeError("project media specification is unavailable")
         identity_payload = _render_identity_payload(
             clip=clip,
             project_revision=project_revision,
             clips_revision=clips_revision,
             trajectory=trajectory,
             workbench=workbench,
-            media_spec=self.project_media_spec,
-            media_spec_revision=self.project_media_spec_revision,
+            media_spec=media_spec,
+            media_spec_revision=media_spec_revision,
             adapter_name=adapter_name,
             adapter_version=adapter_version,
         )
@@ -2570,7 +2605,7 @@ class ProjectService:
                 "workbench_output_revision": str(
                     workbench.value["workbench_output_revision"]
                 ),
-                "media_spec_revision": self.project_media_spec_revision,
+                "media_spec_revision": media_spec_revision,
             }
         )
         job_id = self._identity()
@@ -2637,6 +2672,62 @@ class ProjectService:
         )
         if clip is None:
             return None
+        if job.job_type == "clip_render":
+            media_binding = _project_media_binding(project)
+            if media_binding is None or len(job.depends_on_job_ids) != 1:
+                return None
+            try:
+                render_adapter = self.render_adapters.for_workflow(
+                    str(clip.resolved_workflow)
+                )
+            except KeyError:
+                return None
+            if (
+                render_adapter.name != job.adapter_name
+                or render_adapter.version != job.adapter_version
+            ):
+                return None
+            jobs_manifest = self.repositories.jobs.load(job.project_id)
+            dependency_id = job.depends_on_job_ids[0]
+            dependency = next(
+                (
+                    QueueJob.from_dict(item)
+                    for item in jobs_manifest.jobs
+                    if item.get("job_id") == dependency_id
+                ),
+                None,
+            )
+            if (
+                dependency is None
+                or self._current_trajectory_for_render(clip, (dependency,))
+                != dependency
+            ):
+                return None
+            workbench = _saved_workbench_reference(clip)
+            if (
+                workbench is None
+                or not _workbench_binds_trajectory(
+                    clip, dependency, workbench.value
+                )
+                or not _validate_workbench_immutable_output(
+                    self.projects_root, job.project_id, clip, workbench
+                )
+            ):
+                return None
+            media_spec_revision, media_spec = media_binding
+            return _fingerprint(
+                _render_identity_payload(
+                    clip=clip,
+                    project_revision=project.revision,
+                    clips_revision=clips_manifest.revision,
+                    trajectory=dependency,
+                    workbench=workbench,
+                    media_spec=media_spec,
+                    media_spec_revision=media_spec_revision,
+                    adapter_name=render_adapter.name,
+                    adapter_version=render_adapter.version,
+                )
+            )
         if job.job_type == "trajectory":
             try:
                 adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
@@ -2875,14 +2966,34 @@ def _clip_input_identity(
     return identity
 
 
+def _project_media_binding(
+    project: ProjectManifest,
+) -> tuple[str, ProjectMediaSpec] | None:
+    if project.media_spec_revision is None or project.media_spec is None:
+        return None
+    try:
+        return project.media_spec_revision, ProjectMediaSpec.from_dict(project.media_spec)
+    except (TypeError, ValueError):
+        return None
+
+
 def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
     trajectory_path = job.published_outputs.get("trajectory")
-    if not isinstance(trajectory_path, str) or not job.output_fingerprint:
+    if (
+        not isinstance(trajectory_path, str)
+        or not job.output_fingerprint
+        or not job.attempts
+    ):
         return False
     try:
-        path = Path(trajectory_path)
-        return path.is_file() and sha256(path.read_bytes()).hexdigest() == job.output_fingerprint
-    except OSError:
+        attempt_root = Path(job.attempts[-1].directory).resolve(strict=True)
+        path = Path(trajectory_path).resolve(strict=True)
+        path.relative_to(attempt_root)
+        return (
+            path.is_file()
+            and sha256(path.read_bytes()).hexdigest() == job.output_fingerprint
+        )
+    except (OSError, ValueError):
         return False
 
 
