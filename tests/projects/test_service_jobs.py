@@ -4,6 +4,10 @@ from dataclasses import replace
 from pathlib import Path
 import threading
 
+import pytest
+
+from cadscene.projects.adapters import AdapterProgress
+
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, register_analysis_revision
@@ -574,6 +578,154 @@ def test_adopted_exit_is_published_as_interrupted_by_project_service(
     assert "completion sidecar" in stored["error"]
 
 
+def test_adopted_reap_publishes_cross_project_job_scheduled_by_released_slot(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    add_project(
+        repositories,
+        tmp_path,
+        "p2",
+        (clip("two", project_id="p2"),),
+    )
+    service.enqueue_trajectory_jobs("p1")
+    service.enqueue_trajectory_jobs("p2")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.project_id == "p1"
+    lease = claimed.attempts[-1]
+    observed = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+    restarted.restore_jobs("p1", process_probe=lambda _pid: observed or None)
+    restarted.restore_jobs("p2", process_probe=lambda _pid: observed or None)
+    p2_job_id = next(
+        job.job_id
+        for job in restarted.queue.jobs()
+        if job.project_id == "p2" and job.job_type == "clip_export"
+    )
+    assert restarted.queue.status(p2_job_id) == "queued"
+    observed.clear()
+
+    assert restarted.reap_adopted_jobs() == (claimed.job_id,)
+
+    stored_p2 = next(
+        item
+        for item in repositories.jobs.load("p2").jobs
+        if item["job_id"] == p2_job_id
+    )
+    assert restarted.queue.status(p2_job_id) == "running"
+    assert stored_p2["status"] == "running"
+
+
+def test_cross_project_schedule_is_unclaimable_until_failed_publication_resyncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    add_project(
+        repositories,
+        tmp_path,
+        "p2",
+        (clip("two", project_id="p2"),),
+    )
+    service.enqueue_trajectory_jobs("p1")
+    service.enqueue_trajectory_jobs("p2")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.project_id == "p1"
+    lease = claimed.attempts[-1]
+    observed = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+    restarted.restore_jobs("p1", process_probe=lambda _pid: observed or None)
+    restarted.restore_jobs("p2", process_probe=lambda _pid: observed or None)
+    p2_job_id = next(
+        item.job_id
+        for item in restarted.queue.jobs()
+        if item.project_id == "p2" and item.job_type == "clip_export"
+    )
+    original_publish = repositories.jobs._publish_prepared_unchecked
+    failed = False
+
+    def fail_p2_once(project_id, *args, **kwargs):
+        nonlocal failed
+        if project_id == "p2" and not failed:
+            failed = True
+            raise RuntimeError("p2 publication failed")
+        return original_publish(project_id, *args, **kwargs)
+
+    monkeypatch.setattr(repositories.jobs, "_publish_prepared_unchecked", fail_p2_once)
+    observed.clear()
+
+    with pytest.raises(RuntimeError, match="p2 publication failed"):
+        restarted.reap_adopted_jobs()
+
+    assert restarted.queue.status(p2_job_id) == "running"
+    assert restarted.queue.claim_next_unstarted() is None
+    assert (
+        next(
+            item
+            for item in repositories.jobs.load("p2").jobs
+            if item["job_id"] == p2_job_id
+        )["status"]
+        == "queued"
+    )
+
+    assert restarted.reap_adopted_jobs() == ()
+    claimed_after_resync = restarted.queue.claim_next_unstarted()
+    assert claimed_after_resync is not None
+    assert claimed_after_resync.job_id == p2_job_id
+    assert (
+        next(
+            item
+            for item in repositories.jobs.load("p2").jobs
+            if item["job_id"] == p2_job_id
+        )["status"]
+        == "running"
+    )
+
+
 def test_service_publishes_cancelling_before_blocking_tree_termination(
     tmp_path: Path,
 ) -> None:
@@ -630,3 +782,138 @@ def test_service_publishes_cancelling_before_blocking_tree_termination(
         if item["job_id"] == claimed.job_id
     )
     assert stored_after_cancel["status"] == "cancelled"
+
+
+def test_cancel_publication_failure_rolls_back_reservation_and_preserves_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    terminated: list[str] = []
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+        terminate=lambda: terminated.append("controller"),
+    )
+    original_publish = repositories.jobs._publish_prepared_unchecked
+    failures = 1
+
+    def fail_once(*args, **kwargs):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise RuntimeError("deterministic jobs publication failure")
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(repositories.jobs, "_publish_prepared_unchecked", fail_once)
+
+    with pytest.raises(RuntimeError, match="deterministic jobs publication failure"):
+        service.cancel_job("p1", claimed.job_id)
+
+    assert queue.status(claimed.job_id) == "running"
+    cancelled = service.cancel_job("p1", claimed.job_id)
+    assert cancelled.status == "cancelled"
+    assert terminated == ["controller"]
+
+
+def test_restore_cancelling_terminates_outside_service_and_queue_locks(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    add_project(
+        repositories,
+        tmp_path,
+        "p2",
+        (clip("two", project_id="p2"),),
+    )
+    service.enqueue_trajectory_jobs("p1")
+    service.enqueue_trajectory_jobs("p2")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.project_id == "p1"
+    lease = claimed.attempts[-1]
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    queue.begin_cancel(claimed.job_id)
+    service._publish_queue("p1")
+
+    termination_started = threading.Event()
+    allow_termination = threading.Event()
+
+    def terminate(_pid: int) -> None:
+        termination_started.set()
+        assert allow_termination.wait(5)
+
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(process_tree_terminator=terminate),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+    restarted.restore_jobs("p2", process_probe=lambda _pid: None)
+    p2_job = next(
+        item
+        for item in restarted.queue.jobs()
+        if item.project_id == "p2" and item.status == "running"
+    )
+    p2_claimed = restarted.queue.claim_next_unstarted()
+    assert p2_claimed is not None and p2_claimed.job_id == p2_job.job_id
+    p2_lease = p2_claimed.attempts[-1]
+    restore_result: list[object] = []
+    restore_thread = threading.Thread(
+        target=lambda: restore_result.append(
+            restarted.restore_jobs(
+                "p1",
+                process_probe=lambda _pid: {
+                    "pid": 123,
+                    "process_start_time": "start-1",
+                    "command_fingerprint": "command-1",
+                    "task_token": "token-1",
+                },
+            )
+        )
+    )
+    restore_thread.start()
+    assert termination_started.wait(5)
+    callback_result: list[object] = []
+    callback_thread = threading.Thread(
+        target=lambda: callback_result.append(
+            restarted.update_job_progress(
+                "p2",
+                p2_job.job_id,
+                AdapterProgress(stage="still_running", message="worker heartbeat"),
+                attempt_number=p2_lease.number,
+                claim_token=str(p2_lease.worker_claim_token),
+            )
+        )
+    )
+    callback_thread.start()
+    callback_thread.join(1)
+    callback_completed_before_cleanup = not callback_thread.is_alive()
+    allow_termination.set()
+    restore_thread.join(5)
+    callback_thread.join(5)
+
+    assert callback_completed_before_cleanup
+    assert callback_result and callback_result[0].stage == "still_running"
+    assert restore_result

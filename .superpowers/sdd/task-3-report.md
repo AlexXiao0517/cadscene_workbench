@@ -27,8 +27,9 @@ DONE
   verifies that the complete tree exits and never removes attempt diagnostics.
 - Added restart restoration. Durable order is retained; an active attempt is
   adopted only when PID, process start time, command fingerprint, and task
-  token are all present and exactly verified. Everything else becomes
-  `interrupted` and requires explicit retry.
+  token are all present and exactly verified. A proven-absent attempt becomes
+  `interrupted`; an unverifiable live PID remains blocked and retains its
+  resource/exclusive reservation until absence or safe cleanup is proven.
 - Added manifest-free adapter contracts and registry. `sfm_only`,
   `srt_sfm_fused`, and `pure_rotation` wrap the existing CLI commands and
   output locations. Validators return structured `AdapterResult` values and
@@ -246,6 +247,78 @@ Fresh full-suite run after second-review remediation:
 ```text
 pytest -q
 666 passed, 1 skipped, 1 warning in 34.03s
+```
+
+## Third closure-review remediation
+
+Five additional recovery/publication races against `f6ce331` were reproduced
+before production changes and closed:
+
+- Changed-input active attempts are no longer made terminal before their old
+  process is gone. Fully verified PIDs receive a restore-cleanup reservation,
+  remain `cancelling` (therefore retaining resource and exclusive ownership),
+  and become `superseded`/`interrupted` only after identity is rechecked and
+  tree termination succeeds. Unverified live PIDs remain blocked; access
+  denial is not treated as proof of absence.
+- Restore cleanup is now explicitly two-phase. The reserved `cancelling`
+  state is published under the service/repository/queue locks, process-tree
+  termination happens after every such lock is released, and finalization
+  reacquires the attempt reservation with lease/CAS checks before publication.
+  Cleanup failure stays nonterminal and blocks retry/capacity release.
+- Auto-scheduled jobs are publication-gated when the queue is owned by
+  `ProjectService`. A worker cannot claim a scheduled job until its owning jobs
+  manifest has been atomically published. The adopted-process reaper publishes
+  every affected project, including a different project that receives the
+  released resource slot. Failed publication leaves the project gated and the
+  next coordination pass resynchronizes it before claim.
+- Cancellation no longer removes its process controller while entering
+  `cancelling`. If the initial cancelling-manifest publication fails before
+  becoming durable, the exact prior job/attempt lease is restored and the same
+  controller remains available for a deterministic retry. If cancelling did
+  become durable before an exception, cleanup proceeds and publishes the final
+  state safely.
+- Windows descendant enumeration now treats `AccessDenied` and other psutil
+  inspection errors as verification failures instead of an empty tree. The
+  existing two-scan quiescence rule remains required for successful fallback
+  cancellation.
+
+Third-review RED evidence:
+
+```text
+pytest -q tests/projects/test_queue.py -k restore_cleans_verified_changed_input
+2 failed (verified PID 123 was never terminated)
+pytest -q tests/projects/test_service_jobs.py -k adopted_reap_publishes_cross_project
+1 failed (p2 memory was running while its manifest remained queued)
+pytest -q tests/projects/test_queue.py -k windows_descendant_access_denied
+1 failed (AccessDenied was silently interpreted as no descendants)
+pytest -q tests/projects/test_service_jobs.py -k "cancel_publication_failure or restore_cancelling_terminates_outside"
+2 failed (cancel stayed stranded; unrelated p2 callback was lock-blocked)
+```
+
+Third-review focused GREEN:
+
+```text
+pytest -q tests/projects/test_queue.py -k "restore_cleans_verified_changed_input or restore_resumes_verified_cancelling or windows_descendant_access_denied"
+4 passed
+pytest -q tests/projects/test_service_jobs.py -k "cancel_publication_failure or restore_cancelling_terminates_outside or adopted_reap_publishes_cross_project or cross_project_schedule_is_unclaimable"
+4 passed
+```
+
+Publication-failure recovery is covered deterministically: after p2 publication
+fails, p2 is unclaimable while its manifest remains queued; the next reaper
+coordination pass republishes p2, then and only then permits the worker claim.
+
+Fresh verification after third-review remediation:
+
+```text
+pytest -q tests/projects/test_queue.py tests/projects/test_service_jobs.py tests/projects/test_executor.py
+51 passed in 1.75s
+pytest -q tests/projects
+128 passed in 2.93s
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/workflow tests/pure_rotation tests/video_analysis/test_clip_export.py tests/video_analysis/test_cli.py
+240 passed, 1 skipped, 1 warning in 6.87s
+pytest -q
+676 passed, 1 skipped, 1 warning in 33.93s
 ```
 
 Static/syntax/whitespace verification:

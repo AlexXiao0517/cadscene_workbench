@@ -15,7 +15,12 @@ from .adapters import AdapterInputs, AdapterResult, WorkflowAdapterRegistry
 from .executor import JobExecutionPlan
 from .json_repositories import ProjectRepositories
 from .models import ClipDefinition, JobsManifest
-from .queue import AttemptRecord, LocalResourceQueue, QueueJob
+from .queue import (
+    AttemptRecord,
+    LocalResourceQueue,
+    QueueJob,
+    RestoreCleanupReservation,
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,7 @@ class ProjectService:
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
         self._publication_lock = threading.RLock()
+        self.queue.enable_publication_gate()
 
     def preflight_trajectory_jobs(
         self,
@@ -261,7 +267,17 @@ class ProjectService:
             reservation = self.queue.begin_cancel(job_id)
             if reservation is None:
                 return current
-            self._publish_queue_locked(project_id)
+            try:
+                self._publish_queue_locked(project_id)
+            except Exception:
+                persisted = self.repositories.jobs.load(project_id)
+                stored = next(
+                    (item for item in persisted.jobs if item["job_id"] == job_id),
+                    None,
+                )
+                if stored is None or stored["status"] != "cancelling":
+                    self.queue.abort_cancel(reservation)
+                    raise
         error: Exception | None = None
         try:
             self.queue.terminate_cancel_reservation(reservation)
@@ -481,16 +497,37 @@ class ProjectService:
                 queue_order=manifest.queue_order,
                 process_probe=process_probe,
                 current_fingerprint_resolver=self._current_input_fingerprint,
+                defer_cleanup=True,
             )
             self._publish_queue_locked(project_id)
-            return restored
+            cleanup_reservations = self.queue.pending_restore_cleanups(project_id)
+        cleanup_results: list[tuple[RestoreCleanupReservation, Exception | None]] = []
+        for reservation in cleanup_reservations:
+            cleanup_error: Exception | None = None
+            try:
+                self.queue.terminate_restore_cleanup(reservation)
+            except Exception as exc:
+                cleanup_error = exc
+            cleanup_results.append((reservation, cleanup_error))
+        if cleanup_results:
+            with self._state_guard(project_id):
+                for reservation, cleanup_error in cleanup_results:
+                    self.queue.complete_restore_cleanup(
+                        reservation,
+                        error=cleanup_error,
+                    )
+                self._publish_queue_locked(project_id)
+        return restored
 
     def reap_adopted_jobs(self) -> tuple[str, ...]:
-        reaped = self.queue.poll_adopted_processes()
-        project_ids = {self.queue.get(job_id).project_id for job_id in reaped}
-        for project_id in sorted(project_ids):
-            self._publish_queue(project_id)
-        return reaped
+        with self._publication_lock:
+            reaped = self.queue.poll_adopted_processes()
+            project_ids = {
+                self.queue.get(job_id).project_id for job_id in reaped
+            } | set(self.queue.pending_publication_projects())
+            for project_id in sorted(project_ids):
+                self._publish_queue(project_id)
+            return reaped
 
     def _new_job(
         self,
@@ -698,6 +735,7 @@ class ProjectService:
             return self._publish_queue_locked(project_id)
 
     def _publish_queue_locked(self, project_id: str) -> JobsManifest:
+        self.queue.require_publication(project_id)
         current = self.repositories.jobs.load(project_id)
         jobs = tuple(
             job.to_dict() for job in self.queue.jobs() if job.project_id == project_id
@@ -707,7 +745,7 @@ class ProjectService:
             for job_id in self.queue.queue_order()
             if self.queue.get(job_id).project_id == project_id
         )
-        return self.repositories.jobs.update(
+        published = self.repositories.jobs.update(
             project_id,
             expected_revision=current.revision,
             mutate=lambda manifest: replace(
@@ -716,6 +754,8 @@ class ProjectService:
                 queue_order=order,
             ),
         )
+        self.queue.acknowledge_publication(project_id)
+        return published
 
 
 def _select_clips(

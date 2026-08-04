@@ -555,6 +555,114 @@ def test_windows_fallback_rediscovers_children_before_terminating_parent(
     assert terminated == [201, 202, 123]
 
 
+def test_windows_descendant_access_denied_is_not_treated_as_an_empty_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+    import cadscene.projects.queue as queue_module
+
+    class InaccessibleProcess:
+        def children(self, *, recursive: bool):
+            assert recursive is True
+            raise psutil.AccessDenied(pid=123)
+
+    monkeypatch.setattr(queue_module.os, "name", "nt")
+    monkeypatch.setattr(psutil, "Process", lambda _pid: InaccessibleProcess())
+
+    with pytest.raises(RuntimeError, match="descendant.*verified"):
+        queue_module._descendant_pids(123)
+
+
+def test_windows_access_denied_does_not_prove_a_process_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+    import cadscene.projects.queue as queue_module
+
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda _pid: (_ for _ in ()).throw(psutil.AccessDenied(pid=123)),
+    )
+
+    assert queue_module._pid_alive(123) is True
+
+
+def test_restore_blocks_capacity_when_changed_process_identity_is_unverified() -> None:
+    active = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+    terminated: list[int] = []
+
+    queue = LocalResourceQueue.restore(
+        [active, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: None,
+        process_alive=lambda _pid: True,
+        process_tree_terminator=terminated.append,
+        current_fingerprint_resolver=lambda item: (
+            "changed" if item.job_id == "a" else item.input_fingerprint
+        ),
+    )
+
+    assert queue.status("a") == "cancelling"
+    assert "unverified" in (queue.get("a").error or "")
+    assert queue.status("b") == "queued"
+    assert terminated == []
+
+
+def test_restore_cleanup_failure_keeps_resource_reserved_and_retry_blocked() -> None:
+    active = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+
+    queue = LocalResourceQueue.restore(
+        [active, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+        process_alive=lambda _pid: True,
+        process_tree_terminator=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("tree still alive")
+        ),
+        current_fingerprint_resolver=lambda item: (
+            "changed" if item.job_id == "a" else item.input_fingerprint
+        ),
+    )
+
+    assert queue.status("a") == "cancelling"
+    assert "tree still alive" in (queue.get("a").error or "")
+    assert queue.status("b") == "queued"
+    with pytest.raises(ValueError, match="terminal unsuccessful"):
+        queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+
+
 def test_retry_refuses_unverified_old_process_after_cancel_failure() -> None:
     queue = LocalResourceQueue(
         process_tree_terminator=lambda _pid: (_ for _ in ()).throw(
@@ -618,4 +726,48 @@ def test_restore_resumes_verified_cancelling_cleanup_as_interrupted() -> None:
 
     assert terminated == [123]
     assert queue.status("a") == "interrupted"
+    assert queue.status("b") == "running"
+
+
+@pytest.mark.parametrize(
+    ("restored_status", "expected_terminal"),
+    (("running", "superseded"), ("cancelling", "interrupted")),
+)
+def test_restore_cleans_verified_changed_input_process_before_releasing_capacity(
+    restored_status: str,
+    expected_terminal: str,
+) -> None:
+    terminated: list[int] = []
+    active = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status(restored_status)
+    )
+
+    queue = LocalResourceQueue.restore(
+        [active, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+        current_fingerprint_resolver=lambda item: (
+            "changed-input" if item.job_id == "a" else item.input_fingerprint
+        ),
+        process_tree_terminator=terminated.append,
+    )
+
+    assert terminated == [123]
+    assert queue.status("a") == expected_terminal
     assert queue.status("b") == "running"
