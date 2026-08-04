@@ -205,6 +205,21 @@ Third-review TDD and verification:
 - `python -m compileall -q cadscene`, JavaScript syntax checks for the project
   workspace and camera workbench, and `git diff --check`: pass.
 
+Third-review narrow recheck closure:
+
+- Entering `pending_save` now persists a canonical SHA-256 identity of the exact
+  accepted receipt. Every recovery request must match that identity before an
+  existing immutable target can be trusted or a missing target can be rebuilt.
+  This preserves recovery without consulting a later mutable run file while
+  rejecting `ok: false`, changed revisions, extra/different receipt data, and
+  other replay mismatches.
+- The published-target wrong-receipt regression first produced `2 failed`, then
+  passed with the correct published/missing-target and mutable-source recovery
+  cases (`7 passed`).
+- Final Task 5 focused: `170 passed`.
+- Final full suite: `916 passed, 1 skipped, 1 warning`.
+- `pyflakes`, `compileall`, both JavaScript syntax checks, and `diffcheck`: pass.
+
 ## Review closure (2026-08-04)
 
 - Immutable publication now copies the validated camera-track bytes into

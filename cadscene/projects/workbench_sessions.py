@@ -95,6 +95,7 @@ class WorkbenchSession:
     pending_output_revision: str | None = None
     pending_source_output_revision: str | None = None
     pending_source_output_fingerprint: str | None = None
+    pending_receipt_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -123,6 +124,7 @@ class WorkbenchSession:
             "pending_output_revision": self.pending_output_revision,
             "pending_source_output_revision": self.pending_source_output_revision,
             "pending_source_output_fingerprint": self.pending_source_output_fingerprint,
+            "pending_receipt_fingerprint": self.pending_receipt_fingerprint,
         }
 
     @classmethod
@@ -164,6 +166,9 @@ class WorkbenchSession:
             ),
             pending_source_output_fingerprint=_optional_string(
                 value.get("pending_source_output_fingerprint")
+            ),
+            pending_receipt_fingerprint=_optional_string(
+                value.get("pending_receipt_fingerprint")
             ),
         )
 
@@ -425,8 +430,18 @@ class WorkbenchSessionCoordinator:
             revision = str(session.pending_output_revision or "")
             source_revision = session.pending_source_output_revision
             source_fingerprint = session.pending_source_output_fingerprint
-            if not revision or not source_revision or not source_fingerprint:
+            receipt_fingerprint = session.pending_receipt_fingerprint
+            if (
+                not revision
+                or not source_revision
+                or not source_fingerprint
+                or not receipt_fingerprint
+            ):
                 raise InvalidWorkbenchOutput("pending save metadata is incomplete")
+            if _receipt_fingerprint(receipt) != receipt_fingerprint:
+                raise InvalidWorkbenchOutput(
+                    "validated receipt differs from the pending save"
+                )
             target = (
                 self.outputs_root
                 / validate_project_id(session.project_id)
@@ -484,6 +499,7 @@ class WorkbenchSessionCoordinator:
                     pending_output_revision=revision,
                     pending_source_output_revision=source_revision,
                     pending_source_output_fingerprint=source_fingerprint,
+                    pending_receipt_fingerprint=_receipt_fingerprint(receipt),
                 ),
             )
         fingerprint = self._publish_output(
@@ -524,6 +540,7 @@ class WorkbenchSessionCoordinator:
                 pending_output_revision=None,
                 pending_source_output_revision=None,
                 pending_source_output_fingerprint=None,
+                pending_receipt_fingerprint=None,
             ),
         )
 
@@ -1463,6 +1480,22 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _optional_string(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _receipt_fingerprint(receipt: Mapping[str, object]) -> str:
+    try:
+        serialized = json.dumps(
+            dict(receipt),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise InvalidWorkbenchOutput(
+            "workbench save receipt is not canonical JSON"
+        ) from exc
+    return sha256(serialized).hexdigest()
 
 
 def _valid_number(value: object) -> bool:

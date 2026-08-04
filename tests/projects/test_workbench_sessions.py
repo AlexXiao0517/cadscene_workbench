@@ -362,6 +362,45 @@ def test_expired_pending_save_recovers_already_published_output(
     assert saved.workbench_output_revision == "workbench-output-1"
 
 
+@pytest.mark.parametrize(
+    "wrong_receipt",
+    [
+        _receipt(ok=False),
+        _receipt(source_output_revision="different-manual-track"),
+    ],
+)
+def test_expired_pending_with_published_output_rejects_different_receipt(
+    session_system,
+    monkeypatch: pytest.MonkeyPatch,
+    wrong_receipt: dict[str, object],
+) -> None:
+    coordinator, store, clock, _current, _validated = session_system
+    session = _create(coordinator)
+    original_update = store.update
+    failed = [False]
+
+    def fail_saved_record(project_id, token, *, expected_revision, mutate):
+        current = store.load(project_id, token)
+        candidate = mutate(current)
+        if candidate.state == "saved" and not failed[0]:
+            failed[0] = True
+            raise OSError("session record publication interrupted")
+        return original_update(
+            project_id, token, expected_revision=expected_revision, mutate=mutate
+        )
+
+    monkeypatch.setattr(store, "update", fail_saved_record)
+    with pytest.raises(OSError, match="session record publication interrupted"):
+        coordinator.save("project-1", session.token, _receipt())
+    monkeypatch.setattr(store, "update", original_update)
+    clock.value += timedelta(minutes=16)
+
+    with pytest.raises(InvalidWorkbenchOutput, match="pending save"):
+        coordinator.save("project-1", session.token, wrong_receipt)
+
+    assert store.load("project-1", session.token).state == "pending_save"
+
+
 def test_expired_pending_save_revalidates_and_publishes_missing_output(
     session_system, monkeypatch: pytest.MonkeyPatch
 ) -> None:
