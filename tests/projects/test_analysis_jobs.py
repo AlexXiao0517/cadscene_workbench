@@ -126,6 +126,165 @@ def test_enqueue_repairs_incomplete_analysis_job_refs_without_rewriting_reused_j
     assert {item.job_id: item.to_dict() for item in queue.jobs()} == before
 
 
+def test_enqueue_restores_reused_success_dag_without_busy_regression(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    first = service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    attempt = video_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        video_job.job_id,
+        AdapterResult.success(
+            output_revision=revision,
+            output_fingerprint=tree_fingerprint(output),
+            outputs={"analysis_output": str(output)},
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    key: item
+                    for key, item in value.source_assets["_analysis"].items()
+                    if key != "job_ids"
+                },
+            },
+        ),
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == first.job_ids
+    restored = repositories.project.load("p1")
+    assert restored.source_assets["_analysis"]["status"] == "success"
+    assert restored.source_assets["_analysis"]["analysis_revision"] == revision
+    assert restored.project_state == "ready"
+    assert queue.claim_next_unstarted() is None
+    preflight = service.preflight_trajectory_jobs("p1")
+    assert "project analysis is still running" not in preflight.reasons.values()
+
+
+def test_enqueue_restores_reused_cancelled_dag_as_terminal(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    first = service.enqueue_analysis_jobs("p1")
+    service.cancel_job("p1", first.job_ids[0])
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    "request_key": "request-1",
+                    "status": "queued",
+                },
+            },
+            project_state="analyzing",
+        ),
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == first.job_ids
+    restored = repositories.project.load("p1")
+    assert restored.source_assets["_analysis"]["status"] == "cancelled"
+    assert restored.project_state == "analysis_cancelled"
+    assert queue.claim_next_unstarted() is None
+
+
+def test_upload_restores_reused_success_dag_and_immutable_descriptor(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    from cadscene.projects import service as service_module
+
+    project = repositories.project.load("p1")
+    request_key = service_module._analysis_request_key_from_assets(
+        project.source_assets
+    )
+    assert request_key is not None
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {"request_key": request_key, "status": "queued"},
+            },
+        ),
+    )
+    first = service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    attempt = video_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        video_job.job_id,
+        AdapterResult.success(
+            output_revision=revision,
+            output_fingerprint=tree_fingerprint(output),
+            outputs={"analysis_output": str(output)},
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    project = repositories.project.load("p1")
+    descriptor = project.source_assets["_analysis_revisions"][revision]
+    assets = dict(project.source_assets)
+    assets.pop("_analysis")
+    project = repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(value, source_assets=assets),
+    )
+    video_path = Path(assets["video"]["path"])
+    report = tmp_path / "same-video.validation.json"
+    report.write_text("{}", encoding="utf-8")
+
+    registered = service.register_uploaded_asset(
+        "p1",
+        PublishedUpload(
+            project_id="p1",
+            asset_type="video",
+            original_filename="source.mp4",
+            path=video_path,
+            size_bytes=video_path.stat().st_size,
+            sha256="a" * 64,
+            validation={"decoded": True},
+            validation_report_path=report,
+        ),
+        expected_revision=project.revision,
+    )
+
+    assert registered.analysis_job_ids == first.job_ids
+    restored = repositories.project.load("p1")
+    state = restored.source_assets["_analysis"]
+    assert state["status"] == "success"
+    assert state["analysis_revision"] == revision
+    assert state["analysis_artifact_id"] == descriptor["analysis_artifact_id"]
+    assert restored.project_state == "ready"
+    assert queue.claim_next_unstarted() is None
+
+
 def test_analysis_enqueue_failure_never_leaves_queued_intent_without_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -774,6 +933,27 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
     assert descriptor["analysis_artifact_id"] == candidate_artifact.name
     assert (candidate_artifact / "02_video_analysis" / "clip_manifest.json").is_file()
     assert descriptor["input_snapshot"]["video"]["path"] == str(replacement)
+    project = repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    key: item
+                    for key, item in value.source_assets["_analysis"].items()
+                    if key != "job_ids"
+                },
+            },
+        ),
+    )
+    repaired_candidate = service.enqueue_analysis_jobs("p1")
+    assert repaired_candidate.job_ids == registered.analysis_job_ids
+    project = repositories.project.load("p1")
+    assert project.source_assets["_analysis"]["status"] == "success"
+    assert project.project_state == "analysis_candidate_ready"
+    assert queue.claim_next_unstarted() is None
     still_active = repositories.clips.load("p1").clips[0]
     assert still_active.analysis_revision == first_revision
     export_job = service._new_export_job(

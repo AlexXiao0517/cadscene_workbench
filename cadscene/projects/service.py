@@ -177,20 +177,30 @@ class ProjectService:
                 value: ProjectManifest, operation_id: str
             ) -> ProjectManifest:
                 published_assets = dict(assets)
+                project_state = value.project_state
                 if prepared:
-                    published_assets["_analysis"] = {
-                        "request_key": request_key,
-                        "status": "queued",
-                        "requested_at": self.now(),
-                        "job_ids": list(job_ids),
-                        "operation_id": operation_id,
-                        "error": None,
-                    }
+                    assert batch is not None and request_key is not None
+                    base_state = dict(
+                        published_assets.get("_analysis", {})
+                        if isinstance(
+                            published_assets.get("_analysis"), Mapping
+                        )
+                        else {}
+                    )
+                    base_state.setdefault("requested_at", self.now())
+                    state, project_state = self._analysis_state_for_submission(
+                        batch=batch,
+                        project=value,
+                        request_key=request_key,
+                        base_state=base_state,
+                        operation_id=operation_id,
+                    )
+                    published_assets["_analysis"] = state
                 return replace(
                     value,
                     updated_at=self.now(),
                     source_assets=published_assets,
-                    project_state="analyzing" if prepared else value.project_state,
+                    project_state=project_state,
                 )
 
             mutations = [
@@ -340,20 +350,23 @@ class ProjectService:
                 value: ProjectManifest, operation_id: str
             ) -> ProjectManifest:
                 assets = dict(value.source_assets)
-                assets["_analysis"] = {
-                    "request_key": request_key,
-                    "status": "queued",
+                base_state = {
                     "requested_at": self.now(),
                     "request_kind": "manual",
-                    "job_ids": list(job_ids),
-                    "operation_id": operation_id,
-                    "error": None,
                 }
+                state, project_state = self._analysis_state_for_submission(
+                    batch=batch,
+                    project=value,
+                    request_key=request_key,
+                    base_state=base_state,
+                    operation_id=operation_id,
+                )
+                assets["_analysis"] = state
                 return replace(
                     value,
                     updated_at=self.now(),
                     source_assets=assets,
-                    project_state="analyzing",
+                    project_state=project_state,
                 )
 
             def mutate_jobs(
@@ -498,22 +511,23 @@ class ProjectService:
                 value: ProjectManifest, publication_operation_id: str
             ) -> ProjectManifest:
                 assets = dict(value.source_assets)
-                state = dict(assets.get("_analysis", {}))
-                state.update(
-                    {
-                        "request_key": request_key,
-                        "status": "queued",
-                        "job_ids": list(job_ids),
-                        "operation_id": publication_operation_id,
-                        "error": None,
-                    }
+                state, project_state = self._analysis_state_for_submission(
+                    batch=batch,
+                    project=value,
+                    request_key=request_key,
+                    base_state=(
+                        assets.get("_analysis")
+                        if isinstance(assets.get("_analysis"), Mapping)
+                        else None
+                    ),
+                    operation_id=publication_operation_id,
                 )
                 assets["_analysis"] = state
                 return replace(
                     value,
                     updated_at=self.now(),
                     source_assets=assets,
-                    project_state="analyzing",
+                    project_state=project_state,
                 )
 
             def mutate_jobs(
@@ -1770,6 +1784,94 @@ class ProjectService:
                 parents=True, exist_ok=False
             )
         return batch
+
+    def _analysis_state_for_submission(
+        self,
+        *,
+        batch: PreparedSubmissionBatch,
+        project: ProjectManifest,
+        request_key: str,
+        base_state: Mapping[str, object] | None,
+        operation_id: str,
+    ) -> tuple[dict[str, object], str]:
+        state = dict(base_state or {})
+        state.update(
+            {
+                "request_key": request_key,
+                "job_ids": list(batch.job_ids),
+                "operation_id": operation_id,
+            }
+        )
+        jobs = batch.jobs
+        video = next(
+            (item for item in jobs if item.job_type == "video_analysis"),
+            None,
+        )
+        fully_validated = (
+            len(jobs) == 2
+            and all(
+                item.status == "success" and item.output_validated
+                for item in jobs
+            )
+            and video is not None
+            and video.output_revision is not None
+        )
+        if fully_validated:
+            revision = str(video.output_revision)
+            revisions = project.source_assets.get("_analysis_revisions", {})
+            descriptor = (
+                revisions.get(revision, {})
+                if isinstance(revisions, Mapping)
+                else {}
+            )
+            if isinstance(descriptor, Mapping):
+                state.update(dict(descriptor))
+            state.update(
+                {
+                    "status": "success",
+                    "analysis_revision": revision,
+                    "error": None,
+                }
+            )
+            project_state = (
+                "analysis_candidate_ready"
+                if project.active_analysis_revision not in {None, revision}
+                else "ready"
+            )
+            return state, project_state
+
+        terminal_states = {
+            "failed": "analysis_failed",
+            "interrupted": "analysis_interrupted",
+            "cancelled": "analysis_cancelled",
+            "stale_input": "analysis_superseded",
+            "superseded": "analysis_superseded",
+        }
+        terminal = next(
+            (item for item in jobs if item.status in terminal_states),
+            None,
+        )
+        if terminal is not None:
+            state.update(
+                {"status": terminal.status, "error": terminal.error}
+            )
+            return state, terminal_states[terminal.status]
+        if any(
+            item.status in {"preparing", "running", "validating"}
+            for item in jobs
+        ):
+            state.update({"status": "running", "error": None})
+            return state, "analyzing"
+        if any(item.status == "queued" for item in jobs):
+            state.update({"status": "queued", "error": None})
+            return state, "analyzing"
+        state.update(
+            {
+                "status": "failed",
+                "error": "reused analysis DAG has no schedulable or validated state",
+            }
+        )
+        return state, "analysis_failed"
 
     @staticmethod
     def _analysis_submission_payload(

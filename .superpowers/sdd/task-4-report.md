@@ -450,3 +450,33 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Sixth formal review closure (base `0d35f50`)
+
+### Review finding map: 1 Important
+
+1. **Important - a fully reused terminal DAG was republished as queued:** the
+   three analysis submission paths now share terminal-aware project-state
+   derivation. A complete CAD/video DAG whose two jobs are successful and
+   output-validated restores its immutable analysis revision descriptor and
+   publishes `success`, with project `ready` or `analysis_candidate_ready` as
+   appropriate. It is never re-executed. Failed, interrupted, cancelled,
+   stale-input, and superseded DAGs restore their matching terminal project
+   states; active jobs produce `running`, and only genuinely queued jobs produce
+   `queued`. `_analysis.job_ids` always references the complete resolved DAG.
+
+### Sixth-round TDD and verification evidence
+
+- Initial RED: `3 failed` - reused success via compatibility enqueue regressed
+  to queued/busy, reused cancelled regressed to queued, and same-fingerprint
+  upload lost the successful immutable descriptor and became queued.
+- Focused GREEN: `90 passed`, including ready, candidate-ready, terminal
+  cancelled, no-worker-claim, immutable descriptor recovery, and trajectory
+  preflight not being incorrectly blocked by analysis busy state.
+- All project tests: `212 passed`.
+- Final fresh full suite: `789 passed, 1 skipped` in 40.09 seconds.
+- `python -m pyflakes` over every changed implementation and test file: pass
+  with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
