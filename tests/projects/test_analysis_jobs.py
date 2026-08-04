@@ -1177,10 +1177,13 @@ def test_analysis_result_cannot_publish_output_outside_attempt(tmp_path: Path) -
     assert repositories.project.load("p1").active_analysis_revision is None
 
 
+@pytest.mark.parametrize("with_srt", (False, True))
 def test_restore_migrates_legacy_validated_success_without_losing_provenance(
-    tmp_path: Path,
+    tmp_path: Path, with_srt: bool
 ) -> None:
     service, repositories, queue = _service(tmp_path)
+    if with_srt:
+        _add_srt_asset(repositories, tmp_path)
     job_ids, revision = _complete_analysis(service, repositories, queue, tmp_path)
     assets = repositories.project.load("p1").source_assets
     current_jobs = tuple(queue.get(job_id) for job_id in job_ids)
@@ -1323,6 +1326,7 @@ def test_restore_migrates_legacy_analysis_states_without_state_rewrite(
         "wrong_idempotency",
         "wrong_type",
         "wrong_dependency",
+        "success_unvalidated",
         "wrong_validated_input",
     ),
 )
@@ -1330,7 +1334,7 @@ def test_restore_rejects_polluted_or_inexact_legacy_analysis_dag(
     tmp_path: Path, pollution: str
 ) -> None:
     service, repositories, queue = _service(tmp_path)
-    if pollution == "wrong_validated_input":
+    if pollution in {"success_unvalidated", "wrong_validated_input"}:
         job_ids, _revision = _complete_analysis(
             service, repositories, queue, tmp_path
         )
@@ -1351,6 +1355,12 @@ def test_restore_rejects_polluted_or_inexact_legacy_analysis_dag(
         video = replace(video, job_type="trajectory")
     elif pollution == "wrong_dependency":
         video = replace(video, depends_on_job_ids=())
+    elif pollution == "success_unvalidated":
+        video = replace(
+            video,
+            output_validated=False,
+            validated_input_fingerprint=None,
+        )
     else:
         video = replace(video, validated_input_fingerprint="e" * 64)
     _persist_jobs(repositories, "p1", (cad, video))
@@ -1369,6 +1379,101 @@ def test_restore_rejects_polluted_or_inexact_legacy_analysis_dag(
 
     assert restarted_queue.jobs() == ()
     assert repositories.jobs.load("p1") == before
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        "queued",
+        "running",
+        "failed",
+        "interrupted",
+        "cancelled",
+        "stale_input",
+        "superseded",
+    ),
+)
+@pytest.mark.parametrize("proof_kind", ("output_validated", "validated_input"))
+def test_restore_rejects_legacy_non_success_with_validation_proof(
+    tmp_path: Path, status: str, proof_kind: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids = service.enqueue_analysis_jobs("p1").job_ids
+    assets = repositories.project.load("p1").source_assets
+    legacy = tuple(
+        _as_legacy_analysis_job(queue.get(job_id), assets) for job_id in job_ids
+    )
+    cad, video = legacy
+    video = replace(
+        video,
+        status=status,
+        stage=status,
+        output_validated=proof_kind == "output_validated",
+        validated_input_fingerprint=(
+            video.input_fingerprint
+            if proof_kind in {"output_validated", "validated_input"}
+            else None
+        ),
+    )
+    _persist_jobs(repositories, "p1", (cad, video))
+    before = repositories.jobs.load("p1")
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    with pytest.raises(ValueError, match="legacy|success|validated"):
+        restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    assert restarted_queue.jobs() == ()
+    assert repositories.jobs.load("p1") == before
+
+
+def test_analysis_state_sync_rejects_current_unvalidated_video_success(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids = service.enqueue_analysis_jobs("p1").job_ids
+    cad = queue.get(job_ids[0])
+    video = queue.get(job_ids[1])
+    cad = replace(
+        cad,
+        status="success",
+        stage="success",
+        output_validated=True,
+        validated_input_fingerprint=cad.input_fingerprint,
+    )
+    video = replace(
+        video,
+        status="success",
+        stage="success",
+        output_validated=False,
+        validated_input_fingerprint=None,
+    )
+    restored_queue = LocalResourceQueue.restore(
+        (cad, video),
+        queue_order=job_ids,
+        schedule=False,
+    )
+    restarted = ProjectService(
+        repositories,
+        restored_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    with restarted._state_guard("p1"):
+        restarted._sync_analysis_state_from_queue_locked("p1")
+
+    project = repositories.project.load("p1")
+    assert project.source_assets["_analysis"]["status"] == "failed"
+    assert "validated" in str(project.source_assets["_analysis"]["error"])
+    assert project.project_state == "analysis_failed"
 
 
 def test_legacy_analysis_migration_remains_isolated_across_projects(

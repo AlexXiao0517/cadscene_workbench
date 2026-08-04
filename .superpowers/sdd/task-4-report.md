@@ -676,3 +676,39 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Twelfth formal review closure (base `637ea2e`)
+
+### Review finding map: 1 Important
+
+1. **Important - legacy migration and project-state synchronization trusted
+   status without a complete validation proof:** legacy `success` now migrates
+   only when `output_validated` is true and
+   `validated_input_fingerprint` exactly equals the legacy input fingerprint.
+   Every non-success state must carry neither validation flag nor validated
+   fingerprint. This rejects unverified success, mismatched proof, and proof
+   attached to queued/running/failed/interrupted/cancelled/stale/superseded
+   records before manifest or queue mutation. As a separate defense,
+   `_sync_analysis_state_from_queue_locked` recognizes successful video only
+   when the current-schema job is output-validated and its validated-input
+   fingerprint equals its input fingerprint. An unverified current-schema
+   success is published as `failed` / `analysis_failed`, never `ready`.
+
+### Twelfth-round TDD and verification evidence
+
+- Initial RED: `16 failed, 8 passed` - one unverified legacy success, fourteen
+  non-success/proof combinations, and one current-schema sync bypass incorrectly
+  reached acceptance. Complete legacy success with and without SRT plus existing
+  exact-proof and pollution rejection cases remained valid.
+- Review reproductions GREEN: `24 passed`.
+- Analysis-job test module: `81 passed`.
+- Recovery test module: `16 passed`.
+- Focused analysis/recovery/queue/project-API suite: `163 passed`.
+- All project tests: `269 passed`.
+- Final fresh full suite: `846 passed, 1 skipped` in 42.10 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

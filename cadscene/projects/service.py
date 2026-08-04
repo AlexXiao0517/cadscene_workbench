@@ -1729,16 +1729,20 @@ class ProjectService:
                 raise ValueError(
                     "legacy analysis identity does not match exactly"
                 )
-            if (
-                job.validated_input_fingerprint is not None
-                and job.validated_input_fingerprint != legacy_fingerprint
+            if job.status == "success":
+                if (
+                    not job.output_validated
+                    or job.validated_input_fingerprint != legacy_fingerprint
+                ):
+                    raise ValueError(
+                        "legacy analysis success has no complete validation proof"
+                    )
+            elif (
+                job.output_validated
+                or job.validated_input_fingerprint is not None
             ):
                 raise ValueError(
-                    "legacy validated input fingerprint does not match"
-                )
-            if job.output_validated and job.validated_input_fingerprint is None:
-                raise ValueError(
-                    "validated legacy analysis output has no input fingerprint"
+                    "non-success legacy analysis job carries validation proof"
                 )
             replacements[job.job_id] = replace(
                 job,
@@ -1790,7 +1794,24 @@ class ProjectService:
             (
                 item
                 for item in analysis_jobs
-                if item.job_type == "video_analysis" and item.status == "success"
+                if item.job_type == "video_analysis"
+                and item.status == "success"
+                and item.output_validated
+                and item.validated_input_fingerprint == item.input_fingerprint
+            ),
+            None,
+        )
+        unvalidated_video_success = next(
+            (
+                item
+                for item in analysis_jobs
+                if item.job_type == "video_analysis"
+                and item.status == "success"
+                and (
+                    not item.output_validated
+                    or item.validated_input_fingerprint
+                    != item.input_fingerprint
+                )
             ),
             None,
         )
@@ -1812,6 +1833,9 @@ class ProjectService:
         if successful_video is not None:
             status = "success"
             error = None
+        elif unvalidated_video_success is not None:
+            status = "failed"
+            error = "analysis success has no matching validated input proof"
         elif terminal_problem is not None:
             status = terminal_problem.status
             error = terminal_problem.error
