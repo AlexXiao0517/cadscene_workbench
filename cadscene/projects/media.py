@@ -410,6 +410,13 @@ def validate_rendered_media(
         raise InvalidMediaContract(
             "authoritative source frames must be a non-empty sequence"
         )
+    if any(
+        type(frame.ordinal) is not int or type(frame.pts) is not int
+        for frame in expected_source_frames
+    ):
+        raise InvalidMediaContract(
+            "authoritative source frames require integer identity"
+        )
     if (
         not isinstance(expected_source_time_base, Fraction)
         or expected_source_time_base <= 0

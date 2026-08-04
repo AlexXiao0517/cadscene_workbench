@@ -98,3 +98,11 @@ Narrow-review TDD evidence:
 - Media plus authoritative PTS/export/frame-map regression:
   `105 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+Final minor hardening:
+
+- Publishing also requires every authoritative frame `ordinal` and integer PTS
+  to be a real non-bool `int`; integral floats and booleans cannot exploit
+  Python numeric equality when compared with the frame map.
+- The new four-case regression failed before the check and now passes. Media plus
+  authoritative PTS/export/frame-map regression: `109 passed, 1 skipped`.

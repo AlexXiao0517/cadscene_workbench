@@ -347,6 +347,36 @@ def test_render_validation_requires_positive_exact_fraction_source_time_base(
         )
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [("ordinal", 10.0), ("ordinal", True), ("pts", 5000.0), ("pts", True)],
+)
+def test_render_validation_requires_integer_authoritative_frame_identity(
+    field: str, value: object,
+) -> None:
+    probe = parse_ffprobe(_probe_payload())
+    values: dict[str, object] = {
+        "ordinal": 10,
+        "pts": 5000,
+        "duration_pts": 40,
+        "timestamp_source": "pts",
+    }
+    values[field] = value
+    expected = (
+        DecodedFrameTimestamp(**values),
+        DecodedFrameTimestamp(11, 5040, 40, "pts"),
+        DecodedFrameTimestamp(12, 5080, 40, "pts"),
+    )
+
+    with pytest.raises(InvalidMediaContract, match="integer identity"):
+        validate_rendered_media(
+            probe,
+            _frame_map(),
+            expected_source_frames=expected,
+            expected_source_time_base=Fraction(1, 1000),
+        )
+
+
 @pytest.mark.parametrize("invalid_schema", [True, 1.0])
 def test_render_frame_map_schema_version_is_strict_integer(
     invalid_schema: object,
