@@ -4,6 +4,7 @@
   const params = new URLSearchParams(window.location.search);
   const dataset = params.get("dataset") || "";
   const runId = params.get("runId") || "";
+  const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
   const stageTitles = {
@@ -47,6 +48,8 @@
   let pureRotationCorrectionDraftBase = null;
   let pureRotationWorldYawDeg = 0;
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+  let projectWorkbenchSession = null;
+  let projectWorkbenchSaveInFlight = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
@@ -500,6 +503,7 @@
     }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
+    await finalizeProjectWorkbenchSave({ ok: true, kind: "pure_rotation_calibration" });
     setWorkflowStage("render");
     message.textContent = "当前相机设置和关键帧拟合轨迹已保存，可以预览或开始渲染。";
   }
@@ -1166,8 +1170,60 @@
       cameraTrack: cameraTrack || window.cadsceneGetCameraTrack(),
     });
     await loadKeyframePlan();
+    await finalizeProjectWorkbenchSave(result);
     return result;
   }
+
+  async function bootstrapProjectWorkbenchSession() {
+    if (!projectWorkbenchToken || !dataset) return null;
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(dataset)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`,
+      { cache: "no-store" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    projectWorkbenchSession = payload;
+    return payload;
+  }
+
+  async function finalizeProjectWorkbenchSave(result) {
+    if (!projectWorkbenchSession || projectWorkbenchSaveInFlight) return null;
+    if (projectWorkbenchSession.state !== "editing" && projectWorkbenchSession.state !== "pending_save") return null;
+    projectWorkbenchSaveInFlight = true;
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchSession.project_id)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/save`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: projectWorkbenchSession.clips_revision,
+            existing_save: result,
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
+      window.location.assign(projectWorkbenchSession.return_to);
+      return payload;
+    } finally {
+      projectWorkbenchSaveInFlight = false;
+    }
+  }
+
+  window.addEventListener("pagehide", () => {
+    if (projectWorkbenchSaveInFlight || !projectWorkbenchSession || projectWorkbenchSession.state !== "editing") return;
+    fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchSession.project_id)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/close`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: projectWorkbenchSession.clips_revision }),
+        keepalive: true,
+      },
+    ).catch(() => {});
+  });
 
   function updateKeyframePlanUi() {
     const alignmentButton = document.querySelector("#workflowRunAlignment");
@@ -1608,6 +1664,9 @@
     document.querySelectorAll(".dev-only-control").forEach((node) => node.classList.add("is-debug-visible"));
   }
   loadWorkflowSuggestions();
+  bootstrapProjectWorkbenchSession().catch((error) => {
+    message.textContent = `项目会话不可用：${error.message}`;
+  });
   loadDatasetManifestForUpload();
   blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();

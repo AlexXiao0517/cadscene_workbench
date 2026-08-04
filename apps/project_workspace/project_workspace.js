@@ -4,6 +4,7 @@
   const POLL_INTERVAL_MS = 1500;
   const params = new URLSearchParams(window.location.search);
   const projectId = params.get("projectId") || "";
+  const focusClipId = params.get("focusClip") || "";
   const state = {
     snapshot: null,
     etag: null,
@@ -82,6 +83,7 @@
     if (!progress.hidden) progress.value = fraction;
     $(".stage-only", row).textContent = progress.hidden ? (clip.progress?.message || clip.stage || "—") : `${Math.round(fraction * 100)}%`;
     applyCapabilities(clip, row);
+    $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
     $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
@@ -106,6 +108,13 @@
     $("#mergeProjectButton").disabled = !snapshot.capabilities.can_merge;
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
+    if (focusClipId) {
+      const focused = rows.querySelector(`[data-clip-id="${CSS.escape(focusClipId)}"]`);
+      if (focused) {
+        focused.classList.add("is-focused-return");
+        focused.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }
     const timeline = $("#mergeTimeline");
     timeline.replaceChildren(...snapshot.clips.map((clip) => {
       const item = document.createElement("span");
@@ -269,6 +278,30 @@
       state.etag = null;
       await pollSnapshot();
     } catch (error) { setMessage(error.message, true); }
+  }
+
+  async function openWorkbench(clip, row) {
+    const returnParams = new URLSearchParams({
+      projectId,
+      focusClip: clip.clip_id,
+    });
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/workbench-sessions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.clips,
+            return_to: `/apps/project_workspace/?${returnParams.toString()}`,
+          }),
+        },
+      );
+      state.snapshot.component_revisions.clips = body.clips_revision;
+      window.location.assign(body.workbench_url);
+    } catch (error) {
+      $(".row-error", row).textContent = error.message;
+    }
   }
 
   $("#sidebarToggle").addEventListener("click", (event) => {

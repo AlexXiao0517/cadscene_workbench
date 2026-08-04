@@ -762,6 +762,10 @@ def main(argv: list[str] | None = None) -> int:
     from cadscene.projects.service import ProjectService
     from cadscene.projects.runtime import ProjectRuntime
     from cadscene.projects.uploads import ValidatedUploadStore
+    from cadscene.projects.workbench_sessions import (
+        AtomicWorkbenchSessionStore,
+        ProjectWorkbenchService,
+    )
     from cadscene.projects.workflow_adapters import default_workflow_adapters
 
     projects_root = storage_root / "projects"
@@ -788,11 +792,19 @@ def main(argv: list[str] | None = None) -> int:
         server.server_close()
         print(f"unable to acquire or recover project root: {exc}", file=sys.stderr)
         return 1
+    project_workbench = ProjectWorkbenchService(
+        repositories=repositories,
+        project_service=project_service,
+        session_store=AtomicWorkbenchSessionStore(projects_root),
+        projects_root=projects_root,
+        viewer_runs_root=storage_root / "runs",
+    )
     server.project_api = ProjectApi(
         repositories=repositories,
         service=project_service,
         uploads=ValidatedUploadStore(projects_root),
         now=lambda: datetime.now(timezone.utc).isoformat(),
+        workbench=project_workbench,
     )
     server.project_runtime = project_runtime
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"

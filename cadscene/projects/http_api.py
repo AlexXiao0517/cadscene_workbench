@@ -15,6 +15,14 @@ from .models import ClipDefinition
 from .repositories import RevisionConflict
 from .service import ProjectService, TrajectoryPreflight
 from .uploads import UploadValidationError, ValidatedUploadStore
+from .workbench_sessions import (
+    InvalidWorkbenchOutput,
+    InvalidWorkbenchReturnPath,
+    ProjectWorkbenchService,
+    ReplayedWorkbenchSave,
+    StaleWorkbenchSession,
+    WorkbenchPermissionDenied,
+)
 
 
 _SAFE_ID = r"[A-Za-z0-9_.-]+"
@@ -35,6 +43,12 @@ _TRAJECTORY = re.compile(
 )
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
+)
+_WORKBENCH_CREATE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workbench-sessions$"
+)
+_WORKBENCH_SESSION = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close))?$"
 )
 
 
@@ -73,12 +87,14 @@ class ProjectApi:
         uploads: ValidatedUploadStore,
         now: Callable[[], str],
         identity: Callable[[], str] | None = None,
+        workbench: ProjectWorkbenchService | None = None,
     ) -> None:
         self.repositories = repositories
         self.service = service
         self.uploads = uploads
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
+        self.workbench = workbench
 
     def handle(
         self,
@@ -123,6 +139,20 @@ class ProjectApi:
                 return self._job_action(
                     match["project"], match["job"], match["action"], payload
                 )
+            match = _WORKBENCH_CREATE.fullmatch(path)
+            if method == "POST" and match:
+                return self._create_workbench_session(
+                    match["project"], match["clip"], payload
+                )
+            match = _WORKBENCH_SESSION.fullmatch(path)
+            if match and method == "GET" and match["action"] is None:
+                return self._inspect_workbench_session(
+                    match["project"], match["token"]
+                )
+            if match and method == "POST" and match["action"] in {"save", "close"}:
+                return self._mutate_workbench_session(
+                    match["project"], match["token"], match["action"], payload
+                )
             return ApiResponse(404, {"error": "project_api_not_found"})
         except RevisionConflict as exc:
             return ApiResponse(
@@ -135,7 +165,15 @@ class ProjectApi:
             )
         except FileNotFoundError as exc:
             return ApiResponse(404, {"error": str(exc)})
+        except WorkbenchPermissionDenied as exc:
+            return ApiResponse(403, {"error": str(exc)})
+        except ReplayedWorkbenchSave as exc:
+            return ApiResponse(409, {"error": "workbench_save_replayed", "message": str(exc)})
+        except StaleWorkbenchSession as exc:
+            return ApiResponse(409, {"error": "stale_workbench_session", "message": str(exc)})
         except (UploadValidationError, ValueError, KeyError, TypeError) as exc:
+            return ApiResponse(400, {"error": str(exc)})
+        except (InvalidWorkbenchOutput, InvalidWorkbenchReturnPath) as exc:
             return ApiResponse(400, {"error": str(exc)})
 
     def _create_project(self, payload: Mapping[str, object]) -> ApiResponse:
@@ -265,10 +303,6 @@ class ProjectApi:
             "jobs": jobs.revision,
             "render": render.revision,
         }
-        revision_payload = json.dumps(
-            components, sort_keys=True, separators=(",", ":")
-        ).encode("ascii")
-        snapshot_revision = sha256(revision_payload).hexdigest()
         job_by_clip: dict[str, Mapping[str, object]] = {}
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
@@ -279,7 +313,7 @@ class ProjectApi:
         for clip in clips.clips:
             job = job_by_clip.get(clip.clip_id)
             capability = self._clip_capability(
-                clip, preflight, job, analysis_busy=analysis_busy
+                project_id, clip, preflight, job, analysis_busy=analysis_busy
             )
             can_start_any = can_start_any or bool(
                 capability["can_start_trajectory"]
@@ -306,6 +340,11 @@ class ProjectApi:
                     "stage": None if job is None else job.get("stage"),
                     "progress": None if job is None else job.get("progress"),
                     "capabilities": capability,
+                    "workbench": (
+                        {"state": "unavailable", "workbench_output_revision": None}
+                        if self.workbench is None
+                        else self.workbench.snapshot_for_clip(project_id, clip)
+                    ),
                     "source_interval": {
                         "start_pts": clip.analysis.get("source_start_pts"),
                         "end_pts_exclusive": clip.analysis.get(
@@ -316,6 +355,15 @@ class ProjectApi:
                     },
                 }
             )
+        revision_payload = json.dumps(
+            {
+                "components": components,
+                "workbench": [item["workbench"] for item in clip_payloads],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        snapshot_revision = sha256(revision_payload).hexdigest()
         return {
             "project_id": project_id,
             "snapshot_revision": snapshot_revision,
@@ -336,6 +384,7 @@ class ProjectApi:
 
     def _clip_capability(
         self,
+        project_id: str,
         clip: ClipDefinition,
         preflight: TrajectoryPreflight,
         job: Mapping[str, object] | None,
@@ -350,17 +399,93 @@ class ProjectApi:
         if analysis_busy:
             reason = "project analysis is still running"
         status = None if job is None else str(job.get("status"))
+        can_open_workbench = (
+            False
+            if self.workbench is None
+            else self.workbench.can_open(project_id, clip.clip_id)
+        )
         return {
             "can_start_trajectory": can_start,
             "trajectory_needs_confirmation": needs_confirmation,
             "reason": reason,
-            "can_open_workbench": False,
+            "can_open_workbench": can_open_workbench,
             "can_render": False,
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
             "can_cancel": status
             in {"queued", "preparing", "running", "validating"},
         }
+
+    def _create_workbench_session(
+        self, project_id: str, clip_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+        return_to = payload.get("return_to")
+        if not isinstance(return_to, str):
+            raise InvalidWorkbenchReturnPath("return_to is required")
+        session = self.workbench.open(
+            project_id,
+            clip_id,
+            return_to=return_to,
+            expected_clips_revision=_required_revision(payload),
+        )
+        return ApiResponse(
+            201,
+            {
+                **self.workbench.session_payload(session),
+                "workbench_url": self.workbench.workbench_url(session),
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
+
+    def _inspect_workbench_session(
+        self, project_id: str, token: str
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+        session = self.workbench.inspect(project_id, token)
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
+
+    def _mutate_workbench_session(
+        self,
+        project_id: str,
+        token: str,
+        action: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+        expected_revision = _required_revision(payload)
+        if action == "save":
+            existing_save = payload.get("existing_save")
+            if not isinstance(existing_save, Mapping):
+                raise InvalidWorkbenchOutput("existing_save is required")
+            session = self.workbench.save(
+                project_id,
+                token,
+                existing_save,
+                expected_clips_revision=expected_revision,
+            )
+        else:
+            session = self.workbench.close(
+                project_id,
+                token,
+                expected_clips_revision=expected_revision,
+            )
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
 
     def _update_workflow(
         self,

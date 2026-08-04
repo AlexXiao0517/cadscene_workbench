@@ -32,6 +32,9 @@ def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() ->
     assert "ProjectAnalysisCoordinator" not in source
     assert "analysis_trigger=" not in source
     assert "analysis=None" in source
+    assert "AtomicWorkbenchSessionStore(projects_root)" in source
+    assert "ProjectWorkbenchService(" in source
+    assert "workbench=project_workbench" in source
 
 
 def _clip(

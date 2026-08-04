@@ -139,6 +139,29 @@ def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:
     assert 'querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack())' in script
 
 
+def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
+    script = _read("workflow.js")
+
+    assert 'params.get("projectWorkbenchToken")' in script
+    assert "bootstrapProjectWorkbenchSession" in script
+    assert "/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`" in script
+    existing_save = script.index('/api/workflow/save-camera-track')
+    coordinated_save = script.index('/save`', existing_save)
+    assert existing_save < coordinated_save
+    assert "existing_save: result" in script
+    assert "expected_revision: projectWorkbenchSession.clips_revision" in script
+    assert "window.location.assign(projectWorkbenchSession.return_to)" in script
+    assert 'window.addEventListener("pagehide"' in script
+    assert 'keepalive: true' in script
+    assert "projectWorkbenchSaveInFlight" in script[script.index('window.addEventListener("pagehide"'):]
+    pure_finish = script[
+        script.index("async function finishPureRotationCalibration") :
+        script.index("async function previewPureRotationFittedTrack")
+    ]
+    assert "await refreshPureRotationFittedPreview()" in pure_finish
+    assert 'await finalizeProjectWorkbenchSave({ ok: true, kind: "pure_rotation_calibration" })' in pure_finish
+
+
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:
     script = _read("workflow.js")
     start = script.index("async function persistEditedCameraTrack")

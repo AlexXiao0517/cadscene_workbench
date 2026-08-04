@@ -30,6 +30,11 @@ from .uploads import PublishedUpload, UploadValidationError, ValidatedUploadStor
 from .http_api import ApiResponse, ProjectApi, UploadRequest
 from .analysis import ProjectAnalysisCoordinator
 from .runtime import ProjectRootLease, ProjectRuntime
+from .workbench_sessions import (
+    AtomicWorkbenchSessionStore,
+    ProjectWorkbenchService,
+    WorkbenchSessionStore,
+)
 
 __all__ = [
     "ClipDefinition",
@@ -69,4 +74,7 @@ __all__ = [
     "ProjectAnalysisCoordinator",
     "ProjectRootLease",
     "ProjectRuntime",
+    "WorkbenchSessionStore",
+    "AtomicWorkbenchSessionStore",
+    "ProjectWorkbenchService",
 ]

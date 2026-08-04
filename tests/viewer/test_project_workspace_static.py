@@ -76,3 +76,16 @@ def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> Non
     assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/retry`" in script
     assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/cancel`" in script
     assert '#reanalyzeButton").addEventListener' in script
+
+
+def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert "async function openWorkbench" in script
+    assert "/workbench-sessions`" in script
+    assert "expected_revision: state.snapshot.component_revisions.clips" in script
+    assert "return_to:" in script
+    assert "window.location.assign(body.workbench_url)" in script
+    assert 'params.get("focusClip")' in script
+    assert "scrollIntoView" in script
+    assert '.open-workbench", row).addEventListener' in script
