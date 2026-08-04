@@ -80,6 +80,34 @@ Review TDD evidence:
   `96 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
+## Substage 2a: manifest-free render adapter contracts
+
+This narrowed substage adds only the fake-friendly adapter boundary in
+`cadscene/projects/render_adapters.py`; it does not modify the project service,
+queue, repositories, or manifests and does not implement FFmpeg commands.
+
+- `RenderInputs` validates safe project/clip identity, explicit workflow,
+  absolute existing physical-video/frame-map/workbench inputs, an absolute
+  attempt directory, a non-empty contiguous authoritative decoded-frame
+  sequence, exact positive source time base, immutable workbench output
+  identity, and the project media specification.
+- `RenderExecutionPlan` contains non-empty command token tuples and wraps its
+  validator so only a structured `AdapterResult` can cross the boundary.
+- `RenderAdapter` exposes only immutable validated inputs and a structured
+  execution plan; repositories and manifests are not present in its contract.
+- `RenderAdapterRegistry` routes by workflow, rejects duplicate workflow or
+  adapter name/version identities, and fails closed for unknown workflows.
+- Adapter progress reuses `AdapterProgress`; an unknown fraction remains
+  stage-only and is omitted from serialization.
+
+Substage 2a TDD evidence:
+
+- RED: test collection failed with `ModuleNotFoundError` before
+  `cadscene.projects.render_adapters` existed.
+- Focused GREEN: `21 passed`.
+- Related media/workflow-adapter/executor/queue regression: `143 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
 ## Narrow media-contract review closure
 
 - The publishing-level `validate_rendered_media()` boundary now rejects a
