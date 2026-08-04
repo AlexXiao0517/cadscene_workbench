@@ -115,6 +115,7 @@ def test_valid_upload_publishes_atomically_before_triggering_analysis(
 
     assert result.path == store.published_path("p1", "video")
     assert result.sha256 == hashlib.sha256(payload).hexdigest()
+    assert result.path.name == f"video-{result.sha256}.mp4"
     assert result.validation["decoded"] is True
     assert observations == [(True, True)]
     assert result.path.read_bytes() == payload
@@ -122,6 +123,33 @@ def test_valid_upload_publishes_atomically_before_triggering_analysis(
     immutable_report = json.loads(result.validation_report_path.read_text())
     assert immutable_report["status"] == "published"
     assert immutable_report["sha256"] == result.sha256
+
+
+def test_content_addressed_upload_never_overwrites_conflicting_bytes(
+    tmp_path: Path,
+) -> None:
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"video": _accept}
+    )
+    payload = b"valid-video"
+    fingerprint = hashlib.sha256(payload).hexdigest()
+    pending = store.begin(
+        "p1", "video", "source.mp4", expected_size=len(payload)
+    )
+    pending.write(payload)
+    conflict = (
+        tmp_path
+        / "projects"
+        / "p1"
+        / "assets"
+        / f"video-{fingerprint}.mp4"
+    )
+    conflict.write_bytes(b"wrong-bytes")
+
+    with pytest.raises(UploadValidationError, match="different bytes"):
+        pending.complete_staged()
+
+    assert conflict.read_bytes() == b"wrong-bytes"
 
 
 def test_invalid_dxf_is_rejected_before_publication(tmp_path: Path) -> None:

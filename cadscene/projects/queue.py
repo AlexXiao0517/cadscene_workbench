@@ -112,6 +112,8 @@ class QueueJob:
     output_revision: str | None
     operation_id: str
     attempts: tuple[AttemptRecord, ...]
+    submission_operation_id: str | None = None
+    publication_operation_id: str | None = None
     output_fingerprint: str | None = None
     output_validated: bool = False
     validated_input_fingerprint: str | None = None
@@ -181,6 +183,8 @@ class QueueJob:
             "output_validated": self.output_validated,
             "validated_input_fingerprint": self.validated_input_fingerprint,
             "operation_id": self.operation_id,
+            "submission_operation_id": self.submission_operation_id,
+            "publication_operation_id": self.publication_operation_id,
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "published_outputs": dict(self.published_outputs),
             "progress": None if self.progress is None else dict(self.progress),
@@ -211,6 +215,12 @@ class QueueJob:
             adapter_version=str(value["adapter_version"]),
             output_revision=_optional_string(value.get("output_revision")),
             operation_id=str(value["operation_id"]),
+            submission_operation_id=_optional_string(
+                value.get("submission_operation_id")
+            ),
+            publication_operation_id=_optional_string(
+                value.get("publication_operation_id")
+            ),
             attempts=tuple(
                 AttemptRecord.from_dict(item)  # type: ignore[arg-type]
                 for item in value.get("attempts", ())
@@ -653,6 +663,79 @@ class LocalResourceQueue:
             self._schedule_locked()
             return self._jobs[job.job_id]
 
+    def prepare_submission_candidates(
+        self, jobs: Sequence[QueueJob]
+    ) -> tuple[QueueJob, ...]:
+        """Validate a batch without mutating queue state.
+
+        The caller may durably publish these exact candidates before committing
+        them to the process-local scheduler.
+        """
+
+        with self._lock:
+            known = dict(self._jobs)
+            prepared: list[QueueJob] = []
+            for job in jobs:
+                existing = next(
+                    (
+                        item
+                        for item in known.values()
+                        if item.idempotency_key == job.idempotency_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if (
+                        existing.input_fingerprint != job.input_fingerprint
+                        or existing.adapter_name != job.adapter_name
+                        or existing.adapter_version != job.adapter_version
+                    ):
+                        raise ValueError(
+                            "idempotency key collision across input or adapter identity"
+                        )
+                    prepared.append(existing)
+                    continue
+                if job.job_id in known:
+                    raise ValueError(f"duplicate job_id: {job.job_id}")
+                missing = set(job.depends_on_job_ids) - set(known)
+                if missing:
+                    raise ValueError(f"unknown dependencies: {sorted(missing)}")
+                known[job.job_id] = job
+                prepared.append(job)
+            return tuple(prepared)
+
+    def commit_submission_candidates(
+        self, candidates: Sequence[QueueJob]
+    ) -> tuple[QueueJob, ...]:
+        """CAS-like in-memory commit after the jobs manifest is durable."""
+
+        with self._lock:
+            committed: list[QueueJob] = []
+            for candidate in candidates:
+                existing = next(
+                    (
+                        item
+                        for item in self._jobs.values()
+                        if item.idempotency_key == candidate.idempotency_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.to_dict() != candidate.to_dict():
+                        raise ValueError("durable submission candidate changed before commit")
+                    committed.append(existing)
+                    continue
+                missing = set(candidate.depends_on_job_ids) - set(self._jobs)
+                if missing:
+                    raise ValueError(f"unknown dependencies: {sorted(missing)}")
+                if candidate.job_id in self._jobs:
+                    raise ValueError(f"duplicate job_id: {candidate.job_id}")
+                self._jobs[candidate.job_id] = candidate
+                self._queue_order.append(candidate.job_id)
+                committed.append(candidate)
+            self._schedule_locked()
+            return tuple(self._jobs[item.job_id] for item in committed)
+
     def status(self, job_id: str) -> str:
         with self._lock:
             return self._jobs[job_id].status
@@ -863,6 +946,63 @@ class LocalResourceQueue:
             )
             self._schedule_locked()
             return self._jobs[job_id]
+
+    def prepare_success_candidate(
+        self,
+        job_id: str,
+        *,
+        attempt_number: int,
+        claim_token: str | None,
+        output_revision: str,
+        output_fingerprint: str | None = None,
+        output_validated: bool = True,
+        published_outputs: Mapping[str, str] | None = None,
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            if current.status != "validating":
+                raise ValueError("only validating jobs can prepare success")
+            return replace(
+                current,
+                status="success",
+                stage="success",
+                output_revision=output_revision,
+                output_fingerprint=output_fingerprint,
+                output_validated=output_validated,
+                validated_input_fingerprint=(
+                    current.input_fingerprint if output_validated else None
+                ),
+                published_outputs=dict(published_outputs or {}),
+                error=None,
+            )
+
+    def commit_prepared_candidate(
+        self,
+        job_id: str,
+        *,
+        candidate: QueueJob,
+        attempt_number: int,
+        claim_token: str | None,
+    ) -> QueueJob:
+        with self._lock:
+            current = self._require_active_claim_locked(
+                job_id, attempt_number, claim_token
+            )
+            if current.status != "validating":
+                raise ValueError("only validating jobs can commit success")
+            if (
+                candidate.job_id != current.job_id
+                or candidate.project_id != current.project_id
+                or candidate.input_fingerprint != current.input_fingerprint
+                or candidate.status != "success"
+                or candidate.attempts != current.attempts
+            ):
+                raise ValueError("prepared success candidate no longer matches job lease")
+            self._jobs[job_id] = candidate
+            self._schedule_locked()
+            return candidate
 
     def validate_output(
         self, job_id: str, *, current_input_fingerprint: str

@@ -793,9 +793,6 @@ def main(argv: list[str] | None = None) -> int:
         service=project_service,
         uploads=ValidatedUploadStore(projects_root),
         now=lambda: datetime.now(timezone.utc).isoformat(),
-        analysis_trigger=lambda project_id, _asset_type, _upload: (
-            project_service.enqueue_analysis_jobs(project_id)
-        ),
     )
     server.project_runtime = project_runtime
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"

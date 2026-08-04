@@ -1165,3 +1165,65 @@ def test_restore_cleans_verified_changed_input_process_before_releasing_capacity
     assert terminated == [123]
     assert queue.status("a") == expected_terminal
     assert queue.status("b") == "running"
+
+
+def test_success_candidate_is_invisible_until_explicit_commit(tmp_path: Path) -> None:
+    queue = LocalResourceQueue()
+    submitted = queue.submit(
+        job("candidate", resource_class="light_compute").with_attempt(
+            AttemptRecord(number=1, directory=str(tmp_path / "attempt-1"))
+        )
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    attempt = claimed.attempts[-1]
+    queue.mark_validating(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+    )
+
+    candidate = queue.prepare_success_candidate(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+        output_revision="out-1",
+        output_fingerprint="f" * 64,
+        published_outputs={"result": str(tmp_path / "result")},
+    )
+
+    assert candidate.status == "success"
+    assert queue.get(submitted.job_id).status == "validating"
+    committed = queue.commit_prepared_candidate(
+        submitted.job_id,
+        candidate=replace(candidate, operation_id="publish-op"),
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+    )
+    assert committed.status == "success"
+    assert committed.operation_id == "publish-op"
+
+
+def test_submission_candidates_do_not_mutate_queue_before_manifest_publish() -> None:
+    queue = LocalResourceQueue()
+    first = job("analysis-cad", resource_class="light_compute")
+    second = job(
+        "analysis-video",
+        resource_class="light_compute",
+        depends_on_job_ids=(first.job_id,),
+    )
+
+    candidates = queue.prepare_submission_candidates((first, second))
+
+    assert tuple(item.job_id for item in candidates) == (
+        "analysis-cad",
+        "analysis-video",
+    )
+    assert queue.jobs() == ()
+    committed = queue.commit_submission_candidates(candidates)
+    assert tuple(item.job_id for item in committed) == (
+        "analysis-cad",
+        "analysis-video",
+    )
+    assert queue.status("analysis-cad") == "running"
+    assert queue.status("analysis-video") == "queued"

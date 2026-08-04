@@ -82,6 +82,17 @@ class PendingUpload:
         self.temporary_path.unlink(missing_ok=True)
 
     def complete(self) -> PublishedUpload:
+        published = self._complete_staged()
+        self._store.commit_canonical(published, strict=True)
+        self._store._notify_published(published)
+        return published
+
+    def complete_staged(self) -> PublishedUpload:
+        """Publish immutable media/report without changing the canonical cache."""
+
+        return self._complete_staged()
+
+    def _complete_staged(self) -> PublishedUpload:
         if self._closed:
             raise ValueError("upload is already closed")
         self._stream.flush()
@@ -102,7 +113,7 @@ class PendingUpload:
                 )
             )
             self.destination = self.destination.with_name(
-                f"{self.asset_type}-{digest[:16]}{self.destination.suffix}"
+                f"{self.asset_type}-{digest}{self.destination.suffix}"
             )
             self._store._write_attempt_report(
                 self.project_id,
@@ -117,7 +128,19 @@ class PendingUpload:
                     "validation": validation,
                 },
             )
-            os.replace(self.temporary_path, self.destination)
+            with self._store._lock:
+                if self.destination.exists():
+                    if (
+                        not self.destination.is_file()
+                        or self.destination.stat().st_size != self._size
+                        or _file_fingerprint(self.destination) != digest
+                    ):
+                        raise FileExistsError(
+                            "content-addressed upload path contains different bytes"
+                        )
+                    self.temporary_path.unlink()
+                else:
+                    os.replace(self.temporary_path, self.destination)
             self._store._fsync_directory(self.destination.parent)
             report = {
                 "schema_version": "1.0",
@@ -130,9 +153,6 @@ class PendingUpload:
                 "validation": validation,
             }
             report_path = self._store._write_attempt_report(
-                self.project_id, self.asset_type, report
-            )
-            self._store._write_report(
                 self.project_id, self.asset_type, report
             )
         except Exception as exc:
@@ -169,7 +189,6 @@ class PendingUpload:
             validation=validation,
             validation_report_path=report_path,
         )
-        self._store._notify_published(published)
         return published
 
     def published_path_exists(self) -> bool:
@@ -256,6 +275,30 @@ class ValidatedUploadStore:
                 pass
         return self._assets_dir(project_id) / asset_type
 
+    def commit_canonical(
+        self, upload: PublishedUpload, *, strict: bool = False
+    ) -> bool:
+        """Best-effort diagnostic cache; project manifest remains authoritative."""
+
+        report = {
+            "schema_version": "1.0",
+            "status": "published",
+            "asset_type": upload.asset_type,
+            "original_filename": upload.original_filename,
+            "published_path": upload.path.name,
+            "size_bytes": upload.size_bytes,
+            "sha256": upload.sha256,
+            "validation": dict(upload.validation),
+            "immutable_validation_report": str(upload.validation_report_path),
+        }
+        try:
+            self._write_report(upload.project_id, upload.asset_type, report)
+        except Exception:
+            if strict:
+                raise
+            return False
+        return True
+
     def _notify_published(self, upload: PublishedUpload) -> None:
         if self._on_published is not None:
             self._on_published(upload.project_id, upload.asset_type, upload)
@@ -324,6 +367,14 @@ class ValidatedUploadStore:
             raise ValueError("unsupported CAD extension")
         if asset_type == "cad" and extension == ".json" and filename.lower() != "design.json":
             raise ValueError("CAD JSON upload must be named design.json")
+
+
+def _file_fingerprint(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:

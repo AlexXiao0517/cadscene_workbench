@@ -5,17 +5,21 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
-import shutil
 import sys
 import threading
 from typing import Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
-from cadscene.workflow.data_import import load_dataset_manifest, slugify_dataset_name
-
 from .adapters import AdapterInputs, AdapterResult, WorkflowAdapterRegistry
+from .analysis_adapters import (
+    ADAPTER_NAME as ANALYSIS_ADAPTER_NAME,
+    ADAPTER_VERSION as ANALYSIS_ADAPTER_VERSION,
+    prepare_analysis_plan,
+    validate_dependency_output,
+    validate_result_path,
+)
+from .analysis_publication import AnalysisArtifactPublisher
 from .executor import JobExecutionPlan
 from .json_repositories import ProjectRepositories
 from .models import (
@@ -27,6 +31,7 @@ from .models import (
     register_analysis_revision,
 )
 from .repositories import ManifestMutation, RevisionConflict, publish_manifests
+from .uploads import PublishedUpload
 from .queue import (
     AttemptRecord,
     LocalResourceQueue,
@@ -56,6 +61,21 @@ class EnqueueAnalysisResult:
     request_key: str
 
 
+@dataclass(frozen=True)
+class RegisterUploadResult:
+    project_revision: int
+    request_key: str | None
+    analysis_job_ids: tuple[str, ...] = ()
+
+
+class _AnalysisPublicationPending(RuntimeError):
+    def __init__(self, project_id: str, job_id: str, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.project_id = project_id
+        self.job_id = job_id
+        self.cause = cause
+
+
 class ProjectService:
     """The sole owner of project job-state publication."""
 
@@ -76,8 +96,389 @@ class ProjectService:
         self.storage_root = self.projects_root.parent
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
+        self.analysis_publisher = AnalysisArtifactPublisher(
+            storage_root=self.storage_root,
+            projects_root=self.projects_root,
+            identity=self._identity,
+        )
         self._publication_lock = threading.RLock()
         self.queue.enable_publication_gate()
+
+    def register_uploaded_asset(
+        self,
+        project_id: str,
+        upload: PublishedUpload,
+        *,
+        expected_revision: int,
+    ) -> RegisterUploadResult:
+        """Atomically register immutable upload state and any new analysis DAG."""
+
+        if upload.project_id != project_id:
+            raise ValueError("published upload belongs to another project")
+        if not upload.path.is_file() or not upload.validation_report_path.is_file():
+            raise FileNotFoundError("immutable upload media/report is unavailable")
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            assets = dict(project.source_assets)
+            assets[upload.asset_type] = {
+                "path": str(upload.path),
+                "original_filename": upload.original_filename,
+                "size_bytes": upload.size_bytes,
+                "sha256": upload.sha256,
+                "validation": dict(upload.validation),
+                "validation_report": str(upload.validation_report_path),
+            }
+            request_key = _analysis_request_key_from_assets(assets)
+            previous = assets.get("_analysis")
+            previous_key = (
+                str(previous.get("request_key"))
+                if isinstance(previous, Mapping) and previous.get("request_key")
+                else None
+            )
+            prepared: tuple[QueueJob, ...] = ()
+            job_ids: tuple[str, ...] = ()
+            current_jobs = self.repositories.jobs.load(project_id)
+            if request_key is not None and request_key != previous_key:
+                operation_seed = self._identity()
+                cad_job = self._new_analysis_job(
+                    project_id,
+                    request_key=request_key,
+                    phase="cad",
+                    operation_id=operation_seed,
+                    dependency_ids=(),
+                    project_assets=assets,
+                )
+                video_job = self._new_analysis_job(
+                    project_id,
+                    request_key=request_key,
+                    phase="video",
+                    operation_id=operation_seed,
+                    dependency_ids=(cad_job.job_id,),
+                    project_assets=assets,
+                )
+                prepared = self.queue.prepare_submission_candidates(
+                    (cad_job, video_job)
+                )
+                job_ids = tuple(item.job_id for item in prepared)
+                for candidate in prepared:
+                    Path(candidate.attempts[-1].directory).mkdir(
+                        parents=True, exist_ok=False
+                    )
+
+            existing_jobs = tuple(
+                item for item in self.queue.jobs() if item.project_id == project_id
+            )
+            order = tuple(
+                dict.fromkeys(
+                    (
+                        *(
+                            job_id
+                            for job_id in self.queue.queue_order()
+                            if self.queue.get(job_id).project_id == project_id
+                        ),
+                        *(item.job_id for item in prepared),
+                    )
+                )
+            )
+            by_id = {item.job_id: item for item in existing_jobs}
+            by_id.update({item.job_id: item for item in prepared})
+
+            def mutate_project(
+                value: ProjectManifest, operation_id: str
+            ) -> ProjectManifest:
+                published_assets = dict(assets)
+                if prepared:
+                    published_assets["_analysis"] = {
+                        "request_key": request_key,
+                        "status": "queued",
+                        "requested_at": self.now(),
+                        "job_ids": list(job_ids),
+                        "operation_id": operation_id,
+                        "error": None,
+                    }
+                return replace(
+                    value,
+                    updated_at=self.now(),
+                    source_assets=published_assets,
+                    project_state="analyzing" if prepared else value.project_state,
+                )
+
+            mutations = [
+                ManifestMutation(
+                    repository=self.repositories.project,
+                    project_id=project_id,
+                    expected_revision=project.revision,
+                    mutate=mutate_project,
+                )
+            ]
+            if prepared:
+                def mutate_jobs(
+                    value: JobsManifest, operation_id: str
+                ) -> JobsManifest:
+                    return replace(
+                        value,
+                        updated_at=self.now(),
+                        queue_order=order,
+                        jobs=tuple(
+                            replace(
+                                by_id[job_id],
+                                operation_id=operation_id,
+                                submission_operation_id=operation_id,
+                            ).to_dict()
+                            for job_id in order
+                        ),
+                    )
+
+                mutations.append(
+                    ManifestMutation(
+                        repository=self.repositories.jobs,
+                        project_id=project_id,
+                        expected_revision=current_jobs.revision,
+                        mutate=mutate_jobs,
+                    )
+                )
+            try:
+                publication = publish_manifests(mutations)
+            except Exception as publication_error:
+                from .recovery import reconcile_project
+
+                reconcile_project(project_id, repositories=self.repositories)
+                recovered_project = self.repositories.project.load(project_id)
+                recovered_asset = recovered_project.source_assets.get(
+                    upload.asset_type
+                )
+                recovered_jobs = self.repositories.jobs.load(project_id)
+                recovered_by_id = {
+                    str(item["job_id"]): QueueJob.from_dict(item)
+                    for item in recovered_jobs.jobs
+                }
+                asset_recovered = (
+                    isinstance(recovered_asset, Mapping)
+                    and recovered_asset.get("path") == str(upload.path)
+                    and recovered_asset.get("sha256") == upload.sha256
+                )
+                jobs_recovered = all(
+                    job_id in recovered_by_id for job_id in job_ids
+                )
+                if not asset_recovered or (prepared and not jobs_recovered):
+                    raise publication_error
+                if prepared:
+                    self.queue.commit_submission_candidates(
+                        tuple(recovered_by_id[job_id] for job_id in job_ids)
+                    )
+                    self.queue.acknowledge_publication(project_id)
+                return RegisterUploadResult(
+                    project_revision=recovered_project.revision,
+                    request_key=request_key,
+                    analysis_job_ids=job_ids,
+                )
+            if prepared:
+                jobs = next(
+                    item
+                    for item in publication.manifests
+                    if isinstance(item, JobsManifest)
+                )
+                persisted = {
+                    str(item["job_id"]): QueueJob.from_dict(item)
+                    for item in jobs.jobs
+                }
+                self.queue.commit_submission_candidates(
+                    tuple(persisted[job_id] for job_id in job_ids)
+                )
+                self.queue.acknowledge_publication(project_id)
+            updated_project = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, ProjectManifest)
+            )
+            return RegisterUploadResult(
+                project_revision=updated_project.revision,
+                request_key=request_key,
+                analysis_job_ids=job_ids,
+            )
+
+    def request_reanalysis(
+        self, project_id: str, *, expected_revision: int
+    ) -> RegisterUploadResult:
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            base_key = _analysis_request_key_from_assets(project.source_assets)
+            if base_key is None:
+                raise ValueError("validated video and CAD assets are required")
+            for required in ("video", "cad"):
+                descriptor = project.source_assets.get(required)
+                if not isinstance(descriptor, Mapping):
+                    raise ValueError(f"validated {required} asset is required")
+                media = Path(str(descriptor.get("path") or ""))
+                report = Path(str(descriptor.get("validation_report") or ""))
+                if not media.is_file() or not report.is_file():
+                    raise ValueError(
+                        f"immutable {required} media/report is unavailable"
+                    )
+            request_key = f"{base_key}:manual:{self._identity()}"
+            operation_seed = self._identity()
+            cad_job = self._new_analysis_job(
+                project_id,
+                request_key=request_key,
+                phase="cad",
+                operation_id=operation_seed,
+                dependency_ids=(),
+                project_assets=project.source_assets,
+            )
+            video_job = self._new_analysis_job(
+                project_id,
+                request_key=request_key,
+                phase="video",
+                operation_id=operation_seed,
+                dependency_ids=(cad_job.job_id,),
+                project_assets=project.source_assets,
+            )
+            prepared = self.queue.prepare_submission_candidates(
+                (cad_job, video_job)
+            )
+            for candidate in prepared:
+                Path(candidate.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+            job_ids = tuple(item.job_id for item in prepared)
+            current_jobs = self.repositories.jobs.load(project_id)
+            order = tuple(
+                dict.fromkeys(
+                    (
+                        *(
+                            job_id
+                            for job_id in self.queue.queue_order()
+                            if self.queue.get(job_id).project_id == project_id
+                        ),
+                        *job_ids,
+                    )
+                )
+            )
+            by_id = {
+                item.job_id: item
+                for item in self.queue.jobs()
+                if item.project_id == project_id
+            }
+            by_id.update({item.job_id: item for item in prepared})
+
+            def mutate_project(
+                value: ProjectManifest, operation_id: str
+            ) -> ProjectManifest:
+                assets = dict(value.source_assets)
+                assets["_analysis"] = {
+                    "request_key": request_key,
+                    "status": "queued",
+                    "requested_at": self.now(),
+                    "request_kind": "manual",
+                    "job_ids": list(job_ids),
+                    "operation_id": operation_id,
+                    "error": None,
+                }
+                return replace(
+                    value,
+                    updated_at=self.now(),
+                    source_assets=assets,
+                    project_state="analyzing",
+                )
+
+            def mutate_jobs(
+                value: JobsManifest, operation_id: str
+            ) -> JobsManifest:
+                return replace(
+                    value,
+                    updated_at=self.now(),
+                    queue_order=order,
+                    jobs=tuple(
+                        replace(
+                            by_id[job_id],
+                            operation_id=operation_id,
+                            submission_operation_id=operation_id,
+                        ).to_dict()
+                        for job_id in order
+                    ),
+                )
+
+            try:
+                publication = publish_manifests(
+                    (
+                        ManifestMutation(
+                            repository=self.repositories.project,
+                            project_id=project_id,
+                            expected_revision=project.revision,
+                            mutate=mutate_project,
+                        ),
+                        ManifestMutation(
+                            repository=self.repositories.jobs,
+                            project_id=project_id,
+                            expected_revision=current_jobs.revision,
+                            mutate=mutate_jobs,
+                        ),
+                    )
+                )
+            except Exception as publication_error:
+                from .recovery import reconcile_project
+
+                reconcile_project(project_id, repositories=self.repositories)
+                recovered_project = self.repositories.project.load(project_id)
+                recovered_state = recovered_project.source_assets.get("_analysis")
+                recovered_jobs = self.repositories.jobs.load(project_id)
+                recovered_by_id = {
+                    str(item["job_id"]): QueueJob.from_dict(item)
+                    for item in recovered_jobs.jobs
+                }
+                request_recovered = (
+                    isinstance(recovered_state, Mapping)
+                    and recovered_state.get("request_key") == request_key
+                    and tuple(recovered_state.get("job_ids", ())) == job_ids
+                )
+                if not request_recovered or not all(
+                    job_id in recovered_by_id for job_id in job_ids
+                ):
+                    raise publication_error
+                self.queue.commit_submission_candidates(
+                    tuple(recovered_by_id[job_id] for job_id in job_ids)
+                )
+                self.queue.acknowledge_publication(project_id)
+                return RegisterUploadResult(
+                    project_revision=recovered_project.revision,
+                    request_key=request_key,
+                    analysis_job_ids=job_ids,
+                )
+            persisted_jobs = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, JobsManifest)
+            )
+            persisted = {
+                str(item["job_id"]): QueueJob.from_dict(item)
+                for item in persisted_jobs.jobs
+            }
+            self.queue.commit_submission_candidates(
+                tuple(persisted[job_id] for job_id in job_ids)
+            )
+            self.queue.acknowledge_publication(project_id)
+            updated_project = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, ProjectManifest)
+            )
+            return RegisterUploadResult(
+                project_revision=updated_project.revision,
+                request_key=request_key,
+                analysis_job_ids=job_ids,
+            )
 
     def enqueue_analysis_jobs(self, project_id: str) -> EnqueueAnalysisResult:
         """Persist the CAD -> video lightweight analysis DAG.
@@ -123,40 +524,40 @@ class ProjectService:
                 dependency_ids=(),
                 project_assets=project.source_assets,
             )
-            submitted_cad = self.queue.submit(cad_job)
             video_job = self._new_analysis_job(
                 project_id,
                 request_key=request_key,
                 phase="video",
                 operation_id=operation_id,
-                dependency_ids=(submitted_cad.job_id,),
+                dependency_ids=(cad_job.job_id,),
                 project_assets=project.source_assets,
             )
-            submitted_video = self.queue.submit(video_job)
-            for candidate, submitted in (
-                (cad_job, submitted_cad),
-                (video_job, submitted_video),
-            ):
-                if candidate.job_id == submitted.job_id:
-                    Path(submitted.attempts[-1].directory).mkdir(
-                        parents=True, exist_ok=False
-                    )
-
-            job_ids = (submitted_cad.job_id, submitted_video.job_id)
-            current_jobs = self.repositories.jobs.load(project_id)
-            jobs_payload = tuple(
-                item.to_dict()
-                for item in self.queue.jobs()
-                if item.project_id == project_id
+            prepared = self.queue.prepare_submission_candidates(
+                (cad_job, video_job)
             )
-            queue_order = tuple(
+            for candidate in prepared:
+                attempt = Path(candidate.attempts[-1].directory)
+                if not attempt.exists():
+                    attempt.mkdir(parents=True, exist_ok=False)
+
+            job_ids = (prepared[0].job_id, prepared[1].job_id)
+            current_jobs = self.repositories.jobs.load(project_id)
+            existing_jobs = tuple(
+                item for item in self.queue.jobs() if item.project_id == project_id
+            )
+            by_id = {item.job_id: item for item in existing_jobs}
+            for candidate in prepared:
+                by_id[candidate.job_id] = candidate
+            queue_order = tuple(dict.fromkeys((
+                *(
                 job_id
                 for job_id in self.queue.queue_order()
                 if self.queue.get(job_id).project_id == project_id
-            )
-
+                ),
+                *(item.job_id for item in prepared),
+            )))
             def mutate_project(
-                value: ProjectManifest, _publication_operation_id: str
+                value: ProjectManifest, publication_operation_id: str
             ) -> ProjectManifest:
                 assets = dict(value.source_assets)
                 state = dict(assets.get("_analysis", {}))
@@ -165,7 +566,7 @@ class ProjectService:
                         "request_key": request_key,
                         "status": "queued",
                         "job_ids": list(job_ids),
-                        "operation_id": operation_id,
+                        "operation_id": publication_operation_id,
                         "error": None,
                     }
                 )
@@ -177,26 +578,110 @@ class ProjectService:
                     project_state="analyzing",
                 )
 
-            publish_manifests(
-                (
-                    ManifestMutation(
-                        repository=self.repositories.project,
-                        project_id=project_id,
-                        expected_revision=project.revision,
-                        mutate=mutate_project,
-                    ),
-                    ManifestMutation(
-                        repository=self.repositories.jobs,
-                        project_id=project_id,
-                        expected_revision=current_jobs.revision,
-                        mutate=lambda value, _op: replace(
-                            value, jobs=jobs_payload, queue_order=queue_order
-                        ),
-                    ),
+            def mutate_jobs(
+                value: JobsManifest, publication_operation_id: str
+            ) -> JobsManifest:
+                stamped_jobs = tuple(
+                    replace(
+                        by_id[job_id],
+                        operation_id=publication_operation_id,
+                        submission_operation_id=publication_operation_id,
+                    ).to_dict()
+                    for job_id in queue_order
                 )
+                return replace(
+                    value,
+                    jobs=stamped_jobs,
+                    queue_order=queue_order,
+                    updated_at=self.now(),
+                )
+
+            try:
+                publication = publish_manifests(
+                    (
+                        ManifestMutation(
+                            repository=self.repositories.project,
+                            project_id=project_id,
+                            expected_revision=project.revision,
+                            mutate=mutate_project,
+                        ),
+                        ManifestMutation(
+                            repository=self.repositories.jobs,
+                            project_id=project_id,
+                            expected_revision=current_jobs.revision,
+                            mutate=mutate_jobs,
+                        ),
+                    )
+                )
+            except Exception as publication_error:
+                from .recovery import reconcile_project
+
+                reconcile_project(project_id, repositories=self.repositories)
+                recovered_project = self.repositories.project.load(project_id)
+                recovered_jobs = self.repositories.jobs.load(project_id)
+                recovered_by_id = {
+                    str(item["job_id"]): QueueJob.from_dict(item)
+                    for item in recovered_jobs.jobs
+                }
+                recovered_state = recovered_project.source_assets.get("_analysis")
+                request_recovered = (
+                    isinstance(recovered_state, Mapping)
+                    and recovered_state.get("request_key") == request_key
+                    and tuple(recovered_state.get("job_ids", ())) == job_ids
+                    and all(job_id in recovered_by_id for job_id in job_ids)
+                )
+                if request_recovered:
+                    committed = self.queue.commit_submission_candidates(
+                        tuple(recovered_by_id[job_id] for job_id in job_ids)
+                    )
+                    self.queue.acknowledge_publication(project_id)
+                    return EnqueueAnalysisResult(
+                        job_ids=(committed[0].job_id, committed[1].job_id),
+                        request_key=request_key,
+                    )
+                if (
+                    isinstance(recovered_state, Mapping)
+                    and recovered_state.get("request_key") == request_key
+                    and recovered_state.get("status") == "queued"
+                ):
+                    assets = dict(recovered_project.source_assets)
+                    failed_state = dict(recovered_state)
+                    failed_state.update(
+                        {
+                            "status": "failed",
+                            "job_ids": [],
+                            "error": f"analysis enqueue publication failed: {publication_error}",
+                        }
+                    )
+                    assets["_analysis"] = failed_state
+                    self.repositories.project.update(
+                        project_id,
+                        expected_revision=recovered_project.revision,
+                        mutate=lambda value: replace(
+                            value,
+                            updated_at=self.now(),
+                            source_assets=assets,
+                            project_state="analysis_failed",
+                        ),
+                    )
+                raise publication_error
+            persisted_jobs = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, JobsManifest)
+            )
+            persisted_by_id = {
+                str(item["job_id"]): QueueJob.from_dict(item)
+                for item in persisted_jobs.jobs
+            }
+            committed = self.queue.commit_submission_candidates(
+                tuple(persisted_by_id[job_id] for job_id in job_ids)
             )
             self.queue.acknowledge_publication(project_id)
-            return EnqueueAnalysisResult(job_ids=job_ids, request_key=request_key)
+            return EnqueueAnalysisResult(
+                job_ids=(committed[0].job_id, committed[1].job_id),
+                request_key=request_key,
+            )
 
     def preflight_trajectory_jobs(
         self,
@@ -223,13 +708,13 @@ class ProjectService:
                     for clip_id in skipped
                 },
             )
-        video_path = _asset_path(project.source_assets, "video")
-        srt_path = _asset_path(project.source_assets, "srt")
         eligible: list[str] = []
         confirmation: list[str] = []
         skipped: list[str] = []
         reasons: dict[str, str] = {}
         for clip in selected:
+            video_path = _clip_asset_path(clip, project.source_assets, "video")
+            srt_path = _clip_asset_path(clip, project.source_assets, "srt")
             workflow = clip.resolved_workflow
             if workflow is None:
                 skipped.append(clip.clip_id)
@@ -518,6 +1003,28 @@ class ProjectService:
         attempt_number: int,
         claim_token: str,
     ) -> QueueJob:
+        try:
+            return self._finish_job_once(
+                project_id,
+                job_id,
+                result,
+                current_fingerprint=current_fingerprint,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
+        except _AnalysisPublicationPending as pending:
+            return self._recover_analysis_publication(pending)
+
+    def _finish_job_once(
+        self,
+        project_id: str,
+        job_id: str,
+        result: AdapterResult,
+        *,
+        current_fingerprint: str | None,
+        attempt_number: int,
+        claim_token: str,
+    ) -> QueueJob:
         with self._state_guard(project_id):
             current = self.queue.get(job_id)
             if current.project_id != project_id:
@@ -596,9 +1103,24 @@ class ProjectService:
         if current.status == "running":
             self.queue.mark_validating(job_id, **kwargs)
         try:
-            self._validate_analysis_attempt_output(current, result)
+            validate_result_path(current, result)
             if current.job_type == "video_analysis":
-                self._publish_analysis_outputs_locked(current, result)
+                candidate = self.queue.prepare_success_candidate(
+                    job_id,
+                    output_revision=result.output_revision,
+                    output_fingerprint=result.output_fingerprint,
+                    output_validated=True,
+                    published_outputs=result.outputs,
+                    **kwargs,
+                )
+                try:
+                    return self._publish_analysis_completion_locked(
+                        current, result, candidate=candidate, lease=kwargs
+                    )
+                except Exception as exc:
+                    raise _AnalysisPublicationPending(
+                        project_id, job_id, exc
+                    ) from exc
             finished = self.queue.mark_success(
                 job_id,
                 output_revision=result.output_revision,
@@ -607,85 +1129,103 @@ class ProjectService:
                 published_outputs=result.outputs,
                 **kwargs,
             )
-            if current.job_type == "cad_analysis":
-                self._record_analysis_job_state_locked(
-                    current, "running", error=None
-                )
+            self._record_analysis_job_state_locked(
+                current, "running", error=None
+            )
         except Exception as exc:
+            if isinstance(exc, _AnalysisPublicationPending):
+                raise
             error = f"analysis output publication failed: {exc}"
             finished = self.queue.mark_failed(job_id, error, **kwargs)
             self._record_analysis_job_state_locked(current, "failed", error=error)
         self._publish_queue_locked(project_id)
         return finished
 
-    def _validate_analysis_attempt_output(
-        self, job: QueueJob, result: AdapterResult
-    ) -> None:
-        attempt_root = Path(job.attempts[-1].directory).resolve()
-        output_key = (
-            "cad_dataset" if job.job_type == "cad_analysis" else "analysis_output"
-        )
-        value = result.outputs.get(output_key)
-        if value is None:
-            raise ValueError(f"adapter output is missing {output_key}")
-        output = Path(value).resolve()
-        if not output.is_relative_to(attempt_root):
-            raise ValueError(f"{output_key} escapes its immutable attempt directory")
-        if not output.is_dir():
-            raise FileNotFoundError(f"{output_key} directory is missing")
-        if job.job_type == "cad_analysis":
-            manifest = output / "dataset_manifest.json"
-            if not manifest.is_file():
-                raise FileNotFoundError("CAD attempt dataset manifest is missing")
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
-            if str(payload.get("dataset")) != job.project_id:
-                raise ValueError("CAD attempt dataset belongs to another project")
-            return
-        clip_manifest = output / "clip_manifest.json"
-        if not clip_manifest.is_file():
-            raise FileNotFoundError("video analysis clip manifest is missing")
-        payload = json.loads(clip_manifest.read_text(encoding="utf-8"))
-        if str(payload.get("analysis_revision")) != result.output_revision:
-            raise ValueError("video analysis revision does not match adapter result")
-        clips = payload.get("clips")
-        if not isinstance(clips, list) or not clips:
-            raise ValueError("video analysis produced no logical clips")
+    def _recover_analysis_publication(
+        self, pending: _AnalysisPublicationPending
+    ) -> QueueJob:
+        from .recovery import reconcile_project
 
-    def _validated_cad_dependency(self, video_job: QueueJob) -> tuple[QueueJob, Path]:
+        reconcile_project(pending.project_id, repositories=self.repositories)
+        with self._state_guard(pending.project_id):
+            manifest = self.repositories.jobs.load(pending.project_id)
+            persisted = next(
+                (
+                    QueueJob.from_dict(item)
+                    for item in manifest.jobs
+                    if item.get("job_id") == pending.job_id
+                ),
+                None,
+            )
+            current = self.queue.get(pending.job_id)
+            attempt = current.attempts[-1]
+            claim_token = attempt.worker_claim_token
+            if persisted is not None and persisted.status == "success":
+                if current.status == "validating":
+                    committed = self.queue.commit_prepared_candidate(
+                        pending.job_id,
+                        candidate=persisted,
+                        attempt_number=attempt.number,
+                        claim_token=claim_token,
+                    )
+                else:
+                    committed = persisted
+                self._sync_analysis_state_from_queue_locked(pending.project_id)
+                self.queue.acknowledge_publication(pending.project_id)
+                return committed
+            error = f"analysis publication failed before durable activation: {pending.cause}"
+            failed = self.queue.mark_failed(
+                pending.job_id,
+                error,
+                attempt_number=attempt.number,
+                claim_token=claim_token,
+            )
+            self._record_analysis_job_state_locked(
+                current, "failed", error=error
+            )
+            self._publish_queue_locked(pending.project_id)
+            return failed
+
+    def _publish_analysis_completion_locked(
+        self,
+        video_job: QueueJob,
+        result: AdapterResult,
+        *,
+        candidate: QueueJob,
+        lease: Mapping[str, object],
+    ) -> QueueJob:
         if len(video_job.depends_on_job_ids) != 1:
             raise ValueError("video analysis requires exactly one CAD dependency")
         dependency = self.queue.get(video_job.depends_on_job_ids[0])
-        if (
-            dependency.project_id != video_job.project_id
-            or dependency.job_type != "cad_analysis"
-            or dependency.status != "success"
-            or not dependency.output_validated
-            or dependency.validated_input_fingerprint != dependency.input_fingerprint
-        ):
-            raise ValueError("CAD analysis dependency is not validated")
-        value = dependency.published_outputs.get("cad_dataset")
-        if value is None:
-            raise ValueError("CAD dependency has no dataset output")
-        dataset = Path(value).resolve()
-        attempt_root = Path(dependency.attempts[-1].directory).resolve()
-        if not dataset.is_relative_to(attempt_root):
-            raise ValueError("CAD dependency output escapes its attempt directory")
-        if not (dataset / "dataset_manifest.json").is_file():
-            raise FileNotFoundError("CAD dependency dataset is incomplete")
-        return dependency, dataset
-
-    def _publish_analysis_outputs_locked(
-        self, video_job: QueueJob, result: AdapterResult
-    ) -> None:
-        _dependency, cad_dataset = self._validated_cad_dependency(video_job)
-        analysis_output = Path(result.outputs["analysis_output"]).resolve()
+        cad_dataset = validate_dependency_output(dependency, video_job)
+        analysis_output = validate_result_path(video_job, result)
+        if dependency.output_fingerprint is None or result.output_fingerprint is None:
+            raise ValueError("analysis content fingerprints are missing")
+        artifacts = self.analysis_publisher.publish(
+            project_id=video_job.project_id,
+            cad_source=cad_dataset,
+            cad_fingerprint=dependency.output_fingerprint,
+            analysis_source=analysis_output,
+            analysis_fingerprint=result.output_fingerprint,
+        )
         revision = str(result.output_revision)
+        project = self.repositories.project.load(video_job.project_id)
+        active_clips = self.repositories.clips.load(video_job.project_id)
+        jobs_manifest = self.repositories.jobs.load(video_job.project_id)
+        input_snapshot = _analysis_input_snapshot(
+            project.source_assets,
+            request_key=video_job.input_revision,
+            cad_dataset_id=artifacts.cad_dataset_id,
+            cad_dataset_path=artifacts.cad_dataset_path,
+            analysis_artifact_id=artifacts.analysis_artifact_id,
+            analysis_artifact_path=artifacts.analysis_artifact_path,
+        )
         clip_payload = json.loads(
             (analysis_output / "clip_manifest.json").read_text(encoding="utf-8")
         )
         clips = tuple(
             ClipDefinition.from_analysis(
-                item,
+                {**item, "input_snapshot": input_snapshot},
                 generated_display_name=(
                     f"场景 {int(item.get('scene_index', 1)):02d} · "
                     f"第 {int(item.get('segment_index', 1))} 段"
@@ -695,35 +1235,6 @@ class ProjectService:
         )
         if any(clip.analysis_revision != revision for clip in clips):
             raise ValueError("clip revision does not match the analysis output")
-
-        dataset_id = slugify_dataset_name(
-            f"{video_job.project_id}-analysis-{revision}"
-        )
-        if slugify_dataset_name(dataset_id) != dataset_id:
-            raise ValueError("immutable CAD dataset ID is not canonical")
-        formal_dataset = self.storage_root / "data" / dataset_id
-        formal_analysis = (
-            self.projects_root
-            / video_job.project_id
-            / "analyses"
-            / revision
-        )
-        self._publish_cad_dataset(cad_dataset, formal_dataset, dataset_id=dataset_id)
-        analysis_staging_source = analysis_output.parent / f".publish-{revision}"
-        if analysis_staging_source.exists():
-            shutil.rmtree(analysis_staging_source)
-        (analysis_staging_source / "02_video_analysis").parent.mkdir(
-            parents=True, exist_ok=False
-        )
-        shutil.copytree(analysis_output, analysis_staging_source / "02_video_analysis")
-        try:
-            self._publish_immutable_tree(analysis_staging_source, formal_analysis)
-        finally:
-            if analysis_staging_source.exists():
-                shutil.rmtree(analysis_staging_source)
-
-        project = self.repositories.project.load(video_job.project_id)
-        active_clips = self.repositories.clips.load(video_job.project_id)
         request_key = video_job.input_revision
 
         def mutate_project(
@@ -737,28 +1248,25 @@ class ProjectService:
                     current_revision=value.revision,
                 )
             assets = dict(value.source_assets)
-            cad = dict(assets.get("cad", {}))
-            dataset_manifest = json.loads(
-                (formal_dataset / "dataset_manifest.json").read_text(encoding="utf-8")
-            )
-            cad.update(
-                {
-                    "dataset_id": dataset_id,
-                    "dataset_path": str(formal_dataset),
-                    "analysis": dataset_manifest.get("cad", dataset_manifest),
-                }
-            )
-            assets["cad"] = cad
             analysis = dict(state)
             analysis.update(
                 {
                     "status": "success",
                     "analysis_revision": revision,
-                    "output_path": str(formal_analysis),
+                    "input_snapshot": input_snapshot,
+                    "analysis_artifact_id": artifacts.analysis_artifact_id,
+                    "analysis_artifact_path": str(artifacts.analysis_artifact_path),
                     "error": None,
                 }
             )
             assets["_analysis"] = analysis
+            revisions = dict(assets.get("_analysis_revisions", {}))
+            revisions[revision] = {
+                "input_snapshot": input_snapshot,
+                "analysis_artifact_id": artifacts.analysis_artifact_id,
+                "analysis_artifact_path": str(artifacts.analysis_artifact_path),
+            }
+            assets["_analysis_revisions"] = revisions
             return replace(
                 register_analysis_revision(value, revision, operation_id=operation_id),
                 updated_at=self.now(),
@@ -770,13 +1278,37 @@ class ProjectService:
                 ),
             )
 
+        def mutate_jobs(value: JobsManifest, operation_id: str) -> JobsManifest:
+            if not any(item.get("job_id") == video_job.job_id for item in value.jobs):
+                raise ValueError("video analysis job is missing from jobs manifest")
+            return replace(
+                value,
+                updated_at=self.now(),
+                jobs=tuple(
+                    replace(
+                        candidate,
+                        operation_id=operation_id,
+                        publication_operation_id=operation_id,
+                    ).to_dict()
+                    if item.get("job_id") == video_job.job_id
+                    else dict(item)
+                    for item in value.jobs
+                ),
+            )
+
         mutations = [
             ManifestMutation(
                 repository=self.repositories.project,
                 project_id=video_job.project_id,
                 expected_revision=project.revision,
                 mutate=mutate_project,
-            )
+            ),
+            ManifestMutation(
+                repository=self.repositories.jobs,
+                project_id=video_job.project_id,
+                expected_revision=jobs_manifest.revision,
+                mutate=mutate_jobs,
+            ),
         ]
         if project.active_analysis_revision is None:
             mutations.append(
@@ -792,96 +1324,27 @@ class ProjectService:
                     ),
                 )
             )
-        publish_manifests(mutations)
-
-    def _publish_immutable_tree(self, source: Path, target: Path) -> None:
-        if target.exists():
-            if not target.is_dir() or _tree_fingerprint(source) != _tree_fingerprint(target):
-                raise FileExistsError(
-                    f"immutable output exists with different content: {target}"
-                )
-            return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.parent / f".{target.name}.tmp-{self._identity()}"
-        if staging.exists():
-            raise FileExistsError(f"publication staging path already exists: {staging}")
-        shutil.copytree(source, staging)
-        try:
-            os.replace(staging, target)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-
-    def _publish_cad_dataset(
-        self, source: Path, target: Path, *, dataset_id: str
-    ) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging_root = self.storage_root / f".cad-publish-{self._identity()}"
-        staging = staging_root / "data" / dataset_id
-        shutil.copytree(source, staging)
-        try:
-            manifest_path = staging / "dataset_manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-            old_dataset = str(manifest.get("dataset") or source.name)
-            rewritten = _rewrite_dataset_references(
-                manifest, old_dataset=old_dataset, dataset_id=dataset_id
+        publication = publish_manifests(mutations)
+        persisted_jobs = next(
+            item
+            for item in publication.manifests
+            if isinstance(item, JobsManifest)
+        )
+        persisted = QueueJob.from_dict(
+            next(
+                item
+                for item in persisted_jobs.jobs
+                if item.get("job_id") == video_job.job_id
             )
-            rewritten["dataset"] = dataset_id
-            manifest_path.write_text(
-                json.dumps(rewritten, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            cad = rewritten.get("cad")
-            if not isinstance(cad, Mapping):
-                raise ValueError("published CAD manifest has no cad section")
-            design_value = cad.get("design_json")
-            if design_value:
-                relative = Path(str(design_value))
-                expected_prefix = Path("data") / dataset_id
-                try:
-                    within_dataset = relative.relative_to(expected_prefix)
-                except ValueError as exc:
-                    raise ValueError(
-                        "published CAD design path does not use immutable dataset ID"
-                    ) from exc
-                if not (staging / within_dataset).is_file():
-                    raise FileNotFoundError("published CAD design file is missing")
-            normalized = load_dataset_manifest(staging_root, dataset_id)
-            if str(normalized.get("dataset")) != dataset_id:
-                raise ValueError("staged CAD dataset identity failed validation")
-            if target.exists():
-                if (
-                    not target.is_dir()
-                    or _tree_fingerprint(staging) != _tree_fingerprint(target)
-                ):
-                    raise FileExistsError(
-                        "immutable CAD dataset exists with different content: "
-                        f"{target}"
-                    )
-                self._validate_published_cad_dataset(
-                    target, dataset_id=dataset_id
-                )
-                return
-            os.replace(staging, target)
-            self._validate_published_cad_dataset(target, dataset_id=dataset_id)
-        finally:
-            if staging_root.exists():
-                shutil.rmtree(staging_root)
-
-    def _validate_published_cad_dataset(
-        self, target: Path, *, dataset_id: str
-    ) -> None:
-        if not target.is_dir():
-            raise FileNotFoundError("published CAD dataset directory is missing")
-        loaded = load_dataset_manifest(self.storage_root, dataset_id)
-        if str(loaded.get("dataset")) != dataset_id:
-            raise ValueError("published CAD dataset identity failed validation")
-        cad = loaded.get("cad")
-        if not isinstance(cad, Mapping):
-            raise ValueError("published CAD manifest has no cad section")
-        design_value = cad.get("design_json")
-        if design_value and not (self.storage_root / str(design_value)).is_file():
-            raise FileNotFoundError("published CAD design file is missing")
+        )
+        committed = self.queue.commit_prepared_candidate(
+            video_job.job_id,
+            candidate=persisted,
+            attempt_number=int(lease["attempt_number"]),
+            claim_token=str(lease["claim_token"]),
+        )
+        self.queue.acknowledge_publication(video_job.project_id)
+        return committed
 
     def _record_analysis_job_state_locked(
         self, job: QueueJob, status: str, *, error: str | None
@@ -896,7 +1359,10 @@ class ProjectService:
         assets["_analysis"] = analysis
         project_state = {
             "failed": "analysis_failed",
+            "interrupted": "analysis_interrupted",
+            "cancelled": "analysis_cancelled",
             "stale_input": "analysis_superseded",
+            "superseded": "analysis_superseded",
         }.get(status, "analyzing")
         self.repositories.project.update(
             job.project_id,
@@ -1002,7 +1468,7 @@ class ProjectService:
             project_id=project_id,
             clip_id=clip.clip_id,
             video_path=video_path,
-            srt_path=_asset_path(project.source_assets, "srt"),
+            srt_path=_clip_asset_path(clip, project.source_assets, "srt"),
             attempt_directory=Path(job.attempts[-1].directory),
             parameters=dict(clip.manual_definition),
             source_start_pts=int(clip.analysis["source_start_pts"]),
@@ -1244,6 +1710,14 @@ class ProjectService:
                 analysis_jobs.append(job)
         if not analysis_jobs:
             return
+        successful_video = next(
+            (
+                item
+                for item in analysis_jobs
+                if item.job_type == "video_analysis" and item.status == "success"
+            ),
+            None,
+        )
         terminal_problem = next(
             (
                 item
@@ -1259,7 +1733,10 @@ class ProjectService:
             ),
             None,
         )
-        if terminal_problem is not None:
+        if successful_video is not None:
+            status = "success"
+            error = None
+        elif terminal_problem is not None:
             status = terminal_problem.status
             error = terminal_problem.error
         elif any(item.status in {"preparing", "running", "validating"} for item in analysis_jobs):
@@ -1274,11 +1751,18 @@ class ProjectService:
         updated_state = dict(state)
         updated_state.update({"status": status, "error": error})
         assets["_analysis"] = updated_state
-        project_state = (
-            "analysis_failed"
-            if status in {"failed", "interrupted"}
-            else "analyzing"
-        )
+        project_state = {
+            "success": (
+                "analysis_candidate_ready"
+                if project.candidate_analysis_revision is not None
+                else "ready"
+            ),
+            "failed": "analysis_failed",
+            "interrupted": "analysis_interrupted",
+            "cancelled": "analysis_cancelled",
+            "stale_input": "analysis_superseded",
+            "superseded": "analysis_superseded",
+        }.get(status, "analyzing")
         self.repositories.project.update(
             project_id,
             expected_revision=project.revision,
@@ -1349,8 +1833,8 @@ class ProjectService:
             ),
             input_revision=request_key,
             input_fingerprint=input_fingerprint,
-            adapter_name="project_analysis",
-            adapter_version="1",
+            adapter_name=ANALYSIS_ADAPTER_NAME,
+            adapter_version=ANALYSIS_ADAPTER_VERSION,
             output_revision=None,
             operation_id=operation_id,
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
@@ -1515,7 +1999,7 @@ class ProjectService:
         )
         if clip is None:
             raise KeyError(f"clip no longer exists: {job.clip_id}")
-        video_path = _asset_path(project.source_assets, "video")
+        video_path = _clip_asset_path(clip, project.source_assets, "video")
         if video_path is None or not video_path.is_file():
             raise FileNotFoundError("physical MP4 source is missing")
         attempt = Path(job.attempts[-1].directory)
@@ -1556,57 +2040,7 @@ class ProjectService:
 
     def _prepare_analysis(self, job: QueueJob) -> JobExecutionPlan:
         project = self.repositories.project.load(job.project_id)
-        attempt = Path(job.attempts[-1].directory)
-        attempt.mkdir(parents=True, exist_ok=True)
-        if job.job_type == "cad_analysis":
-            cad_path = _asset_path(project.source_assets, "cad")
-            if cad_path is None or not cad_path.is_file():
-                raise FileNotFoundError("published project CAD is unavailable")
-            cad_asset = project.source_assets.get("cad")
-            assert isinstance(cad_asset, Mapping)
-            command = (
-                sys.executable,
-                "-m",
-                "cadscene.projects.analysis_worker",
-                "cad",
-                "--project-id",
-                job.project_id,
-                "--input",
-                str(cad_path),
-                "--original-filename",
-                str(cad_asset.get("original_filename") or cad_path.name),
-                "--attempt-dir",
-                str(attempt),
-            )
-            return JobExecutionPlan(
-                commands=(command,),
-                validate=lambda: _validate_cad_analysis_outputs(job),
-            )
-        video_path = _asset_path(project.source_assets, "video")
-        if video_path is None or not video_path.is_file():
-            raise FileNotFoundError("published project video is unavailable")
-        revision = f"analysis-{job.job_id}"
-        command_items = [
-            sys.executable,
-            "-m",
-            "cadscene.projects.analysis_worker",
-            "video",
-            "--project-id",
-            job.project_id,
-            "--input",
-            str(video_path),
-            "--analysis-revision",
-            revision,
-            "--attempt-dir",
-            str(attempt),
-        ]
-        srt_path = _asset_path(project.source_assets, "srt")
-        if srt_path is not None and srt_path.is_file():
-            command_items.extend(("--srt", str(srt_path)))
-        return JobExecutionPlan(
-            commands=(tuple(command_items),),
-            validate=lambda: _validate_video_analysis_outputs(job, revision),
-        )
+        return prepare_analysis_plan(job, project.source_assets)
 
     def _attempt_directory(self, project_id: str, job_id: str, number: int) -> Path:
         return self.projects_root / project_id / "jobs" / job_id / f"attempt-{number}"
@@ -1673,6 +2107,26 @@ def _asset_path(assets: Mapping[str, object], name: str) -> Path | None:
     return None if value in (None, "") else Path(str(value))
 
 
+def _clip_input_snapshot(clip: ClipDefinition) -> Mapping[str, object] | None:
+    value = clip.analysis.get("input_snapshot")
+    return value if isinstance(value, Mapping) else None
+
+
+def _clip_asset_path(
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object],
+    name: str,
+) -> Path | None:
+    snapshot = _clip_input_snapshot(clip)
+    if snapshot is not None:
+        value = snapshot.get(name)
+        if isinstance(value, Mapping):
+            path = value.get("path")
+            return None if path in (None, "") else Path(str(path))
+        return None
+    return _asset_path(project_assets, name)
+
+
 def _clip_output_path(clip: ClipDefinition) -> Path | None:
     for key in ("physical_mp4_path", "export_path", "clip_path"):
         value = clip.analysis.get(key)
@@ -1726,6 +2180,33 @@ def _asset_fingerprints(assets: Mapping[str, object]) -> Mapping[str, object]:
     return fingerprints
 
 
+def _clip_input_identity(
+    clip: ClipDefinition, project_assets: Mapping[str, object]
+) -> Mapping[str, object]:
+    snapshot = _clip_input_snapshot(clip)
+    if snapshot is None:
+        return _asset_fingerprints(project_assets)
+    identity: dict[str, object] = {}
+    for name in ("video", "cad", "srt", "analysis_artifact"):
+        value = snapshot.get(name)
+        if not isinstance(value, Mapping):
+            identity[name] = None
+            continue
+        identity[name] = {
+            key: value.get(key)
+            for key in (
+                "path",
+                "sha256",
+                "dataset_id",
+                "dataset_path",
+                "artifact_id",
+            )
+            if value.get(key) is not None
+        }
+    identity["request_key"] = snapshot.get("request_key")
+    return identity
+
+
 def _fingerprint(value: Mapping[str, object]) -> str:
     encoded = json.dumps(
         value,
@@ -1746,19 +2227,25 @@ def _job_identity_payload(
     adapter_name: str,
     adapter_version: str,
 ) -> Mapping[str, object]:
-    return {
+    payload: dict[str, object] = {
         "job_type": job_type,
         "clip_id": clip.clip_id,
         "clip_interval": _authoritative_interval(clip),
         "analysis_revision": clip.analysis_revision,
         "resolved_workflow": clip.resolved_workflow,
-        "source_assets": _asset_fingerprints(project_assets),
-        "project_manifest_revision": project_revision,
-        "clips_manifest_revision": clips_revision,
+        "source_assets": _clip_input_identity(clip, project_assets),
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
         "parameters": dict(clip.manual_definition),
     }
+    if _clip_input_snapshot(clip) is None:
+        payload.update(
+            {
+                "project_manifest_revision": project_revision,
+                "clips_manifest_revision": clips_revision,
+            }
+        )
+    return payload
 
 
 def _analysis_identity_payload(
@@ -1781,9 +2268,62 @@ def _analysis_identity_payload(
         "job_type": f"{phase}_analysis",
         "request_key": request_key,
         "source_assets": assets,
-        "adapter_name": "project_analysis",
-        "adapter_version": "1",
+        "adapter_name": ANALYSIS_ADAPTER_NAME,
+        "adapter_version": ANALYSIS_ADAPTER_VERSION,
     }
+
+
+def _analysis_request_key_from_assets(
+    assets: Mapping[str, object]
+) -> str | None:
+    fingerprints: dict[str, str] = {}
+    for required in ("video", "cad"):
+        value = assets.get(required)
+        if not isinstance(value, Mapping) or not value.get("path") or not value.get("sha256"):
+            return None
+        fingerprints[required] = str(value["sha256"])
+    srt = assets.get("srt")
+    if isinstance(srt, Mapping) and srt.get("sha256"):
+        fingerprints["srt"] = str(srt["sha256"])
+    return _fingerprint(fingerprints)
+
+
+def _analysis_input_snapshot(
+    project_assets: Mapping[str, object],
+    *,
+    request_key: str,
+    cad_dataset_id: str,
+    cad_dataset_path: Path,
+    analysis_artifact_id: str,
+    analysis_artifact_path: Path,
+) -> Mapping[str, object]:
+    snapshot: dict[str, object] = {"request_key": request_key}
+    for name in ("video", "cad", "srt"):
+        value = project_assets.get(name)
+        if not isinstance(value, Mapping):
+            snapshot[name] = None
+            continue
+        snapshot[name] = {
+            key: value.get(key)
+            for key in (
+                "path",
+                "sha256",
+                "size_bytes",
+                "original_filename",
+                "validation_report",
+            )
+            if value.get(key) is not None
+        }
+    cad = dict(snapshot.get("cad") or {})
+    cad.update(
+        {"dataset_id": cad_dataset_id, "dataset_path": str(cad_dataset_path)}
+    )
+    snapshot["cad"] = cad
+    snapshot["analysis_artifact"] = {
+        "artifact_id": analysis_artifact_id,
+        "path": str(analysis_artifact_path),
+    }
+    return snapshot
 
 
 def _export_identity_payload(
@@ -1793,17 +2333,24 @@ def _export_identity_payload(
     project_revision: int,
     clips_revision: int,
 ) -> Mapping[str, object]:
-    return {
+    payload: dict[str, object] = {
         "job_type": "clip_export",
         "clip_id": clip.clip_id,
         "analysis_revision": clip.analysis_revision,
         "clip_interval": _authoritative_interval(clip),
-        "source_assets": _asset_fingerprints(project_assets),
-        "project_manifest_revision": project_revision,
-        "clips_manifest_revision": clips_revision,
+        "source_assets": _clip_input_identity(clip, project_assets),
         "adapter_name": "clip_export",
         "adapter_version": "1",
+        "parameters": dict(clip.manual_definition),
     }
+    if _clip_input_snapshot(clip) is None:
+        payload.update(
+            {
+                "project_manifest_revision": project_revision,
+                "clips_manifest_revision": clips_revision,
+            }
+        )
+    return payload
 
 
 def _validate_clip_export_outputs(
@@ -1841,83 +2388,3 @@ def _validate_clip_export_outputs(
         output_fingerprint=fingerprint,
         outputs=outputs,
     )
-
-
-def _validate_cad_analysis_outputs(job: QueueJob) -> AdapterResult:
-    dataset = Path(job.attempts[-1].directory) / "scratch" / "data" / job.project_id
-    manifest = dataset / "dataset_manifest.json"
-    if not manifest.is_file():
-        return AdapterResult.failed("CAD analysis dataset manifest is missing")
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return AdapterResult.failed(f"invalid CAD analysis dataset manifest: {exc}")
-    if str(payload.get("dataset")) != job.project_id:
-        return AdapterResult.failed("CAD analysis dataset belongs to another project")
-    digest = _tree_fingerprint(dataset)
-    return AdapterResult.success(
-        output_revision=f"cad:{digest[:16]}",
-        output_fingerprint=digest,
-        outputs={"cad_dataset": str(dataset)},
-    )
-
-
-def _validate_video_analysis_outputs(
-    job: QueueJob, revision: str
-) -> AdapterResult:
-    output = (
-        Path(job.attempts[-1].directory)
-        / "02_video_analysis"
-        / revision
-    )
-    clip_manifest = output / "clip_manifest.json"
-    if not clip_manifest.is_file():
-        return AdapterResult.failed("video analysis clip manifest is missing")
-    try:
-        payload = json.loads(clip_manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return AdapterResult.failed(f"invalid video analysis clip manifest: {exc}")
-    if str(payload.get("analysis_revision")) != revision:
-        return AdapterResult.failed("video analysis revision mismatch")
-    if not payload.get("clips"):
-        return AdapterResult.failed("video analysis produced no logical clips")
-    digest = _tree_fingerprint(output)
-    return AdapterResult.success(
-        output_revision=revision,
-        output_fingerprint=digest,
-        outputs={"analysis_output": str(output), "analysis_revision": revision},
-    )
-
-
-def _tree_fingerprint(root: Path) -> str:
-    digest = sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def _rewrite_dataset_references(
-    value: object, *, old_dataset: str, dataset_id: str
-) -> object:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _rewrite_dataset_references(
-                item, old_dataset=old_dataset, dataset_id=dataset_id
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _rewrite_dataset_references(
-                item, old_dataset=old_dataset, dataset_id=dataset_id
-            )
-            for item in value
-        ]
-    if isinstance(value, str):
-        return value.replace(
-            f"data/{old_dataset}/", f"data/{dataset_id}/"
-        ).replace(
-            f"/data/{old_dataset}/", f"/data/{dataset_id}/"
-        )
-    return value

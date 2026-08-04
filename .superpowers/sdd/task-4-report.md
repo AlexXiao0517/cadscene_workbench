@@ -255,3 +255,105 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Third formal review closure (base `28bb393`)
+
+### Review finding map: 4 Critical + 4 Important + 1 Minor
+
+1. **Critical - analysis activation had a crash window:** queue completion is
+   now prepared without mutating process-local state. The successful video job,
+   project activation/candidate state, optional initial clips manifest, and jobs
+   manifest are published with one operation ID. Only the recovered durable job
+   is then committed to the queue. A manifest-prefix crash is reconciled in the
+   same request and again remains recoverable after restart.
+2. **Critical - restart could regress a completed project to running:** restore
+   now preserves a validated successful video-analysis job as
+   `_analysis.status=success` and project `ready` (or candidate-ready). Failed,
+   interrupted, cancelled, stale-input, and superseded analysis jobs map to
+   explicit terminal project states instead of falling back to `analyzing`.
+3. **Critical - lock inversion and non-atomic enqueue:** HTTP no longer holds
+   repository locks while calling `ProjectService`. Upload registration, manual
+   reanalysis, and the compatibility enqueue path use queue prepare candidates,
+   one project/jobs publication, then queue commit in publication -> repository
+   -> queue order. Prefix crashes reconcile immediately; a wholly failed enqueue
+   becomes `analysis_failed` and cannot leave queued intent without durable jobs.
+4. **Critical - upload publication mixed authority with a mutable canonical
+   pointer:** upload completion first publishes full-SHA-256-addressed media and
+   an immutable attempt report. `ProjectService` then atomically owns project
+   asset and optional DAG state. The canonical validation report is written last
+   as a best-effort, repairable diagnostic cache; project manifests reference
+   only the immutable asset/report and remain authoritative if that cache write
+   fails.
+5. **Important - active clips read mutable project assets:** every published
+   analysis revision and clip now carries an immutable input snapshot containing
+   video/CAD/SRT path and SHA-256 plus CAD dataset and analysis artifact IDs and
+   paths. Export, trajectory, SRT input, and input fingerprint resolution read
+   the clip snapshot. A newly uploaded candidate video cannot change an active
+   clip's command or revive an old result as current.
+6. **Important - storage identity followed revisions or trusted claimed
+   fingerprints:** CAD datasets and video-analysis artifacts use validated tree
+   SHA-256 identities, independent of analysis revision. The publisher recomputes
+   both source hashes before naming and recomputes copied staging hashes before
+   publication, closing validate-to-publish substitution. Existing targets are
+   reused only for identical content; conflicting content fails closed. Upload
+   paths likewise use the complete SHA-256 and never overwrite different bytes.
+7. **Important - worker, adapter, validation, and publication concerns were
+   coupled in `service.py`:** lightweight command construction and adapter output
+   validation now live in `analysis_adapters.py`; immutable formal publication
+   and CAD manifest rebasing live in `analysis_publication.py`. The worker remains
+   CLI-only and adapters return structured results; only `ProjectService` changes
+   manifests.
+8. **Important - candidate analysis lacked durable activation inputs:** project
+   `_analysis_revisions[revision]` now records its immutable input snapshot,
+   content-addressed artifact descriptor, and validated clip manifest location.
+   Candidate completion does not change the active clips manifest, but a later
+   explicit activation can reconstruct the candidate from its immutable artifact.
+9. **Minor - operation provenance was ambiguous and duplicate legacy helpers
+   remained:** queue jobs now retain `submission_operation_id` separately from
+   `publication_operation_id`; completion does not erase DAG submission
+   provenance. The duplicate legacy publisher/validator helpers and unused HTTP
+   analysis callback were removed, and successful activation tests assert the
+   shared completion publication operation explicitly.
+
+### Third-round implementation details
+
+- Queue submission and success completion both use explicit prepare/commit
+  candidates. Prepared candidates are invisible to workers until the owning
+  manifest publication succeeds or is reconciled from a durable prefix.
+- Cross-manifest analysis completion records one operation ID on project,
+  initial clips when applicable, and the successful jobs entry. Retry attempts
+  remain immutable and old input/output revisions remain isolated.
+- Upload storage is two-phase: immutable content/report first, service-owned
+  manifest registration second, canonical diagnostic pointer last. No later
+  runtime read depends on the canonical pointer.
+- Clip-bound source lookup is backward compatible: newly analyzed clips use the
+  immutable snapshot, while legacy clips retain their prior manifest-revision
+  input binding. User-owned clip parameters and workflow resolution continue to
+  invalidate affected jobs without candidate project uploads invalidating active
+  clips.
+- The content-addressed candidate descriptor contains the artifact ID/path and
+  input snapshot needed for future explicit activation without consulting mutable
+  current project assets.
+
+### Final TDD and verification evidence
+
+- Queue two-phase RED/GREEN tests cover invisible success candidates and
+  submission candidates that do not mutate the scheduler before publication.
+- Fault-injection tests cover analysis-completion jobs-manifest prefix recovery,
+  restart after recovered activation, manual-reanalysis prefix recovery, the
+  second upload's automatic DAG prefix recovery, total enqueue failure, and a
+  canonical-cache write failure after authoritative upload registration.
+- Snapshot isolation tests prove a replacement/candidate video does not alter
+  active clip export input and prove the candidate artifact descriptor is
+  independently readable.
+- Content tests use real tree hashes and reject forged adapter fingerprints,
+  copied-tree mismatches, conflicting immutable artifacts, and conflicting
+  full-SHA-256 upload targets.
+- Final project + project-API suite: `224 passed`.
+- Final fresh full suite: `778 passed, 1 skipped` in 39.25 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes` over every changed Python and test file: pass with no
+  output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

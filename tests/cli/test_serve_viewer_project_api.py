@@ -13,7 +13,7 @@ from cadscene.projects.http_api import ProjectApi, UploadRequest
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
-from cadscene.projects.service import ProjectService
+from cadscene.projects.service import ProjectService, RegisterUploadResult
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.cli.serve_viewer import RangeRequestHandler, ViewerHTTPServer
@@ -30,7 +30,7 @@ def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() ->
     assert "project_runtime.start()" in source
     assert "project_runtime.close()" in source
     assert "ProjectAnalysisCoordinator" not in source
-    assert "project_service.enqueue_analysis_jobs" in source
+    assert "analysis_trigger=" not in source
     assert "analysis=None" in source
 
 
@@ -484,11 +484,10 @@ def test_serve_viewer_serves_real_project_snapshot_over_http(tmp_path: Path) -> 
     assert body["clips"][0]["clip_id"] == "clip-1"
 
 
-def test_analysis_triggers_once_only_after_all_required_assets_publish(
+def test_analysis_dag_is_published_once_only_after_all_required_assets_publish(
     tmp_path: Path,
 ) -> None:
     api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
-    triggers: list[tuple[str, str]] = []
     api = ProjectApi(
         repositories=repositories,
         service=api.service,
@@ -500,9 +499,6 @@ def test_analysis_triggers_once_only_after_all_required_assets_publish(
             },
         ),
         now=lambda: "2026-08-04T00:00:02Z",
-        analysis_trigger=lambda project_id, kind, _upload: triggers.append(
-            (project_id, kind)
-        ),
     )
     revision = repositories.project.load("p1").revision
     video = api.handle(
@@ -512,7 +508,6 @@ def test_analysis_triggers_once_only_after_all_required_assets_publish(
         upload=UploadRequest("new.mp4", BytesIO(b"video"), 5),
     )
     assert video.status == 201
-    assert triggers == []
 
     cad = api.handle(
         "POST",
@@ -521,8 +516,13 @@ def test_analysis_triggers_once_only_after_all_required_assets_publish(
         upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
     )
     assert cad.status == 201
-    assert triggers == [("p1", "cad")]
-
+    analysis = repositories.project.load("p1").source_assets["_analysis"]
+    assert analysis["status"] == "queued"
+    assert len(analysis["job_ids"]) == 2
+    assert [job.job_type for job in api.service.queue.jobs()] == [
+        "cad_analysis",
+        "video_analysis",
+    ]
     repeated = api.handle(
         "POST",
         "/api/projects/p1/uploads/cad",
@@ -530,8 +530,142 @@ def test_analysis_triggers_once_only_after_all_required_assets_publish(
         upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
     )
     assert repeated.status == 201
-    assert triggers == [("p1", "cad")]
+    assert len(api.service.queue.jobs()) == 2
 
+
+def test_upload_registration_failure_leaves_no_canonical_or_queued_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("clip-1"),))
+    revision = repositories.project.load("p1").revision
+    monkeypatch.setattr(
+        repositories.project,
+        "_publish_prepared_unchecked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("injected project publication failure")
+        ),
+    )
+
+    with pytest.raises(OSError, match="injected project publication"):
+        api.handle(
+            "POST",
+            "/api/projects/p1/uploads/video",
+            json_body={"expected_revision": revision},
+            upload=UploadRequest("replacement.mp4", BytesIO(b"new-video"), 9),
+        )
+
+    project = repositories.project.load("p1")
+    assert "video" not in project.source_assets
+    assert queue.jobs() == ()
+    assert not api.uploads.validation_report_path("p1", "video").exists()
+
+
+def test_second_upload_recovers_analysis_dag_publication_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("clip-1"),))
+    api.uploads = ValidatedUploadStore(
+        tmp_path / "projects",
+        validators={
+            "video": lambda *_: {"decoded": True},
+            "cad": lambda *_: {"parsed": True},
+        },
+    )
+    revision = repositories.project.load("p1").revision
+    video = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/video",
+        json_body={"expected_revision": revision},
+        upload=UploadRequest("source.mp4", BytesIO(b"video"), 5),
+    )
+    original = repositories.jobs._publish_prepared_unchecked
+    failed_once = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("injected jobs publication crash")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repositories.jobs, "_publish_prepared_unchecked", fail_once)
+
+    cad = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/cad",
+        json_body={"expected_revision": video.body["project_revision"]},
+        upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
+    )
+
+    assert cad.status == 201
+    state = repositories.project.load("p1").source_assets["_analysis"]
+    job_ids = tuple(state["job_ids"])
+    assert len(job_ids) == 2
+    assert tuple(state["job_ids"]) == job_ids
+    assert tuple(item.job_id for item in queue.jobs()) == job_ids
+    assert tuple(
+        str(item["job_id"]) for item in repositories.jobs.load("p1").jobs
+    ) == job_ids
+
+
+def test_canonical_cache_failure_does_not_undo_authoritative_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    revision = repositories.project.load("p1").revision
+    monkeypatch.setattr(
+        api.uploads,
+        "_write_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected canonical cache failure")
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/video",
+        json_body={"expected_revision": revision},
+        upload=UploadRequest("replacement.mp4", BytesIO(b"new-video"), 9),
+    )
+
+    assert response.status == 201
+    asset = repositories.project.load("p1").source_assets["video"]
+    assert Path(asset["path"]).read_bytes() == b"new-video"
+    assert Path(asset["validation_report"]).is_file()
+    assert not api.uploads.validation_report_path("p1", "video").exists()
+
+
+def test_http_upload_does_not_take_repository_lock_before_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    revision = repositories.project.load("p1").revision
+    called: list[str] = []
+    monkeypatch.setattr(
+        api.service,
+        "register_uploaded_asset",
+        lambda project_id, upload, expected_revision: (
+            called.append(project_id)
+            or RegisterUploadResult(expected_revision + 1, None)
+        ),
+    )
+    monkeypatch.setattr(
+        repositories.project,
+        "lock_for",
+        lambda _project_id: (_ for _ in ()).throw(
+            AssertionError("HTTP acquired repository lock")
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/video",
+        json_body={"expected_revision": revision},
+        upload=UploadRequest("replacement.mp4", BytesIO(b"new-video"), 9),
+    )
+
+    assert response.status == 201
+    assert called == ["p1"]
 
 def test_manual_reanalysis_advances_revision_and_captures_a_new_request_key(
     tmp_path: Path,
@@ -567,11 +701,6 @@ def test_manual_reanalysis_advances_revision_and_captures_a_new_request_key(
             },
         ),
     )
-    captured: list[tuple[str, str, str]] = []
-    api.analysis_trigger = lambda project_id, kind, upload: captured.append(
-        (project_id, kind, upload.sha256)
-    )
-
     response = api.handle(
         "POST",
         "/api/projects/p1/analysis/start",
@@ -583,12 +712,67 @@ def test_manual_reanalysis_advances_revision_and_captures_a_new_request_key(
     assert response.body["project_revision"] == changed.revision
     assert changed.source_assets["_analysis"]["request_key"] != "automatic"
     assert changed.source_assets["_analysis"]["status"] == "queued"
-    assert captured == [("p1", "video", "a" * 64)]
+    assert len(response.body["job_ids"]) == 2
     assert (
         api.handle("GET", "/api/projects/p1/snapshot")
         .body["capabilities"]["can_reanalyze"]
         is False
     )
+
+
+def test_manual_reanalysis_recovers_jobs_manifest_publication_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("clip-1"),))
+    video = tmp_path / "source.mp4"
+    cad = tmp_path / "design.dxf"
+    current = repositories.project.load("p1")
+    current = repositories.project.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {
+                    "path": str(video),
+                    "sha256": "a" * 64,
+                    "validation_report": str(tmp_path / "video.validation.json"),
+                },
+                "cad": {
+                    "path": str(cad),
+                    "sha256": "b" * 64,
+                    "validation_report": str(tmp_path / "cad.validation.json"),
+                },
+                "_analysis": {"request_key": "automatic", "status": "success"},
+            },
+        ),
+    )
+    original = repositories.jobs._publish_prepared_unchecked
+    failed_once = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("injected jobs publication crash")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repositories.jobs, "_publish_prepared_unchecked", fail_once)
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/analysis/start",
+        json_body={"expected_revision": current.revision},
+    )
+
+    assert response.status == 202
+    job_ids = tuple(response.body["job_ids"])
+    state = repositories.project.load("p1").source_assets["_analysis"]
+    assert tuple(state["job_ids"]) == job_ids
+    assert tuple(item.job_id for item in queue.jobs()) == job_ids
+    assert tuple(
+        str(item["job_id"]) for item in repositories.jobs.load("p1").jobs
+    ) == job_ids
 
 
 def test_manual_reanalysis_missing_captured_report_does_not_mutate_project(

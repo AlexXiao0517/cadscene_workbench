@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from contextlib import ExitStack
 from fractions import Fraction
 from hashlib import sha256
 import json
-from pathlib import Path
 import re
 from typing import BinaryIO, Callable, Mapping
 from uuid import uuid4
@@ -15,7 +14,7 @@ from .identifiers import is_safe_stable_id, validate_project_id
 from .models import ClipDefinition
 from .repositories import RevisionConflict
 from .service import ProjectService, TrajectoryPreflight
-from .uploads import PublishedUpload, UploadValidationError, ValidatedUploadStore
+from .uploads import UploadValidationError, ValidatedUploadStore
 
 
 _SAFE_ID = r"[A-Za-z0-9_.-]+"
@@ -63,9 +62,6 @@ class ApiResponse:
         return json.dumps(self.body, ensure_ascii=False).encode("utf-8")
 
 
-AnalysisTrigger = Callable[[str, str, PublishedUpload], None]
-
-
 class ProjectApi:
     """Route parsing, validation and project-service delegation boundary."""
 
@@ -76,14 +72,12 @@ class ProjectApi:
         service: ProjectService,
         uploads: ValidatedUploadStore,
         now: Callable[[], str],
-        analysis_trigger: AnalysisTrigger | None = None,
         identity: Callable[[], str] | None = None,
     ) -> None:
         self.repositories = repositories
         self.service = service
         self.uploads = uploads
         self.now = now
-        self.analysis_trigger = analysis_trigger
         self._identity = identity or (lambda: uuid4().hex)
 
     def handle(
@@ -164,10 +158,9 @@ class ProjectApi:
         payload: Mapping[str, object],
         request: UploadRequest,
     ) -> ApiResponse:
-        with self.repositories.project.lock_for(project_id):
-            return self._publish_upload_locked(
-                project_id, asset_type, payload, request
-            )
+        return self._publish_upload_locked(
+            project_id, asset_type, payload, request
+        )
 
     def _publish_upload_locked(
         self,
@@ -177,13 +170,6 @@ class ProjectApi:
         request: UploadRequest,
     ) -> ApiResponse:
         expected_revision = _required_revision(payload)
-        current = self.repositories.project.load(project_id)
-        if current.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=current.revision,
-            )
         pending = self.uploads.begin(
             project_id,
             asset_type,
@@ -197,52 +183,22 @@ class ProjectApi:
                 if not chunk:
                     break
                 pending.write(chunk)
-            published = pending.complete()
+            published = pending.complete_staged()
         except BaseException:
             pending.abort()
             raise
-        source_assets = {
-            **current.source_assets,
-            asset_type: {
-                "path": str(published.path),
-                "original_filename": published.original_filename,
-                "size_bytes": published.size_bytes,
-                "sha256": published.sha256,
-                "validation_report": str(published.validation_report_path),
-            },
-        }
-        analysis_key = _analysis_request_key(source_assets)
-        previous_analysis = source_assets.get("_analysis")
-        previous_key = (
-            previous_analysis.get("request_key")
-            if isinstance(previous_analysis, Mapping)
-            else None
-        )
-        should_trigger = analysis_key is not None and analysis_key != previous_key
-        if should_trigger:
-            source_assets["_analysis"] = {
-                "request_key": analysis_key,
-                "status": "queued",
-                "requested_at": self.now(),
-            }
-        updated = self.repositories.project.update(
+        registered = self.service.register_uploaded_asset(
             project_id,
             expected_revision=expected_revision,
-            mutate=lambda value: replace(
-                value,
-                updated_at=self.now(),
-                source_assets=source_assets,
-                project_state="analyzing",
-            ),
+            upload=published,
         )
-        if self.analysis_trigger is not None and should_trigger:
-            self.analysis_trigger(project_id, asset_type, published)
+        self.uploads.commit_canonical(published, strict=False)
         return ApiResponse(
             201,
             {
                 "project_id": project_id,
                 "asset_type": asset_type,
-                "project_revision": updated.revision,
+                "project_revision": registered.project_revision,
                 "fingerprint": published.sha256,
                 "validation": dict(published.validation),
                 "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
@@ -253,54 +209,17 @@ class ProjectApi:
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         expected_revision = _required_revision(payload)
-        with self.repositories.project.lock_for(project_id):
-            project = self.repositories.project.load(project_id)
-            if project.revision != expected_revision:
-                raise RevisionConflict(
-                    project_id=project_id,
-                    expected_revision=expected_revision,
-                    current_revision=project.revision,
-                )
-            base_key = _analysis_request_key(project.source_assets)
-            if base_key is None:
-                raise ValueError("validated video and CAD assets are required")
-            captured_assets = {
-                asset_type: _published_asset(
-                    project_id,
-                    asset_type,
-                    project.source_assets[asset_type],
-                )
-                for asset_type in ("video", "cad", "srt")
-                if isinstance(project.source_assets.get(asset_type), Mapping)
-            }
-            request_key = f"{base_key}:manual:{self._identity()}"
-            assets = dict(project.source_assets)
-            assets["_analysis"] = {
-                "request_key": request_key,
-                "status": "queued",
-                "requested_at": self.now(),
-                "request_kind": "manual",
-            }
-            updated = self.repositories.project.update(
-                project_id,
-                expected_revision=expected_revision,
-                mutate=lambda value: replace(
-                    value,
-                    source_assets=assets,
-                    project_state="analyzing",
-                    updated_at=self.now(),
-                ),
-            )
-            published = captured_assets["video"]
-            if self.analysis_trigger is not None:
-                self.analysis_trigger(project_id, "video", published)
+        result = self.service.request_reanalysis(
+            project_id, expected_revision=expected_revision
+        )
         return ApiResponse(
             202,
             {
                 "project_id": project_id,
                 "triggered": ["video"],
-                "project_revision": updated.revision,
-                "request_key": request_key,
+                "project_revision": result.project_revision,
+                "request_key": result.request_key,
+                "job_ids": list(result.analysis_job_ids),
             },
         )
 
@@ -635,22 +554,3 @@ def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
         fingerprints["srt"] = str(srt["sha256"])
     payload = json.dumps(fingerprints, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("ascii")).hexdigest()
-
-
-def _published_asset(
-    project_id: str, asset_type: str, asset: Mapping[str, object]
-) -> PublishedUpload:
-    path = Path(str(asset.get("path") or ""))
-    report = Path(str(asset.get("validation_report") or ""))
-    if not path.is_file() or not report.is_file() or not asset.get("sha256"):
-        raise ValueError(f"published {asset_type} asset is unavailable")
-    return PublishedUpload(
-        project_id=project_id,
-        asset_type=asset_type,
-        original_filename=str(asset.get("original_filename") or path.name),
-        path=path,
-        size_bytes=int(asset.get("size_bytes", path.stat().st_size)),
-        sha256=str(asset["sha256"]),
-        validation=dict(asset.get("validation", {})),
-        validation_report_path=report,
-    )
