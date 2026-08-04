@@ -49,6 +49,8 @@ class ConcatSegmentExecution:
     render_order: int
     source_video: Path
     source_frame_map: Path
+    source_video_sha256: str
+    source_frame_map_sha256: str
     concat_input: Path
     needs_normalize: bool
     input_output_revision: str
@@ -62,6 +64,8 @@ class ConcatSegmentExecution:
             "render_order": self.render_order,
             "source_video": str(self.source_video),
             "source_frame_map": str(self.source_frame_map),
+            "source_video_sha256": self.source_video_sha256,
+            "source_frame_map_sha256": self.source_frame_map_sha256,
             "concat_input": str(self.concat_input),
             "needs_normalize": self.needs_normalize,
             "input_output_revision": self.input_output_revision,
@@ -141,7 +145,7 @@ class ConcatMediaAdapter:
         if Path(plan.audio_source) != inputs.source_video_path:
             raise ValueError("audio source path differs from the authoritative source")
         final_map = build_final_frame_map(plan, inputs.source_frame_index)
-        _validate_input_bindings(inputs)
+        _validate_plan_input_bindings(inputs)
         normalized_root = inputs.attempt_directory / "normalized"
         segments: list[ConcatSegmentExecution] = []
         for expected_order, entry in enumerate(plan.entries):
@@ -180,6 +184,12 @@ class ConcatMediaAdapter:
                     render_order=entry.render_order,
                     source_video=video,
                     source_frame_map=frame_map,
+                    source_video_sha256=_required_sha(
+                        entry.input_video_sha256, "input video SHA-256"
+                    ),
+                    source_frame_map_sha256=_required_sha(
+                        entry.input_frame_map_sha256, "input frame map SHA-256"
+                    ),
                     concat_input=concat_input,
                     needs_normalize=normalize,
                     input_output_revision=output_revision,
@@ -201,11 +211,11 @@ class ConcatMediaAdapter:
         holder: dict[str, ConcatMediaExecutionPlan] = {}
 
         def validate() -> AdapterResult:
-            _validate_input_bindings(inputs)
+            _validate_execution_bindings(holder["plan"])
             if validator is None:
                 return AdapterResult.failed("concat output validator is not configured")
             result = validator(inputs, holder["plan"])
-            _validate_input_bindings(inputs)
+            _validate_execution_bindings(holder["plan"])
             return result
 
         execution = ConcatMediaExecutionPlan(
@@ -238,8 +248,9 @@ def _frame_duration_seconds(index: DecodedFrameIndex, ordinal: int) -> Fraction:
     return Fraction(end_pts - frame.pts) * index.time_base
 
 
-def _validate_input_bindings(inputs: ConcatMediaInputs) -> None:
+def _validate_plan_input_bindings(inputs: ConcatMediaInputs) -> None:
     plan = inputs.plan
+    _require_regular_file(inputs.source_video_path, "source video")
     if _sha256_file(inputs.source_video_path) != plan.source_asset_fingerprint:
         raise ValueError("source asset fingerprint differs from the concat plan")
     for entry in plan.entries:
@@ -247,6 +258,26 @@ def _validate_input_bindings(inputs: ConcatMediaInputs) -> None:
         frame_map = _required_entry_path(entry.input_frame_map_path, "input frame map")
         _require_expected_sha(video, entry.input_video_sha256, "input video")
         _require_expected_sha(frame_map, entry.input_frame_map_sha256, "input frame map")
+
+
+def _validate_execution_bindings(execution: ConcatMediaExecutionPlan) -> None:
+    _require_regular_file(execution.audio_source, "source video")
+    _require_expected_sha(
+        execution.audio_source,
+        execution.source_asset_fingerprint,
+        "source asset",
+    )
+    for segment in execution.segments:
+        _require_expected_sha(
+            segment.source_video,
+            segment.source_video_sha256,
+            "input video",
+        )
+        _require_expected_sha(
+            segment.source_frame_map,
+            segment.source_frame_map_sha256,
+            "input frame map",
+        )
 
 
 def _required_entry_path(value: str | None, label: str) -> Path:
@@ -268,6 +299,7 @@ def _require_regular_file(path: Path, label: str) -> None:
 
 
 def _require_expected_sha(path: Path, expected: str | None, label: str) -> None:
+    _require_regular_file(path, label)
     digest = _required_sha(expected, f"{label} SHA-256")
     if _sha256_file(path) != digest:
         raise ValueError(f"{label} fingerprint differs from the concat plan")

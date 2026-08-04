@@ -330,6 +330,42 @@ class ConcatPlanEntry:
     needs_normalize: bool | None
     media_differences: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not is_safe_stable_id(self.clip_id):
+            raise ValueError("invalid concat plan clip_id")
+        if type(self.render_order) is not int or self.render_order < 0:
+            raise ValueError("concat plan render_order must be non-negative")
+        if (
+            type(self.source_start_pts) is not int
+            or type(self.source_end_pts_exclusive) is not int
+            or self.source_end_pts_exclusive <= self.source_start_pts
+        ):
+            raise ValueError("concat plan source interval must be increasing")
+        if not isinstance(self.source_time_base, Fraction) or self.source_time_base <= 0:
+            raise ValueError("concat plan source time base must be positive")
+        if (
+            not isinstance(self.source_frames, Sequence)
+            or isinstance(self.source_frames, (str, bytes, bytearray))
+            or not self.source_frames
+            or any(
+                not isinstance(frame, DecodedFrameTimestamp)
+                for frame in self.source_frames
+            )
+        ):
+            raise ValueError("concat plan source frames must be explicit")
+        object.__setattr__(self, "source_frames", tuple(self.source_frames))
+        if type(self.ready) is not bool or type(self.dependency_required) is not bool:
+            raise ValueError("concat plan readiness must be boolean")
+        if self.needs_normalize is not None and type(self.needs_normalize) is not bool:
+            raise ValueError("concat plan normalization state must be boolean or null")
+        if (
+            not isinstance(self.media_differences, Sequence)
+            or isinstance(self.media_differences, (str, bytes, bytearray))
+            or any(not isinstance(item, str) for item in self.media_differences)
+        ):
+            raise ValueError("concat media differences must be strings")
+        object.__setattr__(self, "media_differences", tuple(self.media_differences))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "clip_id": self.clip_id,
@@ -388,6 +424,33 @@ class ConcatPlan:
     source_asset_fingerprint: str
     entries: tuple[ConcatPlanEntry, ...]
     audio_source: str
+
+    def __post_init__(self) -> None:
+        validate_project_id(self.project_id)
+        for name in ("project_revision", "clips_revision"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            not isinstance(self.project_media_spec_revision, str)
+            or not self.project_media_spec_revision.strip()
+            or self.project_media_spec_revision != self.project_media_spec_revision.strip()
+        ):
+            raise ValueError("project media spec revision must be explicit")
+        _require_sha256(self.source_asset_fingerprint, "source asset fingerprint")
+        if (
+            not isinstance(self.entries, Sequence)
+            or isinstance(self.entries, (str, bytes, bytearray))
+            or not self.entries
+            or any(not isinstance(entry, ConcatPlanEntry) for entry in self.entries)
+        ):
+            raise ValueError("concat plan entries must be explicit")
+        object.__setattr__(self, "entries", tuple(self.entries))
+        if (
+            not isinstance(self.audio_source, str)
+            or not self.audio_source.strip()
+            or self.audio_source != self.audio_source.strip()
+        ):
+            raise ValueError("concat audio source must be explicit")
 
     def to_dict(self) -> dict[str, object]:
         return {

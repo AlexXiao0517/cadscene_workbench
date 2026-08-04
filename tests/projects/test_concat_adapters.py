@@ -176,6 +176,48 @@ def test_validator_rechecks_inputs_changed_after_prepare(tmp_path: Path):
         execution.validate()
 
 
+def test_validator_rejects_source_replaced_by_same_bytes_symlink(tmp_path: Path):
+    inputs = _fixture(tmp_path)
+    execution = ConcatMediaAdapter(
+        validator=lambda _inputs, _plan: AdapterResult.failed("not reached")
+    ).prepare(inputs)
+    replacement = tmp_path / "same-source-bytes.mp4"
+    replacement.write_bytes(inputs.source_video_path.read_bytes())
+    inputs.source_video_path.unlink()
+    try:
+        inputs.source_video_path.symlink_to(replacement)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="regular file"):
+        execution.validate()
+
+
+def test_mutable_plan_input_cannot_redirect_validation_after_prepare(tmp_path: Path):
+    inputs = _fixture(tmp_path)
+    mutable_entries = list(inputs.plan.entries)
+    inputs = replace(inputs, plan=replace(inputs.plan, entries=mutable_entries))
+    execution = ConcatMediaAdapter(
+        validator=lambda _inputs, _plan: AdapterResult.failed("not reached")
+    ).prepare(inputs)
+    original_video = execution.segments[0].source_video
+    replacement_video = tmp_path / "replacement.mp4"
+    replacement_map = tmp_path / "replacement.json"
+    replacement_video.write_bytes(b"clean-replacement")
+    replacement_map.write_bytes(b"clean-replacement-map")
+    mutable_entries[0] = replace(
+        mutable_entries[0],
+        input_video_path=str(replacement_video),
+        input_frame_map_path=str(replacement_map),
+        input_video_sha256=_sha(replacement_video),
+        input_frame_map_sha256=_sha(replacement_map),
+    )
+    original_video.write_bytes(b"changed-original-execution-input")
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        execution.validate()
+
+
 @pytest.mark.parametrize("change", ("unknown_normalize", "bad_render_order"))
 def test_prepare_rejects_ambiguous_execution_state(tmp_path: Path, change: str):
     inputs = _fixture(tmp_path)

@@ -134,6 +134,10 @@ TDD evidence:
   rendered video/frame-map file against the immutable plan; validation repeats
   those checks before and after the structured validator to detect changes while
   the task is running.
+- Plan entries, source-frame sequences, and media-difference collections are
+  normalized to immutable tuples. Validation is bound to the frozen execution
+  snapshot rather than a caller-owned plan collection, and rechecks regular-file
+  status so a source cannot be replaced by a same-byte symlink after preparation.
 - The execution plan explicitly separates compatible inputs from normalization
   outputs, preserves source order and immutable publication identities, carries
   the complete expected final frame map, and declares only the original long
@@ -149,8 +153,8 @@ TDD evidence:
 - RED: concat adapter module absent; later regressions demonstrated that
   post-prepare byte replacement, unknown normalization state, and malformed
   render order were initially accepted.
-- Focused concat adapter/plan/media: `95 passed`.
-- Related concat/source-fallback/render: `206 passed, 1 skipped`.
+- Focused concat adapter/plan/media: `96 passed, 1 skipped`.
+- Related concat/source-fallback/render: `207 passed, 2 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
 ### Exact render-prerequisite binding closure
