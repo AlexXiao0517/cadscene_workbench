@@ -355,18 +355,8 @@ class ProjectApi:
                     },
                 }
             )
-        revision_payload = json.dumps(
-            {
-                "components": components,
-                "workbench": [item["workbench"] for item in clip_payloads],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii")
-        snapshot_revision = sha256(revision_payload).hexdigest()
-        return {
+        snapshot = {
             "project_id": project_id,
-            "snapshot_revision": snapshot_revision,
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
@@ -380,6 +370,16 @@ class ProjectApi:
                 and not analysis_busy,
             },
             "clips": clip_payloads,
+        }
+        revision_payload = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            **snapshot,
+            "snapshot_revision": sha256(revision_payload).hexdigest(),
         }
 
     def _clip_capability(

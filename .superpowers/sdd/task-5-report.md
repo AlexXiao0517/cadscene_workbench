@@ -119,6 +119,59 @@
 - `python -m compileall -q`: pass.
 - `node --check` on both changed JavaScript files: pass.
 - `git diff --check`: pass.
+
+## Second review closure (2026-08-04)
+
+- Saved-reference repair now re-resolves the complete current context and
+  applies the same binding checks as a normal save. A reference whose status is
+  `stale` is never repairable through save or close, does not block a new
+  session, and an old token cannot replace the new session reference.
+- Manual and Pure Rotation validators each read an artifact into one immutable
+  byte snapshot. JSON decoding, structural validation, SHA-256, and immutable
+  publication all consume those exact bytes, so a later legal replacement of
+  the mutable run path cannot change what is published.
+- Placement publication, correction publication, and Pure Rotation workbench
+  validation share a normalized per-run process lock. Corrections read the base
+  once, derive the corrected result and base hash from that snapshot, and
+  atomically replace corrected/lineage files under the lock. A crash-visible
+  partial generation remains fail-closed because lineage mismatch selects the
+  current base instead of the corrected track.
+- Snapshot revision now hashes the complete stable server response excluding
+  only `snapshot_revision` itself. Project and clip capabilities therefore
+  invalidate ETag even when the four manifest revisions do not change, such as
+  when an authoritative media file disappears.
+- Atomic session JSON replacement now fsyncs its parent directory after
+  `os.replace`; the existing platform-compatible directory fsync helper keeps
+  unsupported platforms fail-safe.
+- No project manifest was added or reassigned. Four-manifest ownership,
+  `operation_id` recovery correlation, fixed output containment, and the
+  allowlisted return path remain unchanged. Rendering and concat Task 6 code
+  was not touched.
+
+Second-review TDD and verification:
+
+- Critical stale save/close/open regression: observed `3 failed`, then
+  `4 passed` including the existing legitimate saved-reference repair test.
+- Manual/Pure byte-snapshot TOCTOU regression: observed `2 failed`, then
+  `4 passed` including existing save paths.
+- Capability ETag and session-directory fsync regressions: observed `2 failed`,
+  then `3 passed` including stable 304 behavior.
+- Pure Rotation single-base-snapshot regression failed because the coherent
+  publisher did not exist, then passed with the real HTTP lineage and validator
+  regressions (`4 passed`).
+- Combined second-review critical regression set: `9 passed`.
+- Task 5 focused: `157 passed`.
+- Projects + all serve_viewer APIs + viewer + workflow + Pure Rotation:
+  `588 passed, 1 warning`.
+- Final fresh full suite: `910 passed, 1 skipped, 1 warning`. An earlier full
+  run saw one pre-existing asynchronous JobRunner assertion race; the isolated
+  test immediately passed and the final complete run was clean.
+- `pyflakes` on changed production and focused task modules: pass. The complete
+  legacy `test_serve_viewer_workflow_api.py` still reports only its two
+  pre-existing duplicate test definitions (now at lines 418/512 and 438/475).
+- `python -m compileall -q cadscene`,
+  `node --check apps/web_camera_viewer/workflow.js`, and `git diff --check`:
+  pass.
 - Only the pre-existing fontTools deprecation warning remains.
 
 ## Non-goals retained

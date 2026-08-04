@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
 from cadscene.pure_rotation.placement import apply_global_placement
 from cadscene.pure_rotation.corrections import apply_rotation_corrections
+from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 from cadscene.pure_rotation.rotation_matrix import normalize_rotation_fields
 from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggestion
 from cadscene.workflow.data_import import (
@@ -43,6 +44,62 @@ def _atomic_json(path: Path, payload: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _publish_pure_rotation_placement(
+    run_dir: Path, raw_path: Path, placement: dict
+) -> Path:
+    with pure_rotation_run_lock(run_dir):
+        raw = json.loads(raw_path.read_bytes().decode("utf-8-sig"))
+        base = apply_global_placement(
+            raw,
+            segment_id=int(placement["segment_id"]),
+            anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]),
+            camera_center_web=placement["camera_center_web"],
+            manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"],
+            fov=float(placement["fov"]),
+        )
+        output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+        _atomic_json(
+            run_dir / "03_pure_rotation_placement" / "global_camera_placement.json",
+            placement,
+        )
+        _atomic_json(output, base)
+        return output
+
+
+def _publish_pure_rotation_corrections(
+    run_dir: Path, corrections: list[dict]
+) -> Path:
+    with pure_rotation_run_lock(run_dir):
+        base_path = (
+            run_dir
+            / "03_pure_rotation_placement"
+            / "camera_track_cad_base.json"
+        )
+        base_bytes = base_path.read_bytes()
+        base = json.loads(base_bytes.decode("utf-8-sig"))
+        corrected = apply_rotation_corrections(base, corrections)
+        output = (
+            run_dir
+            / "04_pure_rotation_corrections"
+            / "camera_track_corrected.json"
+        )
+        _atomic_json(
+            output.parent / "rotation_correction_keyframes.json",
+            {"schema_version": 1, "corrections": corrections},
+        )
+        _atomic_json(output, corrected)
+        corrected_bytes = output.read_bytes()
+        _atomic_json(
+            output.parent / "correction_lineage.json",
+            {
+                "schema_version": 1,
+                "base_sha256": sha256(base_bytes).hexdigest(),
+                "corrected_sha256": sha256(corrected_bytes).hexdigest(),
+            },
+        )
+        return output
 
 
 class ViewerHTTPServer(ThreadingHTTPServer):
@@ -439,21 +496,16 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 raw_path = run_dir / "02_pure_rotation" / "camera_rotation_raw.json"
                 if not raw_path.exists():
                     raise FileNotFoundError("pure-rotation raw trajectory not found")
-                raw = json.loads(raw_path.read_text(encoding="utf-8-sig"))
                 placement = normalize_rotation_fields(
                     payload.get("placement") or {},
                     ("manual_rotation_cad_from_camera",),
                     allow_legacy_reflection=True,
                 )
-                base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
-                output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
-                _atomic_json(run_dir / "03_pure_rotation_placement" / "global_camera_placement.json", placement)
-                _atomic_json(output, base)
+                output = _publish_pure_rotation_placement(
+                    run_dir, raw_path, placement
+                )
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/pure-rotation/corrections":
-                base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
-                if not base_path.exists():
-                    raise FileNotFoundError("pure-rotation segment is not calibrated")
                 corrections = [
                     normalize_rotation_fields(
                         item,
@@ -462,20 +514,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     )
                     for item in (payload.get("corrections") or [])
                 ]
-                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), corrections)
-                output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
-                _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
-                _atomic_json(output, corrected)
-                _atomic_json(
-                    run_dir
-                    / "04_pure_rotation_corrections"
-                    / "correction_lineage.json",
-                    {
-                        "schema_version": 1,
-                        "base_sha256": sha256(base_path.read_bytes()).hexdigest(),
-                        "corrected_sha256": sha256(output.read_bytes()).hexdigest(),
-                    },
-                )
+                output = _publish_pure_rotation_corrections(run_dir, corrections)
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))

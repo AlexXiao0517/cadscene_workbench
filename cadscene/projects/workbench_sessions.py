@@ -20,6 +20,7 @@ from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
 from .service import ProjectService
+from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 
 
 SCHEMA_VERSION = "1.0"
@@ -307,6 +308,7 @@ class AtomicWorkbenchSessionStore:
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
             temporary = None
+            _fsync_directory(path.parent)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -595,12 +597,11 @@ class WorkbenchSessionCoordinator:
                 source_fingerprint=validated.get("source_output_fingerprint"),
                 source_artifact_name=validated.get("source_artifact_name"),
             )
-        source_path_value = validated.get("source_path")
+        source_bytes = validated.get("source_bytes")
         source_name_value = validated.get("source_artifact_name")
         source_fingerprint = validated.get("source_output_fingerprint")
         if (
-            not isinstance(source_path_value, str)
-            or not source_path_value
+            not isinstance(source_bytes, bytes)
             or not isinstance(source_name_value, str)
             or Path(source_name_value).name != source_name_value
             or not isinstance(source_fingerprint, str)
@@ -609,9 +610,6 @@ class WorkbenchSessionCoordinator:
             raise InvalidWorkbenchOutput(
                 "validated workbench output has no authoritative source artifact"
             )
-        source_path = Path(source_path_value)
-        if not source_path.is_file():
-            raise InvalidWorkbenchOutput("validated source artifact is missing")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary_parent = target.parent.resolve(strict=True)
         temporary: Path | None = Path(
@@ -631,18 +629,10 @@ class WorkbenchSessionCoordinator:
             artifacts_dir = temporary / "artifacts"
             artifacts_dir.mkdir()
             artifact_path = artifacts_dir / source_name_value
-            artifact_hash = sha256()
-            artifact_size = 0
-            with source_path.open("rb") as source_stream, artifact_path.open(
-                "xb"
-            ) as destination_stream:
-                while True:
-                    chunk = source_stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    destination_stream.write(chunk)
-                    artifact_hash.update(chunk)
-                    artifact_size += len(chunk)
+            artifact_hash = sha256(source_bytes)
+            artifact_size = len(source_bytes)
+            with artifact_path.open("xb") as destination_stream:
+                destination_stream.write(source_bytes)
                 destination_stream.flush()
                 os.fsync(destination_stream.fileno())
             copied_fingerprint = artifact_hash.hexdigest()
@@ -877,6 +867,8 @@ class ProjectWorkbenchService:
             if clip is None:
                 raise KeyError(f"unknown clip ID: {clip_id}")
             reference = self._workbench_reference(clip)
+            if reference is not None and reference.value.get("status") == "stale":
+                reference = None
             if reference is not None:
                 token_hash = reference.value.get("session_token_hash")
                 if isinstance(token_hash, str):
@@ -962,6 +954,10 @@ class ProjectWorkbenchService:
                 existing_session, current_reference, allow_saved_repair=True
             )
             if existing_session.state == "saved":
+                self.coordinator._validate_binding(
+                    existing_session,
+                    self.resolve_context(project_id, existing_session.clip_id),
+                )
                 reference = current_reference
                 token_hash = sha256(token.encode("utf-8")).hexdigest()
                 if reference is not None and (
@@ -1015,6 +1011,10 @@ class ProjectWorkbenchService:
             self._require_session_reference(
                 before, self._workbench_reference(clip), allow_saved_repair=False
             )
+            if before.state == "saved":
+                self.coordinator._validate_binding(
+                    before, self.resolve_context(project_id, before.clip_id)
+                )
             session = self.coordinator.abandon(project_id, token)
             state = (
                 session.state
@@ -1044,6 +1044,11 @@ class ProjectWorkbenchService:
         if reference is not None:
             state = str(reference.value.get("status") or state)
             output_revision = reference.value.get("workbench_output_revision")
+            if state == "stale":
+                return {
+                    "state": state,
+                    "workbench_output_revision": output_revision,
+                }
             credential = None
             token_hash = reference.value.get("session_token_hash")
             if isinstance(token_hash, str):
@@ -1106,6 +1111,8 @@ class ProjectWorkbenchService:
             if allow_saved_repair and session.state == "saved":
                 return
             raise StaleWorkbenchSession("clip has no matching workbench session")
+        if reference.value.get("status") == "stale":
+            raise StaleWorkbenchSession("stale workbench reference is not repairable")
         token_hash = sha256(session.token.encode("utf-8")).hexdigest()
         value = reference.value
         checks = (
@@ -1271,17 +1278,19 @@ class ProjectWorkbenchService:
         if not actual.is_file():
             raise InvalidWorkbenchOutput("bound workbench output is missing")
         try:
-            payload = json.loads(actual.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as exc:
+            source_bytes = actual.read_bytes()
+            payload = json.loads(source_bytes.decode("utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidWorkbenchOutput(f"invalid bound workbench output: {exc}") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("keyframes"), list):
             raise InvalidWorkbenchOutput("bound workbench output contract is invalid")
         _validate_manual_camera_track(payload)
-        fingerprint = sha256(actual.read_bytes()).hexdigest()
+        fingerprint = sha256(source_bytes).hexdigest()
         return {
             "source_output_revision": f"manual-track:{fingerprint[:16]}",
             "source_output_fingerprint": fingerprint,
             "source_path": str(actual),
+            "source_bytes": source_bytes,
             "source_artifact_name": actual.name,
         }
 
@@ -1299,6 +1308,13 @@ class ProjectWorkbenchService:
             run_root.relative_to(self.viewer_runs_root)
         except ValueError as exc:
             raise InvalidWorkbenchOutput("pure-rotation run path escaped root") from exc
+        with pure_rotation_run_lock(run_root):
+            return self._validate_pure_rotation_run_snapshot(run_root)
+
+    @staticmethod
+    def _validate_pure_rotation_run_snapshot(
+        run_root: Path,
+    ) -> Mapping[str, object]:
         base = (
             run_root
             / "03_pure_rotation_placement"
@@ -1310,27 +1326,41 @@ class ProjectWorkbenchService:
             / "camera_track_corrected.json"
         )
         lineage = corrected.parent / "correction_lineage.json"
-        actual = base if base.is_file() else None
-        if base.is_file() and corrected.is_file() and lineage.is_file():
+        try:
+            base_bytes = base.read_bytes()
+        except OSError:
+            base_bytes = None
+        try:
+            corrected_bytes = corrected.read_bytes()
+        except OSError:
+            corrected_bytes = None
+        try:
+            lineage_bytes = lineage.read_bytes()
+        except OSError:
+            lineage_bytes = None
+        actual = base if base_bytes is not None else None
+        actual_bytes = base_bytes
+        if base_bytes is not None and corrected_bytes is not None and lineage_bytes is not None:
             try:
-                lineage_payload = json.loads(lineage.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                lineage_payload = json.loads(lineage_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 lineage_payload = {}
             if (
                 isinstance(lineage_payload, dict)
                 and lineage_payload.get("base_sha256")
-                == sha256(base.read_bytes()).hexdigest()
+                == sha256(base_bytes).hexdigest()
                 and lineage_payload.get("corrected_sha256")
-                == sha256(corrected.read_bytes()).hexdigest()
+                == sha256(corrected_bytes).hexdigest()
             ):
                 actual = corrected
-        if actual is None:
+                actual_bytes = corrected_bytes
+        if actual is None or actual_bytes is None:
             raise InvalidWorkbenchOutput(
                 "validated pure-rotation workbench output is missing"
             )
         try:
-            payload = json.loads(actual.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = json.loads(actual_bytes.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidWorkbenchOutput(
                 f"invalid pure-rotation workbench output: {exc}"
             ) from exc
@@ -1351,11 +1381,12 @@ class ProjectWorkbenchService:
             raise InvalidWorkbenchOutput(
                 "pure-rotation workbench output contract is invalid"
             )
-        fingerprint = sha256(actual.read_bytes()).hexdigest()
+        fingerprint = sha256(actual_bytes).hexdigest()
         return {
             "source_output_revision": f"pure-track:{fingerprint[:16]}",
             "source_output_fingerprint": fingerprint,
             "source_path": str(actual),
+            "source_bytes": actual_bytes,
             "source_artifact_name": actual.name,
         }
 

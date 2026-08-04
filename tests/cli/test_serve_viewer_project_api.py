@@ -152,6 +152,27 @@ def test_snapshot_etag_returns_304_with_an_empty_body(tmp_path: Path) -> None:
     assert lowercase.encoded_body == b""
 
 
+def test_snapshot_etag_changes_when_media_loss_changes_server_capabilities(
+    tmp_path: Path,
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    first = api.handle("GET", "/api/projects/p1/snapshot")
+    assert first.body["capabilities"]["can_start_trajectory"] is True
+    assert first.body["clips"][0]["capabilities"]["can_start_trajectory"] is True
+    (tmp_path / "source.mp4").unlink()
+
+    changed = api.handle(
+        "GET",
+        "/api/projects/p1/snapshot",
+        headers={"If-None-Match": first.headers["ETag"]},
+    )
+
+    assert changed.status == 200
+    assert changed.headers["ETag"] != first.headers["ETag"]
+    assert changed.body["capabilities"]["can_start_trajectory"] is False
+    assert changed.body["clips"][0]["capabilities"]["can_start_trajectory"] is False
+
+
 def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     tmp_path: Path,
 ) -> None:
