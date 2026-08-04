@@ -93,7 +93,8 @@ Review TDD evidence:
   integer-PTS sequence are all validated before candidate preflight.
 - Canonical rendered candidates bind project, clip, workflow, current input
   fingerprint, immutable output revision/fingerprint, proof fingerprint,
-  publication operation, paths, probed media, and render frame map. Non-current
+  publication operation, exact video/frame-map SHA-256 values, paths, probed
+  media, and render frame map. Non-current
   candidates become explanatory per-clip blockers rather than current inputs.
 - Source fallback confirmations bind project/clips revisions, clip analysis
   revision, interval fingerprint, source-asset fingerprint, and project media

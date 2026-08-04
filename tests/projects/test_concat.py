@@ -141,6 +141,8 @@ def _candidate(clip: ConcatClip, *, probe=None) -> RenderCandidate:
         output_revision=f"render-{clip.clip_id}",
         output_fingerprint="a" * 64,
         proof_fingerprint="b" * 64,
+        video_sha256="c" * 64,
+        frame_map_sha256="d" * 64,
         publication_operation_id=f"operation-{clip.clip_id}",
         video_path=f"C:/project/{clip.clip_id}/rendered.mp4",
         frame_map_path=f"C:/project/{clip.clip_id}/render_frame_map.json",
@@ -203,6 +205,8 @@ def _fallback(clip: ConcatClip, **changes: object) -> FallbackArtifact:
         "output_revision": f"fallback-{clip.clip_id}",
         "output_fingerprint": "c" * 64,
         "proof_fingerprint": "d" * 64,
+        "video_sha256": "e" * 64,
+        "frame_map_sha256": "f" * 64,
         "publication_operation_id": f"fallback-operation-{clip.clip_id}",
         "video_path": f"C:/project/fallback/{clip.clip_id}/rendered.mp4",
         "frame_map_path": (
@@ -228,6 +232,8 @@ def test_exact_rendered_preflight_builds_source_order_plan_and_final_map() -> No
     assert all(entry.ready and not entry.dependency_required for entry in plan.entries)
     assert plan.entries[0].input_output_revision == "render-clip-1"
     assert plan.entries[0].input_publication_operation_id == "operation-clip-1"
+    assert plan.entries[0].input_video_sha256 == "c" * 64
+    assert plan.entries[0].input_frame_map_sha256 == "d" * 64
     assert plan.audio_source == "C:/project/original.mp4"
     assert plan.source_asset_fingerprint == "f" * 64
     assert plan.to_dict()["source_asset_fingerprint"] == "f" * 64

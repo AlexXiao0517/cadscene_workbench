@@ -76,6 +76,8 @@ class RenderCandidate:
     output_revision: str
     output_fingerprint: str
     proof_fingerprint: str
+    video_sha256: str
+    frame_map_sha256: str
     publication_operation_id: str
     video_path: str
     frame_map_path: str
@@ -93,6 +95,8 @@ class RenderCandidate:
         _require_sha256(self.input_fingerprint, "render input fingerprint")
         _require_sha256(self.output_fingerprint, "render output fingerprint")
         _require_sha256(self.proof_fingerprint, "render proof fingerprint")
+        _require_sha256(self.video_sha256, "render video fingerprint")
+        _require_sha256(self.frame_map_sha256, "render frame map fingerprint")
         for name in ("output_revision", "publication_operation_id"):
             if not is_safe_stable_id(getattr(self, name)):
                 raise ValueError(f"render candidate {name} is unsafe")
@@ -121,6 +125,8 @@ class FallbackArtifact:
     output_revision: str
     output_fingerprint: str
     proof_fingerprint: str
+    video_sha256: str
+    frame_map_sha256: str
     publication_operation_id: str
     video_path: str
     frame_map_path: str
@@ -155,6 +161,8 @@ class FallbackArtifact:
                 raise ValueError(f"fallback {name} is unsafe")
         _require_sha256(self.output_fingerprint, "fallback output fingerprint")
         _require_sha256(self.proof_fingerprint, "fallback proof fingerprint")
+        _require_sha256(self.video_sha256, "fallback video fingerprint")
+        _require_sha256(self.frame_map_sha256, "fallback frame map fingerprint")
         object.__setattr__(
             self, "render_frame_map", _freeze_json_mapping(self.render_frame_map)
         )
@@ -314,6 +322,8 @@ class ConcatPlanEntry:
     input_output_revision: str | None
     input_output_fingerprint: str | None
     input_proof_fingerprint: str | None
+    input_video_sha256: str | None
+    input_frame_map_sha256: str | None
     input_publication_operation_id: str | None
     ready: bool
     dependency_required: bool
@@ -342,6 +352,8 @@ class ConcatPlanEntry:
             "input_output_revision": self.input_output_revision,
             "input_output_fingerprint": self.input_output_fingerprint,
             "input_proof_fingerprint": self.input_proof_fingerprint,
+            "input_video_sha256": self.input_video_sha256,
+            "input_frame_map_sha256": self.input_frame_map_sha256,
             "input_publication_operation_id": self.input_publication_operation_id,
             "ready": self.ready,
             "dependency_required": self.dependency_required,
@@ -442,6 +454,8 @@ def preflight_concat(request: ConcatPreflightRequest) -> ConcatPreflight:
                         output_revision=candidate.output_revision,
                         output_fingerprint=candidate.output_fingerprint,
                         proof_fingerprint=candidate.proof_fingerprint,
+                        video_sha256=candidate.video_sha256,
+                        frame_map_sha256=candidate.frame_map_sha256,
                         publication_operation_id=candidate.publication_operation_id,
                         candidate=candidate,
                     )
@@ -484,6 +498,8 @@ def preflight_concat(request: ConcatPreflightRequest) -> ConcatPreflight:
                         output_revision=fallback.output_revision,
                         output_fingerprint=fallback.output_fingerprint,
                         proof_fingerprint=fallback.proof_fingerprint,
+                        video_sha256=fallback.video_sha256,
+                        frame_map_sha256=fallback.frame_map_sha256,
                         publication_operation_id=fallback.publication_operation_id,
                     )
                 )
@@ -624,6 +640,8 @@ def _ready_entry(
     output_revision: str,
     output_fingerprint: str,
     proof_fingerprint: str,
+    video_sha256: str,
+    frame_map_sha256: str,
     publication_operation_id: str,
     candidate: RenderCandidate | None = None,
 ) -> ConcatPlanEntry:
@@ -655,6 +673,8 @@ def _ready_entry(
         input_output_revision=output_revision,
         input_output_fingerprint=output_fingerprint,
         input_proof_fingerprint=proof_fingerprint,
+        input_video_sha256=video_sha256,
+        input_frame_map_sha256=frame_map_sha256,
         input_publication_operation_id=publication_operation_id,
         ready=True,
         dependency_required=False,
@@ -785,6 +805,8 @@ def _base_entry(
     input_output_revision: str | None = None,
     input_output_fingerprint: str | None = None,
     input_proof_fingerprint: str | None = None,
+    input_video_sha256: str | None = None,
+    input_frame_map_sha256: str | None = None,
     input_publication_operation_id: str | None = None,
     needs_normalize: bool | None = None,
     media_differences: tuple[str, ...] = (),
@@ -804,6 +826,8 @@ def _base_entry(
         input_output_revision=input_output_revision,
         input_output_fingerprint=input_output_fingerprint,
         input_proof_fingerprint=input_proof_fingerprint,
+        input_video_sha256=input_video_sha256,
+        input_frame_map_sha256=input_frame_map_sha256,
         input_publication_operation_id=input_publication_operation_id,
         ready=ready,
         dependency_required=dependency_required,
