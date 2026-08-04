@@ -1135,12 +1135,13 @@ class ProjectWorkbenchService:
         if (
             not isinstance(poses, list)
             or not poses
-            or payload.get("trajectory_mode") not in {None, "pure_rotation_only"}
+            or payload.get("trajectory_mode")
+            != "pure_rotation_manual_calibrated"
             or any(
                 not isinstance(pose, dict)
                 or "decoded_frame_index" not in pose
-                or "rotation_cad_from_camera" not in pose
-                or "camera_center_web" not in pose
+                or not _valid_rotation_matrix(pose.get("rotation_cad_from_camera"))
+                or not _valid_vector3(pose.get("camera_center_web"))
                 for pose in poses
             )
         ):
@@ -1205,6 +1206,26 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _optional_string(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _valid_number(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def _valid_vector3(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(_valid_number(item) for item in value)
+    )
+
+
+def _valid_rotation_matrix(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(_valid_vector3(row) for row in value)
+    )
 
 
 def _path_record_lock(path: Path) -> RLock:

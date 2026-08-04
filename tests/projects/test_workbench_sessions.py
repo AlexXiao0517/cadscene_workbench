@@ -698,7 +698,7 @@ def test_workbench_http_create_bootstrap_save_and_replay_fail_closed(
     assert opened.status == 201
     token = opened.body["token"]
     assert token in opened.body["workbench_url"]
-    assert f"runId=clip-1" in opened.body["workbench_url"]
+    assert "runId=clip-1" in opened.body["workbench_url"]
     assert repositories.clips.load("project-1").revision == clips_revision + 1
     bootstrap = api.handle(
         "GET", f"/api/projects/project-1/workbench-sessions/{token}"
@@ -882,7 +882,7 @@ def test_pure_rotation_save_selects_and_validates_server_run_output(
         path.write_text(
             json.dumps(
                 {
-                    "trajectory_mode": "pure_rotation_only",
+                    "trajectory_mode": "pure_rotation_manual_calibrated",
                     "poses": [
                         {
                             "decoded_frame_index": frame,
