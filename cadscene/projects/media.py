@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 import json
 import math
@@ -38,13 +39,28 @@ class ProjectMediaSpec:
     nominal_frame_rate: Fraction | None = None
 
     def __post_init__(self) -> None:
-        if self.width <= 0 or self.height <= 0:
+        if (
+            isinstance(self.width, bool)
+            or not isinstance(self.width, int)
+            or isinstance(self.height, bool)
+            or not isinstance(self.height, int)
+            or self.width <= 0
+            or self.height <= 0
+        ):
             raise InvalidMediaContract("media dimensions must be positive")
         if self.display_orientation_baked is not True:
             raise InvalidMediaContract("project media orientation must be baked")
-        if self.sample_aspect_ratio <= 0 or self.time_base <= 0:
+        if (
+            not isinstance(self.sample_aspect_ratio, Fraction)
+            or not isinstance(self.time_base, Fraction)
+            or self.sample_aspect_ratio <= 0
+            or self.time_base <= 0
+        ):
             raise InvalidMediaContract("SAR and time base must be positive")
-        if self.nominal_frame_rate is not None and self.nominal_frame_rate <= 0:
+        if self.nominal_frame_rate is not None and (
+            not isinstance(self.nominal_frame_rate, Fraction)
+            or self.nominal_frame_rate <= 0
+        ):
             raise InvalidMediaContract("nominal frame rate must be positive")
         for name in (
             "pixel_format",
@@ -55,7 +71,12 @@ class ProjectMediaSpec:
             "color_transfer",
             "color_primaries",
         ):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+            ):
                 raise InvalidMediaContract(f"{name} must be explicit")
 
     @property
@@ -298,13 +319,23 @@ def validate_render_frame_map(
     *,
     rendered_frame_count: int,
     expected_source_frames: Sequence[DecodedFrameTimestamp] | None = None,
+    expected_source_time_base: Fraction | None = None,
 ) -> tuple[RenderFrameMapEntry, ...]:
     if not isinstance(frame_map, Mapping):
         raise FrameMapMismatch("render frame map must be an object")
     count = _integer(rendered_frame_count, "rendered_frame_count", minimum=0)
     if frame_map.get("schema_version") != 1:
         raise FrameMapMismatch("unsupported render frame map schema")
-    _fraction_value(frame_map.get("source_time_base"), "source_time_base")
+    source_time_base = _fraction_value(
+        frame_map.get("source_time_base"), "source_time_base"
+    )
+    if (
+        expected_source_time_base is not None
+        and source_time_base != expected_source_time_base
+    ):
+        raise FrameMapMismatch(
+            "render frame map time base differs from authoritative source"
+        )
     raw_entries = frame_map.get("frames", frame_map.get("entries"))
     if not isinstance(raw_entries, list):
         raise FrameMapMismatch("render frame map requires frames")
@@ -355,13 +386,20 @@ def validate_render_frame_map(
 
 
 def validate_rendered_media(
-    probe: ProbedMedia, frame_map: Mapping[str, object]
+    probe: ProbedMedia,
+    frame_map: Mapping[str, object],
+    *,
+    expected_source_frames: Sequence[DecodedFrameTimestamp],
+    expected_source_time_base: Fraction,
 ) -> RenderValidationProof:
     if not probe.video.display_orientation_baked:
         raise InvalidMediaContract("rendered video display orientation is not baked")
     output_pts = validate_video_pts(probe.video.frame_pts)
     entries = validate_render_frame_map(
-        frame_map, rendered_frame_count=probe.video.frame_count
+        frame_map,
+        rendered_frame_count=probe.video.frame_count,
+        expected_source_frames=expected_source_frames,
+        expected_source_time_base=expected_source_time_base,
     )
     return RenderValidationProof(
         rendered_frame_count=len(output_pts),
@@ -402,7 +440,7 @@ def audio_video_duration_tolerance_sec(max_source_frame_duration_sec: float) -> 
     duration = _finite_nonnegative(
         max_source_frame_duration_sec, "max_source_frame_duration_sec"
     )
-    return max(0.050, duration)
+    return float(max(Decimal("0.050"), Decimal(str(duration))))
 
 
 def measure_audio_video_duration(
@@ -414,13 +452,15 @@ def measure_audio_video_duration(
     audio = _finite_nonnegative(audio_duration_sec, "audio_duration_sec")
     video = _finite_nonnegative(video_duration_sec, "video_duration_sec")
     tolerance = audio_video_duration_tolerance_sec(max_source_frame_duration_sec)
-    delta = abs(audio - video)
+    delta_decimal = abs(Decimal(str(audio)) - Decimal(str(video)))
+    tolerance_decimal = Decimal(str(tolerance))
+    delta = float(delta_decimal)
     return AudioVideoDurationValidation(
         audio_duration_sec=audio,
         video_duration_sec=video,
         delta_sec=delta,
         tolerance_sec=tolerance,
-        within_tolerance=delta <= tolerance,
+        within_tolerance=delta_decimal <= tolerance_decimal,
     )
 
 
@@ -444,15 +484,18 @@ def validate_audio_video_duration(
 
 
 def _display_rotation(stream: Mapping[str, object]) -> int:
+    rotations: list[int] = []
     tags = stream.get("tags")
     if isinstance(tags, Mapping) and tags.get("rotate") not in (None, ""):
-        return _integer(tags.get("rotate"), "video.tags.rotate")
+        rotations.append(_integer(tags.get("rotate"), "video.tags.rotate") % 360)
     side_data = stream.get("side_data_list")
     if isinstance(side_data, list):
         for item in side_data:
             if isinstance(item, Mapping) and item.get("rotation") is not None:
-                return _integer(item.get("rotation"), "video.rotation")
-    return 0
+                rotations.append(_integer(item.get("rotation"), "video.rotation") % 360)
+    if len(set(rotations)) > 1:
+        raise InvalidMediaContract("conflicting display rotation metadata")
+    return rotations[0] if rotations else 0
 
 
 def _frame_pts(frame: Mapping[str, object], ordinal: int) -> int:
@@ -502,7 +545,7 @@ def _integer(value: object, field: str, *, minimum: int | None = None) -> int:
         raise InvalidMediaContract(f"{field} must be an integer")
     try:
         result = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise InvalidMediaContract(f"{field} must be an integer") from exc
     if isinstance(value, float) and value != result:
         raise InvalidMediaContract(f"{field} must be an integer")

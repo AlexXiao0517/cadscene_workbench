@@ -22,10 +22,11 @@ Implemented contracts:
   passthrough timing.
 - `validate_render_frame_map()` requires schema/time-base validity, contiguous
   output ordinals, integer source decoded-frame ordinals and source PTS, exact
-  output-count equality, ordered unique source identities, and optional exact
-  equality with an authoritative `DecodedFrameTimestamp` sequence.
+  output-count equality, ordered unique source identities, and exact equality
+  with an authoritative `DecodedFrameTimestamp` sequence when publishing.
 - `validate_rendered_media()` combines decoded output count/PTS validation with
-  the frame-map proof and rejects unbaked output orientation.
+  the frame-map proof, requires authoritative source frames and exact source
+  time base, and rejects unbaked output orientation.
 - `media_compatibility()` compares dimensions, baked orientation, SAR, pixel
   format, codec/profile, time base, nominal timing, and all color metadata,
   returning the exact incompatible fields.
@@ -52,3 +53,29 @@ Render adapters, queue/service state, source-interval fallback, normalization,
 concat, original-source audio muxing, immutable media publication, API routes,
 and workspace UI remain intentionally unimplemented for later Task 6
 substages.
+
+## Media-contract review closure
+
+- `ProjectMediaSpec` now rejects bool/non-integer dimensions, non-positive
+  dimensions, non-`Fraction` SAR/time-base/nominal-rate values, and blank or
+  whitespace-padded text. Its frozen runtime representation therefore remains
+  exact and type-stable.
+- Render validation cannot bypass authoritative identity. Callers must provide
+  the expected decoded source-frame sequence and exact source time base; map
+  ordinals, integer PTS, count, and time base must all match.
+- Display rotation parsing consumes both tag rotation and every side-data
+  rotation. Conflicting normalized declarations fail closed, and any consistent
+  non-zero rotation marks orientation as not baked.
+- Audio/video duration comparison uses `Decimal(str(value))`, making the exact
+  50 ms boundary inclusive while rejecting any measured excess.
+- Integer coercion maps bool, infinity, and `OverflowError` into
+  `InvalidMediaContract` instead of leaking implementation exceptions.
+
+Review TDD evidence:
+
+- RED: `18 failed, 24 passed` across strict spec values, rotation conflicts,
+  authoritative render identity/time base, decimal boundary, and overflow.
+- GREEN: `tests/projects/test_media.py` - `42 passed`.
+- Related authoritative PTS/export/frame-map regression -
+  `96 passed, 1 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from copy import deepcopy
 import json
 
 import pytest
@@ -124,10 +125,19 @@ def test_project_media_spec_preserves_explicit_standard_video_contract() -> None
     "change",
     [
         {"width": 0},
+        {"width": True},
+        {"width": 1.5},
         {"display_orientation_baked": False},
         {"sample_aspect_ratio": Fraction(0, 1)},
+        {"sample_aspect_ratio": 1.0},
+        {"sample_aspect_ratio": float("nan")},
         {"time_base": Fraction(-1, 1000)},
+        {"time_base": 0.001},
+        {"nominal_frame_rate": 25.0},
         {"pixel_format": ""},
+        {"codec_name": " h264"},
+        {"profile": "High "},
+        {"color_range": "   "},
         {"color_space": ""},
     ],
 )
@@ -161,6 +171,37 @@ def test_ffprobe_parser_marks_rotation_metadata_as_not_baked() -> None:
     probe = parse_ffprobe(payload)
 
     assert probe.video.display_orientation_baked is False
+
+
+def test_ffprobe_parser_rejects_conflicting_tag_and_side_data_rotation() -> None:
+    payload = _probe_payload()
+    payload["streams"][0]["tags"] = {"rotate": "0"}
+    payload["streams"][0]["side_data_list"] = [{"rotation": 90}]
+
+    with pytest.raises(InvalidMediaContract, match="rotation"):
+        parse_ffprobe(payload)
+
+
+def test_ffprobe_parser_reads_all_consistent_rotation_metadata() -> None:
+    payload = _probe_payload()
+    payload["streams"][0]["tags"] = {"rotate": "90"}
+    payload["streams"][0]["side_data_list"] = [
+        {"side_data_type": "Display Matrix", "rotation": 90},
+        {"side_data_type": "other"},
+    ]
+
+    assert parse_ffprobe(payload).video.display_orientation_baked is False
+
+
+def test_ffprobe_parser_rejects_conflicting_side_data_rotations() -> None:
+    payload = _probe_payload()
+    payload["streams"][0]["side_data_list"] = [
+        {"rotation": 90},
+        {"rotation": 180},
+    ]
+
+    with pytest.raises(InvalidMediaContract, match="rotation"):
+        parse_ffprobe(payload)
 
 
 @pytest.mark.parametrize("pts", [(-1, 39, 79), (40, 80, 120), (0, 40, 40), (0, 80, 40)])
@@ -217,12 +258,57 @@ def test_render_frame_map_rejects_invalid_output_order_or_noninteger_source_iden
 
 def test_render_validation_combines_pts_count_and_frame_map_proof() -> None:
     probe = parse_ffprobe(_probe_payload())
+    expected = tuple(
+        DecodedFrameTimestamp(ordinal, pts, 40, "pts")
+        for ordinal, pts in ((10, 5000), (11, 5040), (12, 5080))
+    )
 
-    proof = validate_rendered_media(probe, _frame_map())
+    proof = validate_rendered_media(
+        probe,
+        _frame_map(),
+        expected_source_frames=expected,
+        expected_source_time_base=Fraction(1, 1000),
+    )
 
     assert proof.rendered_frame_count == 3
     assert proof.source_pts == (5000, 5040, 5080)
     assert proof.output_pts == (0, 40, 80)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        ("frame", 0, "source_decoded_frame_ordinal", 99),
+        ("frame", 1, "source_pts", 5041),
+        ("time_base", 1, 90000),
+    ],
+)
+def test_render_validation_requires_exact_authoritative_source_identity(
+    mutation: tuple[object, ...],
+) -> None:
+    probe = parse_ffprobe(_probe_payload())
+    frame_map = deepcopy(_frame_map())
+    expected = tuple(
+        DecodedFrameTimestamp(ordinal, pts, 40, "pts")
+        for ordinal, pts in ((10, 5000), (11, 5040), (12, 5080))
+    )
+    if mutation[0] == "frame":
+        _, index, field, value = mutation
+        frame_map["frames"][index][field] = value
+    else:
+        _, numerator, denominator = mutation
+        frame_map["source_time_base"] = {
+            "numerator": numerator,
+            "denominator": denominator,
+        }
+
+    with pytest.raises(FrameMapMismatch):
+        validate_rendered_media(
+            probe,
+            frame_map,
+            expected_source_frames=expected,
+            expected_source_time_base=Fraction(1, 1000),
+        )
 
 
 def test_media_compatibility_reports_each_standard_video_difference() -> None:
@@ -261,3 +347,31 @@ def test_audio_video_duration_validation_records_delta_limit_and_rejects_excess(
             video_duration_sec=10.0,
             max_source_frame_duration_sec=0.04,
         )
+
+
+def test_audio_video_duration_exact_decimal_boundary_is_inclusive() -> None:
+    boundary = validate_audio_video_duration(
+        audio_duration_sec=10.05,
+        video_duration_sec=10.0,
+        max_source_frame_duration_sec=0.04,
+    )
+    assert boundary.within_tolerance is True
+    assert boundary.delta_sec == pytest.approx(0.05)
+
+    with pytest.raises(AudioVideoDurationMismatch):
+        validate_audio_video_duration(
+            audio_duration_sec=10.0500001,
+            video_duration_sec=10.0,
+            max_source_frame_duration_sec=0.04,
+        )
+
+
+@pytest.mark.parametrize("invalid", [True, float("inf"), float("-inf")])
+def test_integer_contract_inputs_map_bool_and_overflow_to_domain_error(
+    invalid: object,
+) -> None:
+    payload = _probe_payload()
+    payload["streams"][0]["width"] = invalid
+
+    with pytest.raises(InvalidMediaContract, match="integer"):
+        parse_ffprobe(payload)
