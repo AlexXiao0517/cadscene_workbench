@@ -78,6 +78,16 @@ def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> Non
     assert '#reanalyzeButton").addEventListener' in script
 
 
+def test_workspace_wires_batch_render_to_render_preflight_api() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="batchRenderButton"' in html
+    assert '"render-jobs"' in script
+    assert '#batchRenderButton").addEventListener' in script
+    assert "snapshot.capabilities.can_render" in script
+
+
 def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 

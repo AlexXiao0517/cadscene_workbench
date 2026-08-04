@@ -14,6 +14,7 @@ from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.service import ProjectService, RegisterUploadResult
+from cadscene.projects.service import EnqueueRenderResult, RenderPreflight
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.cli.serve_viewer import RangeRequestHandler, ViewerHTTPServer
@@ -354,6 +355,68 @@ def test_batch_preflight_returns_per_clip_partial_result_without_enqueueing(
     assert response.body["needs_confirmation"] == ["review"]
     assert response.body["skipped"] == ["unsupported"]
     assert queue.jobs() == ()
+
+
+def test_render_preflight_and_enqueue_routes_delegate_to_project_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    preflight = RenderPreflight(
+        eligible=("ready",), confirmation_required=(), skipped=(), reasons={}
+    )
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        api.service,
+        "preflight_render_jobs",
+        lambda project_id, *, clip_ids=None: (
+            calls.append(("preflight", project_id, clip_ids)) or preflight
+        ),
+    )
+    monkeypatch.setattr(
+        api.service,
+        "enqueue_render_jobs",
+        lambda project_id, **kwargs: (
+            calls.append(("enqueue", project_id, kwargs))
+            or EnqueueRenderResult(("ready",), ("render-job-1",), preflight)
+        ),
+    )
+    revision = repositories.jobs.load("p1").revision
+
+    checked = api.handle(
+        "POST", "/api/projects/p1/render-jobs",
+        json_body={"expected_revision": revision, "clip_ids": ["ready"], "enqueue": False},
+    )
+    enqueued = api.handle(
+        "POST", "/api/projects/p1/render-jobs",
+        json_body={"expected_revision": revision, "clip_ids": ["ready"], "enqueue": True},
+    )
+
+    assert checked.status == 200
+    assert checked.body["eligible"] == ["ready"]
+    assert checked.body["confirmation_required"] == []
+    assert enqueued.status == 202
+    assert enqueued.body["job_ids"] == ["render-job-1"]
+    assert calls[-1][0] == "enqueue"
+
+
+def test_snapshot_exposes_server_derived_render_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    monkeypatch.setattr(
+        api.service,
+        "preflight_render_jobs",
+        lambda _project_id, *, clip_ids=None: RenderPreflight(
+            eligible=("ready",), confirmation_required=(), skipped=(), reasons={}
+        ),
+    )
+
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert response.status == 200
+    assert response.body["capabilities"]["can_render"] is True
+    assert response.body["clips"][0]["capabilities"]["can_render"] is True
+    assert response.body["clips"][0]["render"]["status"] == "not_started"
 
 
 def test_cancel_and_retry_job_routes_delegate_through_project_service(

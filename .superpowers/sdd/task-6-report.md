@@ -479,6 +479,30 @@ Preflight integration closure:
   authoritative total duration, so missing `pkt_duration` is supported without
   accepting a compressed or expanded final timeline.
 
+### Substage 5a: render API and workspace integration
+
+- Added `/api/projects/{project_id}/render-jobs` preflight/enqueue routing. The
+  HTTP layer only validates revisions and stable IDs, delegates to
+  `ProjectService.preflight_render_jobs()` / `enqueue_render_jobs()`, and returns
+  per-clip eligible, confirmation-required, skipped, and reason fields.
+- Project snapshots now expose server-derived clip and project render
+  capabilities plus a separate render job state, stage, structured progress,
+  job ID, and immutable output revision. Retry/cancel targets the render job once
+  one exists while preserving the trajectory state before rendering starts.
+- The workspace adds one batch-render control. It reuses the partial-success
+  preflight dialog, keeps trajectory/render confirmation field names explicit,
+  and never enables rendering from client-side inference. The merge control
+  remains disabled until the durable merge DAG is integrated.
+
+TDD and verification:
+
+- RED: the render route returned 404, snapshot hard-coded `can_render=false`, and
+  the workspace had no render control.
+- Project HTTP/workspace focused: `34 passed`; render/API/workspace related:
+  `88 passed`; full suite: `1164 passed, 3 skipped, 1 unrelated deprecation
+  warning`.
+- JavaScript syntax, `pyflakes`, and `git diff --check`: pass.
+
 Crash coverage note: the render-specific suite injects an interruption after
 both participant manifests are durable but before in-memory queue acknowledgement.
 Generic repository recovery tests cover partial multi-manifest owner publication.

@@ -13,7 +13,7 @@ from .json_repositories import ProjectRepositories
 from .identifiers import is_safe_stable_id, validate_project_id
 from .models import ClipDefinition
 from .repositories import RevisionConflict
-from .service import ProjectService, TrajectoryPreflight
+from .service import ProjectService, RenderPreflight, TrajectoryPreflight
 from .uploads import UploadValidationError, ValidatedUploadStore
 from .workbench_sessions import (
     InvalidWorkbenchOutput,
@@ -41,6 +41,7 @@ _NAME = re.compile(
 _TRAJECTORY = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
 )
+_RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -134,6 +135,9 @@ class ProjectApi:
             match = _TRAJECTORY.fullmatch(path)
             if method == "POST" and match:
                 return self._trajectory_jobs(match["project"], payload)
+            match = _RENDER.fullmatch(path)
+            if method == "POST" and match:
+                return self._render_jobs(match["project"], payload)
             match = _JOB_ACTION.fullmatch(path)
             if method == "POST" and match:
                 return self._job_action(
@@ -297,6 +301,9 @@ class ProjectApi:
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=[clip.clip_id for clip in clips.clips]
         )
+        render_preflight = self.service.preflight_render_jobs(
+            project_id, clip_ids=[clip.clip_id for clip in clips.clips]
+        )
         components = {
             "project": project.revision,
             "clips": clips.revision,
@@ -304,21 +311,29 @@ class ProjectApi:
             "render": render.revision,
         }
         job_by_clip: dict[str, Mapping[str, object]] = {}
+        render_job_by_clip: dict[str, Mapping[str, object]] = {}
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
             if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
                 job_by_clip[clip_id] = job
+            elif isinstance(clip_id, str) and job.get("job_type") == "clip_render":
+                render_job_by_clip[clip_id] = job
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
+        can_render_any = False
         for clip in clips.clips:
-            job = job_by_clip.get(clip.clip_id)
+            trajectory_job = job_by_clip.get(clip.clip_id)
+            render_job = render_job_by_clip.get(clip.clip_id)
+            job = render_job or trajectory_job
             capability = self._clip_capability(
-                project_id, clip, preflight, job, analysis_busy=analysis_busy
+                project_id, clip, preflight, render_preflight, job,
+                analysis_busy=analysis_busy,
             )
             can_start_any = can_start_any or bool(
                 capability["can_start_trajectory"]
                 or capability["trajectory_needs_confirmation"]
             )
+            can_render_any = can_render_any or bool(capability["can_render"])
             clip_payloads.append(
                 {
                     "clip_id": clip.clip_id,
@@ -339,6 +354,13 @@ class ProjectApi:
                     "status": "ready" if job is None else job.get("status"),
                     "stage": None if job is None else job.get("stage"),
                     "progress": None if job is None else job.get("progress"),
+                    "render": {
+                        "job_id": None if render_job is None else render_job.get("job_id"),
+                        "status": "not_started" if render_job is None else render_job.get("status"),
+                        "stage": None if render_job is None else render_job.get("stage"),
+                        "progress": None if render_job is None else render_job.get("progress"),
+                        "output_revision": None if render_job is None else render_job.get("output_revision"),
+                    },
                     "capabilities": capability,
                     "workbench": (
                         {"state": "unavailable", "workbench_output_revision": None}
@@ -363,7 +385,7 @@ class ProjectApi:
             "assets": dict(project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,
-                "can_render": False,
+                "can_render": can_render_any,
                 "can_merge": False,
                 "can_reanalyze": _analysis_request_key(project.source_assets)
                 is not None
@@ -387,6 +409,7 @@ class ProjectApi:
         project_id: str,
         clip: ClipDefinition,
         preflight: TrajectoryPreflight,
+        render_preflight: RenderPreflight,
         job: Mapping[str, object] | None,
         *,
         analysis_busy: bool = False,
@@ -409,7 +432,19 @@ class ProjectApi:
             "trajectory_needs_confirmation": needs_confirmation,
             "reason": reason,
             "can_open_workbench": can_open_workbench,
-            "can_render": False,
+            "can_render": not analysis_busy and (
+                clip.clip_id in render_preflight.eligible
+                or clip.clip_id in render_preflight.confirmation_required
+            ),
+            "render_needs_confirmation": (
+                not analysis_busy
+                and clip.clip_id in render_preflight.confirmation_required
+            ),
+            "render_reason": (
+                "project analysis is still running"
+                if analysis_busy
+                else render_preflight.reasons.get(clip.clip_id)
+            ),
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
             "can_cancel": status
@@ -579,6 +614,42 @@ class ProjectApi:
             },
         )
 
+    def _render_jobs(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        current = self.repositories.jobs.load(project_id)
+        if current.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=current.revision,
+            )
+        clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
+        preflight = self.service.preflight_render_jobs(
+            project_id, clip_ids=clip_ids or None
+        )
+        if not bool(payload.get("enqueue", False)):
+            return ApiResponse(200, _render_preflight_payload(preflight))
+        confirmed = _string_sequence(
+            payload.get("confirmed_clip_ids"), "confirmed_clip_ids"
+        )
+        result = self.service.enqueue_render_jobs(
+            project_id,
+            clip_ids=clip_ids or None,
+            confirmed_clip_ids=confirmed,
+            expected_jobs_revision=expected_revision,
+        )
+        return ApiResponse(
+            202,
+            {
+                **_render_preflight_payload(result.preflight),
+                "enqueued_clip_ids": list(result.enqueued_clip_ids),
+                "job_ids": list(result.job_ids),
+                "jobs_revision": self.repositories.jobs.load(project_id).revision,
+            },
+        )
+
     def _job_action(
         self,
         project_id: str,
@@ -633,6 +704,15 @@ def _preflight_payload(preflight: TrajectoryPreflight) -> dict[str, object]:
     return {
         "eligible": list(preflight.eligible),
         "needs_confirmation": list(preflight.needs_confirmation),
+        "skipped": list(preflight.skipped),
+        "reasons": dict(preflight.reasons),
+    }
+
+
+def _render_preflight_payload(preflight: RenderPreflight) -> dict[str, object]:
+    return {
+        "eligible": list(preflight.eligible),
+        "confirmation_required": list(preflight.confirmation_required),
         "skipped": list(preflight.skipped),
         "reasons": dict(preflight.reasons),
     }

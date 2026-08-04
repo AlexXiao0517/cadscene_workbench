@@ -105,6 +105,7 @@
     $("#runningCount").textContent = snapshot.clips.filter((clip) => ["preparing", "running", "validating"].includes(clip.status)).length;
     $("#reanalyzeButton").disabled = !snapshot.capabilities.can_reanalyze;
     $("#batchTrajectoryButton").disabled = !snapshot.capabilities.can_start_trajectory;
+    $("#batchRenderButton").disabled = !snapshot.capabilities.can_render;
     $("#mergeProjectButton").disabled = !snapshot.capabilities.can_merge;
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
@@ -193,22 +194,24 @@
     }
   }
 
-  async function preflightBatch() {
+  async function preflightBatch(kind = "trajectory") {
     const clipIds = selectedClipIds.size ? [...selectedClipIds] : state.snapshot.clips.map((clip) => clip.clip_id);
+    const endpoint = kind === "render" ? "render-jobs" : "trajectory-jobs";
     try {
-      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/trajectory-jobs`, {
+      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.jobs, clip_ids: clipIds, enqueue: false }),
       });
-      state.pendingPreflight = { clipIds, result: body };
-      $("#preflightResult").innerHTML = `<p>可入队：${body.eligible.length} 个</p><p>需确认：${body.needs_confirmation.length} 个</p><p>已跳过：${body.skipped.length} 个</p>`;
+      const needsConfirmation = body.needs_confirmation || body.confirmation_required || [];
+      state.pendingPreflight = { clipIds, result: body, endpoint, needsConfirmation };
+      $("#preflightResult").innerHTML = `<p>可入队：${body.eligible.length} 个</p><p>需确认：${needsConfirmation.length} 个</p><p>已跳过：${body.skipped.length} 个</p>`;
       const items = $("#preflightItems");
       items.replaceChildren(...clipIds.map((clipId) => {
         const label = document.createElement("label");
-        const category = body.eligible.includes(clipId) ? "可入队" : (body.needs_confirmation.includes(clipId) ? "需确认" : "已跳过");
+        const category = body.eligible.includes(clipId) ? "可入队" : (needsConfirmation.includes(clipId) ? "需确认" : "已跳过");
         const reason = body.reasons[clipId] || "检查通过";
-        if (body.needs_confirmation.includes(clipId)) {
+        if (needsConfirmation.includes(clipId)) {
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.dataset.confirmClipId = clipId;
@@ -228,7 +231,7 @@
     const confirmedClipIds = [...document.querySelectorAll("[data-confirm-clip-id]:checked")]
       .map((item) => item.dataset.confirmClipId);
     try {
-      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/trajectory-jobs`, {
+      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${pending.endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -316,7 +319,8 @@
     }
     if (state.snapshot) renderSnapshot(state.snapshot);
   });
-  $("#batchTrajectoryButton").addEventListener("click", preflightBatch);
+  $("#batchTrajectoryButton").addEventListener("click", () => preflightBatch("trajectory"));
+  $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#confirmPreflight").addEventListener("click", enqueuePreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
