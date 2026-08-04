@@ -976,6 +976,32 @@ def _persist_jobs(repositories, project_id: str, jobs: tuple[QueueJob, ...]):
     )
 
 
+def _tamper_current_success_proof(
+    repositories,
+    queue: LocalResourceQueue,
+    job_ids: tuple[str, str],
+    *,
+    phase: str,
+    fault: str,
+) -> None:
+    jobs = tuple(queue.get(job_id) for job_id in job_ids)
+    target_type = f"{phase}_analysis"
+    tampered = tuple(
+        (
+            replace(
+                item,
+                validated_input_fingerprint=(
+                    None if fault == "missing" else "0" * 64
+                ),
+            )
+            if item.job_type == target_type
+            else item
+        )
+        for item in jobs
+    )
+    _persist_jobs(repositories, "p1", tampered)
+
+
 def _complete_analysis(
     service: ProjectService,
     repositories,
@@ -1473,6 +1499,72 @@ def test_analysis_state_sync_rejects_current_unvalidated_video_success(
     project = repositories.project.load("p1")
     assert project.source_assets["_analysis"]["status"] == "failed"
     assert "validated" in str(project.source_assets["_analysis"]["error"])
+    assert project.project_state == "analysis_failed"
+
+
+@pytest.mark.parametrize("phase", ("cad", "video"))
+@pytest.mark.parametrize("fault", ("missing", "mismatch"))
+def test_restore_rejects_current_success_without_exact_proof(
+    tmp_path: Path, phase: str, fault: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids, _revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    _tamper_current_success_proof(
+        repositories,
+        queue,
+        job_ids,
+        phase=phase,
+        fault=fault,
+    )
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    project = repositories.project.load("p1")
+    assert project.source_assets["_analysis"]["status"] == "failed"
+    assert "validated" in str(project.source_assets["_analysis"]["error"])
+    assert project.project_state == "analysis_failed"
+
+
+@pytest.mark.parametrize("phase", ("cad", "video"))
+def test_reenqueue_cannot_revive_mismatched_current_success_proof(
+    tmp_path: Path, phase: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids, _revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    _tamper_current_success_proof(
+        repositories,
+        queue,
+        job_ids,
+        phase=phase,
+        fault="mismatch",
+    )
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+    after_restore = repositories.project.load("p1")
+    assert after_restore.source_assets["_analysis"]["status"] == "failed"
+
+    repaired = restarted.enqueue_analysis_jobs("p1")
+
+    project = repositories.project.load("p1")
+    assert repaired.job_ids == job_ids
+    assert project.source_assets["_analysis"]["status"] == "failed"
     assert project.project_state == "analysis_failed"
 
 

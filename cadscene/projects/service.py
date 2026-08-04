@@ -44,6 +44,14 @@ from .queue import (
 ANALYSIS_IDENTITY_SCHEMA = 2
 
 
+def _has_exact_success_proof(job: QueueJob) -> bool:
+    return (
+        job.status == "success"
+        and job.output_validated
+        and job.validated_input_fingerprint == job.input_fingerprint
+    )
+
+
 @dataclass(frozen=True)
 class TrajectoryPreflight:
     eligible: tuple[str, ...]
@@ -1730,10 +1738,7 @@ class ProjectService:
                     "legacy analysis identity does not match exactly"
                 )
             if job.status == "success":
-                if (
-                    not job.output_validated
-                    or job.validated_input_fingerprint != legacy_fingerprint
-                ):
+                if not _has_exact_success_proof(job):
                     raise ValueError(
                         "legacy analysis success has no complete validation proof"
                     )
@@ -1788,63 +1793,52 @@ class ProjectService:
                 and job.job_type in {"cad_analysis", "video_analysis"}
             ):
                 analysis_jobs.append(job)
-        if not analysis_jobs:
-            return
-        successful_video = next(
-            (
-                item
-                for item in analysis_jobs
-                if item.job_type == "video_analysis"
-                and item.status == "success"
-                and item.output_validated
-                and item.validated_input_fingerprint == item.input_fingerprint
-            ),
-            None,
+        jobs = self._validated_analysis_dag(
+            tuple(analysis_jobs),
+            project_id=project_id,
+            request_key=request_key,
+            project_assets=project.source_assets,
         )
-        unvalidated_video_success = next(
-            (
-                item
-                for item in analysis_jobs
-                if item.job_type == "video_analysis"
-                and item.status == "success"
-                and (
-                    not item.output_validated
-                    or item.validated_input_fingerprint
-                    != item.input_fingerprint
-                )
-            ),
-            None,
-        )
-        terminal_problem = next(
-            (
-                item
-                for item in analysis_jobs
-                if item.status
-                in {
-                    "failed",
-                    "interrupted",
-                    "cancelled",
-                    "stale_input",
-                    "superseded",
-                }
-            ),
-            None,
-        )
-        if successful_video is not None:
+        if jobs is None:
+            status = "failed"
+            error = "recorded analysis DAG is structurally invalid"
+        elif all(_has_exact_success_proof(item) for item in jobs):
             status = "success"
             error = None
-        elif unvalidated_video_success is not None:
+        elif any(
+            item.status == "success" and not _has_exact_success_proof(item)
+            for item in jobs
+        ):
             status = "failed"
             error = "analysis success has no matching validated input proof"
-        elif terminal_problem is not None:
-            status = terminal_problem.status
-            error = terminal_problem.error
-        elif any(item.status in {"preparing", "running", "validating"} for item in analysis_jobs):
-            status = "running"
-            error = None
         else:
-            status = "queued"
-            error = None
+            terminal_problem = next(
+                (
+                    item
+                    for item in jobs
+                    if item.status
+                    in {
+                        "failed",
+                        "interrupted",
+                        "cancelled",
+                        "stale_input",
+                        "superseded",
+                    }
+                ),
+                None,
+            )
+            if terminal_problem is not None:
+                status = terminal_problem.status
+                error = terminal_problem.error
+            elif any(
+                item.status in {"preparing", "running", "validating"}
+                for item in jobs
+            ):
+                status = "running"
+                error = None
+            else:
+                status = "queued"
+                error = None
         if state.get("status") == status and state.get("error") == error:
             return
         assets = dict(project.source_assets)
@@ -2097,10 +2091,7 @@ class ProjectService:
             return state, "analysis_failed"
         video = jobs[1]
         fully_validated = (
-            all(
-                item.status == "success" and item.output_validated
-                for item in jobs
-            )
+            all(_has_exact_success_proof(item) for item in jobs)
             and video.output_revision is not None
         )
         if fully_validated:
@@ -2134,6 +2125,26 @@ class ProjectService:
                 else "ready"
             )
             return state, project_state
+
+        invalid_success = next(
+            (
+                item
+                for item in jobs
+                if item.status == "success"
+                and not _has_exact_success_proof(item)
+            ),
+            None,
+        )
+        if invalid_success is not None:
+            state.update(
+                {
+                    "status": "failed",
+                    "error": (
+                        "reused analysis success has no matching validated input proof"
+                    ),
+                }
+            )
+            return state, "analysis_failed"
 
         terminal_states = {
             "failed": "analysis_failed",

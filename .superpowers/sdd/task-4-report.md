@@ -712,3 +712,38 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Thirteenth formal review closure (base `3e68aa3`)
+
+### Review finding map: 1 Important
+
+1. **Important - exact success proof had three divergent definitions:** the
+   module now has one `_has_exact_success_proof(job)` predicate requiring
+   `status == success`, `output_validated`, and exact equality between validated
+   and current input fingerprints. Legacy migration calls it while the job still
+   carries the verified legacy input; submission-state derivation calls it for
+   both CAD and video; queue-to-project synchronization first validates the
+   complete canonical CAD-to-video DAG and then calls it for both jobs. Missing
+   or mismatched CAD/video proof therefore restores as `analysis_failed`, and a
+   later compatibility enqueue cannot revive the same records as success.
+   Complete success, candidate-ready restoration, and repeated enqueue remain
+   unchanged.
+
+### Thirteenth-round TDD and verification evidence
+
+- Initial RED: `4 failed, 2 passed` - CAD missing/mismatched proof was accepted
+  during restore, CAD mismatch was already successful before re-enqueue, and a
+  video mismatch rejected by sync was revived by re-enqueue. Existing video
+  restore proof checks accounted for the two passing cases.
+- Review reproductions GREEN: `6 passed`.
+- Analysis-job test module: `87 passed`.
+- Recovery test module: `16 passed`.
+- Focused analysis/recovery/queue/project-API suite: `169 passed`.
+- All project tests: `275 passed`.
+- Final fresh full suite: `852 passed, 1 skipped` in 50.05 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
