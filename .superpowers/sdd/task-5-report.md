@@ -179,6 +179,32 @@ Second-review TDD and verification:
 - No rendering, concat, source fallback, labels/tracking, scheduler expansion,
   cross-clip trajectory continuity, or workflow mathematics changes.
 
+## Third review remediation (2026-08-04)
+
+- The editing TTL now applies only while a session is actually `editing`.
+  `pending_save` survives the original editing expiry and can recover either an
+  already-published immutable revision or a missing revision after the current
+  receipt is revalidated against its pending source revision/fingerprint.
+- Project workbench inspect/bootstrap now runs under the project state guard,
+  resolves the current clip and complete workbench context, and validates the
+  current clip-owned reference before returning a credential. Changed inputs or
+  workflows, stale/missing references, and old tokens displaced by a replacement
+  session therefore fail closed before the old workbench can bootstrap.
+- Legitimate saved-reference recovery remains available only for a current,
+  non-stale reference with the same token and bound workflow/input/trajectory.
+  Expired unsaved editing still resolves to `ready`.
+
+Third-review TDD and verification:
+
+- New pending-expiry and stale-bootstrap tests first produced `6 failed`, then
+  passed together with legitimate saved repair and editing-expiry coverage
+  (`9 passed`).
+- Task 5 focused: `168 passed`.
+- Projects + CLI + viewer + workflow + Pure Rotation: `629 passed, 1 warning`.
+- Full suite: `914 passed, 1 skipped, 1 warning`.
+- `python -m compileall -q cadscene`, JavaScript syntax checks for the project
+  workspace and camera workbench, and `git diff --check`: pass.
+
 ## Review closure (2026-08-04)
 
 - Immutable publication now copies the validated camera-track bytes into

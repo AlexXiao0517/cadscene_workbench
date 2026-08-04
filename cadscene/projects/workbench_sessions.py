@@ -413,7 +413,7 @@ class WorkbenchSessionCoordinator:
             raise ReplayedWorkbenchSave("workbench session was already saved")
         if session.state not in {"editing", "pending_save"}:
             raise StaleWorkbenchSession("workbench session is not editable")
-        if self._expired(session):
+        if session.state == "editing" and self._expired(session):
             self.inspect(project_id, token)
             raise StaleWorkbenchSession("workbench session expired")
         context = self.resolve_context(project_id, session.clip_id)
@@ -925,7 +925,31 @@ class ProjectWorkbenchService:
             return session
 
     def inspect(self, project_id: str, token: str) -> WorkbenchSession:
-        return self.coordinator.inspect(project_id, token)
+        with self.project_service._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            session = self.coordinator.store.load(project_id, token)
+            clip = next(
+                (item for item in current.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            if clip is None:
+                raise StaleWorkbenchSession(
+                    "workbench session clip no longer exists"
+                )
+            reference = self._workbench_reference(clip)
+            if reference is None:
+                raise StaleWorkbenchSession(
+                    "clip has no matching workbench session"
+                )
+            self.coordinator._validate_binding(
+                session, self.resolve_context(project_id, session.clip_id)
+            )
+            self._require_session_reference(
+                session,
+                reference,
+                allow_saved_repair=session.state == "saved",
+            )
+            return self.coordinator.inspect(project_id, token)
 
     def save(
         self,

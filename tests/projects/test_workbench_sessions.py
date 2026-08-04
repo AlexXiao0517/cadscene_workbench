@@ -332,6 +332,62 @@ def test_retry_recovers_output_published_before_session_record_save(
     assert output.read_bytes() == before
 
 
+def test_expired_pending_save_recovers_already_published_output(
+    session_system, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator, store, clock, _current, _validated = session_system
+    session = _create(coordinator)
+    original_update = store.update
+    failed = [False]
+
+    def fail_saved_record(project_id, token, *, expected_revision, mutate):
+        current = store.load(project_id, token)
+        candidate = mutate(current)
+        if candidate.state == "saved" and not failed[0]:
+            failed[0] = True
+            raise OSError("session record publication interrupted")
+        return original_update(
+            project_id, token, expected_revision=expected_revision, mutate=mutate
+        )
+
+    monkeypatch.setattr(store, "update", fail_saved_record)
+    with pytest.raises(OSError, match="session record publication interrupted"):
+        coordinator.save("project-1", session.token, _receipt())
+    monkeypatch.setattr(store, "update", original_update)
+    clock.value += timedelta(minutes=16)
+
+    saved = coordinator.save("project-1", session.token, _receipt())
+
+    assert saved.state == "saved"
+    assert saved.workbench_output_revision == "workbench-output-1"
+
+
+def test_expired_pending_save_revalidates_and_publishes_missing_output(
+    session_system, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator, store, clock, _current, _validated = session_system
+    session = _create(coordinator)
+    original_publish = coordinator._publish_output
+    failed = [False]
+
+    def fail_first_publish(*args, **kwargs):
+        if not failed[0]:
+            failed[0] = True
+            raise OSError("output publication interrupted")
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "_publish_output", fail_first_publish)
+    with pytest.raises(OSError, match="output publication interrupted"):
+        coordinator.save("project-1", session.token, _receipt())
+    assert store.load("project-1", session.token).state == "pending_save"
+    clock.value += timedelta(minutes=16)
+
+    saved = coordinator.save("project-1", session.token, _receipt())
+
+    assert saved.state == "saved"
+    assert saved.workbench_output_revision == "workbench-output-1"
+
+
 def test_retry_uses_published_immutable_output_after_mutable_source_changes(
     session_system, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -779,6 +835,68 @@ def test_existing_workbench_reference_never_bypasses_real_input_change(
     )
     assert stale.status == 409
     assert stale.body["error"] == "stale_workbench_session"
+    bootstrap = api.handle(
+        "GET", f"/api/projects/project-1/workbench-sessions/{token}"
+    )
+    assert bootstrap.status == 409
+    assert bootstrap.body["error"] == "stale_workbench_session"
+
+
+def test_workbench_inspect_rejects_workflow_change_and_stale_reference(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    token = opened.body["token"]
+    clips = repositories.clips.load("project-1")
+    api.service.update_clip_workflow(
+        "project-1",
+        "clip-1",
+        expected_revision=clips.revision,
+        workflow_override="pure_rotation",
+    )
+
+    bootstrap = api.handle(
+        "GET", f"/api/projects/project-1/workbench-sessions/{token}"
+    )
+
+    assert bootstrap.status == 409
+    assert bootstrap.body["error"] == "stale_workbench_session"
+
+
+def test_workbench_inspect_rejects_missing_clip_reference(tmp_path: Path) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    token = opened.body["token"]
+    clips = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(value.clips[0], references=()),)
+        ),
+    )
+
+    bootstrap = api.handle(
+        "GET", f"/api/projects/project-1/workbench-sessions/{token}"
+    )
+
+    assert bootstrap.status == 409
+    assert bootstrap.body["error"] == "stale_workbench_session"
 
 
 def test_workbench_http_create_bootstrap_save_and_replay_fail_closed(
@@ -1172,6 +1290,11 @@ def test_stale_saved_reference_allows_new_session_and_old_token_cannot_overwrite
     )
     assert replacement.status == 201
     replacement_reference = repositories.clips.load("project-1").clips[0].references[-1]
+    old_bootstrap = api.handle(
+        "GET", f"/api/projects/project-1/workbench-sessions/{old_token}"
+    )
+    assert old_bootstrap.status == 409
+    assert old_bootstrap.body["error"] == "stale_workbench_session"
 
     rejected = api.handle(
         "POST",
