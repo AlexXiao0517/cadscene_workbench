@@ -26,6 +26,9 @@ from .adapters import (
 from .queue import AttemptRecord, LocalResourceQueue, QueueJob, TaskQueue
 from .service import ProjectService
 from .executor import JobExecutionPlan, LocalJobExecutor
+from .uploads import PublishedUpload, UploadValidationError, ValidatedUploadStore
+from .http_api import ApiResponse, ProjectApi, UploadRequest
+from .analysis import ProjectAnalysisCoordinator
 
 __all__ = [
     "ClipDefinition",
@@ -56,4 +59,11 @@ __all__ = [
     "ProjectService",
     "JobExecutionPlan",
     "LocalJobExecutor",
+    "PublishedUpload",
+    "UploadValidationError",
+    "ValidatedUploadStore",
+    "ApiResponse",
+    "ProjectApi",
+    "UploadRequest",
+    "ProjectAnalysisCoordinator",
 ]

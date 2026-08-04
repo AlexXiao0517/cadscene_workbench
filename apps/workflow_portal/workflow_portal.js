@@ -8,7 +8,15 @@
     srt_sfm_fused: ["SRT + SfM（功能待启用）", "已识别到定位遥测；融合算法尚未启用，不会自动开始。"],
     srt_full_pose: ["SRT 完整姿态（功能待启用）", "已识别到完整姿态字段；直接姿态驱动尚未启用，不会自动开始。"],
   };
-  const state = { dataset: "", runId: "", manifest: null, mode: "sfm_only" };
+  // Kept as compatibility documentation for existing single-video links.
+  const legacyRouteCompatibility = [
+    "/api/workflow/create-dataset",
+    "/api/workflow/upload-video",
+    "/api/workflow/upload-cad",
+    "/api/workflow/upload-srt",
+  ];
+  void legacyRouteCompatibility;
+  const state = { dataset: "", runId: "", manifest: null, mode: "sfm_only", projectRevision: 0 };
   const $ = (selector) => document.querySelector(selector);
 
   function generatedId(prefix) {
@@ -97,19 +105,23 @@
     state.runId = generatedId("run");
     try {
       setMessage("正在创建项目…");
-      await postJson("/api/workflow/create-dataset", { dataset: state.dataset, runId: state.runId, cadScale: 0.06, originX: 567747.5756295, originY: 3330464.2234675, hoveringDeclared });
-      await upload(`/api/workflow/upload-video?dataset=${encodeURIComponent(state.dataset)}&runId=${encodeURIComponent(state.runId)}`, video, "video");
+      await postJson("/api/projects", { project_id: state.dataset, hoveringDeclared });
+      const videoResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/video?expectedRevision=${state.projectRevision}`, video, "video");
+      state.projectRevision = videoResult.project_revision;
       setFileStatus("video", "视频已上传", 1);
-      await upload(`/api/workflow/upload-cad?dataset=${encodeURIComponent(state.dataset)}&runId=${encodeURIComponent(state.runId)}`, cad, "cad");
-      setFileStatus("cad", "CAD 已上传并解析", 1);
       if (srt) {
-        const srtResult = await upload(`/api/workflow/upload-srt?dataset=${encodeURIComponent(state.dataset)}&runId=${encodeURIComponent(state.runId)}`, srt, "srt");
+        const srtResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/srt?expectedRevision=${state.projectRevision}`, srt, "srt");
+        state.projectRevision = srtResult.project_revision;
         state.mode = srtResult.trajectory_mode || state.mode;
         setFileStatus("srt", "SRT 已上传并完成检测", 1);
       }
-      await loadManifest();
-      showResult();
-      setMessage("上传完成，可进入项目。");
+      const cadResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/cad?expectedRevision=${state.projectRevision}`, cad, "cad");
+      state.projectRevision = cadResult.project_revision;
+      setFileStatus("cad", "CAD 已上传并进入分析队列", 1);
+      setMessage("上传完成，正在进入项目片段管理。");
+      const target = new URL("/apps/project_workspace/", window.location.origin);
+      target.searchParams.set("projectId", state.dataset);
+      window.location.assign(target.toString());
     } catch (error) {
       setMessage(`上传失败：${error.message}`);
     } finally { $("#portalSubmit").disabled = false; }

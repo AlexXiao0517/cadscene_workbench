@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import mimetypes
 import os
@@ -104,6 +105,65 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _project_response(self, response) -> None:
+        body = response.encoded_body
+        self.send_response(response.status)
+        for name, value in response.headers.items():
+            self.send_header(name, value)
+        if body:
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _dispatch_project_api(self, method: str) -> None:
+        from cadscene.projects.http_api import ApiResponse, UploadRequest
+
+        api = getattr(self.server, "project_api", None)
+        if api is None:
+            self._project_response(ApiResponse(503, {"error": "project_api_unavailable"}))
+            return
+        parsed = urlsplit(self.path)
+        try:
+            if method == "GET":
+                response = api.handle(
+                    method, parsed.path, headers={name: value for name, value in self.headers.items()}
+                )
+            elif method == "POST" and "/uploads/" in parsed.path:
+                filename, stream = self._multipart_upload()
+                try:
+                    stream.seek(0, os.SEEK_END)
+                    size = stream.tell()
+                    stream.seek(0)
+                    query = parse_qs(parsed.query)
+                    raw_revision = (query.get("expectedRevision") or query.get("expected_revision") or [""])[0]
+                    if not str(raw_revision).isdigit():
+                        raise ValueError("expectedRevision query parameter is required")
+                    response = api.handle(
+                        method,
+                        parsed.path,
+                        json_body={"expected_revision": int(raw_revision)},
+                        upload=UploadRequest(
+                            filename=filename,
+                            stream=stream,
+                            size_bytes=size,
+                            sha256=self.headers.get("X-Content-SHA256"),
+                        ),
+                    )
+                finally:
+                    stream.close()
+            else:
+                response = api.handle(
+                    method,
+                    parsed.path,
+                    headers={name: value for name, value in self.headers.items()},
+                    json_body=self._read_json_body(),
+                )
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            response = ApiResponse(400, {"error": str(exc)})
+        self._project_response(response)
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -286,6 +346,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
+        if route == "/api/projects" or route.startswith("/api/projects/"):
+            self._dispatch_project_api("POST")
+            return
         upload_routes = {
             "/api/workflow/create-dataset",
             "/api/workflow/upload-video",
@@ -469,8 +532,18 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
+    def do_PATCH(self) -> None:
+        route = urlsplit(self.path).path
+        if route.startswith("/api/projects/"):
+            self._dispatch_project_api("PATCH")
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "API not found")
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/projects/"):
+            self._dispatch_project_api("GET")
+            return
         if parsed.path == "/":
             self.send_response(HTTPStatus.FOUND)
             self.send_header("Location", "/apps/workflow_portal/index.html")
@@ -682,6 +755,39 @@ def main(argv: list[str] | None = None) -> int:
     server.storage_root_dir = storage_root
     server.extra_roots = served_roots
     server.job_runner = JobRunner(storage_root)
+    from cadscene.projects.analysis import ProjectAnalysisCoordinator
+    from cadscene.projects.http_api import ProjectApi
+    from cadscene.projects.json_repositories import project_repositories
+    from cadscene.projects.queue import LocalResourceQueue
+    from cadscene.projects.service import ProjectService
+    from cadscene.projects.uploads import ValidatedUploadStore
+    from cadscene.projects.workflow_adapters import default_workflow_adapters
+
+    projects_root = storage_root / "projects"
+    projects_root.mkdir(parents=True, exist_ok=True)
+    repositories = project_repositories(projects_root)
+    queue = LocalResourceQueue()
+    project_service = ProjectService(
+        repositories,
+        queue,
+        default_workflow_adapters(),
+        projects_root=projects_root,
+        now=lambda: datetime.now(timezone.utc).isoformat(),
+    )
+    analysis = ProjectAnalysisCoordinator(
+        repositories,
+        projects_root=projects_root,
+        storage_root=storage_root,
+        now=lambda: datetime.now(timezone.utc).isoformat(),
+    )
+    server.project_api = ProjectApi(
+        repositories=repositories,
+        service=project_service,
+        uploads=ValidatedUploadStore(projects_root),
+        now=lambda: datetime.now(timezone.utc).isoformat(),
+        analysis_trigger=analysis.trigger,
+    )
+    server.project_analysis = analysis
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"
     print(f"Serving {root}")
     for name, path in served_roots.items():
@@ -692,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        analysis.close(wait=True)
         server.server_close()
     return 0
 

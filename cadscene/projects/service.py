@@ -14,7 +14,8 @@ from uuid import uuid4
 from .adapters import AdapterInputs, AdapterResult, WorkflowAdapterRegistry
 from .executor import JobExecutionPlan
 from .json_repositories import ProjectRepositories
-from .models import ClipDefinition, JobsManifest
+from .models import ClipDefinition, ClipsManifest, JobsManifest, RenderManifest
+from .repositories import ManifestMutation, RevisionConflict, publish_manifests
 from .queue import (
     AttemptRecord,
     LocalResourceQueue,
@@ -125,12 +126,153 @@ class ProjectService:
         *,
         clip_ids: Sequence[str] | None = None,
         confirmed_clip_ids: Sequence[str] = (),
+        expected_jobs_revision: int | None = None,
     ) -> EnqueueTrajectoryResult:
         with self._state_guard(project_id):
+            if expected_jobs_revision is not None:
+                current_jobs = self.repositories.jobs.load(project_id)
+                if current_jobs.revision != expected_jobs_revision:
+                    raise RevisionConflict(
+                        project_id=project_id,
+                        expected_revision=expected_jobs_revision,
+                        current_revision=current_jobs.revision,
+                    )
             return self._enqueue_trajectory_jobs_locked(
                 project_id,
                 clip_ids=clip_ids,
                 confirmed_clip_ids=confirmed_clip_ids,
+            )
+
+    def update_clip_workflow(
+        self,
+        project_id: str,
+        clip_id: str,
+        *,
+        expected_revision: int,
+        workflow_override: str | None,
+    ) -> ClipsManifest:
+        """Change the user layer and stale old derived references without deletion."""
+
+        allowed = {"sfm_only", "srt_sfm_fused", "srt_full_pose", "pure_rotation"}
+        if workflow_override is not None and workflow_override not in allowed:
+            raise ValueError(f"unsupported workflow override: {workflow_override}")
+        with self._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=current.revision,
+                )
+            by_id = {clip.clip_id: clip for clip in current.clips}
+            if clip_id not in by_id:
+                raise KeyError(f"unknown clip ID: {clip_id}")
+            selected = by_id[clip_id]
+            if selected.workflow_override == workflow_override:
+                return current
+            render = self.repositories.render.load(project_id)
+
+            def mutate_clips(value: ClipsManifest, _operation_id: str) -> ClipsManifest:
+                changed: list[ClipDefinition] = []
+                for clip in value.clips:
+                    if clip.clip_id != clip_id:
+                        changed.append(clip)
+                        continue
+                    references = tuple(
+                        replace(
+                            reference,
+                            value={
+                                **reference.value,
+                                "previous_status": reference.value.get("status"),
+                                "status": "stale",
+                                "stale_reason": "workflow_changed",
+                            },
+                        )
+                        for reference in clip.references
+                    )
+                    changed.append(
+                        replace(
+                            clip.with_workflow_override(workflow_override),
+                            references=references,
+                        )
+                    )
+                return replace(value, clips=tuple(changed), updated_at=self.now())
+
+            def mutate_render(
+                value: RenderManifest, _operation_id: str
+            ) -> RenderManifest:
+                changed = tuple(
+                    {
+                        **item,
+                        "previous_status": item.get("status"),
+                        "status": "stale",
+                        "stale_reason": "workflow_changed",
+                    }
+                    if item.get("clip_id") == clip_id
+                    else item
+                    for item in value.clip_renders
+                )
+                return replace(value, clip_renders=changed, updated_at=self.now())
+
+            mutations = [
+                ManifestMutation(
+                    repository=self.repositories.clips,
+                    project_id=project_id,
+                    expected_revision=current.revision,
+                    mutate=mutate_clips,
+                )
+            ]
+            if any(item.get("clip_id") == clip_id for item in render.clip_renders):
+                mutations.append(
+                    ManifestMutation(
+                        repository=self.repositories.render,
+                        project_id=project_id,
+                        expected_revision=render.revision,
+                        mutate=mutate_render,
+                    )
+                )
+            publish_manifests(mutations)
+            return self.repositories.clips.load(project_id)
+
+    def update_clip_display_name(
+        self,
+        project_id: str,
+        clip_id: str,
+        *,
+        expected_revision: int,
+        custom_display_name: str | None,
+    ) -> ClipsManifest:
+        if custom_display_name is not None:
+            custom_display_name = custom_display_name.strip()
+            if not custom_display_name or len(custom_display_name) > 120:
+                raise ValueError("custom_display_name must contain 1 to 120 characters")
+        with self._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=current.revision,
+                )
+            if not any(clip.clip_id == clip_id for clip in current.clips):
+                raise KeyError(f"unknown clip ID: {clip_id}")
+            if next(
+                clip for clip in current.clips if clip.clip_id == clip_id
+            ).custom_display_name == custom_display_name:
+                return current
+            return self.repositories.clips.update(
+                project_id,
+                expected_revision=expected_revision,
+                mutate=lambda value: replace(
+                    value,
+                    updated_at=self.now(),
+                    clips=tuple(
+                        clip.with_custom_display_name(custom_display_name)
+                        if clip.clip_id == clip_id
+                        else clip
+                        for clip in value.clips
+                    ),
+                ),
             )
 
     def _enqueue_trajectory_jobs_locked(

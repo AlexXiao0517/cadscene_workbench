@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -319,11 +320,13 @@ def resolve_ffmpeg_executable(explicit: str | Path | None = None) -> Path:
             raise FileNotFoundError(f"FFmpeg executable not found: {executable}")
         return executable
     system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
+    if system_ffmpeg and _supports_libx264(Path(system_ffmpeg)):
         return Path(system_ffmpeg)
     try:
         import imageio_ffmpeg
     except ImportError as exc:
+        if system_ffmpeg:
+            return Path(system_ffmpeg)
         raise RuntimeError(
             "FFmpeg is required for authoritative PTS analysis; install the "
             "video_analysis extra or pass an explicit executable"
@@ -332,6 +335,23 @@ def resolve_ffmpeg_executable(explicit: str | Path | None = None) -> Path:
     if not executable.is_file():
         raise FileNotFoundError(f"FFmpeg executable not found: {executable}")
     return executable
+
+
+@lru_cache(maxsize=8)
+def _supports_libx264(executable: Path) -> bool:
+    """Avoid selecting decode-only LGPL builds for project clip export."""
+
+    try:
+        process = subprocess.run(
+            [str(executable), "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return process.returncode == 0 and b"libx264" in process.stdout
 
 
 _VIDEO_STREAM_RE = re.compile(

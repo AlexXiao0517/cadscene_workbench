@@ -1,0 +1,541 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from fractions import Fraction
+from hashlib import sha256
+import json
+import re
+from typing import BinaryIO, Callable, Mapping
+from uuid import uuid4
+
+from .json_repositories import ProjectRepositories
+from .models import ClipDefinition
+from .repositories import RevisionConflict
+from .service import ProjectService, TrajectoryPreflight
+from .uploads import PublishedUpload, UploadValidationError, ValidatedUploadStore
+
+
+_SAFE_ID = r"[A-Za-z0-9_.-]+"
+_PROJECT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})$")
+_UPLOAD = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt)$"
+)
+_ANALYSIS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/start$")
+_SNAPSHOT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/snapshot$")
+_WORKFLOW = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workflow$"
+)
+_NAME = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/name$"
+)
+_TRAJECTORY = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
+)
+
+
+@dataclass(frozen=True)
+class UploadRequest:
+    filename: str
+    stream: BinaryIO
+    size_bytes: int
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class ApiResponse:
+    status: int
+    body: Mapping[str, object] | None = None
+    headers: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "headers", dict(self.headers or {}))
+
+    @property
+    def encoded_body(self) -> bytes:
+        if self.body is None:
+            return b""
+        return json.dumps(self.body, ensure_ascii=False).encode("utf-8")
+
+
+AnalysisTrigger = Callable[[str, str, PublishedUpload], None]
+
+
+class ProjectApi:
+    """Route parsing, validation and project-service delegation boundary."""
+
+    def __init__(
+        self,
+        *,
+        repositories: ProjectRepositories,
+        service: ProjectService,
+        uploads: ValidatedUploadStore,
+        now: Callable[[], str],
+        analysis_trigger: AnalysisTrigger | None = None,
+        identity: Callable[[], str] | None = None,
+    ) -> None:
+        self.repositories = repositories
+        self.service = service
+        self.uploads = uploads
+        self.now = now
+        self.analysis_trigger = analysis_trigger
+        self._identity = identity or (lambda: uuid4().hex)
+
+    def handle(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        json_body: Mapping[str, object] | None = None,
+        upload: UploadRequest | None = None,
+    ) -> ApiResponse:
+        headers = headers or {}
+        payload = json_body or {}
+        try:
+            if method == "POST" and path == "/api/projects":
+                return self._create_project(payload)
+            match = _SNAPSHOT.fullmatch(path)
+            if method == "GET" and match:
+                return self._snapshot(match["project"], headers)
+            match = _UPLOAD.fullmatch(path)
+            if method == "POST" and match:
+                if upload is None:
+                    raise ValueError("project upload body is required")
+                return self._publish_upload(
+                    match["project"], match["asset"], payload, upload
+                )
+            match = _ANALYSIS.fullmatch(path)
+            if method == "POST" and match:
+                return self._start_analysis(match["project"], payload)
+            match = _WORKFLOW.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_workflow(
+                    match["project"], match["clip"], payload
+                )
+            match = _NAME.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_name(match["project"], match["clip"], payload)
+            match = _TRAJECTORY.fullmatch(path)
+            if method == "POST" and match:
+                return self._trajectory_jobs(match["project"], payload)
+            return ApiResponse(404, {"error": "project_api_not_found"})
+        except RevisionConflict as exc:
+            return ApiResponse(
+                409,
+                {
+                    "error": exc.code,
+                    "expected_revision": exc.expected_revision,
+                    "current_revision": exc.current_revision,
+                },
+            )
+        except FileNotFoundError as exc:
+            return ApiResponse(404, {"error": str(exc)})
+        except (UploadValidationError, ValueError, KeyError, TypeError) as exc:
+            return ApiResponse(400, {"error": str(exc)})
+
+    def _create_project(self, payload: Mapping[str, object]) -> ApiResponse:
+        project_id = str(payload.get("project_id") or f"project-{self._identity()}")
+        if not re.fullmatch(_SAFE_ID, project_id):
+            raise ValueError("invalid project_id")
+        self.repositories.create_project(project_id, updated_at=self.now())
+        return ApiResponse(
+            201,
+            {
+                "project_id": project_id,
+                "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
+            },
+        )
+
+    def _publish_upload(
+        self,
+        project_id: str,
+        asset_type: str,
+        payload: Mapping[str, object],
+        request: UploadRequest,
+    ) -> ApiResponse:
+        with self.repositories.project.lock_for(project_id):
+            return self._publish_upload_locked(
+                project_id, asset_type, payload, request
+            )
+
+    def _publish_upload_locked(
+        self,
+        project_id: str,
+        asset_type: str,
+        payload: Mapping[str, object],
+        request: UploadRequest,
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        current = self.repositories.project.load(project_id)
+        if current.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=current.revision,
+            )
+        pending = self.uploads.begin(
+            project_id,
+            asset_type,
+            request.filename,
+            expected_size=request.size_bytes,
+            expected_sha256=request.sha256,
+        )
+        try:
+            while True:
+                chunk = request.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                pending.write(chunk)
+            published = pending.complete()
+        except BaseException:
+            pending.abort()
+            raise
+        source_assets = {
+            **current.source_assets,
+            asset_type: {
+                "path": str(published.path),
+                "original_filename": published.original_filename,
+                "size_bytes": published.size_bytes,
+                "sha256": published.sha256,
+                "validation_report": str(published.validation_report_path),
+            },
+        }
+        analysis_key = _analysis_request_key(source_assets)
+        previous_analysis = source_assets.get("_analysis")
+        previous_key = (
+            previous_analysis.get("request_key")
+            if isinstance(previous_analysis, Mapping)
+            else None
+        )
+        should_trigger = analysis_key is not None and analysis_key != previous_key
+        if should_trigger:
+            source_assets["_analysis"] = {
+                "request_key": analysis_key,
+                "status": "queued",
+                "requested_at": self.now(),
+            }
+        updated = self.repositories.project.update(
+            project_id,
+            expected_revision=expected_revision,
+            mutate=lambda value: replace(
+                value,
+                updated_at=self.now(),
+                source_assets=source_assets,
+                project_state="analyzing",
+            ),
+        )
+        if self.analysis_trigger is not None and should_trigger:
+            self.analysis_trigger(project_id, asset_type, published)
+        return ApiResponse(
+            201,
+            {
+                "project_id": project_id,
+                "asset_type": asset_type,
+                "project_revision": updated.revision,
+                "fingerprint": published.sha256,
+                "validation": dict(published.validation),
+                "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
+            },
+        )
+
+    def _start_analysis(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        project = self.repositories.project.load(project_id)
+        if project.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=project.revision,
+            )
+        triggered: list[str] = []
+        if self.analysis_trigger is not None:
+            for asset_type in ("cad", "video"):
+                path = self.uploads.published_path(project_id, asset_type)
+                report_path = self.uploads.validation_report_path(
+                    project_id, asset_type
+                )
+                if not path.is_file() or not report_path.is_file():
+                    continue
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                published = PublishedUpload(
+                    project_id=project_id,
+                    asset_type=asset_type,
+                    original_filename=str(report["original_filename"]),
+                    path=path,
+                    size_bytes=int(report["size_bytes"]),
+                    sha256=str(report["sha256"]),
+                    validation=dict(report.get("validation", {})),
+                    validation_report_path=report_path,
+                )
+                self.analysis_trigger(project_id, asset_type, published)
+                triggered.append(asset_type)
+                if asset_type == "cad":
+                    break
+        return ApiResponse(202, {"project_id": project_id, "triggered": triggered})
+
+    def _snapshot(
+        self, project_id: str, headers: Mapping[str, str]
+    ) -> ApiResponse:
+        snapshot = self._build_snapshot(project_id)
+        etag = f'"{snapshot["snapshot_revision"]}"'
+        response_headers = {"ETag": etag, "Cache-Control": "no-store"}
+        if headers.get("If-None-Match") == etag:
+            return ApiResponse(304, None, response_headers)
+        return ApiResponse(200, snapshot, response_headers)
+
+    def _build_snapshot(self, project_id: str) -> dict[str, object]:
+        project = self.repositories.project.load(project_id)
+        clips = self.repositories.clips.load(project_id)
+        jobs = self.repositories.jobs.load(project_id)
+        render = self.repositories.render.load(project_id)
+        components = {
+            "project": project.revision,
+            "clips": clips.revision,
+            "jobs": jobs.revision,
+            "render": render.revision,
+        }
+        revision_payload = json.dumps(
+            components, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+        snapshot_revision = sha256(revision_payload).hexdigest()
+        job_by_clip: dict[str, Mapping[str, object]] = {}
+        for job in jobs.jobs:
+            clip_id = job.get("clip_id")
+            if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
+                job_by_clip[clip_id] = job
+        clip_payloads: list[dict[str, object]] = []
+        can_start_any = False
+        for clip in clips.clips:
+            capability = self._clip_capability(project_id, clip)
+            can_start_any = can_start_any or bool(
+                capability["can_start_trajectory"]
+            )
+            job = job_by_clip.get(clip.clip_id)
+            clip_payloads.append(
+                {
+                    "clip_id": clip.clip_id,
+                    "display_name": clip.display_name,
+                    "generated_display_name": clip.generated_display_name,
+                    "custom_display_name": clip.custom_display_name,
+                    "time_range": _friendly_range(clip),
+                    "duration": _friendly_duration(clip),
+                    "detected_motion_mode": clip.analysis.get(
+                        "detected_motion_mode", "unknown"
+                    ),
+                    "confidence": clip.analysis.get("confidence"),
+                    "recommended_workflow": clip.recommended_workflow,
+                    "workflow_override": clip.workflow_override,
+                    "resolved_workflow": clip.resolved_workflow,
+                    "needs_review": bool(clip.analysis.get("needs_review", False)),
+                    "status": "ready" if job is None else job.get("status"),
+                    "stage": None if job is None else job.get("stage"),
+                    "progress": None if job is None else job.get("progress"),
+                    "capabilities": capability,
+                    "source_interval": {
+                        "start_pts": clip.analysis.get("source_start_pts"),
+                        "end_pts_exclusive": clip.analysis.get(
+                            "source_end_pts_exclusive"
+                        ),
+                        "time_base": clip.analysis.get("source_time_base"),
+                        "semantics": "half_open",
+                    },
+                }
+            )
+        return {
+            "project_id": project_id,
+            "snapshot_revision": snapshot_revision,
+            "component_revisions": components,
+            "project_state": project.project_state,
+            "active_analysis_revision": project.active_analysis_revision,
+            "assets": dict(project.source_assets),
+            "capabilities": {
+                "can_start_trajectory": can_start_any,
+                "can_render": False,
+                "can_merge": False,
+                "can_reanalyze": bool(project.source_assets.get("video")),
+            },
+            "clips": clip_payloads,
+        }
+
+    def _clip_capability(
+        self, project_id: str, clip: ClipDefinition
+    ) -> dict[str, object]:
+        preflight = self.service.preflight_trajectory_jobs(
+            project_id, clip_ids=[clip.clip_id]
+        )
+        can_start = clip.clip_id in preflight.eligible
+        needs_confirmation = clip.clip_id in preflight.needs_confirmation
+        reason = preflight.reasons.get(clip.clip_id)
+        return {
+            "can_start_trajectory": can_start,
+            "trajectory_needs_confirmation": needs_confirmation,
+            "reason": reason,
+            "can_open_workbench": False,
+            "can_render": False,
+            "can_retry": False,
+            "can_cancel": False,
+        }
+
+    def _update_workflow(
+        self,
+        project_id: str,
+        clip_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        if "workflow_override" not in payload:
+            raise ValueError("workflow_override is required and may be null")
+        override = payload["workflow_override"]
+        if override is not None and not isinstance(override, str):
+            raise TypeError("workflow_override must be a string or null")
+        manifest = self.service.update_clip_workflow(
+            project_id,
+            clip_id,
+            expected_revision=_required_revision(payload),
+            workflow_override=override,
+        )
+        clip = next(item for item in manifest.clips if item.clip_id == clip_id)
+        return ApiResponse(
+            200,
+            {
+                "clip_id": clip_id,
+                "clips_revision": manifest.revision,
+                "workflow_override": clip.workflow_override,
+                "resolved_workflow": clip.resolved_workflow,
+            },
+        )
+
+    def _update_name(
+        self,
+        project_id: str,
+        clip_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        if "custom_display_name" not in payload:
+            raise ValueError("custom_display_name is required and may be null")
+        name = payload["custom_display_name"]
+        if name is not None and not isinstance(name, str):
+            raise TypeError("custom_display_name must be a string or null")
+        manifest = self.service.update_clip_display_name(
+            project_id,
+            clip_id,
+            expected_revision=_required_revision(payload),
+            custom_display_name=name,
+        )
+        clip = next(item for item in manifest.clips if item.clip_id == clip_id)
+        return ApiResponse(
+            200,
+            {
+                "clip_id": clip_id,
+                "clips_revision": manifest.revision,
+                "custom_display_name": clip.custom_display_name,
+                "display_name": clip.display_name,
+            },
+        )
+
+    def _trajectory_jobs(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        current = self.repositories.jobs.load(project_id)
+        if current.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=current.revision,
+            )
+        clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
+        preflight = self.service.preflight_trajectory_jobs(
+            project_id, clip_ids=clip_ids or None
+        )
+        if not bool(payload.get("enqueue", False)):
+            return ApiResponse(200, _preflight_payload(preflight))
+        confirmed = _string_sequence(
+            payload.get("confirmed_clip_ids"), "confirmed_clip_ids"
+        )
+        result = self.service.enqueue_trajectory_jobs(
+            project_id,
+            clip_ids=clip_ids or None,
+            confirmed_clip_ids=confirmed,
+            expected_jobs_revision=expected_revision,
+        )
+        return ApiResponse(
+            202,
+            {
+                **_preflight_payload(result.preflight),
+                "enqueued_clip_ids": list(result.enqueued_clip_ids),
+                "job_ids": list(result.job_ids),
+                "jobs_revision": self.repositories.jobs.load(project_id).revision,
+            },
+        )
+
+
+def _required_revision(payload: Mapping[str, object]) -> int:
+    value = payload.get("expected_revision")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("expected_revision must be a non-negative integer")
+    return value
+
+
+def _string_sequence(value: object, name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not re.fullmatch(_SAFE_ID, item)
+        for item in value
+    ):
+        raise ValueError(f"{name} must be a list of stable IDs")
+    return tuple(value)
+
+
+def _preflight_payload(preflight: TrajectoryPreflight) -> dict[str, object]:
+    return {
+        "eligible": list(preflight.eligible),
+        "needs_confirmation": list(preflight.needs_confirmation),
+        "skipped": list(preflight.skipped),
+        "reasons": dict(preflight.reasons),
+    }
+
+
+def _clip_seconds(clip: ClipDefinition) -> tuple[float, float]:
+    time_base = clip.analysis.get("source_time_base")
+    if not isinstance(time_base, Mapping):
+        raise ValueError(f"clip {clip.clip_id} is missing source_time_base")
+    fraction = Fraction(int(time_base["numerator"]), int(time_base["denominator"]))
+    start = Fraction(int(clip.analysis["source_start_pts"])) * fraction
+    end = Fraction(int(clip.analysis["source_end_pts_exclusive"])) * fraction
+    return float(start), float(end)
+
+
+def _clock(seconds: float) -> str:
+    rounded = max(0, int(round(seconds)))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _friendly_range(clip: ClipDefinition) -> str:
+    start, end = _clip_seconds(clip)
+    return f"{_clock(start)} – {_clock(end)}"
+
+
+def _friendly_duration(clip: ClipDefinition) -> str:
+    start, end = _clip_seconds(clip)
+    return _clock(end - start)
+
+
+def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
+    fingerprints: dict[str, str] = {}
+    for required in ("video", "cad"):
+        asset = source_assets.get(required)
+        if not isinstance(asset, Mapping) or not asset.get("path") or not asset.get("sha256"):
+            return None
+        fingerprints[required] = str(asset["sha256"])
+    srt = source_assets.get("srt")
+    if isinstance(srt, Mapping) and srt.get("sha256"):
+        fingerprints["srt"] = str(srt["sha256"])
+    payload = json.dumps(fingerprints, sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode("ascii")).hexdigest()

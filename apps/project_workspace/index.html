@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>项目片段管理 · MediaFlow</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">▶</span><span class="sidebar-label brand-copy">MediaFlow<small>工作台</small></span></div>
+      <nav class="nav-list" aria-label="项目导航">
+        <button class="nav-item" data-nav="overview" type="button" aria-current="false"><span class="nav-icon" aria-hidden="true">▦</span><span class="sidebar-label">项目概览</span></button>
+        <button class="nav-item" data-nav="files" type="button" aria-current="false"><span class="nav-icon" aria-hidden="true">◫</span><span class="sidebar-label">项目文件</span></button>
+        <button class="nav-item active" data-nav="clips" type="button" aria-current="page"><span class="nav-icon" aria-hidden="true">▤</span><span class="sidebar-label">片段管理</span></button>
+        <button class="nav-item" data-nav="settings" type="button" aria-current="false"><span class="nav-icon" aria-hidden="true">⚙</span><span class="sidebar-label">设置</span></button>
+      </nav>
+      <div class="sidebar-project sidebar-label"><small>当前项目</small><strong id="sidebarProjectName">正在加载…</strong></div>
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="收起侧栏" aria-expanded="true"><span aria-hidden="true">«</span><span class="sidebar-label">收起侧栏</span></button>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div><p class="eyebrow">视频项目</p><h1>项目片段管理</h1><p class="breadcrumb" id="projectBreadcrumb">正在读取项目…</p></div>
+        <div class="top-actions">
+          <button id="reanalyzeButton" class="button secondary" type="button" disabled>重新分析</button>
+          <button id="batchTrajectoryButton" class="button secondary" type="button" disabled>批量轨迹反算</button>
+          <button id="mergeProjectButton" class="button primary" type="button" data-action="merge-project" disabled>合并并输出</button>
+        </div>
+      </header>
+
+      <div id="liveMessage" class="live-message" role="status" aria-live="polite"></div>
+
+      <section class="summary-grid" aria-label="项目概况">
+        <article class="summary-card"><span>源视频</span><strong id="sourceVideoName">—</strong><small id="sourceVideoMeta">等待文件</small></article>
+        <article class="summary-card"><span>CAD</span><strong id="cadName">—</strong><small id="cadMeta">等待文件</small></article>
+        <article class="summary-card"><span>SRT</span><strong id="srtName">未上传</strong><small id="srtMeta">可选</small></article>
+        <article class="summary-card metric"><span>总片段数</span><strong id="clipCount">0</strong><small>逻辑片段</small></article>
+        <article class="summary-card metric"><span>待处理</span><strong id="pendingCount">0</strong><small>可批量操作</small></article>
+        <article class="summary-card metric"><span>进行中</span><strong id="runningCount">0</strong><small>资源队列</small></article>
+      </section>
+
+      <section class="panel clip-panel" id="clipPanel">
+        <div class="panel-heading"><div><h2>片段列表</h2><p>场景切换强制分段，连续场景以少于一分钟的最少片段展示。</p></div><span id="pollStatus" class="poll-status">实时同步</span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部片段"></th><th>片段名称</th><th>时间范围</th><th>时长</th><th>检测模式</th><th>推荐工作流</th><th>最终工作流</th><th>当前状态</th><th>进度</th><th>操作</th></tr></thead>
+            <tbody id="clipRows">
+              <tr class="placeholder-row"><td><input type="checkbox" disabled aria-label="示例片段"></td><td><strong>场景 01 · 第 1 段</strong></td><td>00:00 – 00:55</td><td>00:55</td><td>等待分析</td><td class="workflow-recommendation">—</td><td>—</td><td><span class="status-pill">载入中</span></td><td><span class="stage-only">—</span></td><td>—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel merge-preview">
+        <div><h2>输出顺序预览</h2><p>片段按原视频时间顺序排列；未完成片段会阻止合并。</p></div>
+        <div id="mergeTimeline" class="merge-timeline"><span class="empty-state">完成片段分析后显示输出顺序</span></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="preflightDialog" class="dialog"><form method="dialog"><h2>批量操作预检</h2><div id="preflightResult"></div><div class="dialog-actions"><button value="cancel" class="button secondary">取消</button><button id="confirmPreflight" value="default" class="button primary">确认入队</button></div></form></dialog>
+  <template id="clipRowTemplate"><tr><td><input class="clip-select" type="checkbox"></td><td><div class="clip-name-cell"><button class="clip-name" type="button"></button><span class="review-badge" hidden>需确认</span></div></td><td class="time-range"></td><td class="duration"></td><td><span class="motion-mode"></span><small class="confidence"></small></td><td class="workflow-recommendation"></td><td><select class="workflow-select" aria-label="最终工作流"><option value="">使用系统推荐</option><option value="sfm_only">SfM</option><option value="srt_sfm_fused">SRT + SfM</option><option value="srt_full_pose">SRT 完整姿态</option><option value="pure_rotation">纯旋转</option></select><span class="row-error" role="alert"></span></td><td><span class="status-pill"></span><small class="stage-label"></small></td><td><progress max="1"></progress><span class="stage-only"></span></td><td><div class="row-actions"><button class="button compact open-workbench" type="button">进入工作台</button><button class="button compact retry-job" type="button">重试</button><button class="button compact cancel-job" type="button">取消</button></div></td></tr></template>
+  <script src="project_workspace.js"></script>
+</body>
+</html>
