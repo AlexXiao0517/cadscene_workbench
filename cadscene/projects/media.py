@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -324,7 +325,12 @@ def validate_render_frame_map(
     if not isinstance(frame_map, Mapping):
         raise FrameMapMismatch("render frame map must be an object")
     count = _integer(rendered_frame_count, "rendered_frame_count", minimum=0)
-    if frame_map.get("schema_version") != 1:
+    raw_schema_version = frame_map.get("schema_version")
+    try:
+        schema_version = _integer(raw_schema_version, "schema_version", minimum=1)
+    except InvalidMediaContract as exc:
+        raise FrameMapMismatch("unsupported render frame map schema") from exc
+    if type(raw_schema_version) is not int or schema_version != 1:
         raise FrameMapMismatch("unsupported render frame map schema")
     source_time_base = _fraction_value(
         frame_map.get("source_time_base"), "source_time_base"
@@ -392,6 +398,25 @@ def validate_rendered_media(
     expected_source_frames: Sequence[DecodedFrameTimestamp],
     expected_source_time_base: Fraction,
 ) -> RenderValidationProof:
+    if (
+        not isinstance(expected_source_frames, SequenceABC)
+        or isinstance(expected_source_frames, (str, bytes, bytearray))
+        or not expected_source_frames
+        or any(
+            not isinstance(frame, DecodedFrameTimestamp)
+            for frame in expected_source_frames
+        )
+    ):
+        raise InvalidMediaContract(
+            "authoritative source frames must be a non-empty sequence"
+        )
+    if (
+        not isinstance(expected_source_time_base, Fraction)
+        or expected_source_time_base <= 0
+    ):
+        raise InvalidMediaContract(
+            "authoritative source time base must be a positive Fraction"
+        )
     if not probe.video.display_orientation_baked:
         raise InvalidMediaContract("rendered video display orientation is not baked")
     output_pts = validate_video_pts(probe.video.frame_pts)

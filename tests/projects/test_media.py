@@ -311,6 +311,53 @@ def test_render_validation_requires_exact_authoritative_source_identity(
         )
 
 
+@pytest.mark.parametrize("invalid_frames", [None, 3.14, (), "frames"])
+def test_render_validation_rejects_missing_nonsequence_or_empty_authority(
+    invalid_frames: object,
+) -> None:
+    probe = parse_ffprobe(_probe_payload())
+
+    with pytest.raises(InvalidMediaContract, match="source frames"):
+        validate_rendered_media(
+            probe,
+            _frame_map(),
+            expected_source_frames=invalid_frames,
+            expected_source_time_base=Fraction(1, 1000),
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_time_base", [None, 0.001, Fraction(0, 1)]
+)
+def test_render_validation_requires_positive_exact_fraction_source_time_base(
+    invalid_time_base: object,
+) -> None:
+    probe = parse_ffprobe(_probe_payload())
+    expected = tuple(
+        DecodedFrameTimestamp(ordinal, pts, 40, "pts")
+        for ordinal, pts in ((10, 5000), (11, 5040), (12, 5080))
+    )
+
+    with pytest.raises(InvalidMediaContract, match="positive Fraction"):
+        validate_rendered_media(
+            probe,
+            _frame_map(),
+            expected_source_frames=expected,
+            expected_source_time_base=invalid_time_base,
+        )
+
+
+@pytest.mark.parametrize("invalid_schema", [True, 1.0])
+def test_render_frame_map_schema_version_is_strict_integer(
+    invalid_schema: object,
+) -> None:
+    frame_map = _frame_map()
+    frame_map["schema_version"] = invalid_schema
+
+    with pytest.raises(FrameMapMismatch, match="schema"):
+        validate_render_frame_map(frame_map, rendered_frame_count=3)
+
+
 def test_media_compatibility_reports_each_standard_video_difference() -> None:
     actual = _standard_spec(width=1280, pixel_format="yuv444p", color_space="bt2020nc")
 

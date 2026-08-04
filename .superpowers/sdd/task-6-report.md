@@ -79,3 +79,22 @@ Review TDD evidence:
 - Related authoritative PTS/export/frame-map regression -
   `96 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+## Narrow media-contract review closure
+
+- The publishing-level `validate_rendered_media()` boundary now rejects a
+  missing, non-sequence, string-like, empty, or wrongly typed authoritative
+  decoded-frame collection before performing output validation.
+- The authoritative source time base must be an exact, positive `Fraction`;
+  `None`, floating-point values, and non-positive rationals fail closed.
+- Render frame-map `schema_version` is parsed through integer validation and
+  additionally requires the original JSON value to be a non-bool `int`
+  exactly equal to `1`; values such as `true` and `1.0` are rejected.
+
+Narrow-review TDD evidence:
+
+- RED: all `9` focused cases failed before the production change.
+- Focused GREEN: `9 passed, 42 deselected`.
+- Media plus authoritative PTS/export/frame-map regression:
+  `105 passed, 1 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
