@@ -123,6 +123,36 @@ TDD evidence:
 - Related project/render/service/PTS/export regression: `651 passed, 2 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
+### Manifest-free concat execution boundary
+
+- Added `ConcatMediaInputs`, immutable per-segment execution records, and a
+  manifest-free `ConcatMediaAdapter`. The adapter accepts only a canonical
+  `ConcatPlan`, the complete authoritative decoded-frame index, the project media
+  spec, original source asset, and an existing attempt directory.
+- Preparation rejects any dependency-required, unready, ambiguously normalized,
+  or out-of-order entry. It re-hashes the original long video and every selected
+  rendered video/frame-map file against the immutable plan; validation repeats
+  those checks before and after the structured validator to detect changes while
+  the task is running.
+- The execution plan explicitly separates compatible inputs from normalization
+  outputs, preserves source order and immutable publication identities, carries
+  the complete expected final frame map, and declares only the original long
+  video as the audio source. Expected video duration is derived from the complete
+  source integer-PTS span; A/V tolerance is exactly the greater of 50 ms and the
+  maximum authoritative source-frame duration.
+- This substage defines no subprocess or persistence behavior. The next substage
+  supplies the FFmpeg executor and production output validator; adapters remain
+  unable to read or write project manifests.
+
+TDD evidence:
+
+- RED: concat adapter module absent; later regressions demonstrated that
+  post-prepare byte replacement, unknown normalization state, and malformed
+  render order were initially accepted.
+- Focused concat adapter/plan/media: `95 passed`.
+- Related concat/source-fallback/render: `206 passed, 1 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
 ### Exact render-prerequisite binding closure
 
 - A trajectory proof now includes the bytes of the named
