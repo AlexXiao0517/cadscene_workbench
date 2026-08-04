@@ -562,3 +562,44 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Ninth formal review closure (base `32eb6a5`)
+
+### Review finding map: 2 Important
+
+1. **Important - structurally valid recorded jobs could carry noncanonical
+   execution identity:** analysis task identity now has one canonical contract
+   helper shared by `_new_analysis_job` and recorded-DAG validation. The
+   contract covers project and project-level clip ownership, job/resource type,
+   priority, exclusive and idempotency keys, input revision and fingerprint,
+   and adapter name/version. Dependency topology remains a separate DAG check.
+   A field-tampered recorded reference cannot restore success; when the
+   canonical idempotent DAG exists it is selected without adding, reordering,
+   or rewriting queue/jobs-manifest provenance.
+2. **Important - SRT descriptor presence was validated only from the current
+   asset side:** current and captured SRT state must now be symmetric. Both may
+   be absent/`None`, or both must be mappings with identical non-empty string
+   path and SHA-256 values. Extra captured SRT, malformed current or captured
+   values, and one-sided presence all fail closed. Valid historical success
+   restoration remains supported both with and without SRT.
+
+### Ninth-round TDD and verification evidence
+
+- Initial RED: `10 failed, 3 passed` - eight independently tampered canonical
+  contract fields plus extra-snapshot-SRT and malformed-current-SRT were
+  accepted. The already-safe malformed-snapshot-SRT case and both valid SRT
+  presence variants passed before implementation.
+- Review reproductions GREEN: `13 passed`.
+- Analysis-job test module: `51 passed`.
+- Focused analysis/queue/project-API suite: `117 passed`.
+- A focused existing upload-DAG regression exposed intended-vs-current asset
+  validation and passed after submission state received the exact asset set
+  used to create the batch.
+- All project tests: `239 passed`.
+- Final fresh full suite: `816 passed, 1 skipped` in 39.73 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

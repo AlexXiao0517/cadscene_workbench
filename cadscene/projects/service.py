@@ -191,6 +191,7 @@ class ProjectService:
                     state, project_state = self._analysis_state_for_submission(
                         batch=batch,
                         project=value,
+                        project_assets=published_assets,
                         request_key=request_key,
                         base_state=base_state,
                         operation_id=operation_id,
@@ -357,6 +358,7 @@ class ProjectService:
                 state, project_state = self._analysis_state_for_submission(
                     batch=batch,
                     project=value,
+                    project_assets=value.source_assets,
                     request_key=request_key,
                     base_state=base_state,
                     operation_id=operation_id,
@@ -479,6 +481,7 @@ class ProjectService:
                     tuple(item for item in recorded if item is not None),
                     project_id=project_id,
                     request_key=request_key,
+                    project_assets=project.source_assets,
                 )
                 if reused is not None and len(recorded) == len(reused):
                     batch = PreparedSubmissionBatch(
@@ -517,6 +520,7 @@ class ProjectService:
                 state, project_state = self._analysis_state_for_submission(
                     batch=batch,
                     project=value,
+                    project_assets=assets,
                     request_key=request_key,
                     base_state=(
                         assets.get("_analysis")
@@ -1794,6 +1798,7 @@ class ProjectService:
         *,
         project_id: str,
         request_key: str,
+        project_assets: Mapping[str, object],
     ) -> tuple[QueueJob, QueueJob] | None:
         if len(jobs) != 2 or len({item.job_id for item in jobs}) != 2:
             return None
@@ -1809,16 +1814,28 @@ class ProjectService:
         video = by_type["video_analysis"]
         if cad.depends_on_job_ids or video.depends_on_job_ids != (cad.job_id,):
             return None
+        for phase, job in (("cad", cad), ("video", video)):
+            contract = _analysis_job_contract(
+                project_id=project_id,
+                request_key=request_key,
+                phase=phase,
+                project_assets=project_assets,
+            )
+            if any(
+                getattr(job, field_name) != expected
+                for field_name, expected in contract.items()
+            ):
+                return None
         return cad, video
 
     @staticmethod
     def _validated_analysis_descriptor(
-        project: ProjectManifest,
+        project_assets: Mapping[str, object],
         *,
         revision: str,
         request_key: str,
     ) -> dict[str, object] | None:
-        revisions = project.source_assets.get("_analysis_revisions")
+        revisions = project_assets.get("_analysis_revisions")
         if not isinstance(revisions, Mapping):
             return None
         descriptor = revisions.get(revision)
@@ -1837,11 +1854,8 @@ class ProjectService:
         ):
             return None
 
-        required_assets = ["video", "cad"]
-        if isinstance(project.source_assets.get("srt"), Mapping):
-            required_assets.append("srt")
-        for asset_name in required_assets:
-            current = project.source_assets.get(asset_name)
+        for asset_name in ("video", "cad"):
+            current = project_assets.get(asset_name)
             captured = snapshot.get(asset_name)
             if not isinstance(current, Mapping) or not isinstance(captured, Mapping):
                 return None
@@ -1855,6 +1869,24 @@ class ProjectService:
                     or captured_value != current_value
                 ):
                     return None
+
+        current_srt = project_assets.get("srt")
+        captured_srt = snapshot.get("srt")
+        if current_srt is None and captured_srt is None:
+            pass
+        elif isinstance(current_srt, Mapping) and isinstance(captured_srt, Mapping):
+            for identity_field in ("path", "sha256"):
+                current_value = current_srt.get(identity_field)
+                captured_value = captured_srt.get(identity_field)
+                if (
+                    not isinstance(current_value, str)
+                    or not current_value
+                    or not isinstance(captured_value, str)
+                    or captured_value != current_value
+                ):
+                    return None
+        else:
+            return None
 
         snapshot_artifact = snapshot.get("analysis_artifact")
         if not isinstance(snapshot_artifact, Mapping):
@@ -1875,6 +1907,7 @@ class ProjectService:
         *,
         batch: PreparedSubmissionBatch,
         project: ProjectManifest,
+        project_assets: Mapping[str, object],
         request_key: str,
         base_state: Mapping[str, object] | None,
         operation_id: str,
@@ -1899,6 +1932,7 @@ class ProjectService:
             batch.jobs,
             project_id=project.project_id,
             request_key=request_key,
+            project_assets=project_assets,
         )
         if jobs is None:
             state.update(
@@ -1919,7 +1953,7 @@ class ProjectService:
         if fully_validated:
             revision = str(video.output_revision)
             descriptor = self._validated_analysis_descriptor(
-                project,
+                project_assets,
                 revision=revision,
                 request_key=request_key,
             )
@@ -2028,35 +2062,23 @@ class ProjectService:
     ) -> QueueJob:
         if phase not in {"cad", "video"}:
             raise ValueError(f"unsupported analysis phase: {phase}")
-        identity_payload = _analysis_identity_payload(
-            phase=phase,
+        contract = _analysis_job_contract(
+            project_id=project_id,
             request_key=request_key,
+            phase=phase,
             project_assets=project_assets,
         )
-        input_fingerprint = _fingerprint(identity_payload)
         job_id = self._identity()
         attempt_dir = self._attempt_directory(project_id, job_id, 1)
         return QueueJob(
             job_id=job_id,
-            project_id=project_id,
-            clip_id="__project__",
-            job_type=f"{phase}_analysis",
-            resource_class="light_compute",
             status="queued",
             stage="queued",
-            priority=10,
             depends_on_job_ids=dependency_ids,
-            exclusive_key=f"analysis:{project_id}:{phase}",
-            idempotency_key=_fingerprint(
-                {**identity_payload, "purpose": "idempotency"}
-            ),
-            input_revision=request_key,
-            input_fingerprint=input_fingerprint,
-            adapter_name=ANALYSIS_ADAPTER_NAME,
-            adapter_version=ANALYSIS_ADAPTER_VERSION,
             output_revision=None,
             operation_id=operation_id,
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            **contract,
         )
 
     def _new_job(
@@ -2487,6 +2509,37 @@ def _analysis_identity_payload(
         "job_type": f"{phase}_analysis",
         "request_key": request_key,
         "source_assets": assets,
+        "adapter_name": ANALYSIS_ADAPTER_NAME,
+        "adapter_version": ANALYSIS_ADAPTER_VERSION,
+    }
+
+
+def _analysis_job_contract(
+    *,
+    project_id: str,
+    phase: str,
+    request_key: str,
+    project_assets: Mapping[str, object],
+) -> dict[str, object]:
+    if phase not in {"cad", "video"}:
+        raise ValueError(f"unsupported analysis phase: {phase}")
+    identity_payload = _analysis_identity_payload(
+        phase=phase,
+        request_key=request_key,
+        project_assets=project_assets,
+    )
+    return {
+        "project_id": project_id,
+        "clip_id": "__project__",
+        "job_type": f"{phase}_analysis",
+        "resource_class": "light_compute",
+        "priority": 10,
+        "exclusive_key": f"analysis:{project_id}:{phase}",
+        "idempotency_key": _fingerprint(
+            {**identity_payload, "purpose": "idempotency"}
+        ),
+        "input_revision": request_key,
+        "input_fingerprint": _fingerprint(identity_payload),
         "adapter_name": ANALYSIS_ADAPTER_NAME,
         "adapter_version": ANALYSIS_ADAPTER_VERSION,
     }

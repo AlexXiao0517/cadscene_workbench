@@ -593,6 +593,167 @@ def test_descriptor_control_field_injection_cannot_override_submission_state(
     assert state["operation_id"] != "injected-operation"
 
 
+@pytest.mark.parametrize(
+    ("field_name", "tampered_value"),
+    (
+        ("input_fingerprint", "f" * 64),
+        ("idempotency_key", "tampered-idempotency"),
+        ("adapter_name", "tampered-adapter"),
+        ("adapter_version", "999"),
+        ("exclusive_key", "tampered-exclusive"),
+        ("clip_id", "tampered-clip"),
+        ("resource_class", "heavy_compute"),
+        ("priority", 999),
+    ),
+)
+def test_recorded_analysis_job_contract_must_match_canonical_identity(
+    tmp_path: Path, field_name: str, tampered_value: object
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    canonical_ids, _revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    cad = queue.get(canonical_ids[0])
+    video = queue.get(canonical_ids[1])
+    fake = replace(
+        video,
+        job_id=f"fake-{field_name}",
+        **{field_name: tampered_value},
+    )
+    restored_queue = LocalResourceQueue.restore(
+        (*queue.jobs(), fake),
+        queue_order=(*queue.queue_order(), fake.job_id),
+        schedule=False,
+    )
+    restarted = ProjectService(
+        repositories,
+        restored_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+        identity=iter((f"restart-{index}" for index in range(20))).__next__,
+    )
+    restarted._publish_queue("p1")
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    **value.source_assets["_analysis"],
+                    "status": "queued",
+                    "job_ids": [cad.job_id, fake.job_id],
+                },
+            },
+            project_state="analyzing",
+        ),
+    )
+    before_queue = {
+        item.job_id: item.to_dict() for item in restored_queue.jobs()
+    }
+    before_order = restored_queue.queue_order()
+    before_jobs = repositories.jobs.load("p1")
+
+    repaired = restarted.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == canonical_ids
+    state = repositories.project.load("p1").source_assets["_analysis"]
+    assert tuple(state["job_ids"]) == canonical_ids
+    assert state["status"] == "success"
+    assert {
+        item.job_id: item.to_dict() for item in restored_queue.jobs()
+    } == before_queue
+    assert restored_queue.queue_order() == before_order
+    after_jobs = repositories.jobs.load("p1")
+    assert after_jobs.jobs == before_jobs.jobs
+    assert after_jobs.queue_order == before_jobs.queue_order
+
+
+@pytest.mark.parametrize(
+    "srt_case", ("snapshot_extra", "current_invalid", "snapshot_invalid")
+)
+def test_reused_success_descriptor_requires_symmetric_srt_presence(
+    tmp_path: Path, srt_case: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    if srt_case == "snapshot_invalid":
+        _add_srt_asset(repositories, tmp_path)
+    _job_ids, revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    project = repositories.project.load("p1")
+    assets = dict(project.source_assets)
+    revisions = dict(assets["_analysis_revisions"])
+    descriptor = dict(revisions[revision])
+    snapshot = dict(descriptor["input_snapshot"])
+    if srt_case == "snapshot_extra":
+        snapshot["srt"] = {
+            "path": str(tmp_path / "unexpected.srt"),
+            "sha256": "c" * 64,
+        }
+    elif srt_case == "current_invalid":
+        assets["srt"] = ["invalid"]
+    else:
+        snapshot["srt"] = ["invalid"]
+    descriptor["input_snapshot"] = snapshot
+    revisions[revision] = descriptor
+    state = dict(assets["_analysis"])
+    state.pop("job_ids")
+    assets.update({"_analysis_revisions": revisions, "_analysis": state})
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(value, source_assets=assets),
+    )
+
+    service.enqueue_analysis_jobs("p1")
+
+    restored = repositories.project.load("p1")
+    assert restored.source_assets["_analysis"]["status"] == "failed"
+    assert restored.project_state == "analysis_failed"
+    assert "immutable descriptor" in str(
+        restored.source_assets["_analysis"]["error"]
+    )
+
+
+@pytest.mark.parametrize("with_srt", (False, True))
+def test_reused_success_descriptor_accepts_symmetric_srt_presence(
+    tmp_path: Path, with_srt: bool
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    if with_srt:
+        _add_srt_asset(repositories, tmp_path)
+    canonical_ids, revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    project = repositories.project.load("p1")
+    assets = dict(project.source_assets)
+    state = dict(assets["_analysis"])
+    state.pop("job_ids")
+    state["status"] = "queued"
+    assets["_analysis"] = state
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets=assets,
+            project_state="analyzing",
+        ),
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    restored = repositories.project.load("p1")
+    assert repaired.job_ids == canonical_ids
+    assert restored.source_assets["_analysis"]["status"] == "success"
+    assert restored.source_assets["_analysis"]["analysis_revision"] == revision
+    assert restored.project_state == "ready"
+
+
 def test_analysis_enqueue_failure_never_leaves_queued_intent_without_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -670,6 +831,30 @@ def _video_output(job, tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     return output, revision
+
+
+def _add_srt_asset(repositories, tmp_path: Path) -> None:
+    srt = tmp_path / "source.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nframe\n",
+        encoding="utf-8",
+    )
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "srt": {
+                    "path": str(srt),
+                    "sha256": "c" * 64,
+                    "original_filename": "source.srt",
+                },
+            },
+        ),
+    )
 
 
 def _complete_analysis(
