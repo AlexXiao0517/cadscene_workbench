@@ -14,7 +14,7 @@ import zipfile
 
 
 ASSET_TYPES = frozenset({"video", "cad", "srt"})
-_PROJECT_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+from .identifiers import validate_project_id
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v"})
 _CAD_EXTENSIONS = frozenset({".dwg", ".dxf", ".json", ".zip"})
 
@@ -129,7 +129,10 @@ class PendingUpload:
                 "sha256": digest,
                 "validation": validation,
             }
-            report_path = self._store._write_report(
+            self._store._write_report(
+                self.project_id, self.asset_type, report
+            )
+            report_path = self._store._write_attempt_report(
                 self.project_id, self.asset_type, report
             )
         except Exception as exc:
@@ -309,9 +312,7 @@ class ValidatedUploadStore:
 
     @staticmethod
     def _validate_project_id(project_id: str) -> str:
-        if not _PROJECT_ID.fullmatch(project_id):
-            raise ValueError("invalid project_id")
-        return project_id
+        return validate_project_id(project_id)
 
     @staticmethod
     def _validate_extension(asset_type: str, extension: str, filename: str) -> None:
@@ -337,6 +338,7 @@ def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:
             str(ffmpeg),
             "-v",
             "error",
+            "-xerror",
             "-i",
             str(path),
             "-map",
@@ -349,7 +351,7 @@ def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:
         text=True,
         check=False,
     )
-    if process.returncode != 0:
+    if process.returncode != 0 or process.stderr.strip():
         raise ValueError(f"video full decode failed: {process.stderr[-1000:]}")
     index = probe_decoded_frame_index(path, ffmpeg_executable=ffmpeg)
     return {

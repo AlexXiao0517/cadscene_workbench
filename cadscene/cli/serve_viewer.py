@@ -756,10 +756,12 @@ def main(argv: list[str] | None = None) -> int:
     server.extra_roots = served_roots
     server.job_runner = JobRunner(storage_root)
     from cadscene.projects.analysis import ProjectAnalysisCoordinator
+    from cadscene.projects.executor import LocalJobExecutor
     from cadscene.projects.http_api import ProjectApi
     from cadscene.projects.json_repositories import project_repositories
     from cadscene.projects.queue import LocalResourceQueue
     from cadscene.projects.service import ProjectService
+    from cadscene.projects.runtime import ProjectRuntime
     from cadscene.projects.uploads import ValidatedUploadStore
     from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -780,6 +782,20 @@ def main(argv: list[str] | None = None) -> int:
         storage_root=storage_root,
         now=lambda: datetime.now(timezone.utc).isoformat(),
     )
+    project_runtime = ProjectRuntime(
+        projects_root=projects_root,
+        repositories=repositories,
+        service=project_service,
+        executor=LocalJobExecutor(project_service),
+        analysis=analysis,
+    )
+    try:
+        project_runtime.start()
+    except Exception as exc:
+        analysis.close(wait=True)
+        server.server_close()
+        print(f"unable to acquire or recover project root: {exc}", file=sys.stderr)
+        return 1
     server.project_api = ProjectApi(
         repositories=repositories,
         service=project_service,
@@ -788,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         analysis_trigger=analysis.trigger,
     )
     server.project_analysis = analysis
+    server.project_runtime = project_runtime
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"
     print(f"Serving {root}")
     for name, path in served_roots.items():
@@ -798,8 +815,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        analysis.close(wait=True)
-        server.server_close()
+        try:
+            project_runtime.close()
+        finally:
+            server.server_close()
     return 0
 
 

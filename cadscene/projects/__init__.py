@@ -29,6 +29,7 @@ from .executor import JobExecutionPlan, LocalJobExecutor
 from .uploads import PublishedUpload, UploadValidationError, ValidatedUploadStore
 from .http_api import ApiResponse, ProjectApi, UploadRequest
 from .analysis import ProjectAnalysisCoordinator
+from .runtime import ProjectRootLease, ProjectRuntime
 
 __all__ = [
     "ClipDefinition",
@@ -66,4 +67,6 @@ __all__ = [
     "ProjectApi",
     "UploadRequest",
     "ProjectAnalysisCoordinator",
+    "ProjectRootLease",
+    "ProjectRuntime",
 ]

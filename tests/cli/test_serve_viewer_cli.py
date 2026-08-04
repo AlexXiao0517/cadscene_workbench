@@ -50,10 +50,10 @@ def test_viewer_server_exclusively_owns_its_port() -> None:
         first.server_close()
 
 
-def test_serve_viewer_serves_index_and_supports_range() -> None:
+def test_serve_viewer_serves_index_and_supports_range(tmp_path: Path) -> None:
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "cadscene.cli.serve_viewer", "--bind", "127.0.0.1", "--port", str(port)],
+        [sys.executable, "-m", "cadscene.cli.serve_viewer", "--bind", "127.0.0.1", "--port", str(port), "--storage-root", str(tmp_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -121,6 +121,8 @@ def test_serve_viewer_extra_root_serves_named_mount(tmp_path: Path) -> None:
             str(port),
             "--extra-root",
             f"legacy={legacy_root}",
+            "--storage-root",
+            str(tmp_path),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

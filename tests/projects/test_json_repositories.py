@@ -1027,3 +1027,16 @@ def test_prevalidated_candidate_is_not_decoded_again_during_publication(tmp_path
     )
 
     assert calls == 3
+
+
+@pytest.mark.parametrize("project_id", [".", "..", "../escape", "C:escape"])
+def test_project_repository_rejects_ids_that_can_escape_root(
+    tmp_path: Path, project_id: str
+) -> None:
+    repositories = project_repositories(tmp_path / "projects")
+
+    with pytest.raises(ValueError, match="invalid project_id"):
+        repositories.project.path_for(project_id)
+
+    with pytest.raises(ValueError, match="invalid project_id"):
+        repositories.create_project(project_id, updated_at="now")

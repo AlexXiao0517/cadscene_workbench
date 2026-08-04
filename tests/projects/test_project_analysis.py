@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
 
 from cadscene.projects.analysis import ProjectAnalysisCoordinator
 from cadscene.projects.json_repositories import project_repositories
@@ -251,3 +252,61 @@ def test_changed_analysis_request_does_not_attach_old_cad_result_to_new_asset(
     current_cad = repositories.project.load("p1").source_assets["cad"]
     assert current_cad["sha256"] == "new"
     assert "analysis" not in current_cad
+
+
+def test_analysis_uses_asset_snapshot_captured_when_triggered(
+    tmp_path: Path,
+) -> None:
+    repositories = project_repositories(tmp_path / "projects")
+    repositories.create_project("p1", updated_at="now")
+    old_video = tmp_path / "old.mp4"
+    new_video = tmp_path / "new.mp4"
+    old_video.write_bytes(b"old")
+    new_video.write_bytes(b"new")
+    current = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {"path": str(old_video), "sha256": "old"},
+                "_analysis": {"request_key": "request-old", "status": "queued"},
+            },
+        ),
+    )
+    observed: list[Path] = []
+
+    def analyzer(**kwargs):
+        observed.append(Path(kwargs["video_path"]))
+        return _fake_video_analyzer(**kwargs)
+
+    gate = threading.Event()
+    coordinator = ProjectAnalysisCoordinator(
+        repositories,
+        projects_root=tmp_path / "projects",
+        storage_root=tmp_path,
+        now=lambda: "later",
+        identity=lambda: "analysis-old",
+        video_analyzer=analyzer,
+    )
+    coordinator._executor.submit(gate.wait)
+    future = coordinator.trigger("p1", "video", _upload("p1", "video", old_video))
+    changed = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=changed.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {"path": str(new_video), "sha256": "new"},
+                "_analysis": {"request_key": "request-new", "status": "queued"},
+            },
+        ),
+    )
+    gate.set()
+    future.result()
+    coordinator.close()
+
+    assert observed == []  # old request is superseded before any input is opened
+    assert repositories.project.load("p1").active_analysis_revision is None

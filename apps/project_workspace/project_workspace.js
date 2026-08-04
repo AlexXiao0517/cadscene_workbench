@@ -37,6 +37,12 @@
     };
   }
 
+  function effectiveDisplayName(clip) {
+    if (!dirtyEdits.has(clip.clip_id)) return clip.display_name;
+    const edit = dirtyEdits.get(clip.clip_id);
+    return edit.name === null ? clip.generated_display_name : edit.name;
+  }
+
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
     $(".open-workbench", row).disabled = !capabilities.can_open_workbench;
@@ -56,7 +62,7 @@
       else selectedClipIds.delete(clip.clip_id);
     });
     const nameButton = $(".clip-name", row);
-    nameButton.textContent = edit.name || clip.display_name;
+    nameButton.textContent = effectiveDisplayName(clip);
     nameButton.addEventListener("click", () => renameClip(clip, row));
     $(".review-badge", row).hidden = !clip.needs_review;
     $(".time-range", row).textContent = clip.time_range;
@@ -76,6 +82,8 @@
     if (!progress.hidden) progress.value = fraction;
     $(".stage-only", row).textContent = progress.hidden ? (clip.progress?.message || clip.stage || "—") : `${Math.round(fraction * 100)}%`;
     applyCapabilities(clip, row);
+    $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
+    $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
   }
 
@@ -102,7 +110,7 @@
     timeline.replaceChildren(...snapshot.clips.map((clip) => {
       const item = document.createElement("span");
       item.className = "timeline-clip";
-      item.textContent = `${effectiveEdit(clip).name || clip.display_name} · ${clip.duration}`;
+      item.textContent = `${effectiveDisplayName(clip)} · ${clip.duration}`;
       return item;
     }));
   }
@@ -186,6 +194,20 @@
       });
       state.pendingPreflight = { clipIds, result: body };
       $("#preflightResult").innerHTML = `<p>可入队：${body.eligible.length} 个</p><p>需确认：${body.needs_confirmation.length} 个</p><p>已跳过：${body.skipped.length} 个</p>`;
+      const items = $("#preflightItems");
+      items.replaceChildren(...clipIds.map((clipId) => {
+        const label = document.createElement("label");
+        const category = body.eligible.includes(clipId) ? "可入队" : (body.needs_confirmation.includes(clipId) ? "需确认" : "已跳过");
+        const reason = body.reasons[clipId] || "检查通过";
+        if (body.needs_confirmation.includes(clipId)) {
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.dataset.confirmClipId = clipId;
+          label.append(checkbox);
+        }
+        label.append(document.createTextNode(`${clipId} · ${category} · ${reason}`));
+        return label;
+      }));
       $("#preflightDialog").showModal();
     } catch (error) { setMessage(error.message, true); }
   }
@@ -194,6 +216,8 @@
     event.preventDefault();
     const pending = state.pendingPreflight;
     if (!pending) return;
+    const confirmedClipIds = [...document.querySelectorAll("[data-confirm-clip-id]:checked")]
+      .map((item) => item.dataset.confirmClipId);
     try {
       const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/trajectory-jobs`, {
         method: "POST",
@@ -201,7 +225,7 @@
         body: JSON.stringify({
           expected_revision: state.snapshot.component_revisions.jobs,
           clip_ids: pending.clipIds,
-          confirmed_clip_ids: pending.result.needs_confirmation,
+          confirmed_clip_ids: confirmedClipIds,
           enqueue: true,
         }),
       });
@@ -214,6 +238,37 @@
     } catch (error) {
       setMessage(error.message, true);
     }
+  }
+
+  async function reanalyzeProject() {
+    try {
+      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/analysis/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.project }),
+      });
+      state.snapshot.component_revisions.project = body.project_revision;
+      state.etag = null;
+      setMessage("已提交重新分析");
+      await pollSnapshot();
+    } catch (error) { setMessage(error.message, true); }
+  }
+
+  async function runJobAction(clip, action) {
+    if (!clip.job_id) return;
+    const path = action === "retry"
+      ? `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/retry`
+      : `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/cancel`;
+    try {
+      const { body } = await request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.jobs }),
+      });
+      state.snapshot.component_revisions.jobs = body.jobs_revision;
+      state.etag = null;
+      await pollSnapshot();
+    } catch (error) { setMessage(error.message, true); }
   }
 
   $("#sidebarToggle").addEventListener("click", (event) => {
@@ -229,6 +284,7 @@
     if (state.snapshot) renderSnapshot(state.snapshot);
   });
   $("#batchTrajectoryButton").addEventListener("click", preflightBatch);
+  $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#confirmPreflight").addEventListener("click", enqueuePreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
   if (!projectId) setMessage("缺少项目标识，无法载入工作区。", true);

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import threading
 
+import pytest
+
 from cadscene.projects.http_api import ProjectApi, UploadRequest
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
@@ -16,6 +18,17 @@ from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.cli.serve_viewer import RangeRequestHandler, ViewerHTTPServer
 from cadscene.projects.http_api import ApiResponse
+
+
+def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() -> None:
+    source = (Path(__file__).resolve().parents[2] / "cadscene" / "cli" / "serve_viewer.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "LocalJobExecutor(project_service)" in source
+    assert "ProjectRuntime(" in source
+    assert "project_runtime.start()" in source
+    assert "project_runtime.close()" in source
 
 
 def _clip(
@@ -64,7 +77,11 @@ def _api(tmp_path: Path, clips: tuple[ClipDefinition, ...]):
     repositories = project_repositories(tmp_path / "projects")
     repositories.create_project("p1", updated_at="2026-08-04T00:00:00Z")
     video = tmp_path / "source.mp4"
+    cad = tmp_path / "design.dxf"
     video.write_bytes(b"video")
+    cad.write_bytes(b"cad")
+    (tmp_path / "video.validation.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "cad.validation.json").write_text("{}", encoding="utf-8")
     project = repositories.project.load("p1")
     repositories.project.update(
         "p1",
@@ -145,6 +162,60 @@ def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     assert "interface-only" in by_id["full-pose"]["capabilities"]["reason"]
 
 
+def test_project_can_start_trajectory_when_only_review_confirmation_is_needed(
+    tmp_path: Path,
+) -> None:
+    api, _repositories, _queue = _api(
+        tmp_path, (_clip("review", needs_review=True),)
+    )
+
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert response.body["capabilities"]["can_start_trajectory"] is True
+    clip = response.body["clips"][0]
+    assert clip["capabilities"]["trajectory_needs_confirmation"] is True
+
+
+def test_snapshot_reads_all_manifests_under_fixed_lock_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    initial_clips_revision = repositories.clips.load("p1").revision
+    begin_update = threading.Event()
+    update_done = threading.Event()
+    original_project_load = repositories.project.load
+    first = True
+
+    def delayed_project_load(project_id: str):
+        nonlocal first
+        value = original_project_load(project_id)
+        if first:
+            first = False
+            begin_update.set()
+            update_done.wait(0.2)
+        return value
+
+    monkeypatch.setattr(repositories.project, "load", delayed_project_load)
+
+    def update_clips() -> None:
+        begin_update.wait(1)
+        current = repositories.clips.load("p1")
+        repositories.clips.update(
+            "p1",
+            expected_revision=current.revision,
+            mutate=lambda value: replace(value, updated_at="changed"),
+        )
+        update_done.set()
+
+    updater = threading.Thread(target=update_clips)
+    updater.start()
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+    updater.join(2)
+
+    assert not updater.is_alive()
+    assert response.body["component_revisions"]["clips"] == initial_clips_revision
+
+
 def test_workflow_override_requires_revision_and_null_restores_recommendation(
     tmp_path: Path,
 ) -> None:
@@ -219,6 +290,42 @@ def test_batch_preflight_returns_per_clip_partial_result_without_enqueueing(
     assert queue.jobs() == ()
 
 
+def test_cancel_and_retry_job_routes_delegate_through_project_service(
+    tmp_path: Path,
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("ready"),))
+    enqueued = api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("p1").revision,
+            "clip_ids": ["ready"],
+            "enqueue": True,
+        },
+    )
+    job_id = enqueued.body["job_ids"][-1]
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+    assert snapshot.body["clips"][0]["capabilities"]["can_cancel"] is True
+
+    cancelled = api.handle(
+        "POST",
+        f"/api/projects/p1/jobs/{job_id}/cancel",
+        json_body={"expected_revision": repositories.jobs.load("p1").revision},
+    )
+    assert cancelled.status == 202
+    assert queue.status(job_id) == "cancelled"
+
+    retry_snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+    assert retry_snapshot.body["clips"][0]["capabilities"]["can_retry"] is True
+    retried = api.handle(
+        "POST",
+        f"/api/projects/p1/jobs/{job_id}/retry",
+        json_body={"expected_revision": repositories.jobs.load("p1").revision},
+    )
+    assert retried.status == 202
+    assert queue.status(job_id) in {"queued", "preparing"}
+
+
 def test_unknown_project_route_is_rejected_by_project_api(tmp_path: Path) -> None:
     api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
 
@@ -226,6 +333,18 @@ def test_unknown_project_route_is_rejected_by_project_api(tmp_path: Path) -> Non
 
     assert response.status == 404
     assert response.body == {"error": "project_api_not_found"}
+
+
+@pytest.mark.parametrize("project_id", [".", ".."])
+def test_api_rejects_dot_project_ids_without_touching_parent(
+    tmp_path: Path, project_id: str
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+
+    response = api.handle("POST", "/api/projects", json_body={"project_id": project_id})
+
+    assert response.status == 400
+    assert response.body == {"error": "invalid project_id"}
 
 
 def test_serve_viewer_only_dispatches_project_transport_to_project_api(
@@ -279,6 +398,29 @@ def test_serve_viewer_only_dispatches_project_transport_to_project_api(
     ]
 
 
+def test_serve_viewer_serves_real_project_snapshot_over_http(tmp_path: Path) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    server = ViewerHTTPServer(("127.0.0.1", 0), RangeRequestHandler)
+    server.project_api = api
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("GET", "/api/projects/p1/snapshot")
+        response = connection.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert response.getheader("ETag")
+    assert body["project_id"] == "p1"
+    assert body["clips"][0]["clip_id"] == "clip-1"
+
+
 def test_analysis_triggers_once_only_after_all_required_assets_publish(
     tmp_path: Path,
 ) -> None:
@@ -326,3 +468,102 @@ def test_analysis_triggers_once_only_after_all_required_assets_publish(
     )
     assert repeated.status == 201
     assert triggers == [("p1", "cad")]
+
+
+def test_manual_reanalysis_advances_revision_and_captures_a_new_request_key(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    video = tmp_path / "source.mp4"
+    cad = tmp_path / "design.dxf"
+    video.write_bytes(b"video")
+    cad.write_bytes(b"cad")
+    current = repositories.project.load("p1")
+    current = repositories.project.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {
+                    "path": str(video),
+                    "sha256": "a" * 64,
+                    "original_filename": "source.mp4",
+                    "size_bytes": 5,
+                    "validation_report": str(tmp_path / "video.validation.json"),
+                },
+                "cad": {
+                    "path": str(cad),
+                    "sha256": "b" * 64,
+                    "original_filename": "design.dxf",
+                    "size_bytes": 3,
+                    "validation_report": str(tmp_path / "cad.validation.json"),
+                    "analysis": {"entities": 1},
+                },
+                "_analysis": {"request_key": "automatic", "status": "success"},
+            },
+        ),
+    )
+    captured: list[tuple[str, str, str]] = []
+    api.analysis_trigger = lambda project_id, kind, upload: captured.append(
+        (project_id, kind, upload.sha256)
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/analysis/start",
+        json_body={"expected_revision": current.revision},
+    )
+
+    assert response.status == 202
+    changed = repositories.project.load("p1")
+    assert response.body["project_revision"] == changed.revision
+    assert changed.source_assets["_analysis"]["request_key"] != "automatic"
+    assert changed.source_assets["_analysis"]["status"] == "queued"
+    assert captured == [("p1", "video", "a" * 64)]
+    assert (
+        api.handle("GET", "/api/projects/p1/snapshot")
+        .body["capabilities"]["can_reanalyze"]
+        is False
+    )
+
+
+def test_manual_reanalysis_missing_captured_report_does_not_mutate_project(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    video = tmp_path / "source.mp4"
+    cad = tmp_path / "design.dxf"
+    video.write_bytes(b"video")
+    cad.write_bytes(b"cad")
+    current = repositories.project.load("p1")
+    current = repositories.project.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {
+                    "path": str(video),
+                    "sha256": "a" * 64,
+                    "validation_report": str(tmp_path / "missing.json"),
+                },
+                "cad": {"path": str(cad), "sha256": "b" * 64},
+                "_analysis": {"request_key": "automatic", "status": "success"},
+            },
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/analysis/start",
+        json_body={"expected_revision": current.revision},
+    )
+
+    assert response.status == 400
+    unchanged = repositories.project.load("p1")
+    assert unchanged.revision == current.revision
+    assert unchanged.source_assets["_analysis"] == {
+        "request_key": "automatic",
+        "status": "success",
+    }

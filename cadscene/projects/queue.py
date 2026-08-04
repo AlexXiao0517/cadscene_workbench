@@ -311,6 +311,14 @@ class LocalResourceQueue:
     def process_lock(self) -> threading.RLock:
         return self._lock
 
+    def execution_claimed_ids(self) -> tuple[str, ...]:
+        """Return jobs currently owned by a worker attempt."""
+
+        with self._lock:
+            return tuple(
+                job_id for job_id in self._queue_order if job_id in self._execution_claims
+            )
+
     @classmethod
     def restore(
         cls,
@@ -324,7 +332,10 @@ class LocalResourceQueue:
         process_alive: Callable[[int], bool] | None = None,
         schedule: bool = True,
         defer_cleanup: bool = False,
+        unverified_process_policy: str = "fail_closed",
     ) -> LocalResourceQueue:
+        if unverified_process_policy not in {"fail_closed", "interrupt"}:
+            raise ValueError("unsupported unverified process policy")
         queue = cls(
             capacities=capacities,
             process_probe=process_probe,
@@ -419,6 +430,8 @@ class LocalResourceQueue:
                         cleanup_reason=cleanup_reason,
                         target_terminal_status=cleanup_target.status,
                     )
+                elif unverified_process_policy == "interrupt":
+                    queue._jobs[job_id] = cleanup_target
                 elif not _process_may_be_alive(queue._process_alive, attempt.pid):
                     queue._jobs[job_id] = cleanup_target
                 else:
@@ -429,7 +442,9 @@ class LocalResourceQueue:
                         target_terminal_status=cleanup_target.status,
                     )
             elif not identity_matches:
-                if _process_may_be_alive(queue._process_alive, attempt.pid):
+                if unverified_process_policy == "interrupt":
+                    queue._jobs[job_id] = current.with_status("interrupted")
+                elif _process_may_be_alive(queue._process_alive, attempt.pid):
                     queue._jobs[job_id] = replace(
                         current.with_status("cancelling"),
                         error="process identity is unverified; recovery is blocked",
@@ -470,6 +485,7 @@ class LocalResourceQueue:
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
         current_fingerprint_resolver: Callable[[QueueJob], str | None] | None = None,
         defer_cleanup: bool = False,
+        unverified_process_policy: str = "fail_closed",
     ) -> LocalResourceQueue:
         incoming_values = [
             item if isinstance(item, QueueJob) else QueueJob.from_dict(item)
@@ -486,6 +502,7 @@ class LocalResourceQueue:
             process_alive=self._process_alive,
             schedule=False,
             defer_cleanup=defer_cleanup,
+            unverified_process_policy=unverified_process_policy,
         )
         with self._lock:
             retained_order = [

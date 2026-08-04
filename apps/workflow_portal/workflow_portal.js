@@ -103,6 +103,8 @@
     $("#portalSubmit").disabled = true;
     state.dataset = generatedId("dataset");
     state.runId = generatedId("run");
+    state.projectRevision = 0;
+    state.manifest = null;
     try {
       setMessage("正在创建项目…");
       await postJson("/api/projects", { project_id: state.dataset, hoveringDeclared });

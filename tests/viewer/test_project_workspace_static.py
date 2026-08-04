@@ -43,6 +43,8 @@ def test_polling_uses_etag_and_preserves_dirty_edits_and_selection() -> None:
     assert "selectedClipIds" in script
     assert "capabilities" in script
     assert "workflow_override: null" in script
+    assert "dirtyEdits.has(clip.clip_id)" in script
+    assert "edit.name === null ? clip.generated_display_name" in script
 
 
 def test_workflow_portal_redirects_new_uploads_to_project_workspace() -> None:
@@ -52,3 +54,25 @@ def test_workflow_portal_redirects_new_uploads_to_project_workspace() -> None:
 
     assert 'new URL("/apps/project_workspace/"' in script
     assert 'target.searchParams.set("projectId", state.dataset)' in script
+    assert "state.projectRevision = 0" in script
+    assert "state.manifest = null" in script
+
+
+def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="preflightItems"' in html
+    assert "body.reasons[clipId]" in script
+    assert 'data-confirm-clip-id' in script
+    assert "confirmedClipIds" in script
+    assert "confirmed_clip_ids: confirmedClipIds" in script
+
+
+def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert "/analysis/start" in script
+    assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/retry`" in script
+    assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/cancel`" in script
+    assert '#reanalyzeButton").addEventListener' in script

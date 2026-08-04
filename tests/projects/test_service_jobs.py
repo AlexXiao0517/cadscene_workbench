@@ -12,6 +12,7 @@ from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
+from cadscene.projects.repositories import RevisionConflict
 from cadscene.projects.service import ProjectService
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -991,3 +992,20 @@ def test_restore_cancelling_terminates_outside_service_and_queue_locks(
     assert callback_completed_before_cleanup
     assert callback_result and callback_result[0].stage == "still_running"
     assert restore_result
+
+
+def test_job_actions_check_expected_revision_inside_service_state_guard(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    job_id = queue.running_ids()[0]
+    status_before = queue.status(job_id)
+    current_revision = repositories.jobs.load("p1").revision
+
+    with pytest.raises(RevisionConflict):
+        service.cancel_job(
+            "p1", job_id, expected_jobs_revision=current_revision - 1
+        )
+
+    assert queue.status(job_id) == status_before

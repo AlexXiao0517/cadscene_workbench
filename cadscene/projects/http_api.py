@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import ExitStack
 from fractions import Fraction
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import BinaryIO, Callable, Mapping
 from uuid import uuid4
 
 from .json_repositories import ProjectRepositories
+from .identifiers import is_safe_stable_id, validate_project_id
 from .models import ClipDefinition
 from .repositories import RevisionConflict
 from .service import ProjectService, TrajectoryPreflight
@@ -30,6 +33,9 @@ _NAME = re.compile(
 )
 _TRAJECTORY = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
+)
+_JOB_ACTION = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
 
 
@@ -118,6 +124,11 @@ class ProjectApi:
             match = _TRAJECTORY.fullmatch(path)
             if method == "POST" and match:
                 return self._trajectory_jobs(match["project"], payload)
+            match = _JOB_ACTION.fullmatch(path)
+            if method == "POST" and match:
+                return self._job_action(
+                    match["project"], match["job"], match["action"], payload
+                )
             return ApiResponse(404, {"error": "project_api_not_found"})
         except RevisionConflict as exc:
             return ApiResponse(
@@ -134,9 +145,9 @@ class ProjectApi:
             return ApiResponse(400, {"error": str(exc)})
 
     def _create_project(self, payload: Mapping[str, object]) -> ApiResponse:
-        project_id = str(payload.get("project_id") or f"project-{self._identity()}")
-        if not re.fullmatch(_SAFE_ID, project_id):
-            raise ValueError("invalid project_id")
+        project_id = validate_project_id(
+            str(payload.get("project_id") or f"project-{self._identity()}")
+        )
         self.repositories.create_project(project_id, updated_at=self.now())
         return ApiResponse(
             201,
@@ -242,38 +253,56 @@ class ProjectApi:
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         expected_revision = _required_revision(payload)
-        project = self.repositories.project.load(project_id)
-        if project.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=project.revision,
-            )
-        triggered: list[str] = []
-        if self.analysis_trigger is not None:
-            for asset_type in ("cad", "video"):
-                path = self.uploads.published_path(project_id, asset_type)
-                report_path = self.uploads.validation_report_path(
-                    project_id, asset_type
-                )
-                if not path.is_file() or not report_path.is_file():
-                    continue
-                report = json.loads(report_path.read_text(encoding="utf-8"))
-                published = PublishedUpload(
+        with self.repositories.project.lock_for(project_id):
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
                     project_id=project_id,
-                    asset_type=asset_type,
-                    original_filename=str(report["original_filename"]),
-                    path=path,
-                    size_bytes=int(report["size_bytes"]),
-                    sha256=str(report["sha256"]),
-                    validation=dict(report.get("validation", {})),
-                    validation_report_path=report_path,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
                 )
-                self.analysis_trigger(project_id, asset_type, published)
-                triggered.append(asset_type)
-                if asset_type == "cad":
-                    break
-        return ApiResponse(202, {"project_id": project_id, "triggered": triggered})
+            base_key = _analysis_request_key(project.source_assets)
+            if base_key is None:
+                raise ValueError("validated video and CAD assets are required")
+            captured_assets = {
+                asset_type: _published_asset(
+                    project_id,
+                    asset_type,
+                    project.source_assets[asset_type],
+                )
+                for asset_type in ("video", "cad", "srt")
+                if isinstance(project.source_assets.get(asset_type), Mapping)
+            }
+            request_key = f"{base_key}:manual:{self._identity()}"
+            assets = dict(project.source_assets)
+            assets["_analysis"] = {
+                "request_key": request_key,
+                "status": "queued",
+                "requested_at": self.now(),
+                "request_kind": "manual",
+            }
+            updated = self.repositories.project.update(
+                project_id,
+                expected_revision=expected_revision,
+                mutate=lambda value: replace(
+                    value,
+                    source_assets=assets,
+                    project_state="analyzing",
+                    updated_at=self.now(),
+                ),
+            )
+            published = captured_assets["video"]
+            if self.analysis_trigger is not None:
+                self.analysis_trigger(project_id, "video", published)
+        return ApiResponse(
+            202,
+            {
+                "project_id": project_id,
+                "triggered": ["video"],
+                "project_revision": updated.revision,
+                "request_key": request_key,
+            },
+        )
 
     def _snapshot(
         self, project_id: str, headers: Mapping[str, str]
@@ -286,10 +315,19 @@ class ProjectApi:
         return ApiResponse(200, snapshot, response_headers)
 
     def _build_snapshot(self, project_id: str) -> dict[str, object]:
+        with ExitStack() as stack:
+            for repository in self.repositories.in_lock_order():
+                stack.enter_context(repository.lock_for(project_id))
+            return self._build_snapshot_locked(project_id)
+
+    def _build_snapshot_locked(self, project_id: str) -> dict[str, object]:
         project = self.repositories.project.load(project_id)
         clips = self.repositories.clips.load(project_id)
         jobs = self.repositories.jobs.load(project_id)
         render = self.repositories.render.load(project_id)
+        preflight = self.service.preflight_trajectory_jobs(
+            project_id, clip_ids=[clip.clip_id for clip in clips.clips]
+        )
         components = {
             "project": project.revision,
             "clips": clips.revision,
@@ -308,14 +346,16 @@ class ProjectApi:
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
         for clip in clips.clips:
-            capability = self._clip_capability(project_id, clip)
+            job = job_by_clip.get(clip.clip_id)
+            capability = self._clip_capability(clip, preflight, job)
             can_start_any = can_start_any or bool(
                 capability["can_start_trajectory"]
+                or capability["trajectory_needs_confirmation"]
             )
-            job = job_by_clip.get(clip.clip_id)
             clip_payloads.append(
                 {
                     "clip_id": clip.clip_id,
+                    "job_id": None if job is None else job.get("job_id"),
                     "display_name": clip.display_name,
                     "generated_display_name": clip.generated_display_name,
                     "custom_display_name": clip.custom_display_name,
@@ -343,6 +383,12 @@ class ProjectApi:
                     },
                 }
             )
+        analysis_state = project.source_assets.get("_analysis")
+        analysis_status = (
+            str(analysis_state.get("status"))
+            if isinstance(analysis_state, Mapping)
+            else None
+        )
         return {
             "project_id": project_id,
             "snapshot_revision": snapshot_revision,
@@ -354,28 +400,33 @@ class ProjectApi:
                 "can_start_trajectory": can_start_any,
                 "can_render": False,
                 "can_merge": False,
-                "can_reanalyze": bool(project.source_assets.get("video")),
+                "can_reanalyze": _analysis_request_key(project.source_assets)
+                is not None
+                and analysis_status not in {"queued", "running"},
             },
             "clips": clip_payloads,
         }
 
     def _clip_capability(
-        self, project_id: str, clip: ClipDefinition
+        self,
+        clip: ClipDefinition,
+        preflight: TrajectoryPreflight,
+        job: Mapping[str, object] | None,
     ) -> dict[str, object]:
-        preflight = self.service.preflight_trajectory_jobs(
-            project_id, clip_ids=[clip.clip_id]
-        )
         can_start = clip.clip_id in preflight.eligible
         needs_confirmation = clip.clip_id in preflight.needs_confirmation
         reason = preflight.reasons.get(clip.clip_id)
+        status = None if job is None else str(job.get("status"))
         return {
             "can_start_trajectory": can_start,
             "trajectory_needs_confirmation": needs_confirmation,
             "reason": reason,
             "can_open_workbench": False,
             "can_render": False,
-            "can_retry": False,
-            "can_cancel": False,
+            "can_retry": status
+            in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
+            "can_cancel": status
+            in {"queued", "preparing", "running", "validating", "cancelling"},
         }
 
     def _update_workflow(
@@ -470,6 +521,37 @@ class ProjectApi:
             },
         )
 
+    def _job_action(
+        self,
+        project_id: str,
+        job_id: str,
+        action: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        job = (
+            self.service.cancel_job(
+                project_id,
+                job_id,
+                expected_jobs_revision=expected_revision,
+            )
+            if action == "cancel"
+            else self.service.retry_job(
+                project_id,
+                job_id,
+                expected_jobs_revision=expected_revision,
+            )
+        )
+        return ApiResponse(
+            202,
+            {
+                "project_id": project_id,
+                "job_id": job.job_id,
+                "status": job.status,
+                "jobs_revision": self.repositories.jobs.load(project_id).revision,
+            },
+        )
+
 
 def _required_revision(payload: Mapping[str, object]) -> int:
     value = payload.get("expected_revision")
@@ -482,7 +564,7 @@ def _string_sequence(value: object, name: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list) or any(
-        not isinstance(item, str) or not re.fullmatch(_SAFE_ID, item)
+        not is_safe_stable_id(item)
         for item in value
     ):
         raise ValueError(f"{name} must be a list of stable IDs")
@@ -539,3 +621,22 @@ def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
         fingerprints["srt"] = str(srt["sha256"])
     payload = json.dumps(fingerprints, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("ascii")).hexdigest()
+
+
+def _published_asset(
+    project_id: str, asset_type: str, asset: Mapping[str, object]
+) -> PublishedUpload:
+    path = Path(str(asset.get("path") or ""))
+    report = Path(str(asset.get("validation_report") or ""))
+    if not path.is_file() or not report.is_file() or not asset.get("sha256"):
+        raise ValueError(f"published {asset_type} asset is unavailable")
+    return PublishedUpload(
+        project_id=project_id,
+        asset_type=asset_type,
+        original_filename=str(asset.get("original_filename") or path.name),
+        path=path,
+        size_bytes=int(asset.get("size_bytes", path.stat().st_size)),
+        sha256=str(asset["sha256"]),
+        validation=dict(asset.get("validation", {})),
+        validation_report_path=report,
+    )

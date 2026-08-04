@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import replace
 import json
 import os
@@ -52,11 +53,17 @@ class ProjectAnalysisCoordinator:
         if upload.project_id != project_id:
             raise ValueError("published upload belongs to another project")
         if asset_type in {"video", "cad", "srt"}:
-            request_key = _analysis_request_key(
-                self.repositories.project.load(project_id).source_assets
-            )
+            with self.repositories.project.lock_for(project_id):
+                assets_snapshot = deepcopy(
+                    self.repositories.project.load(project_id).source_assets
+                )
+                request_key = _analysis_request_key(assets_snapshot)
             return self._executor.submit(
-                self._run_ready_project, project_id, upload, request_key
+                self._run_ready_project,
+                project_id,
+                upload,
+                request_key,
+                assets_snapshot,
             )
         raise ValueError(f"unsupported analysis asset type: {asset_type}")
 
@@ -65,13 +72,14 @@ class ProjectAnalysisCoordinator:
         project_id: str,
         triggering_upload: PublishedUpload,
         request_key: str | None,
+        assets_snapshot: Mapping[str, object],
     ) -> None:
         project = self.repositories.project.load(project_id)
         if _analysis_request_key(project.source_assets) != request_key:
             return
-        cad_asset = project.source_assets.get("cad")
+        cad_asset = assets_snapshot.get("cad")
         if isinstance(cad_asset, Mapping) and not cad_asset.get("analysis"):
-            cad_path = _asset_path(project.source_assets, "cad")
+            cad_path = _asset_path(assets_snapshot, "cad")
             if cad_path is None or not cad_path.is_file():
                 raise FileNotFoundError("published project CAD is unavailable")
             cad_upload = (
@@ -100,7 +108,11 @@ class ProjectAnalysisCoordinator:
                 != request_key
             ):
                 return
-        self._run_video(project_id, request_key=request_key)
+        self._run_video(
+            project_id,
+            request_key=request_key,
+            assets_snapshot=assets_snapshot,
+        )
 
     def close(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=False)
@@ -147,13 +159,18 @@ class ProjectAnalysisCoordinator:
             self._record_failure(project_id, "cad", exc, request_key=request_key)
             raise
 
-    def _run_video(self, project_id: str, *, request_key: str | None) -> None:
+    def _run_video(
+        self,
+        project_id: str,
+        *,
+        request_key: str | None,
+        assets_snapshot: Mapping[str, object],
+    ) -> None:
         try:
-            project = self.repositories.project.load(project_id)
-            video = _asset_path(project.source_assets, "video")
+            video = _asset_path(assets_snapshot, "video")
             if video is None or not video.is_file():
                 raise FileNotFoundError("published project video is unavailable")
-            srt = _asset_path(project.source_assets, "srt")
+            srt = _asset_path(assets_snapshot, "srt")
             revision = self._identity()
             attempt_root = (
                 self.projects_root

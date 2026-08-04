@@ -401,8 +401,15 @@ class ProjectService:
             self._publish_queue_locked(project_id)
             return finished
 
-    def cancel_job(self, project_id: str, job_id: str) -> QueueJob:
+    def cancel_job(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        expected_jobs_revision: int | None = None,
+    ) -> QueueJob:
         with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
             current = self.queue.get(job_id)
             if current.project_id != project_id:
                 raise KeyError(f"job {job_id} does not belong to {project_id}")
@@ -607,8 +614,15 @@ class ProjectService:
                 claim_token=claim_token,
             )
 
-    def retry_job(self, project_id: str, job_id: str) -> QueueJob:
+    def retry_job(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        expected_jobs_revision: int | None = None,
+    ) -> QueueJob:
         with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
             current = self.queue.get(job_id)
             if current.project_id != project_id:
                 raise KeyError(f"job {job_id} does not belong to {project_id}")
@@ -626,11 +640,25 @@ class ProjectService:
             self._publish_queue_locked(project_id)
             return retried
 
+    def _require_jobs_revision_locked(
+        self, project_id: str, expected_jobs_revision: int | None
+    ) -> None:
+        if expected_jobs_revision is None:
+            return
+        current = self.repositories.jobs.load(project_id)
+        if current.revision != expected_jobs_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_jobs_revision,
+                current_revision=current.revision,
+            )
+
     def restore_jobs(
         self,
         project_id: str,
         *,
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
+        unverified_process_policy: str = "fail_closed",
     ) -> LocalResourceQueue:
         with self._state_guard(project_id):
             manifest = self.repositories.jobs.load(project_id)
@@ -640,6 +668,7 @@ class ProjectService:
                 process_probe=process_probe,
                 current_fingerprint_resolver=self._current_input_fingerprint,
                 defer_cleanup=True,
+                unverified_process_policy=unverified_process_policy,
             )
             self._publish_queue_locked(project_id)
             cleanup_reservations = self.queue.pending_restore_cleanups(project_id)

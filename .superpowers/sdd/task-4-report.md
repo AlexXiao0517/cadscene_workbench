@@ -28,6 +28,17 @@
    completed old CAD import to the replacement asset. The coordinator now
    rechecks the request key under the project lock before attaching results and
    stops before video analysis when the CAD input was superseded.
+9. Formal-review RED/GREEN: API/upload/repository escape tests now reject dot
+   and relative project IDs through one fail-closed validator.
+10. Runtime RED/GREEN: `serve_viewer` now exclusively leases the project root,
+    reconciles and restores durable jobs before startup, marks unverifiable old
+    running jobs interrupted, and drives the real `LocalJobExecutor` worker.
+11. Decode RED/GREEN: full decode now uses `-xerror` and rejects error-level
+    stderr even if FFmpeg reports return code zero.
+12. Interaction RED/GREEN: confirmation-only preflight, selectable per-clip
+    reasons, and real reanalyze/retry/cancel API plus UI events are covered.
+13. Snapshot/edit RED/GREEN: the four manifests are read under fixed lock order
+    and nullable dirty names remain distinct from absent local edits.
 
 ## Implemented behavior
 
@@ -68,6 +79,8 @@
 - `RangeRequestHandler` only parses HTTP JSON/multipart transport and serializes
   `ApiResponse`; it never reads or writes a project manifest.
 - Unified snapshot revision hashes all four component revisions.
+- The snapshot holds the fixed four-manifest lock order, computes capability
+  preflight once, and derives its ETag from that exact state.
 - Stable quoted ETag; matching `If-None-Match` returns 304 with a strict empty
   body.
 - Snapshot provides server-computed project and clip capabilities.
@@ -77,6 +90,20 @@
 - Nullable custom display name restores the generated name.
 - Batch preflight returns eligible/needs-confirmation/skipped per clip and can
   enqueue a partially accepted set.
+- Reanalysis, job retry, and job cancellation use expected-revision project
+  APIs; job capabilities are server-owned.
+- Project IDs share one fail-closed validator across HTTP, uploads, and
+  repository path construction.
+
+### Single-machine runtime
+
+- `serve_viewer` exclusively leases the project root; a second instance cannot
+  own the same manifests.
+- Startup reconciles manifests and restores persisted jobs before worker
+  polling. Unverifiable old running jobs become `interrupted` and are not
+  adopted.
+- The real bounded `LocalJobExecutor` consumes the restored queue and reaps on
+  idle polls. Shutdown stops and joins the worker before releasing ownership.
 
 ### Project workspace
 
@@ -87,22 +114,25 @@
 - Optional measured fraction is shown; stage-only progress is used otherwise.
 - Server capabilities exclusively control action availability.
 - 1.5-second ETag polling preserves local workflow/name edits and selection.
+- A pending `custom_display_name: null` continues to show the generated name
+  during polling instead of reviving an older server custom name.
 - Workflow reset, inline rename, batch preflight/confirm, accessible live status,
   focus treatment, reduced-motion handling, and one merge action.
 - Upload portal uses the new project endpoints in video → optional SRT → CAD
   order and immediately redirects to the project workspace. Existing legacy
   workflow endpoints remain served for old direct clients.
+- Each new or retried submission resets the client project revision and stale
+  manifest state before project creation.
 
 ## Verification
 
-- Upload/API/UI/old-upload/viewer focused set: `112 passed`.
-- All project tests: `152 passed`.
-- Related project/workflow/pure-rotation set: `371 passed`.
-- Full suite: `711 passed, 1 skipped`.
+- Formal-review focused set: `45 passed`.
+- All project tests: `169 passed`.
+- Related project/video-analysis/workflow/pure-rotation set: `500 passed, 1 skipped`.
+- Full suite: `739 passed, 1 skipped`.
 - `compileall`: pass.
-- `pyflakes` on all Task 4 changed Python files: pass. A wider repository-only
-  audit still reports three pre-existing warnings in `json_repositories.py` and
-  `test_recovery.py`; Task 4 does not change those files.
+- `pyflakes` on every Python file changed by Task 4 and this review closure:
+  pass with no warnings.
 - `git diff --check`: pass.
 - Only warning: existing third-party `fontTools.misc.py23` deprecation.
 

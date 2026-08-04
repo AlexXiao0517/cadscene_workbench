@@ -5,10 +5,15 @@ import json
 from pathlib import Path
 from io import BytesIO
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
-from cadscene.projects.uploads import UploadValidationError, ValidatedUploadStore
+from cadscene.projects.uploads import (
+    UploadValidationError,
+    ValidatedUploadStore,
+    _validate_video,
+)
 
 
 def _accept(path: Path, asset_type: str) -> dict[str, object]:
@@ -113,6 +118,10 @@ def test_valid_upload_publishes_atomically_before_triggering_analysis(
     assert result.validation["decoded"] is True
     assert observations == [(True, True)]
     assert result.path.read_bytes() == payload
+    assert result.validation_report_path.parent.name == "validation_attempts"
+    immutable_report = json.loads(result.validation_report_path.read_text())
+    assert immutable_report["status"] == "published"
+    assert immutable_report["sha256"] == result.sha256
 
 
 def test_invalid_dxf_is_rejected_before_publication(tmp_path: Path) -> None:
@@ -171,3 +180,38 @@ def test_cad_zip_rejects_drive_paths_and_symlinks_before_publication(
             pending.complete()
 
         assert not store.published_path("p1", "cad").exists()
+
+
+@pytest.mark.parametrize("project_id", [".", "..", "../escape", "C:escape"])
+def test_upload_store_rejects_project_ids_that_can_escape_root(
+    tmp_path: Path, project_id: str
+) -> None:
+    store = ValidatedUploadStore(tmp_path / "projects", validators={"video": _accept})
+
+    with pytest.raises(ValueError, match="invalid project_id"):
+        store.begin(project_id, "video", "source.mp4", expected_size=1)
+
+    assert not (tmp_path / "escape").exists()
+
+
+def test_video_validation_rejects_decode_error_even_when_ffmpeg_returns_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "broken.mp4"
+    video.write_bytes(b"broken")
+    observed: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        observed.append([str(item) for item in command])
+        return SimpleNamespace(returncode=0, stderr="Error while decoding stream #0:0")
+
+    monkeypatch.setattr("cadscene.projects.uploads.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "cadscene.video_analysis.pts.resolve_ffmpeg_executable",
+        lambda: Path("ffmpeg"),
+    )
+
+    with pytest.raises(ValueError, match="decode failed"):
+        _validate_video(video, "video")
+
+    assert "-xerror" in observed[0]

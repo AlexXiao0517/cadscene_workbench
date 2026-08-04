@@ -23,10 +23,10 @@ from .repositories import (
     PreparedManifest,
     RevisionConflict,
     new_operation_id,
-    ordered_repositories,
     stamp_operation_changes,
     validate_manifest_transition,
 )
+from .identifiers import validate_project_id
 
 
 T = TypeVar("T", bound=ManifestHeader)
@@ -66,6 +66,7 @@ class AtomicJsonRepository(Generic[T]):
         self._fixed_lock = _path_lock(path) if isinstance(path, Path) else None
 
     def path_for(self, project_id: str) -> Path:
+        project_id = validate_project_id(project_id)
         source = self._path_source
         return source(project_id) if callable(source) else source
 
@@ -308,6 +309,7 @@ class ProjectRepositories:
         return (self.project, self.clips, self.jobs, self.render)
 
     def create_project(self, project_id: str, *, updated_at: str) -> None:
+        project_id = validate_project_id(project_id)
         operation_id = new_operation_id()
         values: tuple[ManifestHeader, ...] = (
             replace(
@@ -403,7 +405,7 @@ class ProjectRepositories:
 
 def project_repositories(root: Path) -> ProjectRepositories:
     def manifest_path(name: str) -> Callable[[str], Path]:
-        return lambda project_id: root / project_id / name
+        return lambda project_id: root / validate_project_id(project_id) / name
 
     return ProjectRepositories(
         project=AtomicJsonRepository(
