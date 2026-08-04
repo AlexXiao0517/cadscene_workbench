@@ -20,6 +20,9 @@ def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
     assert "global_camera_placement.json" in server
     assert "rotation_correction_keyframes.json" in server
+    assert "correction_lineage.json" in server
+    assert '"base_sha256"' in server
+    assert '"corrected_sha256"' in server
 
 
 def test_pure_rotation_viewer_focus_is_automatic_not_a_debug_toolbar_action() -> None:

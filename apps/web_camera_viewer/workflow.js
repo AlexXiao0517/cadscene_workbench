@@ -49,6 +49,7 @@
   let pureRotationWorldYawDeg = 0;
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
   let projectWorkbenchSession = null;
+  let projectWorkbenchBootstrapPromise = null;
   let projectWorkbenchSaveInFlight = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
@@ -498,8 +499,16 @@
   }
 
   async function finishPureRotationCalibration() {
+    await ensureProjectWorkbenchSession();
     if (pureRotationEditMode === "placement" || !pureRotationHasPlacement) {
       await savePureRotationPlacement();
+      if (pureRotationCorrections.length) {
+        await apiPost("/api/pure-rotation/corrections", {
+          dataset,
+          runId,
+          corrections: pureRotationCorrections,
+        });
+      }
     }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
@@ -1170,7 +1179,6 @@
       cameraTrack: cameraTrack || window.cadsceneGetCameraTrack(),
     });
     await loadKeyframePlan();
-    await finalizeProjectWorkbenchSave(result);
     return result;
   }
 
@@ -1186,8 +1194,19 @@
     return payload;
   }
 
+  async function ensureProjectWorkbenchSession() {
+    if (!projectWorkbenchToken) return null;
+    if (projectWorkbenchSession) return projectWorkbenchSession;
+    if (!projectWorkbenchBootstrapPromise) {
+      projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
+    }
+    return projectWorkbenchBootstrapPromise;
+  }
+
   async function finalizeProjectWorkbenchSave(result) {
-    if (!projectWorkbenchSession || projectWorkbenchSaveInFlight) return null;
+    if (!projectWorkbenchToken) return null;
+    if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
+    if (projectWorkbenchSaveInFlight) return null;
     if (projectWorkbenchSession.state !== "editing" && projectWorkbenchSession.state !== "pending_save") return null;
     projectWorkbenchSaveInFlight = true;
     try {
@@ -1210,6 +1229,13 @@
     } finally {
       projectWorkbenchSaveInFlight = false;
     }
+  }
+
+  async function finishQualityStage() {
+    await ensureProjectWorkbenchSession();
+    const result = await saveCurrentCameraTrack();
+    await finalizeProjectWorkbenchSave(result);
+    if (!projectWorkbenchToken) setWorkflowStage("render");
   }
 
   window.addEventListener("pagehide", () => {
@@ -1557,7 +1583,7 @@
   // 质量检测只启动 quality job（不再包含路线拟合）。
   document.querySelector("#workflowRunQuality")?.addEventListener("click", () => runWithMessage(startQualityStage));
   document.querySelector("#workflowRerunQuality")?.addEventListener("click", () => runWithMessage(startQualityStage));
-  document.querySelector("#workflowFinishQuality")?.addEventListener("click", () => setWorkflowStage("render"));
+  document.querySelector("#workflowFinishQuality")?.addEventListener("click", () => runWithMessage(finishQualityStage));
   document.querySelector("#workflowReturnKeyframes")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#workflowRender")?.addEventListener("click", () => runWithMessage(startRenderStage));
   document.querySelector("#workflowCancel")?.addEventListener("click", () => runWithMessage(cancelRunningJob));
@@ -1664,9 +1690,12 @@
     document.querySelectorAll(".dev-only-control").forEach((node) => node.classList.add("is-debug-visible"));
   }
   loadWorkflowSuggestions();
-  bootstrapProjectWorkbenchSession().catch((error) => {
-    message.textContent = `项目会话不可用：${error.message}`;
-  });
+  if (projectWorkbenchToken) {
+    projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
+    projectWorkbenchBootstrapPromise.catch((error) => {
+      message.textContent = `项目会话不可用：${error.message}`;
+    });
+  }
   loadDatasetManifestForUpload();
   blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import mimetypes
 import os
@@ -465,6 +466,16 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
                 _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
                 _atomic_json(output, corrected)
+                _atomic_json(
+                    run_dir
+                    / "04_pure_rotation_corrections"
+                    / "correction_lineage.json",
+                    {
+                        "schema_version": 1,
+                        "base_sha256": sha256(base_path.read_bytes()).hexdigest(),
+                        "corrected_sha256": sha256(output.read_bytes()).hexdigest(),
+                    },
+                )
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))

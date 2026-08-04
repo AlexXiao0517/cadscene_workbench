@@ -160,6 +160,18 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     ]
     assert "await refreshPureRotationFittedPreview()" in pure_finish
     assert 'await finalizeProjectWorkbenchSave({ ok: true, kind: "pure_rotation_calibration" })' in pure_finish
+    save_track = script[
+        script.index("async function saveCurrentCameraTrack") :
+        script.index("async function bootstrapProjectWorkbenchSession")
+    ]
+    assert "finalizeProjectWorkbenchSave" not in save_track
+    assert "async function finishQualityStage" in script
+    quality_start = script.index("async function finishQualityStage")
+    quality_finish = script[quality_start:script.index("async function", quality_start + 20)]
+    assert "await ensureProjectWorkbenchSession()" in quality_finish
+    assert "await saveCurrentCameraTrack()" in quality_finish
+    assert "await finalizeProjectWorkbenchSave" in quality_finish
+    assert "projectWorkbenchBootstrapPromise" in script
 
 
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:

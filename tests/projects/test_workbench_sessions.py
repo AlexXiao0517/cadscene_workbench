@@ -81,10 +81,22 @@ def session_system(tmp_path: Path):
         validated.append((session.token, dict(receipt)))
         if receipt.get("ok") is not True:
             raise InvalidWorkbenchOutput("workbench output was not validated")
+        source = tmp_path / "validated-camera-track.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "receipt_fingerprint": receipt["source_output_fingerprint"],
+                    "poses": [{"frame": 0}],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         return {
             "source_output_revision": str(receipt["source_output_revision"]),
-            "source_output_fingerprint": str(receipt["source_output_fingerprint"]),
-            "artifacts": dict(receipt.get("artifacts", {})),
+            "source_output_fingerprint": sha256(source.read_bytes()).hexdigest(),
+            "source_path": str(source),
+            "source_artifact_name": source.name,
         }
 
     def token_factory() -> str:
@@ -129,6 +141,22 @@ def _receipt(**changes: object) -> dict[str, object]:
     }
     value.update(changes)
     return value
+
+
+def _manual_track() -> dict[str, object]:
+    return {
+        "fps": 25.0,
+        "keyframes": [
+            {
+                "frame": 0,
+                "time": 0.0,
+                "camera": {
+                    "x": 1.0, "y": 2.0, "z": 3.0,
+                    "yaw": 0.0, "pitch": -45.0, "roll": 0.0, "fov": 70.0,
+                },
+            }
+        ],
+    }
 
 
 def test_session_binds_every_authoritative_input_and_uses_unguessable_token(
@@ -302,6 +330,54 @@ def test_retry_recovers_output_published_before_session_record_save(
     assert output.read_bytes() == before
 
 
+def test_retry_uses_published_immutable_output_after_mutable_source_changes(
+    session_system, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator, store, _clock, _current, _validated = session_system
+    session = _create(coordinator)
+    original_update = store.update
+    failed = [False]
+
+    def fail_saved_record(project_id, token, *, expected_revision, mutate):
+        current = store.load(project_id, token)
+        candidate = mutate(current)
+        if candidate.state == "saved" and not failed[0]:
+            failed[0] = True
+            raise OSError("session record publication interrupted")
+        return original_update(
+            project_id,
+            token,
+            expected_revision=expected_revision,
+            mutate=mutate,
+        )
+
+    monkeypatch.setattr(store, "update", fail_saved_record)
+    with pytest.raises(OSError, match="session record publication interrupted"):
+        coordinator.save("project-1", session.token, _receipt())
+
+    mutable_source = coordinator.outputs_root.parent / "validated-camera-track.json"
+    mutable_source.write_text('{"new":"legal later save"}', encoding="utf-8")
+
+    def validate_changed_source(_session, _receipt_payload):
+        return {
+            "source_output_revision": "manual-track-8",
+            "source_output_fingerprint": sha256(mutable_source.read_bytes()).hexdigest(),
+            "source_path": str(mutable_source),
+            "source_artifact_name": mutable_source.name,
+        }
+
+    coordinator.validate_output = validate_changed_source
+    saved = coordinator.save("project-1", session.token, _receipt())
+
+    assert saved.state == "saved"
+    assert saved.workbench_output_revision == "workbench-output-1"
+    immutable = (
+        coordinator.outputs_root
+        / "project-1/workbench_outputs/workbench-output-1/artifacts/validated-camera-track.json"
+    )
+    assert immutable.read_text(encoding="utf-8") != mutable_source.read_text(encoding="utf-8")
+
+
 def test_pending_save_rejects_different_validated_receipt(
     session_system, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,6 +399,12 @@ def test_pending_save_rejects_different_validated_receipt(
     monkeypatch.setattr(store, "update", always_fail_saved)
     with pytest.raises(OSError):
         coordinator.save("project-1", session.token, _receipt())
+
+    published = (
+        coordinator.outputs_root
+        / "project-1/workbench_outputs/workbench-output-1"
+    )
+    published.rename(published.with_name("unpublished-interrupted-output"))
 
     with pytest.raises(InvalidWorkbenchOutput, match="pending save"):
         coordinator.save(
@@ -666,7 +748,7 @@ def test_existing_workbench_reference_never_bypasses_real_input_change(
     assert snapshot.body["clips"][0]["capabilities"]["can_open_workbench"] is False
     output = runs_root / "project-1/clip-1/01_keyframes/camera_track_manual.json"
     output.parent.mkdir(parents=True)
-    output.write_text('{"keyframes":[{"frame":0}]}', encoding="utf-8")
+    output.write_text(json.dumps(_manual_track()), encoding="utf-8")
     stale = api.handle(
         "POST",
         f"/api/projects/project-1/workbench-sessions/{token}/save",
@@ -710,10 +792,7 @@ def test_workbench_http_create_bootstrap_save_and_replay_fail_closed(
 
     output = runs_root / "project-1/clip-1/01_keyframes/camera_track_manual.json"
     output.parent.mkdir(parents=True)
-    output.write_text(
-        json.dumps({"fps": 25, "keyframes": [{"frame": 0}]}),
-        encoding="utf-8",
-    )
+    output.write_text(json.dumps(_manual_track()), encoding="utf-8")
     expected_revision = repositories.clips.load("project-1").revision
     saved = api.handle(
         "POST",
@@ -737,6 +816,65 @@ def test_workbench_http_create_bootstrap_save_and_replay_fail_closed(
     )
     assert replay.status == 409
     assert replay.body["error"] == "workbench_save_replayed"
+
+    manifest_path = (
+        tmp_path
+        / "projects/project-1/workbench_outputs/workbench-output-api-1/workbench_output_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = manifest["artifacts"]["camera_track"]
+    assert not Path(artifact["path"]).is_absolute()
+    immutable = manifest_path.parent / artifact["path"]
+    before = immutable.read_bytes()
+    assert sha256(before).hexdigest() == artifact["sha256"]
+    output.write_text(json.dumps({"overwritten": True}), encoding="utf-8")
+    assert immutable.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "track",
+    [
+        {"fps": 25, "keyframes": ["bad"]},
+        {"fps": 25, "keyframes": [{"frame": 0}]},
+        {"fps": 25, "keyframes": [{"frame": True, "camera": {}}]},
+        {"fps": float("nan"), "keyframes": []},
+        {
+            "fps": 25,
+            "keyframes": [{
+                "frame": 0,
+                "camera": {
+                    "x": float("inf"), "y": 0, "z": 0,
+                    "yaw": 0, "pitch": 0, "roll": 0, "fov": 70,
+                },
+            }],
+        },
+    ],
+)
+def test_manual_track_authoritative_validation_rejects_malformed_values(
+    tmp_path: Path, track: dict[str, object]
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    output = runs_root / "project-1/clip-1/01_keyframes/camera_track_manual.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps(track), encoding="utf-8")
+    rejected = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(output)},
+        },
+    )
+    assert rejected.status == 400
+    assert "camera track" in rejected.body["error"]
 
 
 def test_workbench_http_close_recovers_editing_to_ready_and_checks_revision(
@@ -815,7 +953,7 @@ def test_retry_repairs_saved_session_when_clip_reference_publication_failed(
     token = opened.body["token"]
     output = runs_root / "project-1/clip-1/01_keyframes/camera_track_manual.json"
     output.parent.mkdir(parents=True)
-    output.write_text('{"keyframes":[{"frame":0}]}', encoding="utf-8")
+    output.write_text(json.dumps(_manual_track()), encoding="utf-8")
     original_update = repositories.clips.update
     failed = [False]
 
@@ -898,6 +1036,16 @@ def test_pure_rotation_save_selects_and_validates_server_run_output(
             ),
             encoding="utf-8",
         )
+    (corrected.parent / "correction_lineage.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "base_sha256": sha256(base.read_bytes()).hexdigest(),
+                "corrected_sha256": sha256(corrected.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
     malicious = tmp_path / "attacker.json"
     malicious.write_text('{"poses":[]}', encoding="utf-8")
 
@@ -922,10 +1070,61 @@ def test_pure_rotation_save_selects_and_validates_server_run_output(
             / f"projects/project-1/workbench_outputs/{revision}/workbench_output_manifest.json"
         ).read_text(encoding="utf-8")
     )
-    assert manifest["artifacts"]["camera_track"].endswith(
-        "04_pure_rotation_corrections/camera_track_corrected.json"
-    )
+    assert manifest["source_artifact_name"] == "camera_track_corrected.json"
     assert manifest["source_output_revision"].startswith("pure-track:")
+
+
+def test_stale_pure_rotation_corrected_lineage_falls_back_to_current_base(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow="pure_rotation"
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    run = runs_root / "project-1/clip-1"
+    base = run / "03_pure_rotation_placement/camera_track_cad_base.json"
+    corrected = run / "04_pure_rotation_corrections/camera_track_corrected.json"
+    payload = {
+        "trajectory_mode": "pure_rotation_manual_calibrated",
+        "poses": [{
+            "decoded_frame_index": 0,
+            "rotation_cad_from_camera": [[1,0,0],[0,1,0],[0,0,1]],
+            "camera_center_web": [1,2,3],
+        }],
+    }
+    base.parent.mkdir(parents=True)
+    corrected.parent.mkdir(parents=True)
+    base.write_text(json.dumps(payload), encoding="utf-8")
+    corrected.write_text(json.dumps(payload), encoding="utf-8")
+    (corrected.parent / "correction_lineage.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "base_sha256": "0" * 64,
+            "corrected_sha256": sha256(corrected.read_bytes()).hexdigest(),
+        }),
+        encoding="utf-8",
+    )
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "kind": "pure_rotation_calibration"},
+        },
+    )
+    assert saved.status == 200
+    manifest = json.loads((
+        tmp_path / "projects/project-1/workbench_outputs"
+        / saved.body["workbench_output_revision"] / "workbench_output_manifest.json"
+    ).read_text(encoding="utf-8"))
+    assert manifest["source_artifact_name"] == "camera_track_cad_base.json"
 
 
 def test_second_live_session_and_old_session_mutations_fail_closed(
@@ -990,7 +1189,8 @@ def test_pending_save_blocks_replacement_even_after_editing_expiry(
     )
     output = runs_root / "project-1/clip-1/01_keyframes/camera_track_manual.json"
     output.parent.mkdir(parents=True)
-    output.write_text('{"keyframes":[{"frame":0}]}', encoding="utf-8")
+    output.write_text(json.dumps(_manual_track()), encoding="utf-8")
+    editing_snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
     store = api.workbench.coordinator.store
     original_update = store.update
 
@@ -1011,6 +1211,16 @@ def test_pending_save_blocks_replacement_even_after_editing_expiry(
             expected_clips_revision=repositories.clips.load("project-1").revision,
         )
     api.workbench.now.value += timedelta(minutes=31)
+
+    pending_snapshot = api.handle(
+        "GET",
+        "/api/projects/project-1/snapshot",
+        headers={"If-None-Match": editing_snapshot.headers["ETag"]},
+    )
+    assert pending_snapshot.status == 200
+    pending_clip = pending_snapshot.body["clips"][0]
+    assert pending_clip["workbench"]["state"] == "pending_save"
+    assert pending_clip["capabilities"]["can_open_workbench"] is False
 
     blocked = api.handle(
         "POST",

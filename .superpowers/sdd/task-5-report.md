@@ -125,3 +125,47 @@
 
 - No rendering, concat, source fallback, labels/tracking, scheduler expansion,
   cross-clip trajectory continuity, or workflow mathematics changes.
+
+## Review closure (2026-08-04)
+
+- Immutable publication now copies the validated camera-track bytes into
+  `workbench_outputs/<revision>/artifacts/`. The manifest contains only the
+  revision-relative path, SHA-256, and byte size; it does not retain the
+  mutable `runs/` path.
+- General/SRT camera tracks now require a positive finite FPS, at least one
+  keyframe, unique non-negative integer frame indices, finite optional time,
+  and finite `x/y/z/yaw/pitch/roll/fov` camera values with a valid FOV range.
+- Recovery closes the output-publication/session-record crash window. When a
+  pending revision already exists, retry validates its operation ID, binding,
+  source revision/fingerprint, manifest fingerprint, artifact containment,
+  and artifact hash without consulting a later mutable `runs/` file. Only a
+  missing revision revalidates the current receipt, which must still match the
+  pending source revision/fingerprint.
+- Snapshot and capabilities derive `pending_save`, `recovery_required`, and
+  `saved` from the credential plus exact clip reference, so an expired editing
+  timestamp cannot hide an outstanding recoverable operation or yield a stale
+  304 response.
+- Pure Rotation corrections now publish `correction_lineage.json` with hashes
+  of the exact base and corrected files. Validation uses a corrected track only
+  when both hashes match; otherwise it safely selects the current base track.
+  Re-saving placement from the UI re-applies existing corrections before final
+  coordination.
+- Intermediate camera-track saves no longer coordinate the project session or
+  navigate away. Explicit quality/Pure Rotation completion waits for bootstrap,
+  performs the existing workflow save, coordinates the immutable save, and only
+  then returns to the allowlisted project path.
+
+Review verification:
+
+- Real corrections HTTP endpoint lineage: `1 passed`.
+- Workbench/schema/lineage/UI targeted: `115 passed`.
+- Projects + all serve_viewer APIs + viewer + workflow + Pure Rotation:
+  `580 passed, 1 warning`.
+- Full suite: `902 passed, 1 skipped, 1 warning`.
+- `pyflakes` on changed production and focused task modules: pass. Running it
+  on the complete legacy `test_serve_viewer_workflow_api.py` additionally
+  reports its two pre-existing duplicate test-function definitions (lines
+  370/464 and 390/427); these unrelated tests were not renamed in this task.
+- `python -m compileall -q cadscene`: pass.
+- `node --check apps/web_camera_viewer/workflow.js`: pass.
+- `git diff --check`: pass.

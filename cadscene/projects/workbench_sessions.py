@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -417,6 +418,36 @@ class WorkbenchSessionCoordinator:
         self._validate_binding(session, context)
         if "save" not in session.save_permissions or "save" not in context.save_permissions:
             raise WorkbenchPermissionDenied("workbench session has no save permission")
+        if session.state == "pending_save":
+            operation_id = session.operation_id
+            revision = str(session.pending_output_revision or "")
+            source_revision = session.pending_source_output_revision
+            source_fingerprint = session.pending_source_output_fingerprint
+            if not revision or not source_revision or not source_fingerprint:
+                raise InvalidWorkbenchOutput("pending save metadata is incomplete")
+            target = (
+                self.outputs_root
+                / validate_project_id(session.project_id)
+                / "workbench_outputs"
+                / revision
+            )
+            if target.exists():
+                fingerprint = self._validate_existing_output(
+                    target,
+                    session=session,
+                    revision=revision,
+                    operation_id=operation_id,
+                    source_revision=source_revision,
+                    source_fingerprint=source_fingerprint,
+                )
+                return self._mark_saved(
+                    project_id,
+                    token,
+                    pending=session,
+                    revision=revision,
+                    operation_id=operation_id,
+                    fingerprint=fingerprint,
+                )
         validated = self.validate_output(session, receipt)
         if not isinstance(validated, Mapping):
             raise InvalidWorkbenchOutput("validator did not return structured output")
@@ -436,8 +467,6 @@ class WorkbenchSessionCoordinator:
                 )
             operation_id = session.operation_id
             revision = str(session.pending_output_revision or "")
-            if not revision:
-                raise InvalidWorkbenchOutput("pending save has no immutable revision")
             pending = session
         else:
             operation_id = self.operation_factory()
@@ -461,6 +490,25 @@ class WorkbenchSessionCoordinator:
             operation_id=operation_id,
             validated=validated,
         )
+        return self._mark_saved(
+            project_id,
+            token,
+            pending=pending,
+            revision=revision,
+            operation_id=operation_id,
+            fingerprint=fingerprint,
+        )
+
+    def _mark_saved(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        pending: WorkbenchSession,
+        revision: str,
+        operation_id: str,
+        fingerprint: str,
+    ) -> WorkbenchSession:
         return self.store.update(
             project_id,
             token,
@@ -543,26 +591,27 @@ class WorkbenchSessionCoordinator:
                 session=session,
                 revision=revision,
                 operation_id=operation_id,
-                validated=validated,
+                source_revision=validated.get("source_output_revision"),
+                source_fingerprint=validated.get("source_output_fingerprint"),
+                source_artifact_name=validated.get("source_artifact_name"),
             )
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "project_id": session.project_id,
-            "clip_id": session.clip_id,
-            "workflow": session.workflow,
-            "workbench_output_revision": revision,
-            "operation_id": operation_id,
-            "created_at": _timestamp(self.now()),
-            **dict(validated),
-        }
-        serialized = (
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        ).encode("utf-8")
-        fingerprint = sha256(serialized).hexdigest()
-        payload["workbench_output_fingerprint"] = fingerprint
-        final_serialized = (
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        ).encode("utf-8")
+        source_path_value = validated.get("source_path")
+        source_name_value = validated.get("source_artifact_name")
+        source_fingerprint = validated.get("source_output_fingerprint")
+        if (
+            not isinstance(source_path_value, str)
+            or not source_path_value
+            or not isinstance(source_name_value, str)
+            or Path(source_name_value).name != source_name_value
+            or not isinstance(source_fingerprint, str)
+            or len(source_fingerprint) != 64
+        ):
+            raise InvalidWorkbenchOutput(
+                "validated workbench output has no authoritative source artifact"
+            )
+        source_path = Path(source_path_value)
+        if not source_path.is_file():
+            raise InvalidWorkbenchOutput("validated source artifact is missing")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary_parent = target.parent.resolve(strict=True)
         temporary: Path | None = Path(
@@ -579,18 +628,78 @@ class WorkbenchSessionCoordinator:
                 "temporary output directory escaped its owned parent"
             )
         try:
+            artifacts_dir = temporary / "artifacts"
+            artifacts_dir.mkdir()
+            artifact_path = artifacts_dir / source_name_value
+            artifact_hash = sha256()
+            artifact_size = 0
+            with source_path.open("rb") as source_stream, artifact_path.open(
+                "xb"
+            ) as destination_stream:
+                while True:
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination_stream.write(chunk)
+                    artifact_hash.update(chunk)
+                    artifact_size += len(chunk)
+                destination_stream.flush()
+                os.fsync(destination_stream.fileno())
+            copied_fingerprint = artifact_hash.hexdigest()
+            if copied_fingerprint != source_fingerprint:
+                raise InvalidWorkbenchOutput(
+                    "source artifact changed while creating immutable revision"
+                )
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "project_id": session.project_id,
+                "clip_id": session.clip_id,
+                "workflow": session.workflow,
+                "workbench_output_revision": revision,
+                "operation_id": operation_id,
+                "created_at": _timestamp(self.now()),
+                "source_output_revision": validated["source_output_revision"],
+                "source_output_fingerprint": source_fingerprint,
+                "source_artifact_name": source_name_value,
+                "artifacts": {
+                    "camera_track": {
+                        "path": f"artifacts/{source_name_value}",
+                        "sha256": copied_fingerprint,
+                        "size_bytes": artifact_size,
+                    }
+                },
+            }
+            serialized = (
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            ).encode("utf-8")
+            fingerprint = sha256(serialized).hexdigest()
+            payload["workbench_output_fingerprint"] = fingerprint
+            final_serialized = (
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            ).encode("utf-8")
             manifest = temporary / "workbench_output_manifest.json"
             with manifest.open("wb") as stream:
                 stream.write(final_serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
+            _fsync_directory(artifacts_dir)
+            _fsync_directory(temporary)
             os.replace(temporary, target)
             temporary = None
+            _fsync_directory(target.parent)
         finally:
             if temporary is not None and temporary.exists():
                 manifest = temporary / "workbench_output_manifest.json"
+                artifact = temporary / "artifacts" / source_name_value
                 manifest.unlink(missing_ok=True)
-                temporary.rmdir()
+                artifact.unlink(missing_ok=True)
+                artifacts_directory = temporary / "artifacts"
+                if artifacts_directory.exists():
+                    artifacts_directory.rmdir()
+                if temporary.exists():
+                    temporary.rmdir()
         return fingerprint
 
     @staticmethod
@@ -600,7 +709,9 @@ class WorkbenchSessionCoordinator:
         session: WorkbenchSession,
         revision: str,
         operation_id: str,
-        validated: Mapping[str, object],
+        source_revision: object,
+        source_fingerprint: object,
+        source_artifact_name: object | None = None,
     ) -> str:
         manifest_path = target / "workbench_output_manifest.json"
         try:
@@ -615,9 +726,11 @@ class WorkbenchSessionCoordinator:
             "workflow": session.workflow,
             "workbench_output_revision": revision,
             "operation_id": operation_id,
-            "source_output_revision": validated.get("source_output_revision"),
-            "source_output_fingerprint": validated.get("source_output_fingerprint"),
+            "source_output_revision": source_revision,
+            "source_output_fingerprint": source_fingerprint,
         }
+        if source_artifact_name is not None:
+            expected["source_artifact_name"] = source_artifact_name
         if any(payload.get(key) != value for key, value in expected.items()):
             raise InvalidWorkbenchOutput(
                 "existing immutable output disagrees with the pending save"
@@ -632,6 +745,34 @@ class WorkbenchSessionCoordinator:
         ).encode("utf-8")
         if sha256(serialized).hexdigest() != stored:
             raise InvalidWorkbenchOutput("existing immutable output fingerprint is invalid")
+        artifacts = payload.get("artifacts")
+        artifact = (
+            artifacts.get("camera_track") if isinstance(artifacts, dict) else None
+        )
+        if not isinstance(artifact, dict):
+            raise InvalidWorkbenchOutput("existing immutable artifact metadata is invalid")
+        relative = artifact.get("path")
+        artifact_fingerprint = artifact.get("sha256")
+        manifest_artifact_name = payload.get("source_artifact_name")
+        if (
+            not isinstance(relative, str)
+            or Path(relative).is_absolute()
+            or not isinstance(manifest_artifact_name, str)
+            or Path(relative).name != manifest_artifact_name
+        ):
+            raise InvalidWorkbenchOutput("existing immutable artifact path is invalid")
+        artifact_path = (target / relative).resolve(strict=False)
+        try:
+            artifact_path.relative_to(target.resolve(strict=True))
+        except ValueError as exc:
+            raise InvalidWorkbenchOutput("immutable artifact escaped revision") from exc
+        if (
+            not artifact_path.is_file()
+            or not isinstance(artifact_fingerprint, str)
+            or sha256(artifact_path.read_bytes()).hexdigest() != artifact_fingerprint
+            or artifact_fingerprint != source_fingerprint
+        ):
+            raise InvalidWorkbenchOutput("existing immutable artifact fingerprint is invalid")
         return stored
 
 
@@ -751,6 +892,20 @@ class ProjectWorkbenchService:
                     ):
                         raise WorkbenchPermissionDenied(
                             "clip has a pending workbench save that must be recovered"
+                        )
+                    if (
+                        referenced_session is not None
+                        and referenced_session.state == "saved"
+                        and (
+                            reference.value.get("status") != "saved"
+                            or reference.operation_id
+                            != referenced_session.operation_id
+                            or reference.value.get("workbench_output_revision")
+                            != referenced_session.workbench_output_revision
+                        )
+                    ):
+                        raise WorkbenchPermissionDenied(
+                            "clip has a saved workbench result awaiting reference repair"
                         )
             if reference is not None and reference.value.get("status") == "pending_save":
                 raise WorkbenchPermissionDenied(
@@ -879,14 +1034,7 @@ class ProjectWorkbenchService:
     def snapshot_for_clip(
         self, project_id: str, clip: ClipDefinition
     ) -> dict[str, object]:
-        reference = next(
-            (
-                item
-                for item in reversed(clip.references)
-                if item.owner == "clips" and item.key == f"workbench:{clip.clip_id}"
-            ),
-            None,
-        )
+        reference = self._workbench_reference(clip)
         state = (
             "ready"
             if self.resolve_context(project_id, clip.clip_id).can_open_workbench
@@ -896,9 +1044,40 @@ class ProjectWorkbenchService:
         if reference is not None:
             state = str(reference.value.get("status") or state)
             output_revision = reference.value.get("workbench_output_revision")
-            expires_at = reference.value.get("expires_at")
-            if state == "editing" and isinstance(expires_at, str):
-                if self.now() >= _parse_timestamp(expires_at):
+            credential = None
+            token_hash = reference.value.get("session_token_hash")
+            if isinstance(token_hash, str):
+                try:
+                    credential = self.coordinator.store.load_by_token_hash(
+                        project_id, token_hash
+                    )
+                except FileNotFoundError:
+                    pass
+            if credential is not None and credential.state == "pending_save":
+                state = "pending_save"
+                output_revision = credential.pending_output_revision
+            elif credential is not None and credential.state == "saved":
+                output_revision = credential.workbench_output_revision
+                if (
+                    reference.value.get("status") == "saved"
+                    and reference.operation_id == credential.operation_id
+                    and reference.value.get("workbench_output_revision")
+                    == credential.workbench_output_revision
+                ):
+                    state = "saved"
+                else:
+                    state = "recovery_required"
+            elif credential is not None and credential.state == "editing":
+                state = (
+                    "ready"
+                    if self.now() >= _parse_timestamp(credential.expires_at)
+                    else "editing"
+                )
+            elif state == "editing":
+                expires_at = reference.value.get("expires_at")
+                if isinstance(expires_at, str) and self.now() >= _parse_timestamp(
+                    expires_at
+                ):
                     state = "ready"
         return {
             "state": state,
@@ -952,7 +1131,15 @@ class ProjectWorkbenchService:
                 raise StaleWorkbenchSession("saved session operation is not current")
 
     def can_open(self, project_id: str, clip_id: str) -> bool:
-        return self.resolve_context(project_id, clip_id).can_open_workbench
+        context = self.resolve_context(project_id, clip_id)
+        if not context.can_open_workbench:
+            return False
+        clips = self.repositories.clips.load(project_id)
+        clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+        if clip is None:
+            return False
+        state = self.snapshot_for_clip(project_id, clip)["state"]
+        return state not in {"editing", "pending_save", "recovery_required"}
 
     def workbench_url(self, session: WorkbenchSession) -> str:
         from urllib.parse import urlencode
@@ -1089,13 +1276,13 @@ class ProjectWorkbenchService:
             raise InvalidWorkbenchOutput(f"invalid bound workbench output: {exc}") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("keyframes"), list):
             raise InvalidWorkbenchOutput("bound workbench output contract is invalid")
+        _validate_manual_camera_track(payload)
         fingerprint = sha256(actual.read_bytes()).hexdigest()
         return {
             "source_output_revision": f"manual-track:{fingerprint[:16]}",
             "source_output_fingerprint": fingerprint,
-            "artifacts": {
-                "camera_track": actual.relative_to(self.viewer_runs_root).as_posix()
-            },
+            "source_path": str(actual),
+            "source_artifact_name": actual.name,
         }
 
     def _validate_pure_rotation_save(
@@ -1112,15 +1299,31 @@ class ProjectWorkbenchService:
             run_root.relative_to(self.viewer_runs_root)
         except ValueError as exc:
             raise InvalidWorkbenchOutput("pure-rotation run path escaped root") from exc
-        candidates = (
-            run_root
-            / "04_pure_rotation_corrections"
-            / "camera_track_corrected.json",
+        base = (
             run_root
             / "03_pure_rotation_placement"
-            / "camera_track_cad_base.json",
+            / "camera_track_cad_base.json"
         )
-        actual = next((path for path in candidates if path.is_file()), None)
+        corrected = (
+            run_root
+            / "04_pure_rotation_corrections"
+            / "camera_track_corrected.json"
+        )
+        lineage = corrected.parent / "correction_lineage.json"
+        actual = base if base.is_file() else None
+        if base.is_file() and corrected.is_file() and lineage.is_file():
+            try:
+                lineage_payload = json.loads(lineage.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                lineage_payload = {}
+            if (
+                isinstance(lineage_payload, dict)
+                and lineage_payload.get("base_sha256")
+                == sha256(base.read_bytes()).hexdigest()
+                and lineage_payload.get("corrected_sha256")
+                == sha256(corrected.read_bytes()).hexdigest()
+            ):
+                actual = corrected
         if actual is None:
             raise InvalidWorkbenchOutput(
                 "validated pure-rotation workbench output is missing"
@@ -1152,9 +1355,8 @@ class ProjectWorkbenchService:
         return {
             "source_output_revision": f"pure-track:{fingerprint[:16]}",
             "source_output_fingerprint": fingerprint,
-            "artifacts": {
-                "camera_track": actual.relative_to(self.viewer_runs_root).as_posix()
-            },
+            "source_path": str(actual),
+            "source_artifact_name": actual.name,
         }
 
 
@@ -1209,7 +1411,11 @@ def _optional_string(value: object) -> str | None:
 
 
 def _valid_number(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float))
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
 
 
 def _valid_vector3(value: object) -> bool:
@@ -1226,6 +1432,55 @@ def _valid_rotation_matrix(value: object) -> bool:
         and len(value) == 3
         and all(_valid_vector3(row) for row in value)
     )
+
+
+def _validate_manual_camera_track(payload: Mapping[str, object]) -> None:
+    fps = payload.get("fps")
+    keyframes = payload.get("keyframes")
+    if not _valid_number(fps) or float(fps) <= 0:
+        raise InvalidWorkbenchOutput("camera track fps must be finite and positive")
+    if not isinstance(keyframes, list) or not keyframes:
+        raise InvalidWorkbenchOutput("camera track must contain keyframes")
+    frames: set[int] = set()
+    camera_fields = ("x", "y", "z", "yaw", "pitch", "roll", "fov")
+    for keyframe in keyframes:
+        if not isinstance(keyframe, dict):
+            raise InvalidWorkbenchOutput("camera track keyframe must be an object")
+        frame = keyframe.get("frame")
+        if (
+            isinstance(frame, bool)
+            or not isinstance(frame, int)
+            or frame < 0
+            or frame in frames
+        ):
+            raise InvalidWorkbenchOutput(
+                "camera track frame must be a unique non-negative integer"
+            )
+        frames.add(frame)
+        if "time" in keyframe and not _valid_number(keyframe.get("time")):
+            raise InvalidWorkbenchOutput("camera track keyframe time must be finite")
+        camera = keyframe.get("camera")
+        if not isinstance(camera, dict) or any(
+            not _valid_number(camera.get(field)) for field in camera_fields
+        ):
+            raise InvalidWorkbenchOutput(
+                "camera track keyframe camera must contain finite pose values"
+            )
+        if not 1.0 < float(camera["fov"]) < 179.0:
+            raise InvalidWorkbenchOutput("camera track camera fov is invalid")
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _path_record_lock(path: Path) -> RLock:
