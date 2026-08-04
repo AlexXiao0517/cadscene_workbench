@@ -3,6 +3,9 @@ from __future__ import annotations
 from fractions import Fraction
 from copy import deepcopy
 import json
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -15,12 +18,61 @@ from cadscene.projects.media import (
     media_compatibility,
     measure_audio_video_duration,
     parse_ffprobe,
+    probe_media,
     validate_audio_video_duration,
     validate_render_frame_map,
     validate_rendered_media,
     validate_video_pts,
 )
 from cadscene.video_analysis.pts import DecodedFrameTimestamp
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe are required for real media integration",
+)
+def test_real_ffprobe_accepts_micro_mp4_and_rejects_arbitrary_bytes(
+    tmp_path: Path,
+) -> None:
+    encoders = subprocess.run(
+        ("ffmpeg", "-hide_banner", "-encoders"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    encoder = next(
+        (name for name in ("libx264", "libopenh264") if name in encoders), None
+    )
+    if encoder is None:
+        pytest.skip("no software H.264 encoder is available")
+    video = tmp_path / "micro.mp4"
+    subprocess.run(
+        (
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:r=25:d=0.08",
+            "-frames:v",
+            "2",
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-c:v",
+            encoder,
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ),
+        check=True,
+    )
+
+    assert probe_media(video).video.frame_count == 2
+    invalid = tmp_path / "invalid.mp4"
+    invalid.write_bytes(b"not-an-mp4")
+    with pytest.raises(InvalidMediaContract, match="ffprobe rejected"):
+        probe_media(invalid)
 
 
 def _probe_payload(*, pts: tuple[int, ...] = (0, 40, 80)) -> dict[str, object]:

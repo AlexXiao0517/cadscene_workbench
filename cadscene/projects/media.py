@@ -6,6 +6,8 @@ from decimal import Decimal
 from fractions import Fraction
 import json
 import math
+from pathlib import Path
+import subprocess
 from typing import Any, Mapping, Sequence
 
 from cadscene.video_analysis.pts import DecodedFrameTimestamp
@@ -222,6 +224,38 @@ class AudioVideoDurationValidation:
     delta_sec: float
     tolerance_sec: float
     within_tolerance: bool
+
+
+def probe_media(
+    path: Path, *, ffprobe_executable: str = "ffprobe"
+) -> ProbedMedia:
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise InvalidMediaContract("rendered video is not a regular file")
+    try:
+        completed = subprocess.run(
+            (
+                ffprobe_executable,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_frames",
+                "-show_format",
+                str(source),
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise InvalidMediaContract(f"ffprobe execution failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown ffprobe error"
+        raise InvalidMediaContract(f"ffprobe rejected rendered video: {detail}")
+    return parse_ffprobe(completed.stdout)
 
 
 def parse_ffprobe(payload: str | Mapping[str, Any]) -> ProbedMedia:

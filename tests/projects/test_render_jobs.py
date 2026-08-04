@@ -10,7 +10,7 @@ import pytest
 
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
-from cadscene.projects.media import ProjectMediaSpec
+from cadscene.projects.media import ProjectMediaSpec, parse_ffprobe
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.render_adapters import RenderAdapterRegistry, RenderExecutionPlan
@@ -51,6 +51,41 @@ def _media_spec() -> ProjectMediaSpec:
         color_transfer="bt709",
         color_primaries="bt709",
         nominal_frame_rate=Fraction(25, 1),
+    )
+
+
+def _probe_rendered_video(_path: Path, *, pts: tuple[int, ...] = (0, 40)):
+    return parse_ffprobe(
+        {
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "width": 1920,
+                    "height": 1080,
+                    "sample_aspect_ratio": "1:1",
+                    "pix_fmt": "yuv420p",
+                    "codec_name": "h264",
+                    "profile": "High",
+                    "time_base": "1/1000",
+                    "avg_frame_rate": "25/1",
+                    "color_range": "tv",
+                    "color_space": "bt709",
+                    "color_transfer": "bt709",
+                    "color_primaries": "bt709",
+                }
+            ],
+            "frames": [
+                {
+                    "media_type": "video",
+                    "stream_index": 0,
+                    "pts": value,
+                    "pkt_duration": 40,
+                }
+                for value in pts
+            ],
+            "format": {"duration": str(len(pts) * 0.04)},
+        }
     )
 
 
@@ -194,6 +229,7 @@ def _system(tmp_path: Path):
         projects_root=projects_root,
         now=lambda: "2026-08-04T00:00:01Z",
         render_adapters=RenderAdapterRegistry((render_adapter,)),
+        media_probe=_probe_rendered_video,
     )
     project_for_spec = repositories.project.load("p1")
     service.set_project_media_spec(
@@ -323,6 +359,30 @@ def test_preflight_rejects_tampered_workbench_artifact(tmp_path: Path) -> None:
 
     assert result.skipped == ("ready",)
     assert "immutable workbench" in result.reasons["ready"]
+
+
+def test_render_preflight_skips_bad_clip_media_without_blocking_valid_clip(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    review = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "review"
+    )
+    Path(review.analysis["frame_map_path"]).write_text("not-json", encoding="utf-8")
+
+    result = service.preflight_render_jobs(
+        "p1", clip_ids=("ready", "review")
+    )
+
+    assert result.eligible == ("ready",)
+    assert result.skipped == ("review",)
+    assert "physical" in result.reasons["review"]
+    enqueued = service.enqueue_render_jobs(
+        "p1", clip_ids=("ready", "review")
+    )
+    assert enqueued.enqueued_clip_ids == ("ready",)
 
 
 def test_preflight_requires_the_validated_trajectory_output_not_any_diagnostic(
@@ -540,6 +600,7 @@ def test_project_media_specs_survive_service_rebuild_and_remain_project_scoped(
         projects_root=tmp_path / "projects",
         now=lambda: "2026-08-04T00:00:02Z",
         render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
     )
     rebuilt.restore_jobs("p1")
     rebuilt.restore_jobs("p2")
@@ -574,6 +635,7 @@ def test_restore_keeps_current_render_input_and_only_interrupts_unstarted_run(
         projects_root=tmp_path / "projects",
         now=lambda: "2026-08-04T00:00:03Z",
         render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
     )
 
     restored = rebuilt.restore_jobs("p1")
@@ -590,6 +652,11 @@ def test_restore_keeps_current_render_input_and_only_interrupts_unstarted_run(
         "media_spec",
         "adapter_version",
         "trajectory_file",
+        "physical_video",
+        "frame_map",
+        "missing_video",
+        "missing_map",
+        "corrupt_map",
     ],
 )
 def test_restore_supersedes_render_when_any_bound_input_changes(
@@ -670,6 +737,27 @@ def test_restore_supersedes_render_when_any_bound_input_changes(
     elif change == "trajectory_file":
         dependency = next(job for job in trajectories if job.clip_id == "ready")
         Path(dependency.published_outputs["trajectory"]).write_bytes(b"tampered")
+    elif change == "physical_video":
+        clip = next(item for item in repositories.clips.load("p1").clips if item.clip_id == "ready")
+        Path(clip.analysis["physical_mp4_path"]).write_bytes(b"changed-clip")
+    elif change == "frame_map":
+        clip = next(item for item in repositories.clips.load("p1").clips if item.clip_id == "ready")
+        path = Path(clip.analysis["frame_map_path"])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["source_time_base"] = {"numerator": 1, "denominator": 999}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    elif change in {"missing_video", "missing_map", "corrupt_map"}:
+        clip = next(
+            item
+            for item in repositories.clips.load("p1").clips
+            if item.clip_id == "ready"
+        )
+        key = "physical_mp4_path" if change == "missing_video" else "frame_map_path"
+        path = Path(clip.analysis[key])
+        if change == "corrupt_map":
+            path.write_text("not-json", encoding="utf-8")
+        else:
+            path.unlink()
 
     rebuilt = ProjectService(
         repositories,
@@ -678,6 +766,7 @@ def test_restore_supersedes_render_when_any_bound_input_changes(
         projects_root=tmp_path / "projects",
         now=lambda: "2026-08-04T00:00:03Z",
         render_adapters=RenderAdapterRegistry((adapter,)),
+        media_probe=_probe_rendered_video,
     )
 
     restored = rebuilt.restore_jobs("p1")
@@ -837,6 +926,48 @@ def test_finish_clip_render_recovers_when_publication_is_durable_before_error(
     assert len(repositories.render.load("p1").clip_renders) == 1
 
 
+def test_render_publication_recovery_revalidates_durable_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    publish = service_module.publish_manifests
+
+    def publish_tamper_then_interrupt(*args, **kwargs):
+        publish(*args, **kwargs)
+        target = (
+            service.projects_root
+            / "p1"
+            / "render_outputs"
+            / "ready"
+            / str(result.output_revision)
+            / "rendered.mp4"
+        )
+        target.write_bytes(b"tampered-after-durable-publication")
+        raise OSError("simulated interruption after tampering durable output")
+
+    monkeypatch.setattr(
+        service_module, "publish_manifests", publish_tamper_then_interrupt
+    )
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "failed"
+    assert queue.get(render_id).status == "failed"
+    assert repositories.render.load("p1").clip_renders[-1]["job_id"] == render_id
+
+
 def test_finish_clip_render_changed_input_is_stale_and_publishes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +1024,91 @@ def test_finish_clip_render_rejects_missing_structured_validation_proof(
 
     assert finished.status == "failed"
     assert repositories.render.load("p1").clip_renders == ()
+
+
+def test_finish_clip_render_uses_server_probe_not_adapter_frame_claim(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    service.media_probe = lambda path: _probe_rendered_video(path, pts=(0,))
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    dishonest = replace(
+        result,
+        validation_proof={**dict(result.validation_proof or {}), "output_pts": [0]},
+    )
+
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        dishonest,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "failed"
+    assert repositories.render.load("p1").clip_renders == ()
+
+
+def test_finish_rechecks_current_render_input_after_server_probe(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    physical_video = Path(clip.analysis["physical_mp4_path"])
+
+    def probe_and_change_input(path: Path):
+        physical_video.write_bytes(b"changed-during-server-probe")
+        return _probe_rendered_video(path)
+
+    service.media_probe = probe_and_change_input
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    finished = service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "stale_input"
+    assert repositories.render.load("p1").clip_renders == ()
+
+
+def test_attempt_media_changed_after_validation_is_not_published(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    result = _validated_render_result(service, claimed)
+    validated = service._validate_render_result(claimed, result)
+    validated.video_path.write_bytes(b"changed-after-validation")
+
+    with pytest.raises(ValueError, match="staged render"):
+        service._publish_render_artifacts(claimed, validated)
+    assert not (
+        service.projects_root
+        / "p1"
+        / "render_outputs"
+        / "ready"
+        / str(result.output_revision)
+    ).exists()
 
 
 def test_cancel_clip_render_preserves_attempt_and_publishes_no_render(
@@ -962,7 +1178,7 @@ def test_republication_rejects_tampered_or_incomplete_immutable_render_revision(
 
     with pytest.raises(ValueError, match="immutable render revision"):
         service._publish_render_artifacts(
-            claimed, result, dict(result.validation_proof or {})
+            claimed, service._validate_render_result(claimed, result)
         )
     assert repositories.render.load("p1") == render_before
     assert len(render_before.clip_renders) == 1
@@ -999,7 +1215,7 @@ def test_republication_rejects_immutable_render_revision_identity_collision(
 
     with pytest.raises(ValueError, match="immutable render revision"):
         service._publish_render_artifacts(
-            claimed, result, dict(result.validation_proof or {})
+            claimed, service._validate_render_result(claimed, result)
         )
     assert repositories.render.load("p1") == render_before
 
@@ -1023,7 +1239,7 @@ def test_published_render_is_idempotent_and_restores_only_with_exact_proof(
     )
 
     reused = service._publish_render_artifacts(
-        claimed, result, dict(result.validation_proof or {})
+        claimed, service._validate_render_result(claimed, result)
     )
     assert Path(reused["video"]).read_bytes() == b"validated-rendered-video"
 
@@ -1038,10 +1254,180 @@ def test_published_render_is_idempotent_and_restores_only_with_exact_proof(
         projects_root=tmp_path / "projects",
         now=lambda: "2026-08-04T00:00:04Z",
         render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
     )
     restored = rebuilt.restore_jobs("p1")
     assert restored.get(render_id).status == "success"
     assert restored.get(render_id).validation_proof == result.validation_proof
+
+
+def test_restore_does_not_trust_tampered_successful_render_publication(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    published = repositories.render.load("p1").clip_renders[-1]
+    Path(published["outputs"]["video"]).write_bytes(b"tampered")
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:05Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
+    )
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status != "success"
+
+
+@pytest.mark.parametrize("damage", ["missing", "operation", "job_id"])
+def test_restore_requires_unique_exact_render_owner_record(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    current = repositories.render.load("p1")
+    record = dict(current.clip_renders[-1])
+    if damage == "missing":
+        records = ()
+    elif damage == "operation":
+        records = ({**record, "operation_id": "wrong-operation"},)
+    else:
+        records = ({**record, "job_id": "wrong-job"},)
+    repositories.render.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(value, clip_renders=records),
+    )
+
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:06Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
+    )
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status != "success"
+
+
+def test_persisted_render_rejects_unsafe_output_revision_before_path_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    persisted = queue.get(render_id)
+    unsafe_revision = "../outside"
+    target = (
+        service.projects_root
+        / "p1"
+        / "render_outputs"
+        / "ready"
+        / unsafe_revision
+    )
+    polluted = replace(
+        persisted,
+        output_revision=unsafe_revision,
+        published_outputs={
+            "video": str(target / "rendered.mp4"),
+            "frame_map": str(target / "render_frame_map.json"),
+            "manifest": str(target / "render_output_manifest.json"),
+        },
+    )
+    monkeypatch.setattr(
+        repositories.render,
+        "load",
+        lambda _project_id: (_ for _ in ()).throw(
+            AssertionError("unsafe revision reached render repository lookup")
+        ),
+    )
+
+    assert service._validate_persisted_render_success(polluted) is False
+
+
+def test_restore_missing_clip_fails_old_render_without_blocking_project(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    current = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(item for item in value.clips if item.clip_id != "ready"),
+        ),
+    )
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:07Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
+    )
+
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status != "success"
 
 
 def test_enqueue_render_jobs_builds_media_dag_identity_and_is_idempotent(

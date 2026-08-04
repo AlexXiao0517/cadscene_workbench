@@ -34,7 +34,13 @@ from .models import (
     StateReference,
     register_analysis_revision,
 )
-from .media import ProjectMediaSpec, validate_render_frame_map, validate_video_pts
+from .media import (
+    ProbedMedia,
+    ProjectMediaSpec,
+    media_compatibility,
+    probe_media,
+    validate_rendered_media,
+)
 from .identifiers import is_safe_stable_id
 from .render_adapters import RenderAdapterRegistry
 from .render_adapters import RenderInputs
@@ -120,6 +126,19 @@ class _RenderPublicationPending(RuntimeError):
         self.cause = cause
 
 
+@dataclass(frozen=True)
+class _ValidatedRenderBundle:
+    output_revision: str
+    output_fingerprint: str
+    video_path: Path
+    frame_map_path: Path
+    frame_map: Mapping[str, object]
+    proof: Mapping[str, object]
+    source_frames: tuple[DecodedFrameTimestamp, ...]
+    source_time_base: Fraction
+    media_spec: ProjectMediaSpec
+
+
 class ProjectService:
     """The sole owner of project job-state publication."""
 
@@ -133,6 +152,7 @@ class ProjectService:
         now: Callable[[], str],
         identity: Callable[[], str] | None = None,
         render_adapters: RenderAdapterRegistry | None = None,
+        media_probe: Callable[[Path], ProbedMedia] | None = None,
     ) -> None:
         self.repositories = repositories
         self.queue = queue
@@ -142,6 +162,7 @@ class ProjectService:
         self.now = now
         self._identity = identity or (lambda: uuid4().hex)
         self.render_adapters = render_adapters or RenderAdapterRegistry(())
+        self.media_probe = media_probe or probe_media
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
             projects_root=self.projects_root,
@@ -841,6 +862,14 @@ class ProjectService:
                     f"render adapter is unavailable for workflow: {workflow}"
                 )
                 continue
+            try:
+                _render_input_asset_identity(clip)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = (
+                    f"physical render input validation failed: {exc}"
+                )
+                continue
             trajectory = self._current_trajectory_for_render(clip, stored_jobs)
             if trajectory is None:
                 skipped.append(clip.clip_id)
@@ -1321,17 +1350,23 @@ class ProjectService:
         if current.status == "running":
             self.queue.mark_validating(current.job_id, **kwargs)
         try:
-            proof = self._validate_render_result(current, result)
-            published_outputs = self._publish_render_artifacts(
-                current, result, proof
-            )
+            validated = self._validate_render_result(current, result)
+            if self._current_input_fingerprint(current) != current.input_fingerprint:
+                finished = self.queue.mark_stale_input(current.job_id, **kwargs)
+                self._publish_queue_locked(current.project_id)
+                return finished
+            published_outputs = self._publish_render_artifacts(current, validated)
+            if self._current_input_fingerprint(current) != current.input_fingerprint:
+                finished = self.queue.mark_stale_input(current.job_id, **kwargs)
+                self._publish_queue_locked(current.project_id)
+                return finished
             candidate = self.queue.prepare_success_candidate(
                 current.job_id,
-                output_revision=str(result.output_revision),
-                output_fingerprint=result.output_fingerprint,
+                output_revision=validated.output_revision,
+                output_fingerprint=validated.output_fingerprint,
                 output_validated=True,
                 published_outputs=published_outputs,
-                validation_proof=proof,
+                validation_proof=validated.proof,
                 **kwargs,
             )
             jobs_manifest = self.repositories.jobs.load(current.project_id)
@@ -1360,7 +1395,7 @@ class ProjectService:
                 )
 
             render_state = {
-                "render_id": f"{current.clip_id}:{result.output_revision}",
+                "render_id": f"{current.clip_id}:{validated.output_revision}",
                 "project_id": current.project_id,
                 "clip_id": current.clip_id,
                 "job_id": current.job_id,
@@ -1370,10 +1405,10 @@ class ProjectService:
                 "input_fingerprint": current.input_fingerprint,
                 "adapter_name": current.adapter_name,
                 "adapter_version": current.adapter_version,
-                "output_revision": result.output_revision,
-                "output_fingerprint": result.output_fingerprint,
+                "output_revision": validated.output_revision,
+                "output_fingerprint": validated.output_fingerprint,
                 "outputs": dict(published_outputs),
-                "validation_proof": dict(proof),
+                "validation_proof": dict(validated.proof),
             }
 
             def mutate_render(
@@ -1460,7 +1495,11 @@ class ProjectService:
             current = self.queue.get(pending.job_id)
             attempt = current.attempts[-1]
             claim_token = attempt.worker_claim_token
-            if persisted is not None and persisted.status == "success":
+            if (
+                persisted is not None
+                and persisted.status == "success"
+                and self._validate_persisted_render_success(persisted)
+            ):
                 if current.status == "validating":
                     committed = self.queue.commit_prepared_candidate(
                         pending.job_id,
@@ -1563,26 +1602,43 @@ class ProjectService:
 
     def _validate_render_result(
         self, job: QueueJob, result: AdapterResult
-    ) -> Mapping[str, object]:
+    ) -> _ValidatedRenderBundle:
         if (
             not result.output_revision
             or not is_safe_stable_id(result.output_revision)
-            or not result.output_fingerprint
-            or not isinstance(result.validation_proof, Mapping)
             or not job.attempts
         ):
-            raise ValueError("render adapter returned no structured validation proof")
+            raise ValueError("render adapter returned no safe output revision")
         attempt = Path(job.attempts[-1].directory).resolve(strict=True)
         raw_video = result.outputs.get("video")
         raw_map = result.outputs.get("frame_map")
         if not isinstance(raw_video, str) or not isinstance(raw_map, str):
             raise ValueError("render adapter outputs are incomplete")
-        video = Path(raw_video).resolve(strict=True)
-        frame_map_path = Path(raw_map).resolve(strict=True)
+        raw_video_path = Path(raw_video)
+        raw_frame_map_path = Path(raw_map)
+        if raw_video_path.is_symlink() or raw_frame_map_path.is_symlink():
+            raise ValueError("render adapter output path is unsafe")
+        video = raw_video_path.resolve(strict=True)
+        frame_map_path = raw_frame_map_path.resolve(strict=True)
         video.relative_to(attempt)
         frame_map_path.relative_to(attempt)
         if not video.is_file() or not frame_map_path.is_file():
             raise ValueError("render adapter outputs are missing")
+        return self._validate_render_files(
+            job,
+            output_revision=result.output_revision,
+            video_path=video,
+            frame_map_path=frame_map_path,
+        )
+
+    def _validate_render_files(
+        self,
+        job: QueueJob,
+        *,
+        output_revision: str,
+        video_path: Path,
+        frame_map_path: Path,
+    ) -> _ValidatedRenderBundle:
         clips = self.repositories.clips.load(job.project_id)
         clip = next(item for item in clips.clips if item.clip_id == job.clip_id)
         source_map_path = _clip_frame_map_path(clip)
@@ -1595,54 +1651,59 @@ class ProjectService:
         if media_binding is None:
             raise ValueError("project media specification is missing")
         _, media_spec = media_binding
-        proof = dict(result.validation_proof)
-        count = proof.get("rendered_frame_count")
-        output_pts = proof.get("output_pts")
-        if isinstance(count, bool) or not isinstance(count, int):
-            raise ValueError("rendered frame count proof is invalid")
-        if not isinstance(output_pts, list):
-            raise ValueError("render output PTS proof is invalid")
-        validate_video_pts(output_pts)
         frame_map_payload = json.loads(frame_map_path.read_text(encoding="utf-8"))
-        validate_render_frame_map(
+        if not isinstance(frame_map_payload, Mapping):
+            raise ValueError("render frame map must be an object")
+        probed = self.media_probe(video_path)
+        media_proof = validate_rendered_media(
+            probed,
             frame_map_payload,
-            rendered_frame_count=count,
             expected_source_frames=source_frames,
             expected_source_time_base=time_base,
         )
+        compatibility = media_compatibility(probed.video, media_spec)
+        if not compatibility.compatible:
+            raise ValueError(
+                "rendered video differs from project media specification: "
+                + ", ".join(compatibility.differences)
+            )
         expected_time_base = {
             "numerator": time_base.numerator,
             "denominator": time_base.denominator,
         }
-        expected_ordinals = [frame.ordinal for frame in source_frames]
-        expected_pts = [frame.pts for frame in source_frames]
-        video_hash = sha256(video.read_bytes()).hexdigest()
+        video_hash = sha256(video_path.read_bytes()).hexdigest()
         map_hash = sha256(frame_map_path.read_bytes()).hexdigest()
-        expected_fields = {
-            "rendered_frame_count": len(source_frames),
-            "source_ordinals": expected_ordinals,
-            "source_pts": expected_pts,
+        proof = {
+            "rendered_frame_count": media_proof.rendered_frame_count,
+            "output_pts": list(media_proof.output_pts),
+            "source_ordinals": [frame.ordinal for frame in source_frames],
+            "source_pts": list(media_proof.source_pts),
             "source_time_base": expected_time_base,
             "project_media_spec": media_spec.to_dict(),
             "video_sha256": video_hash,
             "frame_map_sha256": map_hash,
         }
-        if any(proof.get(key) != value for key, value in expected_fields.items()):
-            raise ValueError("render validation proof differs from authoritative input")
         proof_fingerprint = sha256(
             json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        if proof_fingerprint != result.output_fingerprint:
-            raise ValueError("render validation proof fingerprint is invalid")
-        return proof
+        return _ValidatedRenderBundle(
+            output_revision=output_revision,
+            output_fingerprint=proof_fingerprint,
+            video_path=video_path,
+            frame_map_path=frame_map_path,
+            frame_map=dict(frame_map_payload),
+            proof=proof,
+            source_frames=source_frames,
+            source_time_base=time_base,
+            media_spec=media_spec,
+        )
 
     def _publish_render_artifacts(
         self,
         job: QueueJob,
-        result: AdapterResult,
-        proof: Mapping[str, object],
+        validated: _ValidatedRenderBundle,
     ) -> Mapping[str, str]:
-        revision = str(result.output_revision)
+        revision = validated.output_revision
         target = (
             self.projects_root
             / job.project_id
@@ -1652,20 +1713,29 @@ class ProjectService:
         )
         manifest_name = "render_output_manifest.json"
         if target.exists():
-            return _validate_existing_render_publication(
-                target, job=job, result=result, proof=proof
+            return self._validate_existing_render_publication(
+                target, job=job, validated=validated
             )
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(
             tempfile.mkdtemp(prefix=f".{revision}-", dir=target.parent)
         )
         try:
-            source_video = Path(result.outputs["video"])
-            source_map = Path(result.outputs["frame_map"])
             destination_video = temporary / "rendered.mp4"
             destination_map = temporary / "render_frame_map.json"
-            shutil.copy2(source_video, destination_video)
-            shutil.copy2(source_map, destination_map)
+            shutil.copy2(validated.video_path, destination_video)
+            shutil.copy2(validated.frame_map_path, destination_map)
+            staged = self._validate_render_files(
+                job,
+                output_revision=revision,
+                video_path=destination_video,
+                frame_map_path=destination_map,
+            )
+            if (
+                staged.output_fingerprint != validated.output_fingerprint
+                or staged.proof != validated.proof
+            ):
+                raise ValueError("staged render differs from validated attempt output")
             manifest_payload = {
                 "schema_version": 1,
                 "project_id": job.project_id,
@@ -1674,10 +1744,10 @@ class ProjectService:
                 "input_revision": job.input_revision,
                 "input_fingerprint": job.input_fingerprint,
                 "output_revision": revision,
-                "output_fingerprint": result.output_fingerprint,
+                "output_fingerprint": validated.output_fingerprint,
                 "adapter_name": job.adapter_name,
                 "adapter_version": job.adapter_version,
-                "validation_proof": dict(proof),
+                "validation_proof": dict(validated.proof),
             }
             manifest_path = temporary / manifest_name
             manifest_path.write_text(
@@ -1698,6 +1768,121 @@ class ProjectService:
             "frame_map": str(target / "render_frame_map.json"),
             "manifest": str(target / manifest_name),
         }
+
+    def _validate_existing_render_publication(
+        self,
+        target: Path,
+        *,
+        job: QueueJob,
+        validated: _ValidatedRenderBundle,
+    ) -> Mapping[str, str]:
+        paths = _validate_existing_render_publication(
+            target,
+            job=job,
+            output_revision=validated.output_revision,
+            output_fingerprint=validated.output_fingerprint,
+            proof=validated.proof,
+        )
+        observed = self._validate_render_files(
+            job,
+            output_revision=validated.output_revision,
+            video_path=Path(paths["video"]),
+            frame_map_path=Path(paths["frame_map"]),
+        )
+        if (
+            observed.output_fingerprint != validated.output_fingerprint
+            or observed.proof != validated.proof
+        ):
+            raise ValueError("immutable render revision differs from validated output")
+        return paths
+
+    def _validate_persisted_render_success(self, job: QueueJob) -> bool:
+        if (
+            job.status != "success"
+            or not job.output_validated
+            or not job.output_revision
+            or not is_safe_stable_id(job.output_revision)
+            or not job.output_fingerprint
+            or not isinstance(job.validation_proof, Mapping)
+        ):
+            return False
+        if (
+            not job.publication_operation_id
+            or job.operation_id != job.publication_operation_id
+        ):
+            return False
+        target = (
+            self.projects_root
+            / job.project_id
+            / "render_outputs"
+            / job.clip_id
+            / job.output_revision
+        )
+        try:
+            paths = {
+                "video": target / "rendered.mp4",
+                "frame_map": target / "render_frame_map.json",
+                "manifest": target / "render_output_manifest.json",
+            }
+            if dict(job.published_outputs) != {
+                name: str(path) for name, path in paths.items()
+            }:
+                return False
+            render_manifest = self.repositories.render.load(job.project_id)
+            render_id = f"{job.clip_id}:{job.output_revision}"
+            records = tuple(
+                item
+                for item in render_manifest.clip_renders
+                if item.get("render_id") == render_id
+            )
+            if len(records) != 1:
+                return False
+            clip = next(
+                (
+                    item
+                    for item in self.repositories.clips.load(job.project_id).clips
+                    if item.clip_id == job.clip_id
+                ),
+                None,
+            )
+            if clip is None:
+                return False
+            expected_record = {
+                "render_id": render_id,
+                "project_id": job.project_id,
+                "clip_id": job.clip_id,
+                "job_id": job.job_id,
+                "status": "success",
+                "workflow": clip.resolved_workflow,
+                "input_revision": job.input_revision,
+                "input_fingerprint": job.input_fingerprint,
+                "adapter_name": job.adapter_name,
+                "adapter_version": job.adapter_version,
+                "output_revision": job.output_revision,
+                "output_fingerprint": job.output_fingerprint,
+                "outputs": dict(job.published_outputs),
+                "validation_proof": dict(job.validation_proof),
+                "operation_id": job.publication_operation_id,
+            }
+            if any(records[0].get(key) != value for key, value in expected_record.items()):
+                return False
+            observed = self._validate_render_files(
+                job,
+                output_revision=job.output_revision,
+                video_path=paths["video"],
+                frame_map_path=paths["frame_map"],
+            )
+            if (
+                observed.output_fingerprint != job.output_fingerprint
+                or observed.proof != job.validation_proof
+            ):
+                return False
+            self._validate_existing_render_publication(
+                target, job=job, validated=observed
+            )
+            return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
 
     def _recover_analysis_publication(
         self, pending: _AnalysisPublicationPending
@@ -2302,8 +2487,29 @@ class ProjectService:
             manifest = self._migrate_legacy_analysis_jobs_locked(
                 project_id, manifest
             )
+            restored_payloads: list[Mapping[str, object]] = []
+            for item in manifest.jobs:
+                job = QueueJob.from_dict(item)
+                if (
+                    job.job_type == "clip_render"
+                    and job.status == "success"
+                    and not self._validate_persisted_render_success(job)
+                ):
+                    job = replace(
+                        job,
+                        status="failed",
+                        stage="failed",
+                        output_revision=None,
+                        output_fingerprint=None,
+                        output_validated=False,
+                        validated_input_fingerprint=None,
+                        published_outputs={},
+                        validation_proof=None,
+                        error="persisted render output failed restore validation",
+                    )
+                restored_payloads.append(job.to_dict())
             restored = self.queue.merge_restored(
-                manifest.jobs,
+                tuple(restored_payloads),
                 project_id=project_id,
                 queue_order=manifest.queue_order,
                 process_probe=process_probe,
@@ -3144,19 +3350,22 @@ class ProjectService:
             ):
                 return None
             media_spec_revision, media_spec = media_binding
-            return _fingerprint(
-                _render_identity_payload(
-                    clip=clip,
-                    project_revision=project.revision,
-                    clips_revision=clips_manifest.revision,
-                    trajectory=dependency,
-                    workbench=workbench,
-                    media_spec=media_spec,
-                    media_spec_revision=media_spec_revision,
-                    adapter_name=render_adapter.name,
-                    adapter_version=render_adapter.version,
+            try:
+                return _fingerprint(
+                    _render_identity_payload(
+                        clip=clip,
+                        project_revision=project.revision,
+                        clips_revision=clips_manifest.revision,
+                        trajectory=dependency,
+                        workbench=workbench,
+                        media_spec=media_spec,
+                        media_spec_revision=media_spec_revision,
+                        adapter_name=render_adapter.name,
+                        adapter_version=render_adapter.version,
+                    )
                 )
-            )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
         if job.job_type == "trajectory":
             try:
                 adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
@@ -3407,7 +3616,8 @@ def _validate_existing_render_publication(
     target: Path,
     *,
     job: QueueJob,
-    result: AdapterResult,
+    output_revision: str,
+    output_fingerprint: str,
     proof: Mapping[str, object],
 ) -> Mapping[str, str]:
     if target.is_symlink() or not target.is_dir():
@@ -3435,8 +3645,8 @@ def _validate_existing_render_publication(
             "job_id": job.job_id,
             "input_revision": job.input_revision,
             "input_fingerprint": job.input_fingerprint,
-            "output_revision": result.output_revision,
-            "output_fingerprint": result.output_fingerprint,
+            "output_revision": output_revision,
+            "output_fingerprint": output_fingerprint,
             "adapter_name": job.adapter_name,
             "adapter_version": job.adapter_version,
             "validation_proof": proof,
@@ -3698,6 +3908,7 @@ def _render_identity_payload(
         "analysis_revision": clip.analysis_revision,
         "resolved_workflow": clip.resolved_workflow,
         "parameters": dict(clip.manual_definition),
+        "physical_inputs": _render_input_asset_identity(clip),
         "trajectory": {
             "job_id": trajectory.job_id,
             "input_revision": trajectory.input_revision,
@@ -3718,6 +3929,59 @@ def _render_identity_payload(
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
     }
+
+
+def _render_input_asset_identity(clip: ClipDefinition) -> Mapping[str, object]:
+    video_path = _clip_output_path(clip)
+    frame_map_path = _clip_frame_map_path(clip)
+    if video_path is None or frame_map_path is None:
+        raise ValueError("clip render physical inputs are unavailable")
+    clip_time_base = clip.analysis.get("source_time_base")
+    if not isinstance(clip_time_base, Mapping):
+        raise ValueError("clip is missing source time base")
+    expected_numerator = clip_time_base.get("numerator")
+    expected_denominator = clip_time_base.get("denominator")
+    if (
+        type(expected_numerator) is not int
+        or type(expected_denominator) is not int
+        or expected_numerator <= 0
+        or expected_denominator <= 0
+    ):
+        raise ValueError("clip source time base is invalid")
+    try:
+        if video_path.is_symlink() or frame_map_path.is_symlink():
+            raise ValueError("clip render physical input is unsafe")
+        video = video_path.resolve(strict=True)
+        frame_map = frame_map_path.resolve(strict=True)
+        if not video.is_file() or not frame_map.is_file():
+            raise ValueError("clip render physical input is not a regular file")
+        payload = json.loads(frame_map.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError("authoritative frame map must be an object")
+        raw_time_base = payload.get("source_time_base")
+        if not isinstance(raw_time_base, Mapping):
+            raise ValueError("authoritative frame map has no source time base")
+        numerator = raw_time_base.get("numerator")
+        denominator = raw_time_base.get("denominator")
+        if (
+            type(numerator) is not int
+            or type(denominator) is not int
+            or numerator != expected_numerator
+            or denominator != expected_denominator
+        ):
+            raise ValueError("authoritative frame map time base differs from clip")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("clip render physical input cannot be validated") from exc
+
+    def identity(path: Path) -> Mapping[str, object]:
+        content = path.read_bytes()
+        return {
+            "path": str(path),
+            "size_bytes": len(content),
+            "sha256": sha256(content).hexdigest(),
+        }
+
+    return {"video": identity(video), "frame_map": identity(frame_map)}
 
 
 def _fingerprint(value: Mapping[str, object]) -> str:

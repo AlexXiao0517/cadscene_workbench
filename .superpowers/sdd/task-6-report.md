@@ -257,10 +257,9 @@ or UI behavior.
   the job-owned attempt directory before constructing manifest-free
   `RenderInputs`.
 - Completion distinguishes stale input and adapter failure from validation or
-  publication failure. A successful adapter result must provide output files
-  inside the immutable attempt plus structured proof for exact source frame
-  ordinals/PTS, time base, project media specification, monotonic output PTS,
-  frame count, and artifact hashes.
+  publication failure. Adapter output files must remain inside the immutable
+  attempt; the service independently probes and constructs the authoritative
+  validation proof rather than accepting adapter claims.
 - Validated artifacts are copied through a same-parent temporary directory and
   atomically published as an immutable render output revision. Attempt files
   and diagnostics remain intact; cancellation and invalid results publish no
@@ -280,6 +279,44 @@ Substage 2c TDD evidence:
 - Focused render-job tests: `24 passed`.
 - Render/service/queue/repository/recovery/workbench/workflow/media related
   regression: `332 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+### fa74dea media-trust and recovery review closure
+
+- Production validation now invokes `ffprobe -show_streams -show_frames
+  -show_format` through `probe_media()` and parses the result into the existing
+  strict media contract. `ProjectService` accepts a probe callable only so pure
+  unit tests can inject deterministic structured probe data.
+- Frame count, output PTS, orientation and full project media compatibility are
+  derived from the probed MP4. The service combines these facts with the exact
+  authoritative frame map and actual artifact hashes to create the durable
+  proof and output fingerprint; adapter-reported proof/fingerprint values are
+  not trusted.
+- Render identity now includes SHA-256 and byte size for both the physical MP4
+  and authoritative frame map. The frame map's exact source time base must match
+  the clip contract. The enqueue and current-fingerprint paths share this same
+  identity builder, so either input changing supersedes the queued job.
+- Restore revalidates every successful clip render against its immutable output
+  manifest, contained regular files, actual hashes, frame map, server probe,
+  project media specification and durable proof. Publication recovery performs
+  the same check before accepting persisted success.
+- Validation returns a frozen bundle of resolved attempt paths and server proof.
+  Publication copies only those paths, then re-probes/re-hashes the staging
+  video and frame map before `os.replace`; a post-validation source change
+  cannot be published.
+- Finish recomputes the complete current render-input fingerprint after server
+  probing and again after artifact staging. A physical input changing during
+  either interval ends as `stale_input` and publishes no current render state.
+
+Review-fix TDD evidence:
+
+- RED: the focused reviewer reproductions first failed because media probing was
+  absent; the old path trusted adapter count/PTS, omitted physical-input hashes,
+  restored a tampered success, and had no frozen staging revalidation boundary.
+- Real media integration generated a two-frame MP4 with ffmpeg, verified it with
+  production ffprobe, and confirmed arbitrary bytes are rejected: `1 passed`.
+- Focused render/media tests: `96 passed`.
+- Related regression: `340 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
 
 Crash coverage note: the render-specific suite injects an interruption after
@@ -313,3 +350,38 @@ Review-fix TDD evidence:
 - Focused render-job tests: `33 passed`.
 - Related regression: `332 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+### Render preflight and owner-consistency review closure
+
+- Render preflight validates each clip's physical MP4 and authoritative frame
+  map identity before declaring it eligible. A missing, malformed, or
+  time-base-inconsistent asset is reported as a per-clip skip, while valid clips
+  in the same request remain enqueueable; enqueue still rebuilds the identity.
+- Current render fingerprint resolution treats missing/corrupt physical inputs
+  as unverifiable and returns `None`, allowing restore to supersede only the
+  affected task instead of aborting the whole project restore.
+- A persisted successful render now additionally requires one exact owner record
+  in `render_manifest`: render/job/project/clip identity, input/output identity,
+  workflow/adapter, paths, proof, and operation ID must match the jobs owner's
+  publication operation. Missing or mismatched owner state cannot restore a job
+  as successful, and publication recovery uses the same validation.
+
+Review-fix TDD evidence:
+
+- RED: malformed per-clip media remained eligible, while missing/mismatched
+  render owner records still restored jobs as success.
+- New focused reviewer cases: `8 passed`.
+- Focused render/media tests: `103 passed`.
+- Related regression: `347 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+Final restore fail-closed hardening:
+
+- Persisted render output revisions are revalidated with
+  `is_safe_stable_id()` before any repository or filesystem lookup, so polluted
+  traversal-like revisions cannot influence output path construction.
+- A successful render whose clip no longer exists now fails persisted-output
+  validation and restores as unsuccessful instead of raising `StopIteration`
+  and blocking the entire project startup.
+- Both focused regressions passed after failing before the guard changes.
+  Focused render/media: `105 passed`; related: `349 passed`; static checks pass.
