@@ -635,3 +635,44 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Eleventh formal review closure (base `1ea802b`)
+
+### Compatibility finding map
+
+1. **Legacy analysis identity required a safe one-time migration:** current
+   analysis identity now declares `ANALYSIS_IDENTITY_SCHEMA = 2` inside the
+   canonical payload. Before queue restore, `ProjectService` holds the project
+   lock and validates manifest ownership, the recorded CAD-to-video topology,
+   canonical non-identity contract fields, and exact legacy input/idempotency
+   hashes. A private pre-project-scope payload exists only for this migration.
+   Valid legacy jobs are atomically republished with project-scoped input and
+   idempotency hashes; validated outputs receive the matching migrated
+   `validated_input_fingerprint`. Status, stage, outputs, errors, attempts, and
+   submission/publication provenance remain unchanged before the existing queue
+   restore path runs.
+2. **Legacy acceptance must not reopen cross-project pollution:** mixed or
+   approximate identities, foreign project ownership, malformed job types or
+   dependencies, and inconsistent validated-input fingerprints fail before any
+   manifest or queue mutation. Two projects migrating byte-identical legacy
+   inputs receive distinct schema-2 fingerprints and idempotency keys, while an
+   actual historical cross-project reference is rejected.
+
+### Eleventh-round TDD and verification evidence
+
+- Initial RED: `10 failed, 1 passed` - valid success/queued/running/failed jobs
+  were invalidated instead of migrated; five inexact/polluted variants were
+  silently accepted; and two-project legacy identities remained equal. The
+  existing queue ownership check already rejected one foreign-project record.
+- Review reproductions GREEN: `11 passed`.
+- Analysis-job test module: `64 passed`.
+- Recovery test module: `16 passed`.
+- Focused analysis/recovery/queue/project-API suite: `146 passed`.
+- All project tests: `252 passed`.
+- Final fresh full suite: `829 passed, 1 skipped` in 40.08 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

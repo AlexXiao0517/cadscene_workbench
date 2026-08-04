@@ -41,6 +41,9 @@ from .queue import (
 )
 
 
+ANALYSIS_IDENTITY_SCHEMA = 2
+
+
 @dataclass(frozen=True)
 class TrajectoryPreflight:
     eligible: tuple[str, ...]
@@ -1622,6 +1625,9 @@ class ProjectService:
     ) -> LocalResourceQueue:
         with self._state_guard(project_id):
             manifest = self.repositories.jobs.load(project_id)
+            manifest = self._migrate_legacy_analysis_jobs_locked(
+                project_id, manifest
+            )
             restored = self.queue.merge_restored(
                 manifest.jobs,
                 project_id=project_id,
@@ -1651,6 +1657,112 @@ class ProjectService:
                     )
                 self._publish_queue_locked(project_id)
         return restored
+
+    def _migrate_legacy_analysis_jobs_locked(
+        self,
+        project_id: str,
+        manifest: JobsManifest,
+    ) -> JobsManifest:
+        jobs = tuple(QueueJob.from_dict(item) for item in manifest.jobs)
+        if any(item.project_id != project_id for item in jobs):
+            raise ValueError(
+                "jobs manifest contains a job owned by another project"
+            )
+        project = self.repositories.project.load(project_id)
+        state = project.source_assets.get("_analysis")
+        if not isinstance(state, Mapping):
+            return manifest
+        request_key = str(state.get("request_key") or "")
+        recorded_ids = tuple(str(item) for item in state.get("job_ids", ()))
+        if not request_key or not recorded_ids:
+            return manifest
+        by_id = {item.job_id: item for item in jobs}
+        if len(recorded_ids) != 2 or len(set(recorded_ids)) != 2:
+            raise ValueError("recorded analysis DAG must contain two unique jobs")
+        try:
+            recorded = tuple(by_id[job_id] for job_id in recorded_ids)
+        except KeyError as exc:
+            raise ValueError("recorded analysis DAG job is missing") from exc
+        structured = self._validated_analysis_dag_structure(
+            recorded,
+            project_id=project_id,
+            request_key=request_key,
+        )
+        if structured is None:
+            raise ValueError("recorded analysis DAG is structurally invalid")
+        if self._validated_analysis_dag(
+            structured,
+            project_id=project_id,
+            request_key=request_key,
+            project_assets=project.source_assets,
+        ) is not None:
+            return manifest
+
+        replacements: dict[str, QueueJob] = {}
+        for phase, job in (("cad", structured[0]), ("video", structured[1])):
+            current_contract = _analysis_job_contract(
+                project_id=project_id,
+                phase=phase,
+                request_key=request_key,
+                project_assets=project.source_assets,
+            )
+            for field_name, expected in current_contract.items():
+                if field_name in {"input_fingerprint", "idempotency_key"}:
+                    continue
+                if getattr(job, field_name) != expected:
+                    raise ValueError(
+                        "legacy analysis job does not match canonical contract"
+                    )
+            legacy_payload = _legacy_analysis_identity_payload(
+                phase=phase,
+                request_key=request_key,
+                project_assets=project.source_assets,
+            )
+            legacy_fingerprint = _fingerprint(legacy_payload)
+            legacy_idempotency = _fingerprint(
+                {**legacy_payload, "purpose": "idempotency"}
+            )
+            if (
+                job.input_fingerprint != legacy_fingerprint
+                or job.idempotency_key != legacy_idempotency
+            ):
+                raise ValueError(
+                    "legacy analysis identity does not match exactly"
+                )
+            if (
+                job.validated_input_fingerprint is not None
+                and job.validated_input_fingerprint != legacy_fingerprint
+            ):
+                raise ValueError(
+                    "legacy validated input fingerprint does not match"
+                )
+            if job.output_validated and job.validated_input_fingerprint is None:
+                raise ValueError(
+                    "validated legacy analysis output has no input fingerprint"
+                )
+            replacements[job.job_id] = replace(
+                job,
+                input_fingerprint=str(current_contract["input_fingerprint"]),
+                idempotency_key=str(current_contract["idempotency_key"]),
+                validated_input_fingerprint=(
+                    str(current_contract["input_fingerprint"])
+                    if job.validated_input_fingerprint is not None
+                    else None
+                ),
+            )
+
+        return self.repositories.jobs.update(
+            project_id,
+            expected_revision=manifest.revision,
+            mutate=lambda value: replace(
+                value,
+                operation_id=self._identity(),
+                jobs=tuple(
+                    replacements.get(item.job_id, item).to_dict()
+                    for item in jobs
+                ),
+            ),
+        )
 
     def _sync_analysis_state_from_queue_locked(self, project_id: str) -> None:
         project = self.repositories.project.load(project_id)
@@ -1800,6 +1912,35 @@ class ProjectService:
         request_key: str,
         project_assets: Mapping[str, object],
     ) -> tuple[QueueJob, QueueJob] | None:
+        structured = ProjectService._validated_analysis_dag_structure(
+            jobs,
+            project_id=project_id,
+            request_key=request_key,
+        )
+        if structured is None:
+            return None
+        cad, video = structured
+        for phase, job in (("cad", cad), ("video", video)):
+            contract = _analysis_job_contract(
+                project_id=project_id,
+                request_key=request_key,
+                phase=phase,
+                project_assets=project_assets,
+            )
+            if any(
+                getattr(job, field_name) != expected
+                for field_name, expected in contract.items()
+            ):
+                return None
+        return cad, video
+
+    @staticmethod
+    def _validated_analysis_dag_structure(
+        jobs: Sequence[QueueJob],
+        *,
+        project_id: str,
+        request_key: str,
+    ) -> tuple[QueueJob, QueueJob] | None:
         if len(jobs) != 2 or len({item.job_id for item in jobs}) != 2:
             return None
         if any(
@@ -1814,18 +1955,6 @@ class ProjectService:
         video = by_type["video_analysis"]
         if cad.depends_on_job_ids or video.depends_on_job_ids != (cad.job_id,):
             return None
-        for phase, job in (("cad", cad), ("video", video)):
-            contract = _analysis_job_contract(
-                project_id=project_id,
-                request_key=request_key,
-                phase=phase,
-                project_assets=project_assets,
-            )
-            if any(
-                getattr(job, field_name) != expected
-                for field_name, expected in contract.items()
-            ):
-                return None
         return cad, video
 
     @staticmethod
@@ -2490,11 +2619,7 @@ def _job_identity_payload(
     return payload
 
 
-def _analysis_identity_payload(
-    *,
-    project_id: str,
-    phase: str,
-    request_key: str,
+def _analysis_identity_assets(
     project_assets: Mapping[str, object],
 ) -> Mapping[str, object]:
     assets: dict[str, object] = {}
@@ -2507,11 +2632,39 @@ def _analysis_identity_payload(
             "path": None if value.get("path") is None else str(value.get("path")),
             "sha256": None if value.get("sha256") is None else str(value.get("sha256")),
         }
+    return assets
+
+
+def _analysis_identity_payload(
+    *,
+    project_id: str,
+    phase: str,
+    request_key: str,
+    project_assets: Mapping[str, object],
+) -> Mapping[str, object]:
     return {
+        "identity_schema": ANALYSIS_IDENTITY_SCHEMA,
         "project_id": project_id,
         "job_type": f"{phase}_analysis",
         "request_key": request_key,
-        "source_assets": assets,
+        "source_assets": _analysis_identity_assets(project_assets),
+        "adapter_name": ANALYSIS_ADAPTER_NAME,
+        "adapter_version": ANALYSIS_ADAPTER_VERSION,
+    }
+
+
+def _legacy_analysis_identity_payload(
+    *,
+    phase: str,
+    request_key: str,
+    project_assets: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Return the pre-project-scope identity only for one-time restore."""
+
+    return {
+        "job_type": f"{phase}_analysis",
+        "request_key": request_key,
+        "source_assets": _analysis_identity_assets(project_assets),
         "adapter_name": ANALYSIS_ADAPTER_NAME,
         "adapter_version": ANALYSIS_ADAPTER_VERSION,
     }

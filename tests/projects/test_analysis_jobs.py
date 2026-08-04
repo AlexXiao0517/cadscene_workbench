@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import threading
+from typing import Mapping
 
 import pytest
 
@@ -13,7 +14,7 @@ from cadscene.projects.analysis_publication import AnalysisArtifactPublisher
 from cadscene.projects.analysis_worker import main as analysis_worker_main
 from cadscene.projects.executor import LocalJobExecutor
 from cadscene.projects.json_repositories import project_repositories
-from cadscene.projects.queue import LocalResourceQueue
+from cadscene.projects.queue import LocalResourceQueue, QueueJob
 from cadscene.projects.recovery import reconcile_project
 from cadscene.projects.service import ProjectService
 from cadscene.projects.uploads import PublishedUpload
@@ -912,6 +913,69 @@ def _add_srt_asset(repositories, tmp_path: Path) -> None:
     )
 
 
+def _legacy_analysis_identity_payload(
+    *,
+    phase: str,
+    request_key: str,
+    project_assets: Mapping[str, object],
+) -> Mapping[str, object]:
+    assets: dict[str, object] = {}
+    for name in ("video", "cad", "srt"):
+        value = project_assets.get(name)
+        if not isinstance(value, Mapping):
+            assets[name] = None
+            continue
+        assets[name] = {
+            "path": None if value.get("path") is None else str(value.get("path")),
+            "sha256": (
+                None if value.get("sha256") is None else str(value.get("sha256"))
+            ),
+        }
+    return {
+        "job_type": f"{phase}_analysis",
+        "request_key": request_key,
+        "source_assets": assets,
+        "adapter_name": "project_analysis",
+        "adapter_version": "2",
+    }
+
+
+def _as_legacy_analysis_job(
+    job: QueueJob, project_assets: Mapping[str, object]
+) -> QueueJob:
+    from cadscene.projects import service as service_module
+
+    payload = _legacy_analysis_identity_payload(
+        phase=job.job_type.removesuffix("_analysis"),
+        request_key=job.input_revision,
+        project_assets=project_assets,
+    )
+    fingerprint = service_module._fingerprint(payload)
+    return replace(
+        job,
+        input_fingerprint=fingerprint,
+        idempotency_key=service_module._fingerprint(
+            {**payload, "purpose": "idempotency"}
+        ),
+        validated_input_fingerprint=(
+            fingerprint if job.output_validated else None
+        ),
+    )
+
+
+def _persist_jobs(repositories, project_id: str, jobs: tuple[QueueJob, ...]):
+    manifest = repositories.jobs.load(project_id)
+    return repositories.jobs.update(
+        project_id,
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(item.to_dict() for item in jobs),
+            queue_order=tuple(item.job_id for item in jobs),
+        ),
+    )
+
+
 def _complete_analysis(
     service: ProjectService,
     repositories,
@@ -1111,6 +1175,258 @@ def test_analysis_result_cannot_publish_output_outside_attempt(tmp_path: Path) -
     assert finished.status == "failed"
     assert "escapes its immutable attempt directory" in str(finished.error)
     assert repositories.project.load("p1").active_analysis_revision is None
+
+
+def test_restore_migrates_legacy_validated_success_without_losing_provenance(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids, revision = _complete_analysis(service, repositories, queue, tmp_path)
+    assets = repositories.project.load("p1").source_assets
+    current_jobs = tuple(queue.get(job_id) for job_id in job_ids)
+    legacy_jobs = tuple(
+        _as_legacy_analysis_job(item, assets) for item in current_jobs
+    )
+    legacy_before = {item.job_id: item.to_dict() for item in legacy_jobs}
+    migrated_fields = {
+        "input_fingerprint",
+        "idempotency_key",
+        "validated_input_fingerprint",
+    }
+    _persist_jobs(repositories, "p1", legacy_jobs)
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    for expected in current_jobs:
+        actual = restarted_queue.get(expected.job_id)
+        assert actual.input_fingerprint == expected.input_fingerprint
+        assert actual.idempotency_key == expected.idempotency_key
+        assert actual.validated_input_fingerprint == expected.input_fingerprint
+        actual_payload = actual.to_dict()
+        for key, value in legacy_before[expected.job_id].items():
+            if key not in migrated_fields:
+                assert actual_payload[key] == value
+    project = repositories.project.load("p1")
+    assert project.source_assets["_analysis"]["status"] == "success"
+    assert project.active_analysis_revision == revision
+    assert project.project_state == "ready"
+
+
+@pytest.mark.parametrize(
+    ("representative", "expected_status", "expected_project_state"),
+    (
+        ("queued", "queued", "analyzing"),
+        ("running", "running", "analyzing"),
+        ("terminal", "failed", "analysis_failed"),
+    ),
+)
+def test_restore_migrates_legacy_analysis_states_without_state_rewrite(
+    tmp_path: Path,
+    representative: str,
+    expected_status: str,
+    expected_project_state: str,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    result = service.enqueue_analysis_jobs("p1")
+    assets = repositories.project.load("p1").source_assets
+    current_jobs = tuple(queue.get(job_id) for job_id in result.job_ids)
+    cad, video = current_jobs
+    process_probe = lambda _pid: None
+    restarted_queue = LocalResourceQueue()
+    if representative == "queued":
+        cad = replace(cad, status="queued", stage="queued")
+        video = replace(video, status="queued", stage="queued")
+        blocker = replace(
+            current_jobs[0],
+            job_id="blocker",
+            project_id="blocker",
+            status="running",
+            stage="running",
+            exclusive_key="analysis:blocker:cad",
+            idempotency_key="blocker-idempotency",
+            input_revision="blocker-input",
+            input_fingerprint="blocker-fingerprint",
+        )
+        restarted_queue.submit(blocker)
+    elif representative == "running":
+        attempt = replace(
+            cad.attempts[-1],
+            pid=123,
+            process_start_time="start",
+            command_fingerprint="command",
+            task_token="task",
+            worker_claim_token="claim",
+        )
+        cad = replace(
+            cad,
+            status="running",
+            stage="running",
+            attempts=(*cad.attempts[:-1], attempt),
+        )
+        video = replace(video, status="queued", stage="queued")
+        process_probe = lambda pid: {
+            "pid": pid,
+            "process_start_time": "start",
+            "command_fingerprint": "command",
+            "task_token": "task",
+        }
+    else:
+        cad = replace(cad, status="failed", stage="failed", error="legacy failure")
+        video = replace(video, status="queued", stage="queued")
+    legacy_jobs = tuple(
+        _as_legacy_analysis_job(item, assets) for item in (cad, video)
+    )
+    before = {item.job_id: item.to_dict() for item in legacy_jobs}
+    _persist_jobs(repositories, "p1", legacy_jobs)
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    restarted.restore_jobs("p1", process_probe=process_probe)
+
+    restored_jobs = tuple(restarted_queue.get(item.job_id) for item in legacy_jobs)
+    assert restored_jobs[0].status == expected_status
+    for actual in restored_jobs:
+        expected = current_jobs[0] if actual.job_type == "cad_analysis" else current_jobs[1]
+        assert actual.input_fingerprint == expected.input_fingerprint
+        assert actual.idempotency_key == expected.idempotency_key
+        actual_payload = actual.to_dict()
+        for key, value in before[actual.job_id].items():
+            if key not in {
+                "input_fingerprint",
+                "idempotency_key",
+                "validated_input_fingerprint",
+            }:
+                assert actual_payload[key] == value
+    project = repositories.project.load("p1")
+    assert project.source_assets["_analysis"]["status"] == expected_status
+    assert project.project_state == expected_project_state
+
+
+@pytest.mark.parametrize(
+    "pollution",
+    (
+        "wrong_project",
+        "wrong_fingerprint",
+        "wrong_idempotency",
+        "wrong_type",
+        "wrong_dependency",
+        "wrong_validated_input",
+    ),
+)
+def test_restore_rejects_polluted_or_inexact_legacy_analysis_dag(
+    tmp_path: Path, pollution: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    if pollution == "wrong_validated_input":
+        job_ids, _revision = _complete_analysis(
+            service, repositories, queue, tmp_path
+        )
+    else:
+        job_ids = service.enqueue_analysis_jobs("p1").job_ids
+    assets = repositories.project.load("p1").source_assets
+    jobs = tuple(
+        _as_legacy_analysis_job(queue.get(job_id), assets) for job_id in job_ids
+    )
+    cad, video = jobs
+    if pollution == "wrong_project":
+        video = replace(video, project_id="p2")
+    elif pollution == "wrong_fingerprint":
+        video = replace(video, input_fingerprint="f" * 64)
+    elif pollution == "wrong_idempotency":
+        video = replace(video, idempotency_key="wrong-idempotency")
+    elif pollution == "wrong_type":
+        video = replace(video, job_type="trajectory")
+    elif pollution == "wrong_dependency":
+        video = replace(video, depends_on_job_ids=())
+    else:
+        video = replace(video, validated_input_fingerprint="e" * 64)
+    _persist_jobs(repositories, "p1", (cad, video))
+    before = repositories.jobs.load("p1")
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    with pytest.raises(ValueError, match="analysis|project|legacy"):
+        restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    assert restarted_queue.jobs() == ()
+    assert repositories.jobs.load("p1") == before
+
+
+def test_legacy_analysis_migration_remains_isolated_across_projects(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    shared_assets = repositories.project.load("p1").source_assets
+    repositories.create_project("p2", updated_at="now")
+    p2 = repositories.project.load("p2")
+    repositories.project.update(
+        "p2",
+        expected_revision=p2.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                name: (dict(asset) if isinstance(asset, dict) else asset)
+                for name, asset in shared_assets.items()
+            },
+            project_state="analyzing",
+        ),
+    )
+    p1_ids = service.enqueue_analysis_jobs("p1").job_ids
+    p2_ids = service.enqueue_analysis_jobs("p2").job_ids
+    for project_id, job_ids in (("p1", p1_ids), ("p2", p2_ids)):
+        assets = repositories.project.load(project_id).source_assets
+        legacy = tuple(
+            _as_legacy_analysis_job(
+                replace(queue.get(job_id), status="queued", stage="queued"),
+                assets,
+            )
+            for job_id in job_ids
+        )
+        _persist_jobs(repositories, project_id, legacy)
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+    p1_after_first = {
+        job_id: restarted_queue.get(job_id).to_dict() for job_id in p1_ids
+    }
+    restarted.restore_jobs("p2", process_probe=lambda _pid: None)
+
+    assert {
+        job_id: restarted_queue.get(job_id).to_dict() for job_id in p1_ids
+    } == p1_after_first
+    for p1_id, p2_id in zip(p1_ids, p2_ids):
+        p1_job = restarted_queue.get(p1_id)
+        p2_job = restarted_queue.get(p2_id)
+        assert p1_job.project_id == "p1"
+        assert p2_job.project_id == "p2"
+        assert p1_job.input_fingerprint != p2_job.input_fingerprint
+        assert p1_job.idempotency_key != p2_job.idempotency_key
 
 
 def test_restore_marks_unverified_analysis_running_as_interrupted(tmp_path: Path) -> None:
