@@ -471,6 +471,7 @@ class ProjectService:
                     raise ValueError(f"published {required} asset is missing")
 
             recorded_ids = tuple(str(item) for item in analysis.get("job_ids", ()))
+            batch: PreparedSubmissionBatch | None = None
             if len(recorded_ids) == 2:
                 recorded = tuple(
                     (self.queue.get(job_id) if any(item.job_id == job_id for item in self.queue.jobs()) else None)
@@ -480,16 +481,21 @@ class ProjectService:
                     item is not None and item.input_revision == request_key
                     for item in recorded
                 ):
-                    return EnqueueAnalysisResult(
-                        job_ids=(recorded_ids[0], recorded_ids[1]),
-                        request_key=request_key,
+                    reused = tuple(
+                        item for item in recorded if item is not None
+                    )
+                    batch = PreparedSubmissionBatch(
+                        jobs=reused,
+                        new_candidates=(),
+                        reused_jobs=reused,
                     )
 
-            batch = self._prepare_analysis_submission(
-                project_id,
-                request_key=request_key,
-                project_assets=project.source_assets,
-            )
+            if batch is None:
+                batch = self._prepare_analysis_submission(
+                    project_id,
+                    request_key=request_key,
+                    project_assets=project.source_assets,
+                )
             prepared = batch.jobs
             job_ids = batch.job_ids
             current_jobs = self.repositories.jobs.load(project_id)
@@ -1795,6 +1801,14 @@ class ProjectService:
         operation_id: str,
     ) -> tuple[dict[str, object], str]:
         state = dict(base_state or {})
+        result_fields = (
+            "analysis_revision",
+            "input_snapshot",
+            "analysis_artifact_id",
+            "analysis_artifact_path",
+        )
+        for field_name in result_fields:
+            state.pop(field_name, None)
         state.update(
             {
                 "request_key": request_key,
@@ -1824,8 +1838,23 @@ class ProjectService:
                 if isinstance(revisions, Mapping)
                 else {}
             )
-            if isinstance(descriptor, Mapping):
-                state.update(dict(descriptor))
+            descriptor_is_complete = (
+                isinstance(descriptor, Mapping)
+                and isinstance(descriptor.get("input_snapshot"), Mapping)
+                and bool(descriptor.get("analysis_artifact_id"))
+                and bool(descriptor.get("analysis_artifact_path"))
+            )
+            if not descriptor_is_complete:
+                state.update(
+                    {
+                        "status": "failed",
+                        "error": (
+                            "reused successful analysis has no complete immutable descriptor"
+                        ),
+                    }
+                )
+                return state, "analysis_failed"
+            state.update(dict(descriptor))
             state.update(
                 {
                     "status": "success",

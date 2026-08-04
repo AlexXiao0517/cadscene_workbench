@@ -480,3 +480,44 @@ analysis through a `Future`.
 - `git diff --check`: pass.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
+
+## Seventh formal review closure (base `b2aac46`)
+
+### Review finding map: 2 Important
+
+1. **Important - complete recorded job IDs bypassed terminal-state repair:** the
+   compatibility enqueue fast path returned as soon as both referenced queue
+   jobs existed and matched `input_revision`. It now constructs a fully reused
+   `PreparedSubmissionBatch` and continues through the same manifest/state
+   derivation as missing or incomplete references. A legacy project stuck at
+   `_analysis.status=queued` / `project_state=analyzing` therefore self-heals to
+   ready or candidate-ready from its two validated successful jobs without
+   modifying historical job provenance, attempts, or outputs.
+2. **Important - request result provenance crossed request boundaries and an
+   incomplete descriptor could still publish success:** submission-state
+   derivation now clears `analysis_revision`, `input_snapshot`,
+   `analysis_artifact_id`, and `analysis_artifact_path` before deriving every
+   queued, active, terminal, or new-request state. A reused successful DAG is
+   accepted only when `_analysis_revisions[video.output_revision]` contains all
+   three immutable descriptor fields: mapping-valued `input_snapshot`, non-empty
+   `analysis_artifact_id`, and non-empty `analysis_artifact_path`. Missing any
+   field fails closed as `analysis_failed`; old base-state provenance is never
+   spliced into the incomplete descriptor.
+
+### Seventh-round TDD and verification evidence
+
+- Initial RED: `5 failed` - one complete-recorded-IDs busy-state reproduction,
+  one request-key change retaining four stale result fields, and three
+  parameterized incomplete-descriptor cases.
+- Focused GREEN: all five review reproductions pass; complete success restores
+  readiness while preserving durable/in-memory jobs byte-for-byte, new requests
+  contain no old result provenance, and each missing descriptor field fails
+  closed.
+- Focused analysis/queue/project-API suite: `95 passed`.
+- All project tests: `217 passed`.
+- Final fresh full suite: `794 passed, 1 skipped` in 40.55 seconds.
+- `python -m pyflakes` over every changed implementation and test file: pass
+  with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.

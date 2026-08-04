@@ -176,6 +176,58 @@ def test_enqueue_restores_reused_success_dag_without_busy_regression(
     assert "project analysis is still running" not in preflight.reasons.values()
 
 
+def test_enqueue_complete_recorded_success_dag_repairs_legacy_busy_state(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    first = service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    attempt = video_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        video_job.job_id,
+        AdapterResult.success(
+            output_revision=revision,
+            output_fingerprint=tree_fingerprint(output),
+            outputs={"analysis_output": str(output)},
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    before_jobs = {item.job_id: item.to_dict() for item in queue.jobs()}
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    **value.source_assets["_analysis"],
+                    "status": "queued",
+                },
+            },
+            project_state="analyzing",
+        ),
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == first.job_ids
+    restored = repositories.project.load("p1")
+    assert restored.source_assets["_analysis"]["status"] == "success"
+    assert restored.project_state == "ready"
+    assert {item.job_id: item.to_dict() for item in queue.jobs()} == before_jobs
+    assert {
+        str(item["job_id"]): item
+        for item in repositories.jobs.load("p1").jobs
+    } == before_jobs
+
+
 def test_enqueue_restores_reused_cancelled_dag_as_terminal(
     tmp_path: Path,
 ) -> None:
@@ -283,6 +335,113 @@ def test_upload_restores_reused_success_dag_and_immutable_descriptor(
     assert state["analysis_artifact_id"] == descriptor["analysis_artifact_id"]
     assert restored.project_state == "ready"
     assert queue.claim_next_unstarted() is None
+
+
+def test_new_request_clears_previous_analysis_result_provenance(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = _service(tmp_path)
+    project = repositories.project.load("p1")
+    stale_state = {
+        **project.source_assets["_analysis"],
+        "analysis_revision": "old-revision",
+        "input_snapshot": {"request_key": "old-request"},
+        "analysis_artifact_id": "video-analysis-old",
+        "analysis_artifact_path": str(tmp_path / "old-artifact"),
+    }
+    project = repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={**value.source_assets, "_analysis": stale_state},
+        ),
+    )
+    replacement = tmp_path / "new-source.mp4"
+    replacement.write_bytes(b"new-source")
+    report = tmp_path / "new-source.validation.json"
+    report.write_text("{}", encoding="utf-8")
+
+    service.register_uploaded_asset(
+        "p1",
+        PublishedUpload(
+            project_id="p1",
+            asset_type="video",
+            original_filename="new-source.mp4",
+            path=replacement,
+            size_bytes=replacement.stat().st_size,
+            sha256="e" * 64,
+            validation={"decoded": True},
+            validation_report_path=report,
+        ),
+        expected_revision=project.revision,
+    )
+
+    state = repositories.project.load("p1").source_assets["_analysis"]
+    assert state["request_key"] != "request-1"
+    for key in (
+        "analysis_revision",
+        "input_snapshot",
+        "analysis_artifact_id",
+        "analysis_artifact_path",
+    ):
+        assert key not in state
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ("input_snapshot", "analysis_artifact_id", "analysis_artifact_path"),
+)
+def test_reused_success_dag_with_incomplete_descriptor_fails_closed(
+    tmp_path: Path, missing_key: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    attempt = video_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        video_job.job_id,
+        AdapterResult.success(
+            output_revision=revision,
+            output_fingerprint=tree_fingerprint(output),
+            outputs={"analysis_output": str(output)},
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    project = repositories.project.load("p1")
+    assets = dict(project.source_assets)
+    revisions = dict(assets["_analysis_revisions"])
+    descriptor = dict(revisions[revision])
+    descriptor.pop(missing_key)
+    revisions[revision] = descriptor
+    state = dict(assets["_analysis"])
+    state.pop("job_ids")
+    assets.update({"_analysis_revisions": revisions, "_analysis": state})
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(value, source_assets=assets),
+    )
+
+    service.enqueue_analysis_jobs("p1")
+
+    restored = repositories.project.load("p1")
+    state = restored.source_assets["_analysis"]
+    assert state["status"] == "failed"
+    assert restored.project_state == "analysis_failed"
+    assert "immutable descriptor" in str(state["error"])
+    for key in (
+        "analysis_revision",
+        "input_snapshot",
+        "analysis_artifact_id",
+        "analysis_artifact_path",
+    ):
+        assert key not in state
 
 
 def test_analysis_enqueue_failure_never_leaves_queued_intent_without_jobs(
