@@ -496,3 +496,34 @@ TDD evidence:
 - Focused source fallback/media: `81 passed`.
 - Related source/media/render/service/PTS/export regression: `449 passed, 1 skipped`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+#### Default edit-list encoder delay and atomic sidecar hardening
+
+- A normal libx264 MP4 using its default edit list reproduced a fallback output
+  whose first visible PTS was `1024` when output edit lists were disabled. The
+  fallback now encodes with `-bf 0` while retaining `-use_editlist 0`, eliminating
+  reordering delay without relaxing zero-start validation, introducing negative
+  timestamps, forcing a frame rate, or adding/dropping frames.
+- Real regressions cover both an ordinary source and a stream-copy source with a
+  90-degree display-rotation matrix. Both fallback outputs start at integer PTS
+  zero, remain strictly monotonic and non-negative, contain exactly the mapped
+  decoded-frame count, bake display orientation, and match project dimensions.
+- Atomic frame-map writes now use a same-directory random file created by
+  `tempfile.mkstemp` with exclusive creation. The open descriptor is flushed and
+  fsynced, the path is checked as non-symlink and against its original file
+  identity before `os.replace`, and cleanup only removes that exact created file.
+  A legacy fixed temporary symlink/residual is never opened or removed; concurrent
+  writers use distinct names. The symlink-specific assertion skips on Windows
+  hosts without symlink creation privilege, while residual/concurrency and
+  replaced-file ownership tests run there.
+
+Review-fix TDD evidence:
+
+- RED: both default-edit-list real sources failed strict validation because the
+  rendered first frame did not start at zero; the command lacked `-bf 0`.
+- RED: concurrent fixed-name frame-map writers collided on Windows, and the old
+  fixed path was vulnerable to following a precreated symlink where supported.
+- Focused source fallback/media: `85 passed, 1 skipped`.
+- Related source/media/render/service/PTS/export regression:
+  `453 passed, 2 skipped`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

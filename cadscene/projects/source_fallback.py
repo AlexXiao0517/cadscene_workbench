@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from typing import Mapping
 
 from cadscene.video_analysis.clip_export import (
@@ -224,6 +225,8 @@ def _build_source_interval_ffmpeg_command(
         preset,
         "-crf",
         str(crf),
+        "-bf",
+        "0",
         "-profile:v",
         spec.profile.casefold(),
         "-pix_fmt",
@@ -508,16 +511,27 @@ def _validate_files(
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    created_stat = os.fstat(descriptor)
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        if temporary.is_symlink():
+            raise OSError("atomic JSON temporary path must not be a symlink")
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            descriptor = -1
             json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if not _same_regular_file(temporary, created_stat):
+            raise OSError("atomic JSON temporary file identity changed")
         os.replace(temporary, path)
     finally:
-        if temporary.exists():
+        if descriptor >= 0:
+            os.close(descriptor)
+        if _same_regular_file(temporary, created_stat):
             temporary.unlink()
 
 
@@ -527,6 +541,14 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _same_regular_file(path: Path, expected: os.stat_result) -> bool:
+    try:
+        current = path.stat(follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return False
+    return not path.is_symlink() and os.path.samestat(current, expected)
 
 
 def _validate_encoder_options(*, preset: str, crf: int) -> None:

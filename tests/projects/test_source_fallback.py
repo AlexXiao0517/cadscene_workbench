@@ -7,9 +7,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 
 import pytest
 
+import cadscene.projects.source_fallback as source_fallback
 from cadscene.cli.render_source_interval import _positive_fraction
 from cadscene.projects.media import ProjectMediaSpec, parse_ffprobe, probe_media
 from cadscene.projects.service import ProjectService
@@ -176,6 +178,7 @@ def test_ffmpeg_source_interval_command_is_absolute_pts_passthrough_video_only(
     ]
     assert command[command.index("-i") + 1] == str(inputs.source_video_path)
     assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-bf") + 1] == "0"
     assert command[command.index("-pix_fmt") + 1] == "yuv420p"
     assert command[command.index("-video_track_timescale") + 1] == "1000"
 
@@ -213,6 +216,85 @@ def test_render_writes_authoritative_frame_map_before_starting_encoder(
 
     assert video.read_bytes() == b"encoded"
     assert frame_map.is_file()
+
+
+def test_atomic_frame_map_write_does_not_follow_precreated_fixed_temp_symlink(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "render_frame_map.json"
+    legacy_temporary = tmp_path / ".render_frame_map.json.tmp"
+    external = tmp_path / "external.json"
+    external.write_text("sentinel", encoding="utf-8")
+    try:
+        legacy_temporary.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    source_fallback._write_json_atomic(destination, {"writer": "safe"})
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {"writer": "safe"}
+    assert external.read_text(encoding="utf-8") == "sentinel"
+    assert legacy_temporary.is_symlink()
+
+
+def test_atomic_frame_map_writers_use_unique_temps_and_leave_residual_untouched(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "render_frame_map.json"
+    residual = tmp_path / ".render_frame_map.json.tmp-residual"
+    residual.write_text("keep", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def write(number: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            source_fallback._write_json_atomic(destination, {"writer": number})
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=write, args=(number,)) for number in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert failures == []
+    assert json.loads(destination.read_text(encoding="utf-8"))["writer"] in {1, 2}
+    assert residual.read_text(encoding="utf-8") == "keep"
+    assert list(tmp_path.glob(".render_frame_map.json.*.tmp")) == []
+
+
+def test_atomic_frame_map_cleanup_does_not_delete_replaced_nonowned_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "render_frame_map.json"
+    attacker_file = tmp_path / "attacker-residual"
+    attacker_file.write_text("do-not-delete", encoding="utf-8")
+    original_same_file = source_fallback._same_regular_file
+    swapped_path: Path | None = None
+
+    def replace_before_identity_check(
+        path: Path, expected: object,
+    ) -> bool:
+        nonlocal swapped_path
+        if swapped_path is None:
+            path.unlink()
+            attacker_file.replace(path)
+            swapped_path = path
+        return original_same_file(path, expected)
+
+    monkeypatch.setattr(
+        source_fallback, "_same_regular_file", replace_before_identity_check
+    )
+
+    with pytest.raises(OSError, match="identity changed"):
+        source_fallback._write_json_atomic(destination, {"writer": "safe"})
+
+    assert swapped_path is not None
+    assert swapped_path.read_text(encoding="utf-8") == "do-not-delete"
+    assert not destination.exists()
 
 
 def test_source_fallback_adapter_is_manifest_free_and_returns_validated_result(
@@ -448,3 +530,134 @@ def test_real_nonzero_vfr_source_interval_preserves_half_open_frame_identity(
     assert mapped_ordinals == [frame.ordinal for frame in index.frames]
     assert mapped_pts == [frame.pts for frame in index.frames]
     assert mapped_pts.count(boundary) == 1
+
+
+@pytest.mark.skipif(
+    shutil.which("ffprobe") is None,
+    reason="ffprobe is required for real source fallback integration",
+)
+@pytest.mark.parametrize(
+    ("rotation", "expected_dimensions"),
+    ((0, (64, 48)), (90, (48, 64))),
+)
+def test_real_default_edit_list_and_rotation_render_zero_start_without_reordering(
+    tmp_path: Path,
+    rotation: int,
+    expected_dimensions: tuple[int, int],
+) -> None:
+    ffmpeg = resolve_ffmpeg_executable()
+    ordinary = (tmp_path / "ordinary.mp4").resolve()
+    subprocess.run(
+        (
+            str(ffmpeg),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=25:duration=0.2",
+            "-frames:v",
+            "5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_range",
+            "tv",
+            "-colorspace",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            str(ordinary),
+        ),
+        check=True,
+    )
+    source = ordinary
+    if rotation:
+        source = (tmp_path / "rotated.mp4").resolve()
+        subprocess.run(
+            (
+                str(ffmpeg),
+                "-v",
+                "error",
+                "-display_rotation:v:0",
+                str(rotation),
+                "-i",
+                str(ordinary),
+                "-map",
+                "0:v:0",
+                "-c",
+                "copy",
+                str(source),
+            ),
+            check=True,
+        )
+    index = probe_decoded_frame_index(source, ffmpeg_executable=ffmpeg)
+    assert index.frames[0].pts == 0
+    if rotation:
+        raw_probe = json.loads(
+            subprocess.run(
+                (
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_streams",
+                    "-of",
+                    "json",
+                    str(source),
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        side_data = raw_probe["streams"][0].get("side_data_list", [])
+        assert any(abs(item.get("rotation", 0)) == 90 for item in side_data)
+    attempt = (tmp_path / f"attempt-rotation-{rotation}").resolve()
+    attempt.mkdir()
+    width, height = expected_dimensions
+    spec = ProjectMediaSpec(
+        width=width,
+        height=height,
+        display_orientation_baked=True,
+        sample_aspect_ratio=Fraction(1, 1),
+        pixel_format="yuv420p",
+        codec_name="h264",
+        profile="High",
+        time_base=index.time_base,
+        color_range="tv",
+        color_space="bt709",
+        color_transfer="bt709",
+        color_primaries="bt709",
+        nominal_frame_rate=None,
+    )
+    inputs = SourceIntervalRenderInputs(
+        project_id="project-edit-list",
+        clip_id=f"clip-rotation-{rotation}",
+        source_video_path=source,
+        source_start_pts=index.source_start_pts,
+        source_end_pts_exclusive=index.source_end_pts_exclusive,
+        source_time_base=index.time_base,
+        attempt_directory=attempt,
+        project_media_spec=spec,
+    )
+
+    video, frame_map_path = render_source_interval(
+        inputs, ffmpeg_executable=ffmpeg
+    )
+    output = probe_media(video)
+    frame_map = json.loads(frame_map_path.read_text(encoding="utf-8"))
+
+    assert output.video.frame_pts[0] == 0
+    assert all(pts >= 0 for pts in output.video.frame_pts)
+    assert all(
+        current > previous
+        for previous, current in zip(
+            output.video.frame_pts, output.video.frame_pts[1:]
+        )
+    )
+    assert output.video.frame_count == len(frame_map["frames"]) == len(index.frames)
+    assert output.video.display_orientation_baked is True
+    assert (output.video.width, output.video.height) == expected_dimensions
