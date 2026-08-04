@@ -1196,12 +1196,148 @@ def test_success_candidate_is_invisible_until_explicit_commit(tmp_path: Path) ->
     assert queue.get(submitted.job_id).status == "validating"
     committed = queue.commit_prepared_candidate(
         submitted.job_id,
-        candidate=replace(candidate, operation_id="publish-op"),
+        candidate=replace(
+            candidate,
+            operation_id="publish-op",
+            publication_operation_id="publish-op",
+        ),
         attempt_number=attempt.number,
         claim_token=attempt.worker_claim_token,
     )
     assert committed.status == "success"
     assert committed.operation_id == "publish-op"
+
+
+@pytest.mark.parametrize(
+    "pollution",
+    [
+        "missing_fingerprint",
+        "unvalidated",
+        "wrong_validated_input",
+        "missing_publication_operation",
+        "missing_outputs",
+    ],
+)
+def test_prepared_success_candidate_rejects_structural_degradation(
+    tmp_path: Path,
+    pollution: str,
+) -> None:
+    queue = LocalResourceQueue()
+    submitted = queue.submit(
+        job("prepared", resource_class="light_compute").with_attempt(
+            AttemptRecord(number=1, directory=str(tmp_path / "attempt-1"))
+        )
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    attempt = claimed.attempts[-1]
+    queue.mark_validating(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+    )
+    candidate = queue.prepare_success_candidate(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+        output_revision="out-1",
+        output_fingerprint="f" * 64,
+        published_outputs={"result": str(tmp_path / "result.json")},
+    )
+    candidate = replace(
+        candidate,
+        operation_id="publish-operation",
+        publication_operation_id="publish-operation",
+    )
+    if pollution == "missing_fingerprint":
+        candidate = replace(candidate, output_fingerprint=None)
+    elif pollution == "unvalidated":
+        candidate = replace(
+            candidate,
+            output_validated=False,
+            validated_input_fingerprint=None,
+        )
+    elif pollution == "wrong_validated_input":
+        candidate = replace(candidate, validated_input_fingerprint="other-input")
+    elif pollution == "missing_publication_operation":
+        candidate = replace(candidate, publication_operation_id=None)
+    else:
+        candidate = replace(candidate, published_outputs={})
+
+    with pytest.raises(ValueError, match="prepared success candidate"):
+        queue.commit_prepared_candidate(
+            submitted.job_id,
+            candidate=candidate,
+            attempt_number=attempt.number,
+            claim_token=attempt.worker_claim_token,
+        )
+    assert queue.get(submitted.job_id).status == "validating"
+
+
+@pytest.mark.parametrize(
+    "pollution",
+    ["clip_id", "job_type", "adapter", "stage", "output_validated"],
+)
+def test_recovered_terminal_candidate_rejects_contract_pollution(
+    tmp_path: Path,
+    pollution: str,
+) -> None:
+    queue = LocalResourceQueue()
+    submitted = queue.submit(
+        job("recovered", resource_class="media_io").with_attempt(
+            AttemptRecord(number=1, directory=str(tmp_path / "attempt-1"))
+        )
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    attempt = claimed.attempts[-1]
+    queue.mark_validating(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+    )
+    success = queue.prepare_success_candidate(
+        submitted.job_id,
+        attempt_number=attempt.number,
+        claim_token=attempt.worker_claim_token,
+        output_revision="out-1",
+        output_fingerprint="f" * 64,
+        published_outputs={"video": str(tmp_path / "rendered.mp4")},
+        validation_proof={"video_sha256": "f" * 64},
+    )
+    candidate = replace(
+        success,
+        status="failed",
+        stage="failed",
+        operation_id="restore-operation",
+        publication_operation_id="restore-operation",
+        output_validated=False,
+        validated_input_fingerprint=None,
+        error="restore validation failed",
+    )
+    if pollution == "clip_id":
+        candidate = replace(candidate, clip_id="other-clip")
+    elif pollution == "job_type":
+        candidate = replace(candidate, job_type="merge")
+    elif pollution == "adapter":
+        candidate = replace(candidate, adapter_name="other-adapter")
+    elif pollution == "stage":
+        candidate = replace(candidate, stage="success")
+    else:
+        candidate = replace(
+            candidate,
+            output_validated=True,
+            validated_input_fingerprint=candidate.input_fingerprint,
+        )
+
+    with pytest.raises(ValueError, match="recovered terminal candidate"):
+        queue.commit_recovered_terminal_candidate(
+            submitted.job_id,
+            candidate=candidate,
+            attempt_number=attempt.number,
+            claim_token=attempt.worker_claim_token,
+        )
+    assert queue.get(submitted.job_id).status == "validating"
 
 
 def test_submission_candidates_do_not_mutate_queue_before_manifest_publish() -> None:

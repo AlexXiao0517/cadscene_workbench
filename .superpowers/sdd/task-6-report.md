@@ -413,3 +413,35 @@ Review-fix TDD evidence:
 - Focused render/media/queue: `153 passed`.
 - Related regression: `354 passed`.
 - `pyflakes`, `compileall`, and `git diff --check`: pass.
+
+### Recovered terminal candidate contract hardening
+
+- Queue commit now compares one shared immutable job contract for both prepared
+  success and recovered terminal candidates: project/clip/job type, resource,
+  priority, DAG/exclusivity/idempotency identity, input revision/fingerprint,
+  adapter identity, attempt lease, submission provenance, and cleanup fields
+  cannot change during publication recovery.
+- A recovered candidate must be `failed` or `superseded` with matching stage,
+  revoked output validation, and no validated-input fingerprint. Its operation
+  and publication operation must be the same non-empty ID.
+- Durable diagnostic outputs are accepted only with paired output
+  revision/fingerprint, non-empty string path mappings, mapping-shaped proof,
+  and mapping-shaped optional progress. An output-less terminal candidate cannot
+  smuggle published paths or proof.
+- The prepared-success commit also uses the immutable contract helper and now
+  requires `stage == success`, paired non-empty output revision/fingerprint,
+  validated output against the leased input fingerprint, matching non-empty
+  publication operation IDs, and at least one well-formed published output.
+  Validation proof remains optional because analysis adapters may not emit one;
+  when present, proof and progress must be mapping-shaped.
+
+Review-fix TDD evidence:
+
+- RED: polluted clip ID, job type, adapter, stage, and output-validation state
+  were all accepted by the recovered commit API.
+- RED: five malformed prepared-success candidates (missing fingerprint,
+  unvalidated output, wrong validated input, missing publication operation, and
+  missing outputs) were accepted before the structural guard.
+- Focused queue/render: `107 passed`.
+- Related regression: `364 passed`.
+- `pyflakes`, `compileall`, and `git diff --check`: pass.

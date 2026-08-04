@@ -24,6 +24,26 @@ TERMINAL_STATUSES = {
     "stale_input",
 }
 
+_IMMUTABLE_JOB_CONTRACT_FIELDS = (
+    "job_id",
+    "project_id",
+    "clip_id",
+    "job_type",
+    "resource_class",
+    "priority",
+    "depends_on_job_ids",
+    "exclusive_key",
+    "idempotency_key",
+    "input_revision",
+    "input_fingerprint",
+    "adapter_name",
+    "adapter_version",
+    "attempts",
+    "submission_operation_id",
+    "cleanup_reason",
+    "target_terminal_status",
+)
+
 
 @dataclass(frozen=True)
 class AttemptRecord:
@@ -1043,11 +1063,10 @@ class LocalResourceQueue:
             if current.status != "validating":
                 raise ValueError("only validating jobs can commit success")
             if (
-                candidate.job_id != current.job_id
-                or candidate.project_id != current.project_id
-                or candidate.input_fingerprint != current.input_fingerprint
+                not _same_immutable_job_contract(current, candidate)
                 or candidate.status != "success"
-                or candidate.attempts != current.attempts
+                or candidate.stage != "success"
+                or not _valid_prepared_success_candidate(current, candidate)
             ):
                 raise ValueError("prepared success candidate no longer matches job lease")
             self._jobs[job_id] = candidate
@@ -1069,11 +1088,13 @@ class LocalResourceQueue:
             if current.status != "validating":
                 raise ValueError("only validating jobs can commit recovered state")
             if (
-                candidate.job_id != current.job_id
-                or candidate.project_id != current.project_id
-                or candidate.input_fingerprint != current.input_fingerprint
+                not _same_immutable_job_contract(current, candidate)
                 or candidate.status not in {"failed", "superseded"}
-                or candidate.attempts != current.attempts
+                or candidate.stage != candidate.status
+                or candidate.output_validated
+                or candidate.validated_input_fingerprint is not None
+                or not _valid_publication_provenance(candidate)
+                or not _valid_recovered_output_history(candidate)
             ):
                 raise ValueError("recovered terminal candidate no longer matches lease")
             self._jobs[job_id] = candidate
@@ -1849,6 +1870,80 @@ def _process_may_be_alive(alive: Callable[[int], bool], pid: int) -> bool:
     except Exception:
         # Fail closed: an unreadable PID retains resource/exclusive ownership.
         return True
+
+
+def _same_immutable_job_contract(current: QueueJob, candidate: QueueJob) -> bool:
+    return all(
+        getattr(candidate, field_name) == getattr(current, field_name)
+        for field_name in _IMMUTABLE_JOB_CONTRACT_FIELDS
+    )
+
+
+def _valid_publication_provenance(candidate: QueueJob) -> bool:
+    return (
+        isinstance(candidate.operation_id, str)
+        and bool(candidate.operation_id)
+        and candidate.operation_id == candidate.publication_operation_id
+    )
+
+
+def _valid_prepared_success_candidate(current: QueueJob, candidate: QueueJob) -> bool:
+    return (
+        isinstance(candidate.output_revision, str)
+        and bool(candidate.output_revision)
+        and isinstance(candidate.output_fingerprint, str)
+        and bool(candidate.output_fingerprint)
+        and candidate.output_validated is True
+        and candidate.validated_input_fingerprint == current.input_fingerprint
+        and _valid_publication_provenance(candidate)
+        and isinstance(candidate.published_outputs, Mapping)
+        and bool(candidate.published_outputs)
+        and all(
+            isinstance(key, str)
+            and bool(key)
+            and isinstance(value, str)
+            and bool(value)
+            for key, value in candidate.published_outputs.items()
+        )
+        and (
+            candidate.validation_proof is None
+            or isinstance(candidate.validation_proof, Mapping)
+        )
+        and (candidate.progress is None or isinstance(candidate.progress, Mapping))
+    )
+
+
+def _valid_recovered_output_history(candidate: QueueJob) -> bool:
+    has_revision = (
+        isinstance(candidate.output_revision, str) and bool(candidate.output_revision)
+    )
+    has_fingerprint = (
+        isinstance(candidate.output_fingerprint, str)
+        and bool(candidate.output_fingerprint)
+    )
+    if has_revision != has_fingerprint:
+        return False
+    if not isinstance(candidate.published_outputs, Mapping) or any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(value, str)
+        or not value
+        for key, value in candidate.published_outputs.items()
+    ):
+        return False
+    if candidate.validation_proof is not None and not isinstance(
+        candidate.validation_proof, Mapping
+    ):
+        return False
+    if candidate.progress is not None and not isinstance(candidate.progress, Mapping):
+        return False
+    if not has_revision:
+        return not candidate.published_outputs and candidate.validation_proof is None
+    return (
+        bool(candidate.published_outputs)
+        and isinstance(candidate.validation_proof, Mapping)
+        and bool(candidate.validation_proof)
+    )
 
 
 def _invalidated_job(job: QueueJob) -> QueueJob:
