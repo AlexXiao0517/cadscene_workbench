@@ -444,6 +444,155 @@ def test_reused_success_dag_with_incomplete_descriptor_fails_closed(
         assert key not in state
 
 
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ("duplicate_video", "cross_project", "wrong_dependency", "wrong_type"),
+)
+def test_recorded_analysis_dag_is_validated_before_terminal_recovery(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    canonical_ids, _revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    cad = queue.get(canonical_ids[0])
+    video = queue.get(canonical_ids[1])
+    recorded_ids: tuple[str, str]
+    if invalid_kind == "duplicate_video":
+        recorded_ids = (video.job_id, video.job_id)
+    else:
+        fake = replace(
+            video,
+            job_id=f"fake-{invalid_kind}",
+            project_id=("p2" if invalid_kind == "cross_project" else "p1"),
+            job_type=("trajectory" if invalid_kind == "wrong_type" else "video_analysis"),
+            depends_on_job_ids=(
+                () if invalid_kind == "wrong_dependency" else (cad.job_id,)
+            ),
+            idempotency_key=f"fake-key-{invalid_kind}",
+            exclusive_key=f"fake:{invalid_kind}",
+        )
+        queue.submit(fake)
+        if fake.project_id == "p1":
+            service._publish_queue("p1")
+        recorded_ids = (cad.job_id, fake.job_id)
+    before_queue = {item.job_id: item.to_dict() for item in queue.jobs()}
+    before_order = queue.queue_order()
+    before_jobs = repositories.jobs.load("p1")
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "_analysis": {
+                    **value.source_assets["_analysis"],
+                    "status": "queued",
+                    "job_ids": list(recorded_ids),
+                },
+            },
+            project_state="analyzing",
+        ),
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == canonical_ids
+    restored = repositories.project.load("p1")
+    assert tuple(restored.source_assets["_analysis"]["job_ids"]) == canonical_ids
+    assert restored.source_assets["_analysis"]["status"] == "success"
+    assert {item.job_id: item.to_dict() for item in queue.jobs()} == before_queue
+    assert queue.queue_order() == before_order
+    after_jobs = repositories.jobs.load("p1")
+    assert after_jobs.jobs == before_jobs.jobs
+    assert after_jobs.queue_order == before_jobs.queue_order
+
+
+@pytest.mark.parametrize(
+    "descriptor_fault",
+    ("empty_snapshot", "wrong_request_key", "artifact_mismatch", "video_identity"),
+)
+def test_reused_success_descriptor_identity_must_match_current_request(
+    tmp_path: Path, descriptor_fault: str
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    _job_ids, revision = _complete_analysis(
+        service, repositories, queue, tmp_path
+    )
+    project = repositories.project.load("p1")
+    assets = dict(project.source_assets)
+    revisions = dict(assets["_analysis_revisions"])
+    descriptor = dict(revisions[revision])
+    snapshot = dict(descriptor["input_snapshot"])
+    if descriptor_fault == "empty_snapshot":
+        snapshot = {}
+    elif descriptor_fault == "wrong_request_key":
+        snapshot["request_key"] = "another-request"
+    elif descriptor_fault == "artifact_mismatch":
+        snapshot["analysis_artifact"] = {
+            "artifact_id": "video-analysis-other",
+            "path": str(tmp_path / "other-artifact"),
+        }
+    else:
+        snapshot["video"] = {
+            **snapshot["video"],
+            "sha256": "f" * 64,
+        }
+    descriptor["input_snapshot"] = snapshot
+    revisions[revision] = descriptor
+    state = dict(assets["_analysis"])
+    state.pop("job_ids")
+    assets.update({"_analysis_revisions": revisions, "_analysis": state})
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(value, source_assets=assets),
+    )
+
+    service.enqueue_analysis_jobs("p1")
+
+    restored = repositories.project.load("p1")
+    state = restored.source_assets["_analysis"]
+    assert state["status"] == "failed"
+    assert restored.project_state == "analysis_failed"
+    assert "immutable descriptor" in str(state["error"])
+
+
+def test_descriptor_control_field_injection_cannot_override_submission_state(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids, revision = _complete_analysis(service, repositories, queue, tmp_path)
+    project = repositories.project.load("p1")
+    expected_request_key = project.source_assets["_analysis"]["request_key"]
+    assets = dict(project.source_assets)
+    revisions = dict(assets["_analysis_revisions"])
+    revisions[revision] = {
+        **revisions[revision],
+        "request_key": "injected-request",
+        "job_ids": ["injected-job"],
+        "operation_id": "injected-operation",
+    }
+    state = dict(assets["_analysis"])
+    state.pop("job_ids")
+    assets.update({"_analysis_revisions": revisions, "_analysis": state})
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(value, source_assets=assets),
+    )
+
+    service.enqueue_analysis_jobs("p1")
+
+    state = repositories.project.load("p1").source_assets["_analysis"]
+    assert state["status"] == "success"
+    assert state["request_key"] == expected_request_key
+    assert tuple(state["job_ids"]) == job_ids
+    assert state["operation_id"] != "injected-operation"
+
+
 def test_analysis_enqueue_failure_never_leaves_queued_intent_without_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -521,6 +670,34 @@ def _video_output(job, tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     return output, revision
+
+
+def _complete_analysis(
+    service: ProjectService,
+    repositories,
+    queue: LocalResourceQueue,
+    tmp_path: Path,
+) -> tuple[tuple[str, str], str]:
+    result = service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    attempt = video_job.attempts[-1]
+    finished = service.finish_job(
+        "p1",
+        video_job.job_id,
+        AdapterResult.success(
+            output_revision=revision,
+            output_fingerprint=tree_fingerprint(output),
+            outputs={"analysis_output": str(output)},
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    assert finished.status == "success"
+    assert repositories.project.load("p1").active_analysis_revision == revision
+    return result.job_ids, revision
 
 
 def test_video_finish_is_only_owner_that_publishes_cad_and_analysis(

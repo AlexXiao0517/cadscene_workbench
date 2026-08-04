@@ -296,6 +296,47 @@ analysis through a `Future`.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
 
+## Eighth formal review closure (base `917267f`)
+
+### Review finding map: 2 Important
+
+1. **Important - recorded job references were trusted as a valid analysis
+   DAG:** terminal-state recovery now passes every recorded or prepared batch
+   through one structural validator. It requires two unique jobs owned by the
+   same project and request, exactly one `cad_analysis` and one
+   `video_analysis`, no CAD dependency, and the exact CAD-to-video dependency.
+   Invalid recorded references are rebuilt from the canonical idempotent DAG;
+   they cannot restore success or add, reorder, or rewrite historical queue and
+   jobs-manifest provenance.
+2. **Important - immutable analysis descriptors were only checked for field
+   presence and could overwrite control state:** successful recovery now uses a
+   single descriptor validator. It requires mapping/string shapes, the current
+   request key, matching video/CAD and optional SRT path plus SHA-256 identity,
+   and matching nested/top-level analysis artifact ID and path. Only
+   `input_snapshot`, `analysis_artifact_id`, and `analysis_artifact_path` are
+   copied into recovered state. Injected `request_key`, `job_ids`, or
+   `operation_id` fields cannot override submission controls; incomplete or
+   inconsistent descriptors fail closed as `analysis_failed`.
+
+### Eighth-round TDD and verification evidence
+
+- Initial RED: `9 failed` - four invalid recorded-DAG variants
+  (`duplicate_video`, `cross_project`, `wrong_dependency`, `wrong_type`), four
+  immutable-descriptor identity variants (`empty_snapshot`,
+  `wrong_request_key`, `artifact_mismatch`, `video_identity`), and one
+  descriptor control-field injection reproduction.
+- Review reproductions GREEN: `9 passed`.
+- Analysis-job test module: `38 passed`.
+- Focused analysis/queue/project-API suite: `104 passed`.
+- All project tests: `226 passed`.
+- Final fresh full suite: `803 passed, 1 skipped` in 39.04 seconds.
+- `python -m compileall -q cadscene tests`: pass.
+- `python -m pyflakes cadscene/projects/service.py
+  tests/projects/test_analysis_jobs.py`: pass with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
+
 ## Fourth formal review closure (base `81a12ac`)
 
 ### Review finding map: 1 Critical + 4 Important

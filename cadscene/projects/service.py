@@ -473,17 +473,14 @@ class ProjectService:
             recorded_ids = tuple(str(item) for item in analysis.get("job_ids", ()))
             batch: PreparedSubmissionBatch | None = None
             if len(recorded_ids) == 2:
-                recorded = tuple(
-                    (self.queue.get(job_id) if any(item.job_id == job_id for item in self.queue.jobs()) else None)
-                    for job_id in recorded_ids
+                queue_jobs = {item.job_id: item for item in self.queue.jobs()}
+                recorded = tuple(queue_jobs.get(job_id) for job_id in recorded_ids)
+                reused = self._validated_analysis_dag(
+                    tuple(item for item in recorded if item is not None),
+                    project_id=project_id,
+                    request_key=request_key,
                 )
-                if all(
-                    item is not None and item.input_revision == request_key
-                    for item in recorded
-                ):
-                    reused = tuple(
-                        item for item in recorded if item is not None
-                    )
+                if reused is not None and len(recorded) == len(reused):
                     batch = PreparedSubmissionBatch(
                         jobs=reused,
                         new_candidates=(),
@@ -1791,6 +1788,88 @@ class ProjectService:
             )
         return batch
 
+    @staticmethod
+    def _validated_analysis_dag(
+        jobs: Sequence[QueueJob],
+        *,
+        project_id: str,
+        request_key: str,
+    ) -> tuple[QueueJob, QueueJob] | None:
+        if len(jobs) != 2 or len({item.job_id for item in jobs}) != 2:
+            return None
+        if any(
+            item.project_id != project_id or item.input_revision != request_key
+            for item in jobs
+        ):
+            return None
+        by_type = {item.job_type: item for item in jobs}
+        if set(by_type) != {"cad_analysis", "video_analysis"}:
+            return None
+        cad = by_type["cad_analysis"]
+        video = by_type["video_analysis"]
+        if cad.depends_on_job_ids or video.depends_on_job_ids != (cad.job_id,):
+            return None
+        return cad, video
+
+    @staticmethod
+    def _validated_analysis_descriptor(
+        project: ProjectManifest,
+        *,
+        revision: str,
+        request_key: str,
+    ) -> dict[str, object] | None:
+        revisions = project.source_assets.get("_analysis_revisions")
+        if not isinstance(revisions, Mapping):
+            return None
+        descriptor = revisions.get(revision)
+        if not isinstance(descriptor, Mapping):
+            return None
+        snapshot = descriptor.get("input_snapshot")
+        artifact_id = descriptor.get("analysis_artifact_id")
+        artifact_path = descriptor.get("analysis_artifact_path")
+        if (
+            not isinstance(snapshot, Mapping)
+            or not isinstance(artifact_id, str)
+            or not artifact_id
+            or not isinstance(artifact_path, str)
+            or not artifact_path
+            or snapshot.get("request_key") != request_key
+        ):
+            return None
+
+        required_assets = ["video", "cad"]
+        if isinstance(project.source_assets.get("srt"), Mapping):
+            required_assets.append("srt")
+        for asset_name in required_assets:
+            current = project.source_assets.get(asset_name)
+            captured = snapshot.get(asset_name)
+            if not isinstance(current, Mapping) or not isinstance(captured, Mapping):
+                return None
+            for identity_field in ("path", "sha256"):
+                current_value = current.get(identity_field)
+                captured_value = captured.get(identity_field)
+                if (
+                    not isinstance(current_value, str)
+                    or not current_value
+                    or not isinstance(captured_value, str)
+                    or captured_value != current_value
+                ):
+                    return None
+
+        snapshot_artifact = snapshot.get("analysis_artifact")
+        if not isinstance(snapshot_artifact, Mapping):
+            return None
+        if (
+            snapshot_artifact.get("artifact_id") != artifact_id
+            or snapshot_artifact.get("path") != artifact_path
+        ):
+            return None
+        return {
+            "input_snapshot": dict(snapshot),
+            "analysis_artifact_id": artifact_id,
+            "analysis_artifact_path": artifact_path,
+        }
+
     def _analysis_state_for_submission(
         self,
         *,
@@ -1816,35 +1895,35 @@ class ProjectService:
                 "operation_id": operation_id,
             }
         )
-        jobs = batch.jobs
-        video = next(
-            (item for item in jobs if item.job_type == "video_analysis"),
-            None,
+        jobs = self._validated_analysis_dag(
+            batch.jobs,
+            project_id=project.project_id,
+            request_key=request_key,
         )
+        if jobs is None:
+            state.update(
+                {
+                    "status": "failed",
+                    "error": "reused analysis DAG is structurally invalid",
+                }
+            )
+            return state, "analysis_failed"
+        video = jobs[1]
         fully_validated = (
-            len(jobs) == 2
-            and all(
+            all(
                 item.status == "success" and item.output_validated
                 for item in jobs
             )
-            and video is not None
             and video.output_revision is not None
         )
         if fully_validated:
             revision = str(video.output_revision)
-            revisions = project.source_assets.get("_analysis_revisions", {})
-            descriptor = (
-                revisions.get(revision, {})
-                if isinstance(revisions, Mapping)
-                else {}
+            descriptor = self._validated_analysis_descriptor(
+                project,
+                revision=revision,
+                request_key=request_key,
             )
-            descriptor_is_complete = (
-                isinstance(descriptor, Mapping)
-                and isinstance(descriptor.get("input_snapshot"), Mapping)
-                and bool(descriptor.get("analysis_artifact_id"))
-                and bool(descriptor.get("analysis_artifact_path"))
-            )
-            if not descriptor_is_complete:
+            if descriptor is None:
                 state.update(
                     {
                         "status": "failed",
@@ -1854,7 +1933,7 @@ class ProjectService:
                     }
                 )
                 return state, "analysis_failed"
-            state.update(dict(descriptor))
+            state.update(descriptor)
             state.update(
                 {
                     "status": "success",
