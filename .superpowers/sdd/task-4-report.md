@@ -256,6 +256,59 @@ analysis through a `Future`.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
 
+## Fourth formal review closure (base `81a12ac`)
+
+### Review finding map: 1 Critical + 4 Important
+
+1. **Critical - analysis completion recovery released the publication lock:**
+   `finish_job` now holds the same reentrant `_publication_lock` across the
+   complete `_finish_job_once -> reconcile -> durable reload/queue commit`
+   sequence. Repository and queue locks remain nested in the established order.
+   A concurrent upload/reanalysis cannot replace the analysis request intent
+   between a failed activation publication and its recovery decision.
+2. **Important - a new analysis DAG rewrote historical job provenance:** all
+   three DAG publication paths now assign `operation_id` and
+   `submission_operation_id` only to newly prepared candidate IDs. Existing
+   jobs are serialized byte-for-byte from their queue objects. Tests preserve
+   historical completion/submission provenance and assert the corresponding
+   durable and in-memory records remain identical.
+3. **Important - execution fingerprint and command plan used different state
+   snapshots:** `prepare_job_execution` now performs fingerprint validation and
+   the full clip-export, CAD/video-analysis, or trajectory plan construction
+   under one `_state_guard`. Concurrent upload or workflow-override mutation
+   waits until the old job-bound command and validator closure are fully built;
+   no helper can re-read a newer manifest after the fingerprint check.
+4. **Important - tree hashes admitted path/content concatenation collisions and
+   publication-copy TOCTOU:** tree fingerprints now use a versioned binary
+   encoding with entry type, path byte length, content byte length, path bytes,
+   and content bytes. Directories and symlinks have explicit types. The known
+   `zz_a + bc` versus `zz_ab + c` collision is covered. The publisher rehashes
+   copied source subtrees, normalized CAD staging, and final analysis staging
+   immediately before atomic publication; any mismatch fails closed.
+5. **Important - validators could mutate upload bytes after the stream digest:**
+   after validation and before any report or media publication, the temporary
+   upload's filesystem size and SHA-256 are recomputed and required to equal the
+   streamed size/digest (and therefore any supplied expected hash). A validator
+   that replaces bytes with different same-length content now raises
+   `UploadValidationError` and publishes no content-addressed media.
+
+### Fourth-round TDD and verification evidence
+
+- Initial focused RED: `5 failed` covering historical DAG provenance, the
+  concrete tree-hash collision, unlocked activation recovery, unlocked plan
+  construction, and same-length validator mutation.
+- Focused GREEN: all five review reproductions pass; an additional final-staging
+  copy-mutation test also passes and proves the atomic target is never published.
+- All project tests: `206 passed`.
+- Related project API + video-analysis + workflow + pure-rotation suite:
+  `255 passed, 1 skipped`.
+- Final fresh full suite: `783 passed, 1 skipped` in 44.34 seconds.
+- `python -m pyflakes` over every changed implementation and test file: pass
+  with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
+
 ## Third formal review closure (base `28bb393`)
 
 ### Review finding map: 4 Critical + 4 Important + 1 Minor

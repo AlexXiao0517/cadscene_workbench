@@ -92,10 +92,11 @@ class AnalysisArtifactPublisher:
         )
 
     def _publish_immutable_tree(self, source: Path, target: Path) -> None:
+        expected_tree_fingerprint = tree_fingerprint(source)
         if target.exists():
             if (
                 not target.is_dir()
-                or tree_fingerprint(source) != tree_fingerprint(target)
+                or expected_tree_fingerprint != tree_fingerprint(target)
             ):
                 raise FileExistsError(
                     f"immutable output exists with different content: {target}"
@@ -105,6 +106,11 @@ class AnalysisArtifactPublisher:
         staging = target.parent / f".{target.name}.tmp-{self.identity()}"
         shutil.copytree(source, staging)
         try:
+            _require_fingerprint(
+                staging,
+                expected_tree_fingerprint,
+                label="copied normalized analysis artifact",
+            )
             os.replace(staging, target)
         finally:
             if staging.exists():
@@ -160,10 +166,11 @@ class AnalysisArtifactPublisher:
             normalized = load_dataset_manifest(staging_root, dataset_id)
             if str(normalized.get("dataset")) != dataset_id:
                 raise ValueError("staged CAD dataset identity failed validation")
+            normalized_fingerprint = tree_fingerprint(staging)
             if target.exists():
                 if (
                     not target.is_dir()
-                    or tree_fingerprint(staging) != tree_fingerprint(target)
+                    or normalized_fingerprint != tree_fingerprint(target)
                 ):
                     raise FileExistsError(
                         "immutable CAD dataset exists with different content: "
@@ -171,6 +178,11 @@ class AnalysisArtifactPublisher:
                     )
                 self._validate_cad_dataset(target, dataset_id=dataset_id)
                 return
+            _require_fingerprint(
+                staging,
+                normalized_fingerprint,
+                label="normalized CAD publication staging",
+            )
             os.replace(staging, target)
             self._validate_cad_dataset(target, dataset_id=dataset_id)
         finally:

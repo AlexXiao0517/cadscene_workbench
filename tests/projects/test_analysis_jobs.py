@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -682,6 +683,9 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
     )
     active_clip = repositories.clips.load("p1").clips[0]
     old_video = Path(active_clip.analysis["input_snapshot"]["video"]["path"])
+    historical_jobs = {
+        item.job_id: item.to_dict() for item in queue.jobs()
+    }
 
     replacement = tmp_path / "video-new.mp4"
     replacement.write_bytes(b"new-video")
@@ -703,6 +707,12 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
         expected_revision=project.revision,
     )
     assert len(registered.analysis_job_ids) == 2
+    durable_jobs = {
+        str(item["job_id"]): item for item in repositories.jobs.load("p1").jobs
+    }
+    for job_id, before in historical_jobs.items():
+        assert durable_jobs[job_id] == before
+        assert queue.get(job_id).to_dict() == before
     _finish_cad(service, queue, tmp_path)
     candidate_video_job = queue.claim_next_unstarted()
     assert candidate_video_job is not None
@@ -777,3 +787,118 @@ def test_analysis_publisher_rejects_fingerprint_that_does_not_match_content(
 
     assert not (tmp_path / "data").exists()
     assert not (tmp_path / "projects" / "p1" / "analysis_artifacts").exists()
+
+
+def test_tree_fingerprint_frames_paths_and_content_without_ambiguity(
+    tmp_path: Path,
+) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "zz_a").write_bytes(b"bc")
+    (right / "zz_ab").write_bytes(b"c")
+
+    assert tree_fingerprint(left) != tree_fingerprint(right)
+
+
+def test_analysis_publisher_rehashes_final_staging_after_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    publisher = AnalysisArtifactPublisher(
+        storage_root=tmp_path,
+        projects_root=tmp_path / "projects",
+        identity=lambda: "copy-check",
+    )
+    from cadscene.projects import analysis_publication as publication_module
+
+    real_copytree = publication_module.shutil.copytree
+
+    def copy_then_mutate(source_path, target_path, *args, **kwargs):
+        copied = real_copytree(source_path, target_path, *args, **kwargs)
+        (Path(target_path) / "manifest.json").write_text(
+            '{"mutated":true}', encoding="utf-8"
+        )
+        return copied
+
+    monkeypatch.setattr(publication_module.shutil, "copytree", copy_then_mutate)
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        publisher._publish_immutable_tree(source, tmp_path / "published")
+
+    assert not (tmp_path / "published").exists()
+
+
+def test_analysis_recovery_holds_publication_lock_against_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    result = service.enqueue_analysis_jobs("p1")
+    job = queue.get(result.job_ids[0])
+    from cadscene.projects import service as service_module
+
+    recovering = threading.Event()
+    release = threading.Event()
+
+    def fail_finish(*_args, **_kwargs):
+        raise service_module._AnalysisPublicationPending(
+            "p1", job.job_id, OSError("injected publication failure")
+        )
+
+    def block_recovery(_pending):
+        recovering.set()
+        assert release.wait(5)
+        return queue.get(job.job_id)
+
+    monkeypatch.setattr(service, "_finish_job_once", fail_finish)
+    monkeypatch.setattr(service, "_recover_analysis_publication", block_recovery)
+    finish_result: list[object] = []
+    finish_thread = threading.Thread(
+        target=lambda: finish_result.append(
+            service.finish_job(
+                "p1",
+                job.job_id,
+                AdapterResult.failed("ignored"),
+                attempt_number=1,
+                claim_token="ignored",
+            )
+        )
+    )
+    finish_thread.start()
+    assert recovering.wait(5)
+
+    replacement = tmp_path / "replacement.mp4"
+    replacement.write_bytes(b"replacement")
+    report = tmp_path / "replacement.validation.json"
+    report.write_text("{}", encoding="utf-8")
+    project = repositories.project.load("p1")
+    upload_result: list[object] = []
+    upload_thread = threading.Thread(
+        target=lambda: upload_result.append(
+            service.register_uploaded_asset(
+                "p1",
+                PublishedUpload(
+                    project_id="p1",
+                    asset_type="video",
+                    original_filename="replacement.mp4",
+                    path=replacement,
+                    size_bytes=replacement.stat().st_size,
+                    sha256="e" * 64,
+                    validation={"decoded": True},
+                    validation_report_path=report,
+                ),
+                expected_revision=project.revision,
+            )
+        )
+    )
+    upload_thread.start()
+    upload_thread.join(0.2)
+    assert upload_thread.is_alive()
+
+    release.set()
+    finish_thread.join(5)
+    upload_thread.join(5)
+    assert finish_result and upload_result

@@ -112,6 +112,12 @@ class PendingUpload:
                     self.temporary_path, self.asset_type
                 )
             )
+            validated_size = self.temporary_path.stat().st_size
+            validated_digest = _file_fingerprint(self.temporary_path)
+            if validated_size != self._size or validated_digest != digest:
+                raise UploadValidationError(
+                    "upload bytes changed during validation"
+                )
             self.destination = self.destination.with_name(
                 f"{self.asset_type}-{digest}{self.destination.suffix}"
             )

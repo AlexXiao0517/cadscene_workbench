@@ -152,6 +152,34 @@ def test_content_addressed_upload_never_overwrites_conflicting_bytes(
     assert conflict.read_bytes() == b"wrong-bytes"
 
 
+def test_validator_cannot_replace_upload_bytes_after_stream_digest(
+    tmp_path: Path,
+) -> None:
+    original = b"valid-video"
+    replacement = b"other-video"
+    assert len(original) == len(replacement)
+
+    def mutate_after_validation(path: Path, _asset_type: str):
+        path.write_bytes(replacement)
+        return {"decoded": True}
+
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"video": mutate_after_validation}
+    )
+    pending = store.begin(
+        "p1", "video", "source.mp4", expected_size=len(original)
+    )
+    pending.write(original)
+
+    with pytest.raises(UploadValidationError, match="changed during validation"):
+        pending.complete_staged()
+
+    assert not any(
+        path.name.startswith("video-") and path.suffix == ".mp4"
+        for path in (tmp_path / "projects" / "p1" / "assets").iterdir()
+    )
+
+
 def test_invalid_dxf_is_rejected_before_publication(tmp_path: Path) -> None:
     store = ValidatedUploadStore(tmp_path / "projects")
     pending = store.begin("p1", "cad", "broken.dxf", expected_size=7)

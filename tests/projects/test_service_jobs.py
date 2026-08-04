@@ -459,6 +459,72 @@ def test_requested_clip_export_plan_never_contains_unselected_clip(
     assert len(repositories.jobs.load("p1").jobs) == 2
 
 
+def test_prepare_execution_holds_clip_snapshot_until_plan_is_built(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service, repositories, queue = service_with_clips(
+        tmp_path, (clip("one"),)
+    )
+    service.enqueue_trajectory_jobs("p1")
+    export = next(item for item in queue.jobs() if item.job_type == "clip_export")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == export.job_id
+    lease = claimed.attempts[-1]
+    plan_entered = threading.Event()
+    release_plan = threading.Event()
+    original_prepare = service._prepare_clip_export
+
+    def blocking_prepare(job):
+        plan_entered.set()
+        assert release_plan.wait(5)
+        return original_prepare(job)
+
+    monkeypatch.setattr(service, "_prepare_clip_export", blocking_prepare)
+    plans: list[object] = []
+    prepare_thread = threading.Thread(
+        target=lambda: plans.append(
+            service.prepare_job_execution(
+                "p1",
+                export.job_id,
+                attempt_number=lease.number,
+                claim_token=str(lease.worker_claim_token),
+            )
+        )
+    )
+    prepare_thread.start()
+    assert plan_entered.wait(5)
+
+    mutation_finished = threading.Event()
+
+    def mutate_clip() -> None:
+        current = repositories.clips.load("p1")
+        repositories.clips.update(
+            "p1",
+            expected_revision=current.revision,
+            mutate=lambda value: replace(
+                value,
+                clips=(
+                    replace(
+                        value.clips[0],
+                        workflow_override="pure_rotation",
+                        resolved_workflow="pure_rotation",
+                    ),
+                ),
+            ),
+        )
+        mutation_finished.set()
+
+    mutation_thread = threading.Thread(target=mutate_clip)
+    mutation_thread.start()
+    mutation_thread.join(0.2)
+    assert not mutation_finished.is_set()
+
+    release_plan.set()
+    prepare_thread.join(5)
+    mutation_thread.join(5)
+    assert plans and mutation_finished.is_set()
+
+
 def test_existing_physical_clip_skips_export_without_exporting_other_clips(
     tmp_path: Path,
 ) -> None:

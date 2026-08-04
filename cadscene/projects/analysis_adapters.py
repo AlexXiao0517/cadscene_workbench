@@ -165,9 +165,25 @@ def asset_path(assets: Mapping[str, object], name: str) -> Path | None:
 
 def tree_fingerprint(root: Path) -> str:
     digest = sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(path.read_bytes())
+    digest.update(b"cadscene-tree-fingerprint-v2\x00")
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            entry_type = b"L"
+            content = path.readlink().as_posix().encode("utf-8")
+        elif path.is_dir():
+            entry_type = b"D"
+            content = b""
+        elif path.is_file():
+            entry_type = b"F"
+            content = path.read_bytes()
+        else:
+            raise ValueError(f"unsupported tree entry: {path}")
+        digest.update(entry_type)
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
     return digest.hexdigest()
 
 

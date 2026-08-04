@@ -226,11 +226,15 @@ class ProjectService:
                         updated_at=self.now(),
                         queue_order=order,
                         jobs=tuple(
-                            replace(
-                                by_id[job_id],
-                                operation_id=operation_id,
-                                submission_operation_id=operation_id,
-                            ).to_dict()
+                            (
+                                replace(
+                                    by_id[job_id],
+                                    operation_id=operation_id,
+                                    submission_operation_id=operation_id,
+                                ).to_dict()
+                                if job_id in job_ids
+                                else by_id[job_id].to_dict()
+                            )
                             for job_id in order
                         ),
                     )
@@ -401,11 +405,15 @@ class ProjectService:
                     updated_at=self.now(),
                     queue_order=order,
                     jobs=tuple(
-                        replace(
-                            by_id[job_id],
-                            operation_id=operation_id,
-                            submission_operation_id=operation_id,
-                        ).to_dict()
+                        (
+                            replace(
+                                by_id[job_id],
+                                operation_id=operation_id,
+                                submission_operation_id=operation_id,
+                            ).to_dict()
+                            if job_id in job_ids
+                            else by_id[job_id].to_dict()
+                        )
                         for job_id in order
                     ),
                 )
@@ -582,11 +590,15 @@ class ProjectService:
                 value: JobsManifest, publication_operation_id: str
             ) -> JobsManifest:
                 stamped_jobs = tuple(
-                    replace(
-                        by_id[job_id],
-                        operation_id=publication_operation_id,
-                        submission_operation_id=publication_operation_id,
-                    ).to_dict()
+                    (
+                        replace(
+                            by_id[job_id],
+                            operation_id=publication_operation_id,
+                            submission_operation_id=publication_operation_id,
+                        ).to_dict()
+                        if job_id in job_ids
+                        else by_id[job_id].to_dict()
+                    )
                     for job_id in queue_order
                 )
                 return replace(
@@ -1003,17 +1015,18 @@ class ProjectService:
         attempt_number: int,
         claim_token: str,
     ) -> QueueJob:
-        try:
-            return self._finish_job_once(
-                project_id,
-                job_id,
-                result,
-                current_fingerprint=current_fingerprint,
-                attempt_number=attempt_number,
-                claim_token=claim_token,
-            )
-        except _AnalysisPublicationPending as pending:
-            return self._recover_analysis_publication(pending)
+        with self._publication_lock:
+            try:
+                return self._finish_job_once(
+                    project_id,
+                    job_id,
+                    result,
+                    current_fingerprint=current_fingerprint,
+                    attempt_number=attempt_number,
+                    claim_token=claim_token,
+                )
+            except _AnalysisPublicationPending as pending:
+                return self._recover_analysis_publication(pending)
 
     def _finish_job_once(
         self,
@@ -1439,6 +1452,12 @@ class ProjectService:
                     )
                 self._publish_queue_locked(project_id)
                 raise RuntimeError("job input changed before execution")
+            return self._build_job_execution_plan_locked(job)
+
+    def _build_job_execution_plan_locked(
+        self, job: QueueJob
+    ) -> JobExecutionPlan:
+        project_id = job.project_id
         if job.job_type == "clip_export":
             return self._prepare_clip_export(job)
         if job.job_type in {"cad_analysis", "video_analysis"}:
