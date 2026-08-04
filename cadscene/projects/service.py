@@ -35,6 +35,7 @@ from .uploads import PublishedUpload
 from .queue import (
     AttemptRecord,
     LocalResourceQueue,
+    PreparedSubmissionBatch,
     QueueJob,
     RestoreCleanupReservation,
 )
@@ -141,35 +142,18 @@ class ProjectService:
                 if isinstance(previous, Mapping) and previous.get("request_key")
                 else None
             )
+            batch: PreparedSubmissionBatch | None = None
             prepared: tuple[QueueJob, ...] = ()
             job_ids: tuple[str, ...] = ()
             current_jobs = self.repositories.jobs.load(project_id)
             if request_key is not None and request_key != previous_key:
-                operation_seed = self._identity()
-                cad_job = self._new_analysis_job(
+                batch = self._prepare_analysis_submission(
                     project_id,
                     request_key=request_key,
-                    phase="cad",
-                    operation_id=operation_seed,
-                    dependency_ids=(),
                     project_assets=assets,
                 )
-                video_job = self._new_analysis_job(
-                    project_id,
-                    request_key=request_key,
-                    phase="video",
-                    operation_id=operation_seed,
-                    dependency_ids=(cad_job.job_id,),
-                    project_assets=assets,
-                )
-                prepared = self.queue.prepare_submission_candidates(
-                    (cad_job, video_job)
-                )
-                job_ids = tuple(item.job_id for item in prepared)
-                for candidate in prepared:
-                    Path(candidate.attempts[-1].directory).mkdir(
-                        parents=True, exist_ok=False
-                    )
+                prepared = batch.jobs
+                job_ids = batch.job_ids
 
             existing_jobs = tuple(
                 item for item in self.queue.jobs() if item.project_id == project_id
@@ -221,21 +205,16 @@ class ProjectService:
                 def mutate_jobs(
                     value: JobsManifest, operation_id: str
                 ) -> JobsManifest:
+                    assert batch is not None
                     return replace(
                         value,
                         updated_at=self.now(),
                         queue_order=order,
-                        jobs=tuple(
-                            (
-                                replace(
-                                    by_id[job_id],
-                                    operation_id=operation_id,
-                                    submission_operation_id=operation_id,
-                                ).to_dict()
-                                if job_id in job_ids
-                                else by_id[job_id].to_dict()
-                            )
-                            for job_id in order
+                        jobs=self._analysis_submission_payload(
+                            by_id=by_id,
+                            order=order,
+                            batch=batch,
+                            operation_id=operation_id,
                         ),
                     )
 
@@ -273,9 +252,8 @@ class ProjectService:
                 if not asset_recovered or (prepared and not jobs_recovered):
                     raise publication_error
                 if prepared:
-                    self.queue.commit_submission_candidates(
-                        tuple(recovered_by_id[job_id] for job_id in job_ids)
-                    )
+                    assert batch is not None
+                    self._commit_analysis_submission(batch, recovered_by_id)
                     self.queue.acknowledge_publication(project_id)
                 return RegisterUploadResult(
                     project_revision=recovered_project.revision,
@@ -292,9 +270,8 @@ class ProjectService:
                     str(item["job_id"]): QueueJob.from_dict(item)
                     for item in jobs.jobs
                 }
-                self.queue.commit_submission_candidates(
-                    tuple(persisted[job_id] for job_id in job_ids)
-                )
+                assert batch is not None
+                self._commit_analysis_submission(batch, persisted)
                 self.queue.acknowledge_publication(project_id)
             updated_project = next(
                 item
@@ -332,31 +309,13 @@ class ProjectService:
                         f"immutable {required} media/report is unavailable"
                     )
             request_key = f"{base_key}:manual:{self._identity()}"
-            operation_seed = self._identity()
-            cad_job = self._new_analysis_job(
+            batch = self._prepare_analysis_submission(
                 project_id,
                 request_key=request_key,
-                phase="cad",
-                operation_id=operation_seed,
-                dependency_ids=(),
                 project_assets=project.source_assets,
             )
-            video_job = self._new_analysis_job(
-                project_id,
-                request_key=request_key,
-                phase="video",
-                operation_id=operation_seed,
-                dependency_ids=(cad_job.job_id,),
-                project_assets=project.source_assets,
-            )
-            prepared = self.queue.prepare_submission_candidates(
-                (cad_job, video_job)
-            )
-            for candidate in prepared:
-                Path(candidate.attempts[-1].directory).mkdir(
-                    parents=True, exist_ok=False
-                )
-            job_ids = tuple(item.job_id for item in prepared)
+            prepared = batch.jobs
+            job_ids = batch.job_ids
             current_jobs = self.repositories.jobs.load(project_id)
             order = tuple(
                 dict.fromkeys(
@@ -404,17 +363,11 @@ class ProjectService:
                     value,
                     updated_at=self.now(),
                     queue_order=order,
-                    jobs=tuple(
-                        (
-                            replace(
-                                by_id[job_id],
-                                operation_id=operation_id,
-                                submission_operation_id=operation_id,
-                            ).to_dict()
-                            if job_id in job_ids
-                            else by_id[job_id].to_dict()
-                        )
-                        for job_id in order
+                    jobs=self._analysis_submission_payload(
+                        by_id=by_id,
+                        order=order,
+                        batch=batch,
+                        operation_id=operation_id,
                     ),
                 )
 
@@ -455,9 +408,7 @@ class ProjectService:
                     job_id in recovered_by_id for job_id in job_ids
                 ):
                     raise publication_error
-                self.queue.commit_submission_candidates(
-                    tuple(recovered_by_id[job_id] for job_id in job_ids)
-                )
+                self._commit_analysis_submission(batch, recovered_by_id)
                 self.queue.acknowledge_publication(project_id)
                 return RegisterUploadResult(
                     project_revision=recovered_project.revision,
@@ -473,9 +424,7 @@ class ProjectService:
                 str(item["job_id"]): QueueJob.from_dict(item)
                 for item in persisted_jobs.jobs
             }
-            self.queue.commit_submission_candidates(
-                tuple(persisted[job_id] for job_id in job_ids)
-            )
+            self._commit_analysis_submission(batch, persisted)
             self.queue.acknowledge_publication(project_id)
             updated_project = next(
                 item
@@ -523,32 +472,13 @@ class ProjectService:
                         request_key=request_key,
                     )
 
-            operation_id = self._identity()
-            cad_job = self._new_analysis_job(
+            batch = self._prepare_analysis_submission(
                 project_id,
                 request_key=request_key,
-                phase="cad",
-                operation_id=operation_id,
-                dependency_ids=(),
                 project_assets=project.source_assets,
             )
-            video_job = self._new_analysis_job(
-                project_id,
-                request_key=request_key,
-                phase="video",
-                operation_id=operation_id,
-                dependency_ids=(cad_job.job_id,),
-                project_assets=project.source_assets,
-            )
-            prepared = self.queue.prepare_submission_candidates(
-                (cad_job, video_job)
-            )
-            for candidate in prepared:
-                attempt = Path(candidate.attempts[-1].directory)
-                if not attempt.exists():
-                    attempt.mkdir(parents=True, exist_ok=False)
-
-            job_ids = (prepared[0].job_id, prepared[1].job_id)
+            prepared = batch.jobs
+            job_ids = batch.job_ids
             current_jobs = self.repositories.jobs.load(project_id)
             existing_jobs = tuple(
                 item for item in self.queue.jobs() if item.project_id == project_id
@@ -589,17 +519,11 @@ class ProjectService:
             def mutate_jobs(
                 value: JobsManifest, publication_operation_id: str
             ) -> JobsManifest:
-                stamped_jobs = tuple(
-                    (
-                        replace(
-                            by_id[job_id],
-                            operation_id=publication_operation_id,
-                            submission_operation_id=publication_operation_id,
-                        ).to_dict()
-                        if job_id in job_ids
-                        else by_id[job_id].to_dict()
-                    )
-                    for job_id in queue_order
+                stamped_jobs = self._analysis_submission_payload(
+                    by_id=by_id,
+                    order=queue_order,
+                    batch=batch,
+                    operation_id=publication_operation_id,
                 )
                 return replace(
                     value,
@@ -643,8 +567,8 @@ class ProjectService:
                     and all(job_id in recovered_by_id for job_id in job_ids)
                 )
                 if request_recovered:
-                    committed = self.queue.commit_submission_candidates(
-                        tuple(recovered_by_id[job_id] for job_id in job_ids)
+                    committed = self._commit_analysis_submission(
+                        batch, recovered_by_id
                     )
                     self.queue.acknowledge_publication(project_id)
                     return EnqueueAnalysisResult(
@@ -686,8 +610,8 @@ class ProjectService:
                 str(item["job_id"]): QueueJob.from_dict(item)
                 for item in persisted_jobs.jobs
             }
-            committed = self.queue.commit_submission_candidates(
-                tuple(persisted_by_id[job_id] for job_id in job_ids)
+            committed = self._commit_analysis_submission(
+                batch, persisted_by_id
             )
             self.queue.acknowledge_publication(project_id)
             return EnqueueAnalysisResult(
@@ -1815,6 +1739,72 @@ class ProjectService:
                     f"job-state publication failed for one or more projects: {details}"
                 ) from failures[0][1]
             return reaped
+
+    def _prepare_analysis_submission(
+        self,
+        project_id: str,
+        *,
+        request_key: str,
+        project_assets: Mapping[str, object],
+    ) -> PreparedSubmissionBatch:
+        operation_seed = self._identity()
+        cad_job = self._new_analysis_job(
+            project_id,
+            request_key=request_key,
+            phase="cad",
+            operation_id=operation_seed,
+            dependency_ids=(),
+            project_assets=project_assets,
+        )
+        video_job = self._new_analysis_job(
+            project_id,
+            request_key=request_key,
+            phase="video",
+            operation_id=operation_seed,
+            dependency_ids=(cad_job.job_id,),
+            project_assets=project_assets,
+        )
+        batch = self.queue.prepare_submission_candidates((cad_job, video_job))
+        for candidate in batch.new_candidates:
+            Path(candidate.attempts[-1].directory).mkdir(
+                parents=True, exist_ok=False
+            )
+        return batch
+
+    @staticmethod
+    def _analysis_submission_payload(
+        *,
+        by_id: Mapping[str, QueueJob],
+        order: Sequence[str],
+        batch: PreparedSubmissionBatch,
+        operation_id: str,
+    ) -> tuple[Mapping[str, object], ...]:
+        return tuple(
+            (
+                replace(
+                    by_id[job_id],
+                    operation_id=operation_id,
+                    submission_operation_id=operation_id,
+                ).to_dict()
+                if job_id in batch.new_job_ids
+                else by_id[job_id].to_dict()
+            )
+            for job_id in order
+        )
+
+    def _commit_analysis_submission(
+        self,
+        batch: PreparedSubmissionBatch,
+        persisted_by_id: Mapping[str, QueueJob],
+    ) -> tuple[QueueJob, ...]:
+        if batch.new_candidates:
+            self.queue.commit_submission_candidates(
+                tuple(
+                    persisted_by_id[candidate.job_id]
+                    for candidate in batch.new_candidates
+                )
+            )
+        return tuple(self.queue.get(job_id) for job_id in batch.job_ids)
 
     def _new_analysis_job(
         self,

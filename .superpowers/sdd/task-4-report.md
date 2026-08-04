@@ -256,6 +256,46 @@ analysis through a `Future`.
 - Only observed warning: the existing third-party `fontTools.misc.py23`
   deprecation warning.
 
+## Fifth formal review closure (base `1bf0116`)
+
+### Review finding map: 1 Important
+
+1. **Important - idempotently reused analysis jobs could receive new
+   provenance or be recommitted:** analysis DAG preparation now returns a
+   structured `PreparedSubmissionBatch` containing the complete ordered DAG,
+   genuinely new candidates, and reused queue jobs. Reused jobs retain every
+   field, including `operation_id`, `submission_operation_id`, attempts, status,
+   output identity, and publication provenance. Only `new_candidates` receive
+   the current submission operation, create attempt directories, and enter the
+   post-publication queue commit. The project `_analysis.job_ids` still records
+   the complete resolved CAD -> video DAG, including reused IDs.
+
+### Shared-path and dependency hardening
+
+- Upload-triggered analysis, manual reanalysis, and compatibility enqueue now
+  share the same prepare, manifest-payload, and commit helpers, preventing the
+  three publication paths from drifting again.
+- Batch preparation maps a proposed dependency ID to the actual reused job ID.
+  A partially reused DAG can therefore reuse its CAD job while a newly created
+  video job depends on the durable CAD ID.
+- Missing or one-element `_analysis.job_ids` is repaired from the existing
+  idempotent queue DAG without changing historical job provenance, without
+  creating attempt directories, and without raising during commit.
+
+### Fifth-round TDD and verification evidence
+
+- Initial RED: both missing and incomplete `_analysis.job_ids` reproductions
+  failed with `durable submission candidate changed before commit`.
+- Focused GREEN: `87 passed`, including complete reuse and mixed reused-CAD /
+  new-video dependency rebinding.
+- All project tests: `209 passed`.
+- Final fresh full suite: `786 passed, 1 skipped` in 48.25 seconds.
+- `python -m pyflakes` over every changed implementation and test file: pass
+  with no output.
+- `git diff --check`: pass.
+- Only observed warning: the existing third-party `fontTools.misc.py23`
+  deprecation warning.
+
 ## Fourth formal review closure (base `81a12ac`)
 
 ### Review finding map: 1 Critical + 4 Important

@@ -90,6 +90,42 @@ def test_analysis_enqueue_persists_explicit_lightweight_dag(tmp_path: Path) -> N
     assert repeated.job_ids == result.job_ids
 
 
+@pytest.mark.parametrize("recorded_count", (0, 1))
+def test_enqueue_repairs_incomplete_analysis_job_refs_without_rewriting_reused_jobs(
+    tmp_path: Path, recorded_count: int
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    first = service.enqueue_analysis_jobs("p1")
+    service._publish_queue("p1")
+    before = {item.job_id: item.to_dict() for item in queue.jobs()}
+    project = repositories.project.load("p1")
+
+    def remove_refs(value):
+        assets = dict(value.source_assets)
+        state = dict(assets["_analysis"])
+        if recorded_count:
+            state["job_ids"] = [first.job_ids[0]]
+        else:
+            state.pop("job_ids", None)
+        assets["_analysis"] = state
+        return replace(value, source_assets=assets)
+
+    repositories.project.update(
+        "p1", expected_revision=project.revision, mutate=remove_refs
+    )
+
+    repaired = service.enqueue_analysis_jobs("p1")
+
+    assert repaired.job_ids == first.job_ids
+    analysis = repositories.project.load("p1").source_assets["_analysis"]
+    assert tuple(analysis["job_ids"]) == first.job_ids
+    durable = {
+        str(item["job_id"]): item for item in repositories.jobs.load("p1").jobs
+    }
+    assert durable == before
+    assert {item.job_id: item.to_dict() for item in queue.jobs()} == before
+
+
 def test_analysis_enqueue_failure_never_leaves_queued_intent_without_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

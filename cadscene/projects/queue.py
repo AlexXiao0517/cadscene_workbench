@@ -247,6 +247,21 @@ class QueueJob:
         )
 
 
+@dataclass(frozen=True)
+class PreparedSubmissionBatch:
+    jobs: tuple[QueueJob, ...]
+    new_candidates: tuple[QueueJob, ...]
+    reused_jobs: tuple[QueueJob, ...]
+
+    @property
+    def job_ids(self) -> tuple[str, ...]:
+        return tuple(item.job_id for item in self.jobs)
+
+    @property
+    def new_job_ids(self) -> frozenset[str]:
+        return frozenset(item.job_id for item in self.new_candidates)
+
+
 class TaskQueue(Protocol):
     def submit(self, job: QueueJob) -> QueueJob:
         ...
@@ -665,7 +680,7 @@ class LocalResourceQueue:
 
     def prepare_submission_candidates(
         self, jobs: Sequence[QueueJob]
-    ) -> tuple[QueueJob, ...]:
+    ) -> PreparedSubmissionBatch:
         """Validate a batch without mutating queue state.
 
         The caller may durably publish these exact candidates before committing
@@ -675,12 +690,22 @@ class LocalResourceQueue:
         with self._lock:
             known = dict(self._jobs)
             prepared: list[QueueJob] = []
+            new_candidates: list[QueueJob] = []
+            reused_jobs: list[QueueJob] = []
+            dependency_aliases: dict[str, str] = {}
             for job in jobs:
+                normalized = replace(
+                    job,
+                    depends_on_job_ids=tuple(
+                        dependency_aliases.get(item, item)
+                        for item in job.depends_on_job_ids
+                    ),
+                )
                 existing = next(
                     (
                         item
                         for item in known.values()
-                        if item.idempotency_key == job.idempotency_key
+                        if item.idempotency_key == normalized.idempotency_key
                     ),
                     None,
                 )
@@ -693,16 +718,24 @@ class LocalResourceQueue:
                         raise ValueError(
                             "idempotency key collision across input or adapter identity"
                         )
+                    dependency_aliases[job.job_id] = existing.job_id
                     prepared.append(existing)
+                    reused_jobs.append(existing)
                     continue
-                if job.job_id in known:
-                    raise ValueError(f"duplicate job_id: {job.job_id}")
-                missing = set(job.depends_on_job_ids) - set(known)
+                if normalized.job_id in known:
+                    raise ValueError(f"duplicate job_id: {normalized.job_id}")
+                missing = set(normalized.depends_on_job_ids) - set(known)
                 if missing:
                     raise ValueError(f"unknown dependencies: {sorted(missing)}")
-                known[job.job_id] = job
-                prepared.append(job)
-            return tuple(prepared)
+                known[normalized.job_id] = normalized
+                dependency_aliases[job.job_id] = normalized.job_id
+                prepared.append(normalized)
+                new_candidates.append(normalized)
+            return PreparedSubmissionBatch(
+                jobs=tuple(prepared),
+                new_candidates=tuple(new_candidates),
+                reused_jobs=tuple(reused_jobs),
+            )
 
     def commit_submission_candidates(
         self, candidates: Sequence[QueueJob]

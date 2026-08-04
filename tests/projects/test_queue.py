@@ -1213,17 +1213,52 @@ def test_submission_candidates_do_not_mutate_queue_before_manifest_publish() -> 
         depends_on_job_ids=(first.job_id,),
     )
 
-    candidates = queue.prepare_submission_candidates((first, second))
+    batch = queue.prepare_submission_candidates((first, second))
 
-    assert tuple(item.job_id for item in candidates) == (
+    assert batch.job_ids == (
         "analysis-cad",
         "analysis-video",
     )
+    assert batch.new_candidates == batch.jobs
+    assert batch.reused_jobs == ()
     assert queue.jobs() == ()
-    committed = queue.commit_submission_candidates(candidates)
+    committed = queue.commit_submission_candidates(batch.new_candidates)
     assert tuple(item.job_id for item in committed) == (
         "analysis-cad",
         "analysis-video",
     )
     assert queue.status("analysis-cad") == "running"
     assert queue.status("analysis-video") == "queued"
+
+
+def test_submission_batch_reuses_job_and_rebinds_new_dependency() -> None:
+    queue = LocalResourceQueue()
+    existing_cad = queue.submit(
+        job(
+            "existing-cad",
+            resource_class="light_compute",
+            idempotency_key="cad-key",
+        )
+    )
+    proposed_cad = job(
+        "proposed-cad",
+        resource_class="light_compute",
+        idempotency_key="cad-key",
+    )
+    proposed_video = job(
+        "proposed-video",
+        resource_class="light_compute",
+        depends_on_job_ids=(proposed_cad.job_id,),
+        idempotency_key="video-key",
+    )
+
+    batch = queue.prepare_submission_candidates(
+        (proposed_cad, proposed_video)
+    )
+
+    assert batch.reused_jobs == (existing_cad,)
+    assert batch.new_candidates[0].job_id == proposed_video.job_id
+    assert batch.new_candidates[0].depends_on_job_ids == (existing_cad.job_id,)
+    assert batch.job_ids == (existing_cad.job_id, proposed_video.job_id)
+    committed = queue.commit_submission_candidates(batch.new_candidates)
+    assert tuple(item.job_id for item in committed) == (proposed_video.job_id,)
