@@ -334,6 +334,56 @@ python -m black --check <all changed Python files>
 11 files would be left unchanged
 ```
 
+## Fourth closure-review remediation
+
+Four additional fail-closed recovery and publication findings against
+`88891d6` were reproduced before production changes and closed:
+
+- Adopted-process polling no longer interprets a missing/mismatched identity
+  probe as process exit. PID liveness must independently prove absence before
+  the adopted lease, resource slot, and exclusive key are released. Probe or
+  liveness inspection exceptions are treated as unreadable live state, so the
+  next bounded job remains queued and no unpublished worker can claim it.
+- Restore cleanup intent is durable. `QueueJob` now serializes typed
+  `cleanup_reason` and `target_terminal_status` fields. A crash after publishing
+  the first `cancelling` phase therefore preserves `superseded`/`stale_input`
+  intent instead of the next restore degrading it to generic `interrupted`.
+- Adopted-reap coordination attempts every pending project publication in a
+  round. Successful publications are acknowledged independently; failed
+  projects stay publication-gated; failures are aggregated and reported only
+  after later projects have had their publication opportunity.
+- Ordinary cancellation failures no longer publish a terminal state while an
+  old process may still be alive or unreadable. The job remains
+  `cancelling`/`process_unverified`, retains its worker claim, controller,
+  resource slot and exclusive key, is persisted by `ProjectService`, and blocks
+  retry. The retained controller can be invoked by a later cancellation retry;
+  only proven absence or successful verified termination releases ownership.
+
+Fourth-review RED evidence:
+
+```text
+pytest -q tests/projects/test_queue.py -k "adopted_process_probe_uncertainty or changed_input_cleanup_target_survives or cancel_termination_failure_retains or retry_refuses_unverified"
+5 failed (uncertain adoption was reaped; cleanup target became interrupted;
+cancel failure became terminal and released ownership)
+pytest -q tests/projects/test_service_jobs.py -k "pending_project_publications_continue or persists_process_unverified"
+2 failed (p2 failure starved p3; failed cancellation persisted interrupted)
+pytest -q tests/projects/test_queue.py -k "probe_error_is_not_proof or identity_inspection_errors"
+2 failed (inspection exceptions escaped instead of retaining fail-closed state)
+```
+
+Fresh fourth-review verification:
+
+```text
+pytest -q tests/projects/test_queue.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/projects/test_workflow_adapters.py
+80 passed in 2.59s
+pytest -q tests/projects
+137 passed in 3.01s
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/workflow tests/pure_rotation tests/video_analysis/test_clip_export.py tests/video_analysis/test_cli.py
+250 passed, 1 skipped, 1 warning in 6.83s
+pytest -q
+685 passed, 1 skipped, 1 warning in 33.73s
+```
+
 ## Self-review
 
 - Confirmed Task 2 repository/model invariants were consumed rather than

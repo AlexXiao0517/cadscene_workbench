@@ -525,8 +525,19 @@ class ProjectService:
             project_ids = {
                 self.queue.get(job_id).project_id for job_id in reaped
             } | set(self.queue.pending_publication_projects())
+            failures: list[tuple[str, Exception]] = []
             for project_id in sorted(project_ids):
-                self._publish_queue(project_id)
+                try:
+                    self._publish_queue(project_id)
+                except Exception as exc:
+                    failures.append((project_id, exc))
+            if failures:
+                details = "; ".join(
+                    f"{project_id}: {error}" for project_id, error in failures
+                )
+                raise RuntimeError(
+                    f"job-state publication failed for one or more projects: {details}"
+                ) from failures[0][1]
             return reaped
 
     def _new_job(

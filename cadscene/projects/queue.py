@@ -118,6 +118,8 @@ class QueueJob:
     published_outputs: Mapping[str, str] = field(default_factory=dict)
     progress: Mapping[str, object] | None = None
     error: str | None = None
+    cleanup_reason: str | None = None
+    target_terminal_status: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -140,6 +142,11 @@ class QueueJob:
             raise ValueError(f"unknown resource class: {self.resource_class}")
         if self.job_id in self.depends_on_job_ids:
             raise ValueError("a job cannot depend on itself")
+        if (
+            self.target_terminal_status is not None
+            and self.target_terminal_status not in TERMINAL_STATUSES
+        ):
+            raise ValueError("cleanup target must be a terminal status")
         numbers = [attempt.number for attempt in self.attempts]
         if numbers != list(range(1, len(numbers) + 1)):
             raise ValueError("attempt numbers must be immutable and contiguous")
@@ -178,6 +185,8 @@ class QueueJob:
             "published_outputs": dict(self.published_outputs),
             "progress": None if self.progress is None else dict(self.progress),
             "error": self.error,
+            "cleanup_reason": self.cleanup_reason,
+            "target_terminal_status": self.target_terminal_status,
         }
 
     @classmethod
@@ -221,6 +230,10 @@ class QueueJob:
                 else dict(value["progress"])  # type: ignore[arg-type]
             ),
             error=_optional_string(value.get("error")),
+            cleanup_reason=_optional_string(value.get("cleanup_reason")),
+            target_terminal_status=_optional_string(
+                value.get("target_terminal_status")
+            ),
         )
 
 
@@ -269,6 +282,7 @@ class LocalResourceQueue:
         self._execution_claims: dict[str, tuple[int, str]] = {}
         self._adopted_attempts: dict[str, tuple[int, str]] = {}
         self._restore_cleanups: dict[str, RestoreCleanupReservation] = {}
+        self._cancel_reservations: set[str] = set()
         self._publication_gated = False
         self._pending_publication_projects: set[str] = set()
         self._lock = threading.RLock()
@@ -335,15 +349,27 @@ class LocalResourceQueue:
             current = queue._jobs[job_id]
             if current.status not in RESOURCE_HOLDING_STATUSES:
                 continue
+            cleanup_target = None
+            cleanup_reason = current.cleanup_reason
+            if current.status == "cancelling" and current.target_terminal_status:
+                cleanup_target = _cleanup_terminal_job(
+                    current, current.target_terminal_status
+                )
+            elif current.status == "cancelling":
+                cleanup_target = _cleanup_terminal_job(current, "interrupted")
+                cleanup_reason = "cancellation_interrupted_by_restart"
+            elif job_id in invalidated:
+                cleanup_target = invalidated[job_id]
+                cleanup_reason = "input_changed"
             attempt = current.attempts[-1] if current.attempts else None
             if attempt is None or attempt.pid is None:
                 queue._jobs[job_id] = (
-                    invalidated[job_id]
-                    if job_id in invalidated and current.status != "cancelling"
-                    else current.with_status("interrupted")
+                    cleanup_target
+                    if cleanup_target is not None
+                    else _cleanup_terminal_job(current, "interrupted")
                 )
                 continue
-            observed = probe(attempt.pid)
+            observed = _probe_or_unverified(probe, attempt.pid)
             expected = {
                 "pid": attempt.pid,
                 "process_start_time": attempt.process_start_time,
@@ -354,14 +380,6 @@ class LocalResourceQueue:
                 any(value in (None, "") for value in expected.values())
                 or observed is None
                 or any(observed.get(key) != value for key, value in expected.items())
-            )
-            cleanup_target = (
-                replace(
-                    current.with_status("interrupted"),
-                    error="cancellation interrupted by service restart",
-                )
-                if current.status == "cancelling"
-                else invalidated.get(job_id)
             )
             if cleanup_target is not None:
                 if identity_matches:
@@ -378,16 +396,20 @@ class LocalResourceQueue:
                     queue._jobs[job_id] = replace(
                         current.with_status("cancelling"),
                         error="verified old process cleanup is pending",
+                        cleanup_reason=cleanup_reason,
+                        target_terminal_status=cleanup_target.status,
                     )
-                elif not queue._process_alive(attempt.pid):
+                elif not _process_may_be_alive(queue._process_alive, attempt.pid):
                     queue._jobs[job_id] = cleanup_target
                 else:
                     queue._jobs[job_id] = replace(
                         current.with_status("cancelling"),
                         error="process identity is unverified; recovery is blocked",
+                        cleanup_reason=cleanup_reason,
+                        target_terminal_status=cleanup_target.status,
                     )
             elif not identity_matches:
-                if queue._process_alive(attempt.pid):
+                if _process_may_be_alive(queue._process_alive, attempt.pid):
                     queue._jobs[job_id] = replace(
                         current.with_status("cancelling"),
                         error="process identity is unverified; recovery is blocked",
@@ -500,7 +522,7 @@ class LocalResourceQueue:
             )
 
     def terminate_restore_cleanup(self, reservation: RestoreCleanupReservation) -> None:
-        observed = self._process_probe(reservation.pid)
+        observed = _probe_or_unverified(self._process_probe, reservation.pid)
         expected = {
             "pid": reservation.pid,
             "process_start_time": reservation.process_start_time,
@@ -886,7 +908,7 @@ class LocalResourceQueue:
             current = self._jobs[job_id]
             if current.status in TERMINAL_STATUSES:
                 return None
-            if current.status == "cancelling":
+            if job_id in self._cancel_reservations:
                 raise ValueError("job cancellation is already in progress")
             attempt = current.attempts[-1] if current.attempts else None
             number = None if attempt is None else attempt.number
@@ -897,7 +919,12 @@ class LocalResourceQueue:
                 if number is None or claim_token is None
                 else self._process_controllers.get((job_id, number, str(claim_token)))
             )
-            self._jobs[job_id] = current.with_status("cancelling")
+            self._jobs[job_id] = replace(
+                current.with_status("cancelling"),
+                cleanup_reason="user_cancel",
+                target_terminal_status="interrupted",
+            )
+            self._cancel_reservations.add(job_id)
             return CancelReservation(
                 job_id=job_id,
                 attempt_number=number,
@@ -925,6 +952,7 @@ class LocalResourceQueue:
             ):
                 raise ValueError("cancel reservation no longer owns the active attempt")
             self._jobs[reservation.job_id] = reservation.previous_job
+            self._cancel_reservations.discard(reservation.job_id)
             return reservation.previous_job
 
     def terminate_cancel_reservation(self, reservation: CancelReservation) -> None:
@@ -933,7 +961,7 @@ class LocalResourceQueue:
         if reservation.controller is not None:
             reservation.controller()
             return
-        observed = self._process_probe(reservation.pid)
+        observed = _probe_or_unverified(self._process_probe, reservation.pid)
         expected = {
             "pid": reservation.pid,
             "process_start_time": reservation.process_start_time,
@@ -962,6 +990,24 @@ class LocalResourceQueue:
                 != reservation.attempt_number
             ):
                 raise ValueError("cancel reservation no longer owns the active attempt")
+            process_may_still_be_alive = False
+            if error is not None and reservation.pid is not None:
+                process_may_still_be_alive = _process_may_be_alive(
+                    self._process_alive, reservation.pid
+                )
+            if process_may_still_be_alive:
+                self._jobs[reservation.job_id] = replace(
+                    current,
+                    stage="process_unverified",
+                    error=str(error),
+                    output_revision=None,
+                    output_fingerprint=None,
+                    output_validated=False,
+                    validated_input_fingerprint=None,
+                    published_outputs={},
+                )
+                self._cancel_reservations.discard(reservation.job_id)
+                return self._jobs[reservation.job_id]
             status = "interrupted" if error is not None else "cancelled"
             self._jobs[reservation.job_id] = replace(
                 current.with_status(status),
@@ -971,6 +1017,8 @@ class LocalResourceQueue:
                 output_validated=False,
                 validated_input_fingerprint=None,
                 published_outputs={},
+                cleanup_reason=None,
+                target_terminal_status=None,
             )
             if reservation.attempt_number is not None and reservation.claim_token:
                 self._process_controllers.pop(
@@ -981,6 +1029,7 @@ class LocalResourceQueue:
                     ),
                     None,
                 )
+            self._cancel_reservations.discard(reservation.job_id)
             self._schedule_locked()
             return self._jobs[reservation.job_id]
 
@@ -1001,7 +1050,7 @@ class LocalResourceQueue:
             if (
                 previous is not None
                 and previous.pid is not None
-                and self._process_alive(previous.pid)
+                and _process_may_be_alive(self._process_alive, previous.pid)
             ):
                 raise ValueError("old process is not proven gone; retry is blocked")
             retried = replace(
@@ -1014,6 +1063,8 @@ class LocalResourceQueue:
                 validated_input_fingerprint=None,
                 published_outputs={},
                 error=None,
+                cleanup_reason=None,
+                target_terminal_status=None,
             )
             self._jobs[job_id] = retried
             self._schedule_locked()
@@ -1089,17 +1140,26 @@ class LocalResourceQueue:
         exited: list[tuple[str, int, str]] = []
         for job_id, (attempt_number, claim_token), current in snapshots:
             attempt = current.attempts[-1]
-            observed = None if attempt.pid is None else self._process_probe(attempt.pid)
+            observed = (
+                None
+                if attempt.pid is None
+                else _probe_or_unverified(self._process_probe, attempt.pid)
+            )
             expected = {
                 "pid": attempt.pid,
                 "process_start_time": attempt.process_start_time,
                 "command_fingerprint": attempt.command_fingerprint,
                 "task_token": attempt.task_token,
             }
-            if observed is None or any(
+            identity_is_uncertain = observed is None or any(
                 observed.get(key) != value for key, value in expected.items()
-            ):
-                exited.append((job_id, attempt_number, claim_token))
+            )
+            if identity_is_uncertain:
+                process_is_alive = _process_may_be_alive(
+                    self._process_alive, attempt.pid
+                )
+                if not process_is_alive:
+                    exited.append((job_id, attempt_number, claim_token))
         reaped: list[str] = []
         with self._lock:
             for job_id, attempt_number, claim_token in exited:
@@ -1360,6 +1420,25 @@ def _optional_string(value: object) -> str | None:
     return None if value is None else str(value)
 
 
+def _probe_or_unverified(
+    probe: Callable[[int], Mapping[str, object] | None], pid: int
+) -> Mapping[str, object] | None:
+    try:
+        return probe(pid)
+    except Exception:
+        # AccessDenied and transient inspection failures cannot prove either
+        # identity or process absence.
+        return None
+
+
+def _process_may_be_alive(alive: Callable[[int], bool], pid: int) -> bool:
+    try:
+        return alive(pid)
+    except Exception:
+        # Fail closed: an unreadable PID retains resource/exclusive ownership.
+        return True
+
+
 def _invalidated_job(job: QueueJob) -> QueueJob:
     status = "stale_input" if job.status == "success" else "superseded"
     return replace(
@@ -1372,4 +1451,27 @@ def _invalidated_job(job: QueueJob) -> QueueJob:
         validated_input_fingerprint=None,
         published_outputs={},
         error=None,
+        cleanup_reason=None,
+        target_terminal_status=None,
+    )
+
+
+def _cleanup_terminal_job(job: QueueJob, status: str) -> QueueJob:
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(f"cleanup target is not terminal: {status}")
+    error = (
+        "cancellation interrupted by service restart"
+        if status == "interrupted"
+        else None
+    )
+    return replace(
+        job.with_status(status),
+        output_revision=None,
+        output_fingerprint=None,
+        output_validated=False,
+        validated_input_fingerprint=None,
+        published_outputs={},
+        error=error,
+        cleanup_reason=None,
+        target_terminal_status=None,
     )

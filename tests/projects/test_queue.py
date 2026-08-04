@@ -527,6 +527,128 @@ def test_verified_adopted_process_is_reaped_when_it_exits() -> None:
     assert queue.status("b") == "running"
 
 
+@pytest.mark.parametrize(
+    "later_observation",
+    (
+        None,
+        {
+            "pid": 123,
+            "process_start_time": "different-start",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+    ),
+)
+def test_adopted_process_probe_uncertainty_keeps_capacity_and_claim_fail_closed(
+    later_observation,
+) -> None:
+    initial_observation = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    observed = [initial_observation]
+    running = (
+        job("a", exclusive_key="trajectory:clip-1")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+    queue = LocalResourceQueue.restore(
+        [running, job("b", exclusive_key="trajectory:clip-1")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: observed[0],
+        process_alive=lambda _pid: True,
+    )
+    observed[0] = later_observation
+
+    assert queue.poll_adopted_processes() == ()
+
+    assert queue.status("a") in {"running", "cancelling"}
+    assert queue.status("b") == "queued"
+    assert queue.claim_next_unstarted() is None
+
+
+def test_adopted_process_probe_error_is_not_proof_of_exit() -> None:
+    initial = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    probe_available = [True]
+
+    def probe(_pid: int):
+        if not probe_available[0]:
+            raise RuntimeError("process identity is inaccessible")
+        return initial
+
+    running = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+    queue = LocalResourceQueue.restore(
+        [running, job("b")],
+        queue_order=("a", "b"),
+        process_probe=probe,
+        process_alive=lambda _pid: True,
+    )
+    probe_available[0] = False
+
+    assert queue.poll_adopted_processes() == ()
+    assert queue.status("b") == "queued"
+
+
+def test_restore_identity_inspection_errors_retain_resource_fail_closed() -> None:
+    running = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                pid=123,
+                process_start_time="start-1",
+                command_fingerprint="command-1",
+                task_token="token-1",
+            )
+        )
+        .with_status("running")
+    )
+
+    queue = LocalResourceQueue.restore(
+        [running, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("identity access denied")
+        ),
+        process_alive=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("liveness access denied")
+        ),
+    )
+
+    assert queue.status("a") == "cancelling"
+    assert queue.status("b") == "queued"
+
+
 def test_windows_fallback_rediscovers_children_before_terminating_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -663,6 +785,50 @@ def test_restore_cleanup_failure_keeps_resource_reserved_and_retry_blocked() -> 
         queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
 
 
+def test_changed_input_cleanup_target_survives_crash_between_restore_phases() -> None:
+    identity = {
+        "pid": 123,
+        "process_start_time": "start-1",
+        "command_fingerprint": "command-1",
+        "task_token": "token-1",
+    }
+    active = (
+        job("a")
+        .with_attempt(
+            AttemptRecord(
+                number=1,
+                directory="jobs/a/attempt-1",
+                **identity,
+            )
+        )
+        .with_status("running")
+    )
+    first_restore = LocalResourceQueue.restore(
+        [active, job("b")],
+        queue_order=("a", "b"),
+        process_probe=lambda _pid: identity,
+        process_alive=lambda _pid: True,
+        current_fingerprint_resolver=lambda item: (
+            "changed-input" if item.job_id == "a" else item.input_fingerprint
+        ),
+        defer_cleanup=True,
+    )
+    persisted = [item.to_dict() for item in first_restore.jobs()]
+    terminated: list[int] = []
+
+    second_restore = LocalResourceQueue.restore(
+        persisted,
+        queue_order=first_restore.queue_order(),
+        process_probe=lambda _pid: identity,
+        process_alive=lambda _pid: True,
+        process_tree_terminator=terminated.append,
+    )
+
+    assert terminated == [123]
+    assert second_restore.status("a") == "superseded"
+    assert second_restore.status("b") == "running"
+
+
 def test_retry_refuses_unverified_old_process_after_cancel_failure() -> None:
     queue = LocalResourceQueue(
         process_tree_terminator=lambda _pid: (_ for _ in ()).throw(
@@ -688,11 +854,89 @@ def test_retry_refuses_unverified_old_process_after_cancel_failure() -> None:
             )
         )
     )
-    interrupted = queue.cancel("a")
+    cancelling = queue.cancel("a")
 
-    assert interrupted.status == "interrupted"
-    with pytest.raises(ValueError, match="old process.*not proven gone"):
+    assert cancelling.status == "cancelling"
+    assert cancelling.stage == "process_unverified"
+    with pytest.raises(ValueError, match="terminal unsuccessful"):
         queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+
+
+def test_cancel_termination_failure_retains_claim_controller_and_resource_slot() -> (
+    None
+):
+    def fail_termination() -> None:
+        raise RuntimeError("descendant remained alive")
+
+    queue = LocalResourceQueue(process_alive=lambda _pid: True)
+    queue.submit(
+        job("a", exclusive_key="trajectory:clip-1").with_attempt(
+            AttemptRecord(number=1, directory="jobs/a/attempt-1")
+        )
+    )
+    queue.submit(job("b", exclusive_key="trajectory:clip-1"))
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == "a"
+    lease = claimed.attempts[-1]
+    queue.record_process(
+        "a",
+        attempt_number=lease.number,
+        claim_token=lease.worker_claim_token,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt-1.log",
+        terminate=fail_termination,
+    )
+
+    result = queue.cancel("a")
+
+    assert result.status == "cancelling"
+    assert result.stage == "process_unverified"
+    assert queue.status("b") == "queued"
+    assert queue.claim_next_unstarted() is None
+    assert queue._execution_claims["a"] == (lease.number, lease.worker_claim_token)
+    assert (
+        "a",
+        lease.number,
+        str(lease.worker_claim_token),
+    ) in queue._process_controllers
+
+
+def test_cancel_can_retry_the_retained_controller_after_unverified_failure() -> None:
+    calls = 0
+
+    def terminate() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("tree still alive")
+
+    process_alive = [True]
+    queue = LocalResourceQueue(process_alive=lambda _pid: process_alive[0])
+    queue.submit(
+        job("a").with_attempt(AttemptRecord(number=1, directory="jobs/a/attempt-1"))
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    queue.record_process(
+        "a",
+        attempt_number=lease.number,
+        claim_token=lease.worker_claim_token,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt-1.log",
+        terminate=terminate,
+    )
+    assert queue.cancel("a").status == "cancelling"
+    process_alive[0] = False
+
+    assert queue.cancel("a").status == "cancelled"
+    assert calls == 2
 
 
 def test_restore_resumes_verified_cancelling_cleanup_as_interrupted() -> None:

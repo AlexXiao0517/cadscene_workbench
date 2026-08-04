@@ -726,6 +726,80 @@ def test_cross_project_schedule_is_unclaimable_until_failed_publication_resyncs(
     )
 
 
+def test_pending_project_publications_continue_after_one_project_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repositories, _queue = service_with_clips(tmp_path, (clip("one"),))
+    add_project(repositories, tmp_path, "p2", (clip("two", project_id="p2"),))
+    add_project(repositories, tmp_path, "p3", (clip("three", project_id="p3"),))
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+    for project_id in ("p1", "p2", "p3"):
+        restarted.restore_jobs(project_id, process_probe=lambda _pid: None)
+        restarted.queue.require_publication(project_id)
+    p3_revision_before = repositories.jobs.load("p3").revision
+    original_publish = repositories.jobs._publish_prepared_unchecked
+
+    def fail_p2_persistently(project_id, *args, **kwargs):
+        if project_id == "p2":
+            raise RuntimeError("p2 persistent publication failure")
+        return original_publish(project_id, *args, **kwargs)
+
+    monkeypatch.setattr(
+        repositories.jobs,
+        "_publish_prepared_unchecked",
+        fail_p2_persistently,
+    )
+
+    with pytest.raises(RuntimeError, match="p2 persistent publication failure"):
+        restarted.reap_adopted_jobs()
+
+    assert repositories.jobs.load("p3").revision == p3_revision_before + 1
+    assert "p3" not in restarted.queue.pending_publication_projects()
+    assert "p2" in restarted.queue.pending_publication_projects()
+
+
+def test_service_persists_process_unverified_after_cancel_termination_failure(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    service.record_job_process(
+        "p1",
+        claimed.job_id,
+        pid=123,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt.log",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+        terminate=lambda: (_ for _ in ()).throw(RuntimeError("tree still alive")),
+    )
+    queue._process_alive = lambda _pid: True
+
+    result = service.cancel_job("p1", claimed.job_id)
+
+    stored = next(
+        item
+        for item in repositories.jobs.load("p1").jobs
+        if item["job_id"] == claimed.job_id
+    )
+    assert result.status == "cancelling"
+    assert result.stage == "process_unverified"
+    assert stored["status"] == "cancelling"
+    assert stored["stage"] == "process_unverified"
+
+
 def test_service_publishes_cancelling_before_blocking_tree_termination(
     tmp_path: Path,
 ) -> None:
