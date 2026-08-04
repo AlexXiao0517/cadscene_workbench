@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE_WITH_CONCERNS
+DONE
 
 - Branch: `feature/video-project-pipeline`
 - Worktree: `D:\zjic2026\cadscene_workbench\.worktrees\video-project-pipeline`
@@ -21,9 +21,10 @@ DONE_WITH_CONCERNS
 - Added structured `AdapterProgress`. Unknown progress omits `fraction`; queue
   updates persist the adapter stage/message without fabricating a percentage.
 - Added safe terminal handling for failed, interrupted, cancelled, and
-  stale-input work. Cancellation delegates to a full process-tree terminator
-  (`taskkill /T /F` on Windows; process-group SIGTERM on POSIX) and never
-  removes attempt logs or temporary outputs.
+  stale-input work. Windows execution uses a kill-on-close Job Object where
+  available; verified PID/start/fingerprint/token fallback termination and
+  POSIX process-group termination cover the remaining cases. Cancellation
+  verifies that the complete tree exits and never removes attempt diagnostics.
 - Added restart restoration. Durable order is retained; an active attempt is
   adopted only when PID, process start time, command fingerprint, and task
   token are all present and exactly verified. Everything else becomes
@@ -45,6 +46,28 @@ DONE_WITH_CONCERNS
 - Changed active inputs produce `stale_input`, retain attempt diagnostics,
   clear output publication fields, and are not reported as algorithm failure.
 - Exported the Task 3 public interfaces from `cadscene.projects`.
+
+## Review remediation
+
+- Added a real bounded local executor and subprocess worker. Queue-reserved
+  attempts are claimed atomically, adapter commands execute strictly in order,
+  PID/start time/command fingerprint/task token/log paths are persisted, and
+  only `ProjectService` publishes durable job state.
+- Made finish and recovery recompute current authoritative identity from source
+  files, manifest revisions, exact integer-PTS intervals, parameters, workflow,
+  and adapter version. Caller-provided fingerprints are never authoritative.
+- Made project restore merge into the global queue so other projects, live
+  controllers, ordering, and shared resource capacity are retained.
+- Routed SfM through `resolve_sfm_python()` and derived fused-SRT offsets exactly
+  from `source_start_pts * source_time_base`, after validating the authoritative
+  clip frame map.
+- Reused the existing physical clip-export CLI through an attempt-scoped batch
+  export plan and validated the resulting MP4/frame-map artifacts before making
+  them available to trajectory dependencies.
+- Closed executor lifecycle races: normal completion releases its controller,
+  retries use only the new attempt controller, cancellation and executor
+  publication are serialized safely, and a process launched before identity
+  publication failure is terminated rather than orphaned.
 
 ## TDD evidence: RED
 
@@ -121,28 +144,28 @@ Focused Task 3 tests after implementation and self-review:
 
 ```text
 pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py
-34 passed in 0.24s
+49 passed in 2.87s
 ```
 
 All project repository/service tests:
 
 ```text
 pytest -q tests/projects
-91 passed in 0.77s
+105 passed in 3.58s
 ```
 
 Requested workflow and pure-rotation regression set:
 
 ```text
-pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/workflow tests/pure_rotation
-156 passed, 1 warning in 3.34s
+pytest -q tests/projects/test_queue.py tests/projects/test_workflow_adapters.py tests/projects/test_service_jobs.py tests/projects/test_executor.py tests/workflow tests/pure_rotation
+170 passed, 1 warning in 8.35s
 ```
 
 Single full-suite run:
 
 ```text
 pytest -q
-637 passed, 1 skipped, 1 warning in 37.67s
+652 passed, 1 skipped, 1 warning in 47.00s
 ```
 
 Static/syntax/whitespace verification:
@@ -167,8 +190,9 @@ exit 0
 - Confirmed dependency completion is insufficient without validation against
   the dependency's current input fingerprint.
 - Confirmed missing restart identity fields fail closed to `interrupted`.
-- Confirmed cancellation performs no attempt-directory cleanup and stale
-  results publish no output revision or output map.
+- Confirmed real Windows parent/descendant cancellation performs no
+  attempt-directory cleanup, verifies tree exit, and stale results publish no
+  output revision or output map.
 - Confirmed the three runnable adapters reference existing CLI module names
   and actual output paths. No workflow mathematical internals changed.
 

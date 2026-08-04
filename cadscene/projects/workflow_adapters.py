@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -13,6 +15,7 @@ from .adapters import (
     AdapterResult,
     WorkflowAdapterRegistry,
 )
+from cadscene.workflow.job_runner import resolve_sfm_python
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ class ExistingWorkflowAdapter:
                 raise FileNotFoundError(
                     f"physical SRT with {self.srt_requirement} coverage is required"
                 )
+        if self.name == "srt_sfm_fused":
+            _validate_exact_clip_mapping(inputs)
         inputs.attempt_directory.mkdir(parents=True, exist_ok=True)
         return inputs
 
@@ -117,7 +122,7 @@ class ExistingWorkflowAdapter:
 
     def _sfm_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         command = [
-            sys.executable,
+            str(resolve_sfm_python()),
             "-m",
             "cadscene.cli.run_sfm",
             "--dataset",
@@ -162,6 +167,8 @@ class ExistingWorkflowAdapter:
             str(inputs.srt_path),
             "--video",
             str(inputs.video_path),
+            "--time-offset-sec",
+            _source_offset_seconds(inputs),
         ]
         return tuple(command)
 
@@ -226,3 +233,63 @@ def default_workflow_adapters() -> WorkflowAdapterRegistry:
             ),
         )
     )
+
+
+def _validate_exact_clip_mapping(inputs: AdapterInputs) -> None:
+    if (
+        inputs.source_start_pts is None
+        or inputs.source_end_pts_exclusive is None
+        or inputs.source_time_base is None
+        or inputs.frame_map_path is None
+    ):
+        raise ValueError(
+            "srt_sfm_fused requires authoritative PTS interval and frame map"
+        )
+    if not inputs.frame_map_path.is_file():
+        raise FileNotFoundError(f"clip frame map is missing: {inputs.frame_map_path}")
+    payload = json.loads(inputs.frame_map_path.read_text(encoding="utf-8"))
+    time_base = payload.get("source_time_base") or {}
+    mapped_time_base = Fraction(
+        int(time_base.get("numerator")), int(time_base.get("denominator"))
+    )
+    if mapped_time_base != inputs.source_time_base:
+        raise ValueError("frame map time base disagrees with authoritative interval")
+    mapped = next(
+        (
+            item
+            for item in payload.get("clips", ())
+            if item.get("clip_id") == inputs.clip_id
+        ),
+        None,
+    )
+    if mapped is None:
+        raise ValueError("frame map does not contain the requested clip_id")
+    if (
+        int(mapped.get("source_start_pts")) != inputs.source_start_pts
+        or int(mapped.get("source_end_pts_exclusive"))
+        != inputs.source_end_pts_exclusive
+    ):
+        raise ValueError("frame map clip interval disagrees with authoritative interval")
+    frames = mapped.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("frame map clip interval contains no decoded frames")
+    points = [int(item["pts"]) for item in frames]
+    if points[0] != inputs.source_start_pts:
+        raise ValueError("frame map first frame disagrees with clip interval")
+    if any(
+        point < inputs.source_start_pts
+        or point >= inputs.source_end_pts_exclusive
+        for point in points
+    ) or any(right <= left for left, right in zip(points, points[1:])):
+        raise ValueError("frame map last/order disagrees with clip interval")
+
+
+def _source_offset_seconds(inputs: AdapterInputs) -> str:
+    if inputs.source_start_pts is None or inputs.source_time_base is None:
+        raise ValueError("source offset requires authoritative integer PTS")
+    offset = Fraction(inputs.source_start_pts) * inputs.source_time_base
+    with localcontext() as context:
+        context.prec = 30
+        decimal = Decimal(offset.numerator) / Decimal(offset.denominator)
+    rendered = format(decimal, "f").rstrip("0").rstrip(".")
+    return rendered or "0"

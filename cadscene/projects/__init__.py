@@ -25,6 +25,7 @@ from .adapters import (
 )
 from .queue import AttemptRecord, LocalResourceQueue, QueueJob, TaskQueue
 from .service import ProjectService
+from .executor import JobExecutionPlan, LocalJobExecutor
 
 __all__ = [
     "ClipDefinition",
@@ -53,4 +54,6 @@ __all__ = [
     "QueueJob",
     "TaskQueue",
     "ProjectService",
+    "JobExecutionPlan",
+    "LocalJobExecutor",
 ]

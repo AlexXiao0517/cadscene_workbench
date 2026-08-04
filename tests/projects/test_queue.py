@@ -129,7 +129,15 @@ def test_cancel_terminates_process_tree_and_preserves_attempt_directory(
             task_token="token-1",
         )
     )
-    queue = LocalResourceQueue(process_tree_terminator=terminated.append)
+    queue = LocalResourceQueue(
+        process_tree_terminator=terminated.append,
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+    )
     queue.submit(running)
 
     queue.cancel("a")
@@ -137,6 +145,102 @@ def test_cancel_terminates_process_tree_and_preserves_attempt_directory(
     assert terminated == [123]
     assert queue.status("a") == "cancelled"
     assert log.read_text(encoding="utf-8") == "partial output"
+
+
+def test_cancel_that_cannot_terminate_tree_becomes_interrupted() -> None:
+    def fail_termination(_pid: int) -> None:
+        raise RuntimeError("descendant remained alive")
+
+    running = job("a").with_attempt(
+        AttemptRecord(
+            number=1,
+            directory="jobs/a/attempt-1",
+            pid=123,
+            process_start_time="start-1",
+            command_fingerprint="command-1",
+            task_token="token-1",
+        )
+    )
+    queue = LocalResourceQueue(
+        process_tree_terminator=fail_termination,
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "token-1",
+        },
+    )
+    queue.submit(running)
+
+    cancelled = queue.cancel("a")
+
+    assert cancelled.status == "interrupted"
+    assert cancelled.error == "descendant remained alive"
+
+
+def test_cancel_refuses_pid_fallback_when_full_process_identity_does_not_match() -> None:
+    terminated: list[int] = []
+    running = job("a").with_attempt(
+        AttemptRecord(
+            number=1,
+            directory="jobs/a/attempt-1",
+            pid=123,
+            process_start_time="start-1",
+            command_fingerprint="command-1",
+            task_token="token-1",
+        )
+    )
+    queue = LocalResourceQueue(
+        process_tree_terminator=terminated.append,
+        process_probe=lambda _pid: {
+            "pid": 123,
+            "process_start_time": "start-1",
+            "command_fingerprint": "command-1",
+            "task_token": "another-task",
+        },
+    )
+    queue.submit(running)
+
+    cancelled = queue.cancel("a")
+
+    assert cancelled.status == "interrupted"
+    assert "identity" in (cancelled.error or "")
+    assert terminated == []
+
+
+def test_retry_releases_old_controller_and_uses_only_new_attempt_controller() -> None:
+    calls: list[str] = []
+    queue = LocalResourceQueue()
+    queue.submit(
+        job("a").with_attempt(
+            AttemptRecord(number=1, directory="jobs/a/attempt-1")
+        )
+    )
+    queue.record_process(
+        "a",
+        pid=101,
+        process_start_time="start-1",
+        command_fingerprint="command-1",
+        task_token="token-1",
+        log_path="attempt-1.log",
+    )
+    queue.register_process_controller("a", lambda: calls.append("old"))
+    queue.mark_failed("a", "failed")
+    queue.release_process_controller(101)
+    queue.retry("a", AttemptRecord(number=2, directory="jobs/a/attempt-2"))
+    queue.record_process(
+        "a",
+        pid=202,
+        process_start_time="start-2",
+        command_fingerprint="command-2",
+        task_token="token-2",
+        log_path="attempt-2.log",
+    )
+    queue.register_process_controller("a", lambda: calls.append("new"))
+
+    queue.cancel("a")
+
+    assert calls == ["new"]
 
 
 @pytest.mark.parametrize(

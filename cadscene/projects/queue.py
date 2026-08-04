@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import os
+from pathlib import Path
 import signal
-import subprocess
+import threading
+import time
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
 from .adapters import AdapterProgress
@@ -208,6 +210,7 @@ class LocalResourceQueue:
         self,
         *,
         capacities: Mapping[str, int] | None = None,
+        process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
         process_tree_terminator: Callable[[int], None] | None = None,
     ) -> None:
         configured = {name: 1 for name in RESOURCE_CLASSES}
@@ -220,6 +223,10 @@ class LocalResourceQueue:
         self._jobs: dict[str, QueueJob] = {}
         self._queue_order: list[str] = []
         self._terminate_tree = process_tree_terminator or terminate_process_tree
+        self._process_probe = process_probe or probe_process_identity
+        self._process_controllers: dict[int, Callable[[], None]] = {}
+        self._execution_claims: set[str] = set()
+        self._lock = threading.RLock()
 
     @classmethod
     def restore(
@@ -229,10 +236,13 @@ class LocalResourceQueue:
         queue_order: Sequence[str],
         capacities: Mapping[str, int] | None = None,
         process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
+        current_fingerprint_resolver: Callable[[QueueJob], str | None] | None = None,
         process_tree_terminator: Callable[[int], None] | None = None,
+        schedule: bool = True,
     ) -> LocalResourceQueue:
         queue = cls(
             capacities=capacities,
+            process_probe=process_probe,
             process_tree_terminator=process_tree_terminator,
         )
         records = [
@@ -245,6 +255,26 @@ class LocalResourceQueue:
         if len(queue_order) != len(set(queue_order)):
             raise ValueError("queue_order must not contain duplicates")
         queue._queue_order = list(queue_order)
+        if current_fingerprint_resolver is not None:
+            for job_id in queue._queue_order:
+                current = queue._jobs[job_id]
+                fingerprint = current_fingerprint_resolver(current)
+                if fingerprint != current.input_fingerprint:
+                    queue._jobs[job_id] = _invalidated_job(current)
+            changed = True
+            while changed:
+                changed = False
+                for job_id in queue._queue_order:
+                    current = queue._jobs[job_id]
+                    if current.status in {"stale_input", "superseded"}:
+                        continue
+                    if any(
+                        queue._jobs[dependency].status
+                        in {"stale_input", "superseded"}
+                        for dependency in current.depends_on_job_ids
+                    ):
+                        queue._jobs[job_id] = _invalidated_job(current)
+                        changed = True
         probe = process_probe or (lambda _pid: None)
         for job_id in queue._queue_order:
             current = queue._jobs[job_id]
@@ -267,8 +297,54 @@ class LocalResourceQueue:
                 or any(observed.get(key) != value for key, value in expected.items())
             ):
                 queue._jobs[job_id] = current.with_status("interrupted")
-        queue._schedule()
+        if schedule:
+            queue._schedule()
         return queue
+
+    def merge_restored(
+        self,
+        jobs: Iterable[QueueJob | Mapping[str, object]],
+        *,
+        queue_order: Sequence[str],
+        process_probe: Callable[[int], Mapping[str, object] | None] | None = None,
+        current_fingerprint_resolver: Callable[[QueueJob], str | None] | None = None,
+    ) -> LocalResourceQueue:
+        incoming_values = [
+            item if isinstance(item, QueueJob) else QueueJob.from_dict(item)
+            for item in jobs
+        ]
+        incoming_projects = {item.project_id for item in incoming_values}
+        restored = LocalResourceQueue.restore(
+            incoming_values,
+            queue_order=queue_order,
+            capacities=self.capacities,
+            process_probe=process_probe,
+            current_fingerprint_resolver=current_fingerprint_resolver,
+            process_tree_terminator=self._terminate_tree,
+            schedule=False,
+        )
+        retained_order = [
+            job_id
+            for job_id in self._queue_order
+            if self._jobs[job_id].project_id not in incoming_projects
+        ]
+        retained_jobs = {job_id: self._jobs[job_id] for job_id in retained_order}
+        retained_controllers = {
+            pid: controller
+            for pid, controller in self._process_controllers.items()
+            if any(
+                attempt.pid == pid
+                for job in retained_jobs.values()
+                for attempt in job.attempts
+            )
+        }
+        self._jobs = {**retained_jobs, **restored._jobs}
+        self._queue_order = [*retained_order, *restored._queue_order]
+        self._process_controllers = retained_controllers
+        if process_probe is not None:
+            self._process_probe = process_probe
+        self._schedule()
+        return self
 
     def submit(self, job: QueueJob) -> QueueJob:
         for existing in self._jobs.values():
@@ -309,6 +385,25 @@ class LocalResourceQueue:
             if self._jobs[job_id].status in ACTIVE_STATUSES
         ]
 
+    def claim_next_unstarted(self) -> QueueJob | None:
+        """Atomically claim one queue-reserved attempt for a local worker."""
+        with self._lock:
+            for job_id in self._queue_order:
+                current = self._jobs[job_id]
+                attempt = current.attempts[-1] if current.attempts else None
+                if (
+                    current.status in ACTIVE_STATUSES
+                    and (attempt is None or attempt.pid is None)
+                    and job_id not in self._execution_claims
+                ):
+                    self._execution_claims.add(job_id)
+                    return current
+        return None
+
+    def release_execution_claim(self, job_id: str) -> None:
+        with self._lock:
+            self._execution_claims.discard(job_id)
+
     def mark_validating(self, job_id: str) -> QueueJob:
         current = self._jobs[job_id]
         if current.status != "running":
@@ -328,6 +423,57 @@ class LocalResourceQueue:
             progress=progress.to_dict(),
         )
         return self._jobs[job_id]
+
+    def record_process(
+        self,
+        job_id: str,
+        *,
+        pid: int,
+        process_start_time: str,
+        command_fingerprint: str,
+        task_token: str,
+        log_path: str,
+        terminate: Callable[[], None] | None = None,
+    ) -> QueueJob:
+        with self._lock:
+            current = self._jobs[job_id]
+            if current.status not in ACTIVE_STATUSES or not current.attempts:
+                raise ValueError("process identity requires an active attempt")
+            previous = current.attempts[-1]
+            if previous.pid is not None:
+                raise ValueError("attempt process identity is immutable once recorded")
+            attempt = replace(
+                previous,
+                pid=pid,
+                process_start_time=process_start_time,
+                command_fingerprint=command_fingerprint,
+                task_token=task_token,
+                log_path=log_path,
+            )
+            self._jobs[job_id] = replace(
+                current,
+                attempts=(*current.attempts[:-1], attempt),
+                status="running",
+                stage="running",
+            )
+            if terminate is not None:
+                self._process_controllers[pid] = terminate
+            return self._jobs[job_id]
+
+    def register_process_controller(
+        self, job_id: str, terminate: Callable[[], None]
+    ) -> None:
+        with self._lock:
+            current = self._jobs[job_id]
+            attempt = current.attempts[-1] if current.attempts else None
+            if attempt is None or attempt.pid is None:
+                raise ValueError("process controller requires recorded process identity")
+            self._process_controllers[attempt.pid] = terminate
+
+    def release_process_controller(self, pid: int) -> None:
+        """Forget a completed attempt's in-memory cancellation callback."""
+        with self._lock:
+            self._process_controllers.pop(pid, None)
 
     def mark_success(
         self,
@@ -399,13 +545,63 @@ class LocalResourceQueue:
         self._schedule()
         return self._jobs[job_id]
 
+    def mark_superseded(self, job_id: str) -> QueueJob:
+        current = self._jobs[job_id]
+        if current.status in TERMINAL_STATUSES:
+            return current
+        self._jobs[job_id] = replace(
+            current.with_status("superseded"),
+            output_revision=None,
+            output_fingerprint=None,
+            output_validated=False,
+            validated_input_fingerprint=None,
+            published_outputs={},
+            error=None,
+        )
+        self._schedule()
+        return self._jobs[job_id]
+
     def cancel(self, job_id: str) -> QueueJob:
         current = self._jobs[job_id]
         if current.status in TERMINAL_STATUSES:
             return current
         attempt = current.attempts[-1] if current.attempts else None
         if attempt is not None and attempt.pid is not None:
-            self._terminate_tree(attempt.pid)
+            try:
+                controller = self._process_controllers.pop(attempt.pid, None)
+                if controller is not None:
+                    controller()
+                else:
+                    observed = self._process_probe(attempt.pid)
+                    expected = {
+                        "pid": attempt.pid,
+                        "process_start_time": attempt.process_start_time,
+                        "command_fingerprint": attempt.command_fingerprint,
+                        "task_token": attempt.task_token,
+                    }
+                    if (
+                        any(value in (None, "") for value in expected.values())
+                        or observed is None
+                        or any(
+                            observed.get(key) != value
+                            for key, value in expected.items()
+                        )
+                    ):
+                        raise RuntimeError(
+                            "refusing PID fallback because process identity could not be verified"
+                        )
+                    self._terminate_tree(attempt.pid)
+            except Exception as exc:
+                self._jobs[job_id] = replace(
+                    current.with_status("interrupted"),
+                    error=str(exc),
+                    output_revision=None,
+                    output_fingerprint=None,
+                    output_validated=False,
+                    published_outputs={},
+                )
+                self._schedule()
+                return self._jobs[job_id]
         self._jobs[job_id] = replace(
             current.with_status("cancelled"),
             output_revision=None,
@@ -480,23 +676,163 @@ class LocalResourceQueue:
         return True
 
 
-def terminate_process_tree(pid: int) -> None:
+def terminate_process_tree(pid: int, *, timeout: float = 5.0) -> None:
     if pid <= 0:
         raise ValueError("pid must be positive")
+    descendants = _descendant_pids(pid)
+    targets = {pid, *descendants}
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        for target in (*descendants, pid):
+            _terminate_windows_process(target)
+    else:
+        try:
+            process_group = os.getpgid(pid)
+        except ProcessLookupError:
+            return
+        os.killpg(process_group, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and any(_pid_alive(item) for item in targets):
+        time.sleep(0.02)
+    remaining = {item for item in targets if _pid_alive(item)}
+    if remaining and os.name != "nt":
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        for item in remaining:
+            try:
+                os.kill(item, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and any(
+            _pid_alive(item) for item in remaining
+        ):
+            time.sleep(0.02)
+        remaining = {item for item in remaining if _pid_alive(item)}
+    if remaining:
+        raise RuntimeError(
+            f"process tree did not terminate; remaining PIDs: {sorted(remaining)}"
         )
+
+
+def probe_process_identity(pid: int) -> Mapping[str, object] | None:
+    """Read the durable identity embedded in an executor wrapper command line."""
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        command = process.cmdline()
+        values: dict[str, object] = {
+            "pid": pid,
+            "process_start_time": f"{process.create_time():.6f}",
+        }
+        for flag, key in (
+            ("--command-fingerprint", "command_fingerprint"),
+            ("--task-token", "task_token"),
+        ):
+            try:
+                values[key] = command[command.index(flag) + 1]
+            except (ValueError, IndexError):
+                values[key] = None
+        return values
+    except (ImportError, OSError):
+        return None
+
+
+def _terminate_windows_process(pid: int) -> None:
+    try:
+        import psutil
+
+        psutil.Process(pid).terminate()
+        return
+    except ImportError:
+        pass
+    except OSError:
+        return
+    import ctypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(0x0001, False, pid)
+    if not handle:
+        if _pid_alive(pid):
+            raise RuntimeError(f"access denied terminating PID {pid}")
         return
     try:
-        process_group = os.getpgid(pid)
+        if not ctypes.windll.kernel32.TerminateProcess(handle, 1):
+            raise RuntimeError(f"failed terminating PID {pid}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _descendant_pids(pid: int) -> set[int]:
+    try:
+        import psutil
+
+        return {child.pid for child in psutil.Process(pid).children(recursive=True)}
+    except (ImportError, OSError):
+        if os.name == "nt":
+            return set()
+        parents: dict[int, int] = {}
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = stat.read_text(encoding="ascii").split()
+                parents[int(fields[0])] = int(fields[3])
+            except (OSError, ValueError, IndexError):
+                continue
+        descendants: set[int] = set()
+        pending = [pid]
+        while pending:
+            parent = pending.pop()
+            children = [child for child, owner in parents.items() if owner == parent]
+            descendants.update(children)
+            pending.extend(children)
+        return descendants
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except ImportError:
+        pass
+    except OSError:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x100000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(
+                ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ) and code.value == 259
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
     except ProcessLookupError:
-        return
-    os.killpg(process_group, signal.SIGTERM)
+        return False
+    return True
 
 
 def _optional_string(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _invalidated_job(job: QueueJob) -> QueueJob:
+    status = "stale_input" if job.status == "success" else "superseded"
+    return replace(
+        job,
+        status=status,
+        stage=status,
+        output_revision=None,
+        output_fingerprint=None,
+        output_validated=False,
+        validated_input_fingerprint=None,
+        published_outputs={},
+        error=None,
+    )

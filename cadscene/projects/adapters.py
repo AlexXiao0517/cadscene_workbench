@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
@@ -37,6 +38,10 @@ class AdapterInputs:
     srt_path: Path | None
     attempt_directory: Path
     parameters: Mapping[str, object] = field(default_factory=dict)
+    source_start_pts: int | None = None
+    source_end_pts_exclusive: int | None = None
+    source_time_base: Fraction | None = None
+    frame_map_path: Path | None = None
 
 
 @dataclass(frozen=True)
