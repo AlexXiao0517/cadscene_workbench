@@ -22,6 +22,7 @@ from .queue import QueueJob
 from .repositories import RevisionConflict
 from .service import ProjectService
 from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
+from cadscene.workflow.data_import import slugify_dataset_name
 
 
 SCHEMA_VERSION = "1.0"
@@ -1361,7 +1362,7 @@ class ProjectWorkbenchService:
 
     @staticmethod
     def _workbench_dataset_id(project_id: str, clip_id: str) -> str:
-        return f"{validate_project_id(project_id)}--{clip_id}"
+        return slugify_dataset_name(f"{validate_project_id(project_id)}-{clip_id}")
 
     @staticmethod
     def _cad_design_for_context(clip: ClipDefinition) -> Path | None:

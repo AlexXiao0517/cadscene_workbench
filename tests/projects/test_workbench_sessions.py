@@ -28,6 +28,7 @@ from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _validate_clip_export_outputs
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
+from cadscene.workflow.data_import import slugify_dataset_name
 
 
 UTC = timezone.utc
@@ -825,18 +826,19 @@ def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
     assert "workflowStage=sfm" in opened.body["workbench_url"]
     assert opened.body["trajectory_job_id"] == ""
     query = parse_qs(urlsplit(opened.body["workbench_url"]).query)
-    assert query["dataset"] == ["project-1--clip-1"]
+    assert query["dataset"] == ["project-1-clip-1"]
+    assert slugify_dataset_name(query["dataset"][0]) == query["dataset"][0]
     assert query["projectId"] == ["project-1"]
-    assert query["video"] == ["/data/project-1--clip-1/video/project-1--clip-1.mp4"]
-    assert query["cad"] == ["/data/project-1--clip-1/cad/design.json"]
+    assert query["video"] == ["/data/project-1-clip-1/video/project-1-clip-1.mp4"]
+    assert query["cad"] == ["/data/project-1-clip-1/cad/design.json"]
     assert (
-        tmp_path / "data/project-1--clip-1/video/project-1--clip-1.mp4"
+        tmp_path / "data/project-1-clip-1/video/project-1-clip-1.mp4"
     ).read_bytes() == b"physical-clip"
     assert json.loads(
-        (tmp_path / "data/project-1--clip-1/cad/design.json").read_text(encoding="utf-8")
+        (tmp_path / "data/project-1-clip-1/cad/design.json").read_text(encoding="utf-8")
     )["entities"] == [{"type": "line"}]
     bridge = json.loads(
-        (tmp_path / "data/project-1--clip-1/dataset_manifest.json").read_text(encoding="utf-8")
+        (tmp_path / "data/project-1-clip-1/dataset_manifest.json").read_text(encoding="utf-8")
     )
     assert bridge["workflow"]["trajectory_mode"] == "sfm_only"
 
@@ -960,7 +962,7 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     assert opened.status == 201
     assert opened.body["launch_mode"] == "workflow_start"
     assert (
-        tmp_path / "data/project-1--clip-1/video/project-1--clip-1.mp4"
+        tmp_path / "data/project-1-clip-1/video/project-1-clip-1.mp4"
     ).read_bytes() == b"exported-58-second-clip"
 
 
@@ -1024,7 +1026,7 @@ def test_user_started_trajectory_is_attached_to_open_workbench_session(
     assert attached.body["save_permissions"] == ["save"]
     published = (
         runs_root
-        / "project-1--clip-1/clip-1/02_sfm/camera_trajectory.json"
+        / "project-1-clip-1/clip-1/02_sfm/camera_trajectory.json"
     )
     assert json.loads(published.read_text(encoding="utf-8"))["poses"]
     inspected = api.handle(
@@ -1035,7 +1037,7 @@ def test_user_started_trajectory_is_attached_to_open_workbench_session(
     assert inspected.body["trajectory_job_id"] == job.job_id
     manual = (
         runs_root
-        / "project-1--clip-1/clip-1/01_keyframes/camera_track_manual.json"
+        / "project-1-clip-1/clip-1/01_keyframes/camera_track_manual.json"
     )
     manual.parent.mkdir(parents=True, exist_ok=True)
     manual.write_text(json.dumps(_manual_track()), encoding="utf-8")

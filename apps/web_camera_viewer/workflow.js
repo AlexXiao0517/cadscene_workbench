@@ -920,6 +920,10 @@
 
   function maybeAutoApplySfmCameraInit() {
     if (!trajectoryWorkflowLoaded || isPureRotationWorkflow()) return;
+    if (projectWorkbenchTrajectoryIsPending()) {
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      return;
+    }
     if (typeof window.cadsceneApplyCameraParameters !== "function") return;
     applySfmCameraInitializationOnce().catch((error) => {
       message.textContent = `SfM 相机参数初值不可用：${error.message}`;
@@ -942,6 +946,12 @@
   }
 
   async function pollJobStatus() {
+    if (projectWorkbenchTrajectoryIsPending()) {
+      stateLabel.textContent = "待启动";
+      if (!selectedWorkflowStage) setWorkflowStage("sfm");
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      return;
+    }
     const path = runPath("job_status.json");
     if (!path) {
       stateLabel.textContent = "未指定 dataset/runId";
@@ -1202,7 +1212,22 @@
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
     projectWorkbenchSession = payload;
+    if (projectWorkbenchTrajectoryIsPending()) {
+      document.querySelector('#workflowSteps li[data-stage="upload"]')?.classList.add("is-success");
+      setWorkflowStage("sfm");
+      stateLabel.textContent = "待启动";
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+    } else {
+      maybeAutoApplySfmCameraInit();
+    }
     return payload;
+  }
+
+  function projectWorkbenchTrajectoryIsPending() {
+    return Boolean(
+      projectWorkbenchToken
+      && (!projectWorkbenchSession || projectWorkbenchSession.launch_mode === "workflow_start")
+    );
   }
 
   async function ensureProjectWorkbenchSession() {
@@ -1553,6 +1578,7 @@
   }
 
   async function pollJobLog() {
+    if (projectWorkbenchTrajectoryIsPending()) return;
     const stage = runningStage || latestJobStatus?.current_stage || selectedWorkflowStage;
     if (!dataset || !runId || !["sfm", "alignment", "quality", "render"].includes(stage)) return;
     try {
