@@ -187,9 +187,10 @@ class ProjectApi:
         )
         self.repositories.create_project(project_id, updated_at=self.now())
         display_name = str(payload.get("display_name") or "").strip()
+        project_revision = 0
         if display_name:
             project = self.repositories.project.load(project_id)
-            self.repositories.project.update(
+            updated = self.repositories.project.update(
                 project_id,
                 expected_revision=project.revision,
                 mutate=lambda current: replace(
@@ -201,10 +202,12 @@ class ProjectApi:
                     },
                 ),
             )
+            project_revision = updated.revision
         return ApiResponse(
             201,
             {
                 "project_id": project_id,
+                "project_revision": project_revision,
                 "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
             },
         )

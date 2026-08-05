@@ -128,7 +128,8 @@
     state.manifest = null;
     try {
       setMessage("正在创建项目…");
-      await postJson("/api/projects", { project_id: state.dataset, display_name: video.name.replace(/\.[^.]+$/, "") });
+      const projectResult = await postJson("/api/projects", { project_id: state.dataset, display_name: video.name.replace(/\.[^.]+$/, "") });
+      state.projectRevision = projectResult.project_revision;
       const videoResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/video?expectedRevision=${state.projectRevision}`, video, "video");
       state.projectRevision = videoResult.project_revision;
       setFileStatus("video", "视频已上传", 1);

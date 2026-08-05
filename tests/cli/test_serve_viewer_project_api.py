@@ -500,6 +500,22 @@ def test_api_rejects_dot_project_ids_without_touching_parent(
     assert response.body == {"error": "invalid project_id"}
 
 
+def test_create_project_returns_the_revision_after_persisting_display_name(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+
+    response = api.handle(
+        "POST",
+        "/api/projects",
+        json_body={"project_id": "new-project", "display_name": "金华项目"},
+    )
+
+    assert response.status == 201
+    assert response.body["project_revision"] == 1
+    assert repositories.project.load("new-project").source_assets["display_name"] == "金华项目"
+
+
 def test_serve_viewer_only_dispatches_project_transport_to_project_api(
     tmp_path: Path,
 ) -> None:
