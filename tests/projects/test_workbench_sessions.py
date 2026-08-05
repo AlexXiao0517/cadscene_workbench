@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -661,8 +662,13 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
     repositories.create_project("project-1", updated_at="2026-08-04T08:00:00Z")
     source = tmp_path / "source.mp4"
     physical_clip = tmp_path / "clip-1.mp4"
+    cad_dataset = tmp_path / "cad-dataset"
     source.write_bytes(b"source-video")
     physical_clip.write_bytes(b"physical-clip")
+    cad_dataset.mkdir()
+    (cad_dataset / "design.json").write_text(
+        json.dumps({"entities": [{"type": "line"}]}), encoding="utf-8"
+    )
     project = repositories.project.load("project-1")
     repositories.project.update(
         "project-1",
@@ -688,7 +694,12 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
             "input_snapshot": {
                 "request_key": "analysis-request-1",
                 "video": {"path": str(source), "sha256": "v" * 64},
-                "cad": None,
+                "cad": {
+                    "path": str(tmp_path / "source.dxf"),
+                    "sha256": "c" * 64,
+                    "dataset_id": "cad-test",
+                    "dataset_path": str(cad_dataset),
+                },
                 "srt": None,
                 "analysis_artifact": {
                     "path": str(tmp_path / "analysis.json"),
@@ -783,7 +794,77 @@ def test_snapshot_exposes_server_derived_workbench_capability_and_state(
     assert clip["workbench"]["workbench_output_revision"] is None
 
 
-def test_snapshot_rejects_historical_success_from_an_old_clip_input(
+def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    clip = snapshot.body["clips"][0]
+    assert clip["capabilities"]["can_open_workbench"] is True
+    assert clip["workbench"]["state"] == "ready"
+
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert opened.status == 201
+    assert opened.body["launch_mode"] == "workflow_start"
+    assert "workflowStage=sfm" in opened.body["workbench_url"]
+    assert opened.body["trajectory_job_id"] == ""
+    query = parse_qs(urlsplit(opened.body["workbench_url"]).query)
+    assert query["dataset"] == ["project-1--clip-1"]
+    assert query["projectId"] == ["project-1"]
+    assert query["video"] == ["/data/project-1--clip-1/video/project-1--clip-1.mp4"]
+    assert query["cad"] == ["/data/project-1--clip-1/cad/design.json"]
+    assert (
+        tmp_path / "data/project-1--clip-1/video/project-1--clip-1.mp4"
+    ).read_bytes() == b"physical-clip"
+    assert json.loads(
+        (tmp_path / "data/project-1--clip-1/cad/design.json").read_text(encoding="utf-8")
+    )["entities"] == [{"type": "line"}]
+    bridge = json.loads(
+        (tmp_path / "data/project-1--clip-1/dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    assert bridge["workflow"]["trajectory_mode"] == "sfm_only"
+
+
+def test_workflow_start_session_is_not_allowed_to_save_before_trajectory(
+    session_system,
+) -> None:
+    coordinator, _store, _clock, current, _validated = session_system
+    current[0] = _context(
+        trajectory_job_id="",
+        trajectory_output_revision="",
+        trajectory_output_fingerprint="",
+        save_permissions=(),
+        can_open_workbench=True,
+    )
+
+    session = _create(coordinator)
+
+    assert session.trajectory_job_id == ""
+    assert session.save_permissions == ()
+    with pytest.raises(WorkbenchPermissionDenied, match="save permission"):
+        coordinator.save(
+            "project-1",
+            session.token,
+            {"ok": True},
+        )
+
+
+def test_snapshot_never_binds_historical_success_from_an_old_clip_input(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, job = _project_api_with_workbench(tmp_path)
@@ -796,7 +877,7 @@ def test_snapshot_rejects_historical_success_from_an_old_clip_input(
     )
 
     snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
-    assert snapshot.body["clips"][0]["capabilities"]["can_open_workbench"] is False
+    assert snapshot.body["clips"][0]["capabilities"]["can_open_workbench"] is True
     opened = api.handle(
         "POST",
         "/api/projects/project-1/clips/clip-1/workbench-sessions",
@@ -805,7 +886,9 @@ def test_snapshot_rejects_historical_success_from_an_old_clip_input(
             "return_to": "/apps/project_workspace/?projectId=project-1",
         },
     )
-    assert opened.status == 403
+    assert opened.status == 201
+    assert opened.body["launch_mode"] == "workflow_start"
+    assert opened.body["trajectory_job_id"] == ""
 
 
 def test_expired_editing_changes_snapshot_etag_and_never_returns_stale_304(

@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import shutil
 import tempfile
 from threading import Lock, RLock
 from typing import Callable, Mapping, Protocol
@@ -85,6 +86,7 @@ class WorkbenchSession:
     trajectory_run_id: str
     trajectory_output_revision: str
     trajectory_output_fingerprint: str
+    launch_mode: str
     save_permissions: tuple[str, ...]
     created_at: str
     expires_at: str
@@ -114,6 +116,7 @@ class WorkbenchSession:
             "trajectory_run_id": self.trajectory_run_id,
             "trajectory_output_revision": self.trajectory_output_revision,
             "trajectory_output_fingerprint": self.trajectory_output_fingerprint,
+            "launch_mode": self.launch_mode,
             "save_permissions": list(self.save_permissions),
             "created_at": self.created_at,
             "expires_at": self.expires_at,
@@ -146,6 +149,14 @@ class WorkbenchSession:
             trajectory_output_revision=str(value["trajectory_output_revision"]),
             trajectory_output_fingerprint=str(
                 value["trajectory_output_fingerprint"]
+            ),
+            launch_mode=str(
+                value.get("launch_mode")
+                or (
+                    "trajectory_ready"
+                    if value.get("trajectory_job_id")
+                    else "workflow_start"
+                )
             ),
             save_permissions=tuple(str(item) for item in value["save_permissions"]),
             created_at=str(value["created_at"]),
@@ -358,12 +369,13 @@ class WorkbenchSessionCoordinator:
         _validate_context_identity(context, project_id, clip_id)
         if not context.can_open_workbench:
             raise WorkbenchPermissionDenied("server capability forbids workbench")
-        if not (
+        trajectory_ready = bool(
             context.trajectory_output_revision
             and context.trajectory_output_fingerprint
             and context.trajectory_job_id
             and context.trajectory_run_id
-        ):
+        )
+        if not trajectory_ready and context.save_permissions:
             raise StaleWorkbenchSession("current trajectory output is unavailable")
         validated_return = validate_return_to(return_to, project_id, clip_id)
         token = self.token_factory()
@@ -386,6 +398,7 @@ class WorkbenchSessionCoordinator:
             trajectory_run_id=context.trajectory_run_id,
             trajectory_output_revision=context.trajectory_output_revision,
             trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+            launch_mode=("trajectory_ready" if trajectory_ready else "workflow_start"),
             save_permissions=tuple(context.save_permissions),
             created_at=_timestamp(created),
             expires_at=_timestamp(created + self.ttl),
@@ -849,7 +862,13 @@ class ProjectWorkbenchService:
                 continue
             current_job = candidate
             break
-        can_open = current_job is not None and clip.resolved_workflow is not None
+        physical_clip = self._physical_clip_for_context(project_id, clip, jobs.jobs)
+        cad_design = self._cad_design_for_context(clip)
+        can_open = (
+            clip.resolved_workflow is not None
+            and physical_clip is not None
+            and cad_design is not None
+        )
         return WorkbenchContext(
             project_id=project_id,
             clip_id=clip_id,
@@ -865,7 +884,7 @@ class ProjectWorkbenchService:
             trajectory_output_fingerprint=(
                 "" if current_job is None else str(current_job.output_fingerprint)
             ),
-            save_permissions=(("save",) if can_open else ()),
+            save_permissions=(("save",) if current_job is not None else ()),
             can_open_workbench=can_open,
         )
 
@@ -930,6 +949,7 @@ class ProjectWorkbenchService:
                     raise WorkbenchPermissionDenied(
                         "clip already has an active workbench session"
                     )
+            self._publish_workbench_inputs(project_id, clip)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -1192,11 +1212,16 @@ class ProjectWorkbenchService:
     def workbench_url(self, session: WorkbenchSession) -> str:
         from urllib.parse import urlencode
 
+        dataset = self._workbench_dataset_id(session.project_id, session.clip_id)
         return "/apps/web_camera_viewer/?" + urlencode(
             {
-                "dataset": session.project_id,
+                "dataset": dataset,
+                "projectId": session.project_id,
                 "runId": session.trajectory_run_id,
                 "projectWorkbenchToken": session.token,
+                "workflowStage": "sfm",
+                "video": f"/data/{dataset}/video/{dataset}.mp4",
+                "cad": f"/data/{dataset}/cad/design.json",
             }
         )
 
@@ -1209,6 +1234,7 @@ class ProjectWorkbenchService:
             "workflow": session.workflow,
             "trajectory_job_id": session.trajectory_job_id,
             "trajectory_run_id": session.trajectory_run_id,
+            "launch_mode": session.launch_mode,
             "state": session.state,
             "expires_at": session.expires_at,
             "return_to": session.return_to,
@@ -1216,6 +1242,123 @@ class ProjectWorkbenchService:
             "session_revision": session.revision,
             "workbench_output_revision": session.workbench_output_revision,
         }
+
+    def _physical_clip_for_context(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        job_payloads: tuple[Mapping[str, object], ...],
+    ) -> Path | None:
+        for key in ("physical_mp4_path", "export_path", "clip_path"):
+            value = clip.analysis.get(key)
+            if value and Path(str(value)).is_file():
+                return Path(str(value))
+        for payload in reversed(job_payloads):
+            if (
+                payload.get("job_type") != "clip_export"
+                or payload.get("clip_id") != clip.clip_id
+            ):
+                continue
+            candidate = QueueJob.from_dict(payload)
+            video = candidate.published_outputs.get(f"video:{clip.clip_id}")
+            if (
+                candidate.status == "success"
+                and candidate.output_validated
+                and candidate.validated_input_fingerprint == candidate.input_fingerprint
+                and video
+                and Path(video).is_file()
+            ):
+                return Path(video)
+        return None
+
+    @staticmethod
+    def _workbench_dataset_id(project_id: str, clip_id: str) -> str:
+        return f"{validate_project_id(project_id)}--{clip_id}"
+
+    @staticmethod
+    def _cad_design_for_context(clip: ClipDefinition) -> Path | None:
+        snapshot = clip.analysis.get("input_snapshot")
+        if not isinstance(snapshot, Mapping):
+            return None
+        cad = snapshot.get("cad")
+        if not isinstance(cad, Mapping):
+            return None
+        dataset_path = cad.get("dataset_path")
+        if not dataset_path:
+            return None
+        design = Path(str(dataset_path)) / "design.json"
+        return design if design.is_file() else None
+
+    def _publish_workbench_inputs(
+        self, project_id: str, clip: ClipDefinition
+    ) -> None:
+        jobs = self.repositories.jobs.load(project_id)
+        video = self._physical_clip_for_context(project_id, clip, jobs.jobs)
+        cad = self._cad_design_for_context(clip)
+        if video is None:
+            raise WorkbenchPermissionDenied("片段视频尚未准备完成")
+        if cad is None:
+            raise WorkbenchPermissionDenied("项目 CAD 尚未准备完成")
+        storage_root = self.viewer_runs_root.parent.resolve(strict=True)
+        data_root = (storage_root / "data").resolve(strict=False)
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        target = (data_root / dataset).resolve(strict=False)
+        if data_root not in (target, *target.parents):
+            raise WorkbenchPermissionDenied("工作台资源目录无效")
+        video_target = target / "video" / f"{dataset}.mp4"
+        cad_target = target / "cad" / "design.json"
+        for source, destination in ((video, video_target), (cad, cad_target)):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(source, temporary)
+                with temporary.open("rb+") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, destination)
+                _fsync_directory(destination.parent)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        manifest = {
+            "dataset": dataset,
+            "status": "ready",
+            "video": {
+                "path": f"data/{dataset}/video/{dataset}.mp4",
+                "url": f"/data/{dataset}/video/{dataset}.mp4",
+            },
+            "cad": {
+                "status": "ready",
+                "design_json": f"data/{dataset}/cad/design.json",
+                "url": f"/data/{dataset}/cad/design.json",
+            },
+            "workflow": {
+                "trajectory_mode": str(clip.resolved_workflow),
+                "implementation_status": "ready",
+            },
+            "defaults": {"cad_scale": 0.06, "origin_xy": [0.0, 0.0]},
+            "project_binding": {
+                "project_id": project_id,
+                "clip_id": clip.clip_id,
+                "analysis_revision": clip.analysis_revision,
+            },
+        }
+        target.mkdir(parents=True, exist_ok=True)
+        manifest_path = target / "dataset_manifest.json"
+        temporary_manifest = target / f".dataset_manifest.{uuid4().hex}.tmp"
+        payload = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode(
+            "utf-8"
+        )
+        try:
+            with temporary_manifest.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_manifest, manifest_path)
+            _fsync_directory(target)
+        finally:
+            if temporary_manifest.exists():
+                temporary_manifest.unlink()
 
     def _publish_clip_state(
         self,
