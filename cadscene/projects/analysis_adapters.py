@@ -139,7 +139,7 @@ def validate_cad_outputs(job: QueueJob) -> AdapterResult:
 
 
 def validate_video_outputs(job: QueueJob, revision: str) -> AdapterResult:
-    output = Path(job.attempts[-1].directory) / "02_video_analysis" / revision
+    output = _video_analysis_output_dir(job, revision)
     try:
         payload = _read_json(output / "clip_manifest.json", "video analysis")
     except (OSError, ValueError) as exc:
@@ -154,6 +154,16 @@ def validate_video_outputs(job: QueueJob, revision: str) -> AdapterResult:
         output_fingerprint=digest,
         outputs={"analysis_output": str(output), "analysis_revision": revision},
     )
+
+
+def _video_analysis_output_dir(job: QueueJob, revision: str) -> Path:
+    """Resolve both legacy flat and current revision-indexed analyzer layouts."""
+    root = Path(job.attempts[-1].directory) / "02_video_analysis"
+    flat = root / revision
+    indexed = root / "analysis_revisions" / revision
+    if (flat / "clip_manifest.json").is_file():
+        return flat
+    return indexed
 
 
 def asset_path(assets: Mapping[str, object], name: str) -> Path | None:

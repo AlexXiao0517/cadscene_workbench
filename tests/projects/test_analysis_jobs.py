@@ -9,7 +9,7 @@ from typing import Mapping
 import pytest
 
 from cadscene.projects.adapters import AdapterResult
-from cadscene.projects.analysis_adapters import tree_fingerprint
+from cadscene.projects.analysis_adapters import tree_fingerprint, validate_video_outputs
 from cadscene.projects.analysis_publication import AnalysisArtifactPublisher
 from cadscene.projects.analysis_worker import main as analysis_worker_main
 from cadscene.projects.executor import LocalJobExecutor
@@ -887,6 +887,25 @@ def _video_output(job, tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     return output, revision
+
+
+def test_video_analysis_validation_accepts_revision_indexed_output(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    indexed_root = output.parent / "analysis_revisions"
+    indexed_root.mkdir()
+    output.rename(indexed_root / output.name)
+
+    result = validate_video_outputs(video_job, revision)
+
+    assert result.status == "success"
+    assert result.outputs["analysis_output"] == str(indexed_root / revision)
 
 
 def _add_srt_asset(repositories, tmp_path: Path) -> None:
