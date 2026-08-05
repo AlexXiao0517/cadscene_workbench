@@ -54,6 +54,7 @@
   let projectWorkbenchBootstrapPromise = null;
   let projectWorkbenchSaveInFlight = false;
   let projectWorkbenchTrajectoryJobId = null;
+  let projectWorkbenchTrajectoryStatus = null;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
@@ -950,6 +951,7 @@
   }
 
   async function pollJobStatus() {
+    if (projectWorkbenchTrajectoryOwnsStatus()) return;
     if (projectWorkbenchTrajectoryIsPending()) {
       stateLabel.textContent = "待启动";
       if (!selectedWorkflowStage) setWorkflowStage("sfm");
@@ -1234,6 +1236,10 @@
     );
   }
 
+  function projectWorkbenchTrajectoryOwnsStatus() {
+    return Boolean(projectWorkbenchToken && projectWorkbenchTrajectoryStatus);
+  }
+
   async function ensureProjectWorkbenchSession() {
     if (!projectWorkbenchToken) return null;
     if (projectWorkbenchSession) return projectWorkbenchSession;
@@ -1287,13 +1293,17 @@
       projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
       const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
       if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
+      projectWorkbenchTrajectoryStatus = String(clip.status || clip.stage || "queued");
       const fraction = clip.progress?.fraction;
       if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
       stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
       message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
       if (terminal.has(clip.status)) {
+        projectWorkbenchTrajectoryJobId = null;
+        document.querySelector("#workflowCancel").hidden = true;
+        refreshSupplementalWorkflowActionAvailability(false);
         if (clip.status !== "success") {
-          throw new Error(clip.progress?.message || projectTrajectoryStatusCopy(clip.status, clip.stage));
+          throw new Error(projectTrajectoryStatusCopy(clip.status, clip.stage));
         }
         const attached = await projectWorkbenchRequest(
           `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/trajectory-ready`,
@@ -1332,6 +1342,7 @@
     if (!jobId) throw new Error("轨迹任务未能进入队列");
     projectWorkbenchSession.jobs_revision = queued.jobs_revision;
     projectWorkbenchTrajectoryJobId = jobId;
+    projectWorkbenchTrajectoryStatus = "queued";
     runningStage = isPureRotationWorkflow() ? "pure_rotation" : "sfm";
     progress.value = 0;
     stateLabel.textContent = "排队中";
@@ -1552,14 +1563,27 @@
   }
 
   async function cancelRunningJob() {
-    if (projectWorkbenchToken && projectWorkbenchTrajectoryJobId) {
-      const cancelled = await projectWorkbenchRequest(
-        `/jobs/${encodeURIComponent(projectWorkbenchTrajectoryJobId)}/cancel`,
-        { expected_revision: projectWorkbenchSession.jobs_revision },
-      );
-      projectWorkbenchSession.jobs_revision = cancelled.jobs_revision;
-      message.textContent = "已请求取消轨迹任务";
-      return cancelled;
+    if (projectWorkbenchToken) {
+      if (!projectWorkbenchTrajectoryJobId) return null;
+      const jobId = projectWorkbenchTrajectoryJobId;
+      const previousStatus = projectWorkbenchTrajectoryStatus;
+      projectWorkbenchTrajectoryJobId = null;
+      projectWorkbenchTrajectoryStatus = "cancelled";
+      document.querySelector("#workflowCancel").hidden = true;
+      try {
+        const cancelled = await projectWorkbenchRequest(
+          `/jobs/${encodeURIComponent(jobId)}/cancel`,
+          { expected_revision: projectWorkbenchSession.jobs_revision },
+        );
+        projectWorkbenchSession.jobs_revision = cancelled.jobs_revision;
+        message.textContent = "已请求取消轨迹任务";
+        return cancelled;
+      } catch (error) {
+        projectWorkbenchTrajectoryJobId = jobId;
+        projectWorkbenchTrajectoryStatus = previousStatus;
+        document.querySelector("#workflowCancel").hidden = false;
+        throw error;
+      }
     }
     await apiPost("/api/workflow/cancel", { dataset, runId });
     runningStage = null;
@@ -1582,6 +1606,7 @@
   }
 
   async function pollJobLog() {
+    if (projectWorkbenchTrajectoryOwnsStatus()) return;
     if (projectWorkbenchTrajectoryIsPending()) return;
     const stage = runningStage || latestJobStatus?.current_stage || selectedWorkflowStage;
     if (!dataset || !runId || !["sfm", "alignment", "quality", "render"].includes(stage)) return;

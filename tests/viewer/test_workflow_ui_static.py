@@ -189,6 +189,37 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "button.disabled = blocked" in availability
 
 
+def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() -> None:
+    script = _read("workflow.js")
+
+    status_poll = script[
+        script.index("async function pollJobStatus") : script.index("function stageOptions")
+    ]
+    log_poll = script[
+        script.index("async function pollJobLog") : script.index("function runWithMessage")
+    ]
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+    cancel = script[
+        script.index("async function cancelRunningJob") :
+        script.index("function updateRenderProgressFromLog")
+    ]
+
+    assert "function projectWorkbenchTrajectoryOwnsStatus" in script
+    assert "if (projectWorkbenchTrajectoryOwnsStatus()) return;" in status_poll
+    assert status_poll.index("projectWorkbenchTrajectoryOwnsStatus()") < status_poll.index(
+        "projectWorkbenchTrajectoryIsPending()"
+    )
+    assert "if (projectWorkbenchTrajectoryOwnsStatus()) return;" in log_poll
+    assert "projectWorkbenchTrajectoryJobId = null" in wait
+    assert 'querySelector("#workflowCancel").hidden = true' in wait
+    assert "clip.progress?.message ||" not in wait
+    assert "if (projectWorkbenchToken)" in cancel
+    assert "if (!projectWorkbenchTrajectoryJobId) return null" in cancel
+
+
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:
     script = _read("workflow.js")
     start = script.index("async function persistEditedCameraTrack")
