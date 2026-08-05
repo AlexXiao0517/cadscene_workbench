@@ -220,6 +220,22 @@ def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() 
     assert "if (!projectWorkbenchTrajectoryJobId) return null" in cancel
 
 
+def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
+    script = _read("workflow.js")
+    start = script[
+        script.index("async function runProjectWorkbenchTrajectory") :
+        script.index("async function finalizeProjectWorkbenchSave")
+    ]
+
+    assert "projectWorkbenchTrajectoryStartPromise" in script
+    assert "if (projectWorkbenchTrajectoryStartPromise)" in start
+    assert "return projectWorkbenchTrajectoryStartPromise" in start
+    assert "async function runProjectWorkbenchTrajectoryOnce" in start
+    assert 'new Set(["failed", "interrupted", "cancelled", "stale_input", "superseded"])' in start
+    assert "`/jobs/${encodeURIComponent(currentClip.job_id)}/retry`" in start
+    assert "expected_revision: snapshot.component_revisions.jobs" in start
+
+
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:
     script = _read("workflow.js")
     start = script.index("async function persistEditedCameraTrack")

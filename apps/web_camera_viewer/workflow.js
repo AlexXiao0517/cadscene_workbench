@@ -55,6 +55,7 @@
   let projectWorkbenchSaveInFlight = false;
   let projectWorkbenchTrajectoryJobId = null;
   let projectWorkbenchTrajectoryStatus = null;
+  let projectWorkbenchTrajectoryStartPromise = null;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
@@ -1321,26 +1322,71 @@
   }
 
   async function runProjectWorkbenchTrajectory() {
+    if (projectWorkbenchTrajectoryStartPromise) {
+      return projectWorkbenchTrajectoryStartPromise;
+    }
+    projectWorkbenchTrajectoryStartPromise = runProjectWorkbenchTrajectoryOnce();
+    try {
+      return await projectWorkbenchTrajectoryStartPromise;
+    } finally {
+      projectWorkbenchTrajectoryStartPromise = null;
+      if (!projectWorkbenchTrajectoryJobId) {
+        refreshSupplementalWorkflowActionAvailability(false);
+      }
+    }
+  }
+
+  async function runProjectWorkbenchTrajectoryOnce() {
     if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
     if (projectWorkbenchSession.launch_mode === "trajectory_ready") {
       throw new Error("当前片段已有可用轨迹；如需重算，请返回片段管理页面重试");
     }
     const clipId = projectWorkbenchSession.clip_id;
-    const preflight = await projectWorkbenchRequest("/trajectory-jobs", {
-      expected_revision: projectWorkbenchSession.jobs_revision,
-      clip_ids: [clipId],
-      enqueue: false,
+    projectWorkbenchTrajectoryStatus = "checking";
+    stateLabel.textContent = "正在检查任务";
+    message.textContent = "正在确认当前片段的轨迹任务状态";
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = true;
     });
-    const confirmed = (preflight.needs_confirmation || []).includes(clipId) ? [clipId] : [];
-    const queued = await projectWorkbenchRequest("/trajectory-jobs", {
-      expected_revision: projectWorkbenchSession.jobs_revision,
-      clip_ids: [clipId],
-      confirmed_clip_ids: confirmed,
-      enqueue: true,
-    });
-    const jobId = queued.job_ids?.[0];
+    const snapshotResponse = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+      { cache: "no-store" },
+    );
+    const snapshot = await snapshotResponse.json().catch(() => ({}));
+    if (!snapshotResponse.ok) throw new Error(snapshot.error || `HTTP ${snapshotResponse.status}`);
+    projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+    const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
+    if (!currentClip) throw new Error("项目中找不到当前片段");
+
+    const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
+    const retryStatuses = new Set(["failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    let jobId = null;
+    if (currentClip.job_id && activeStatuses.has(currentClip.status)) {
+      jobId = currentClip.job_id;
+    } else if (currentClip.job_id && retryStatuses.has(currentClip.status)) {
+      const retried = await projectWorkbenchRequest(
+        `/jobs/${encodeURIComponent(currentClip.job_id)}/retry`,
+        { expected_revision: snapshot.component_revisions.jobs },
+      );
+      jobId = retried.job_id;
+      projectWorkbenchSession.jobs_revision = retried.jobs_revision;
+    } else {
+      const preflight = await projectWorkbenchRequest("/trajectory-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        enqueue: false,
+      });
+      const confirmed = (preflight.needs_confirmation || []).includes(clipId) ? [clipId] : [];
+      const queued = await projectWorkbenchRequest("/trajectory-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        confirmed_clip_ids: confirmed,
+        enqueue: true,
+      });
+      jobId = queued.job_ids?.[0];
+      projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+    }
     if (!jobId) throw new Error("轨迹任务未能进入队列");
-    projectWorkbenchSession.jobs_revision = queued.jobs_revision;
     projectWorkbenchTrajectoryJobId = jobId;
     projectWorkbenchTrajectoryStatus = "queued";
     runningStage = isPureRotationWorkflow() ? "pure_rotation" : "sfm";
