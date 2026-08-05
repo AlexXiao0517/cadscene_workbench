@@ -1295,10 +1295,6 @@
       const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
       if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
       projectWorkbenchTrajectoryStatus = String(clip.status || clip.stage || "queued");
-      const fraction = clip.progress?.fraction;
-      if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
-      stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
-      message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
       if (terminal.has(clip.status)) {
         projectWorkbenchTrajectoryJobId = null;
         document.querySelector("#workflowCancel").hidden = true;
@@ -1316,6 +1312,30 @@
         message.textContent = "轨迹结果已验证，正在载入关键帧标定工作台";
         window.location.reload();
         return attached;
+      }
+      let renderedRuntime = false;
+      try {
+        const runtimeResponse = await fetch(
+          `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
+          { cache: "no-store" },
+        );
+        if (runtimeResponse.ok) {
+          const runtime = await runtimeResponse.json();
+          if (runtime.workflow_status) {
+            await renderStatus(runtime.workflow_status);
+            renderedRuntime = true;
+          }
+          const content = document.querySelector("#workflowLogContent");
+          if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
+        }
+      } catch (error) {
+        // 实时详情读取失败时继续使用项目 snapshot，不能中断任务状态跟踪。
+      }
+      if (!renderedRuntime) {
+        const fraction = clip.progress?.fraction;
+        if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
+        stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+        message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
       }
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }

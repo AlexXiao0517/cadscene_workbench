@@ -220,6 +220,19 @@ def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() 
     assert "if (!projectWorkbenchTrajectoryJobId) return null" in cancel
 
 
+def test_project_trajectory_polling_reuses_workflow_progress_and_log_panels() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert "/jobs/${encodeURIComponent(jobId)}/runtime" in wait
+    assert "await renderStatus(runtime.workflow_status)" in wait
+    assert 'document.querySelector("#workflowLogContent")' in wait
+    assert 'runtime.lines.join("\\n")' in wait
+
+
 def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
     script = _read("workflow.js")
     start = script[

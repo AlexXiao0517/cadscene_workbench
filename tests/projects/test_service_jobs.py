@@ -11,7 +11,7 @@ from cadscene.projects.adapters import AdapterProgress
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, register_analysis_revision
-from cadscene.projects.queue import LocalResourceQueue
+from cadscene.projects.queue import AttemptRecord, LocalResourceQueue, QueueJob
 from cadscene.projects.repositories import RevisionConflict
 from cadscene.projects.service import ProjectService
 from cadscene.projects.workflow_adapters import default_workflow_adapters
@@ -106,6 +106,86 @@ def add_project(
             clips=clips,
         ),
     )
+
+
+def test_job_runtime_reuses_current_attempt_workflow_status_and_log(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("clip-1"),))
+    attempt_dir = tmp_path / "projects" / "p1" / "jobs" / "job-1" / "attempt-1"
+    run_dir = attempt_dir / "p1" / "clip-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "job_status.json").write_text(
+        '{"status":"running","operation":"sfm","stages":{"sfm":'
+        '{"status":"running","progress":0.52,"message":"正在进行顺序匹配"}}}',
+        encoding="utf-8",
+    )
+    log_path = attempt_dir / "adapter.log"
+    log_path.write_text("first\n正在提取特征\n正在进行顺序匹配\n", encoding="utf-8")
+    queue.submit(
+        QueueJob(
+            job_id="job-1",
+            project_id="p1",
+            clip_id="clip-1",
+            job_type="trajectory",
+            resource_class="heavy_compute",
+            status="queued",
+            stage="queued",
+            priority=0,
+            depends_on_job_ids=(),
+            exclusive_key="trajectory:p1:clip-1",
+            idempotency_key="runtime-job-1",
+            input_revision="analysis-1",
+            input_fingerprint="input-v1",
+            adapter_name="sfm_only",
+            adapter_version="1",
+            output_revision=None,
+            operation_id="operation-job-1",
+            attempts=(
+                AttemptRecord(
+                    number=1,
+                    directory=str(attempt_dir),
+                    log_path=str(log_path),
+                ),
+            ),
+        )
+    )
+
+    runtime = service.job_runtime("p1", "job-1", tail=2)
+
+    assert runtime["job_id"] == "job-1"
+    assert runtime["workflow_status"]["stages"]["sfm"]["progress"] == 0.52
+    assert runtime["lines"] == ["正在提取特征", "正在进行顺序匹配"]
+
+
+def test_job_runtime_rejects_job_owned_by_another_project(tmp_path: Path) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("clip-1"),))
+    attempt_dir = tmp_path / "projects" / "p2" / "jobs" / "job-2" / "attempt-1"
+    queue.submit(
+        QueueJob(
+            job_id="job-2",
+            project_id="p2",
+            clip_id="clip-1",
+            job_type="trajectory",
+            resource_class="heavy_compute",
+            status="queued",
+            stage="queued",
+            priority=0,
+            depends_on_job_ids=(),
+            exclusive_key=None,
+            idempotency_key="runtime-job-2",
+            input_revision="analysis-1",
+            input_fingerprint="input-v1",
+            adapter_name="sfm_only",
+            adapter_version="1",
+            output_revision=None,
+            operation_id="operation-job-2",
+            attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+        )
+    )
+
+    with pytest.raises(KeyError, match="does not belong"):
+        service.job_runtime("p1", "job-2")
 
 
 def test_batch_preflight_groups_partial_eligibility_without_enqueueing(

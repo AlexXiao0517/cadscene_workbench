@@ -46,6 +46,9 @@ _RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
+_JOB_RUNTIME = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/runtime$"
+)
 _WORKBENCH_CREATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workbench-sessions$"
 )
@@ -139,6 +142,13 @@ class ProjectApi:
             match = _RENDER.fullmatch(path)
             if method == "POST" and match:
                 return self._render_jobs(match["project"], payload)
+            match = _JOB_RUNTIME.fullmatch(path)
+            if method == "GET" and match:
+                return ApiResponse(
+                    200,
+                    self.service.job_runtime(match["project"], match["job"]),
+                    {"Cache-Control": "no-store"},
+                )
             match = _JOB_ACTION.fullmatch(path)
             if method == "POST" and match:
                 return self._job_action(

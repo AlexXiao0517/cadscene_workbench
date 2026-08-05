@@ -55,6 +55,7 @@ from .queue import (
     RestoreCleanupReservation,
 )
 from cadscene.video_analysis.pts import DecodedFrameTimestamp
+from cadscene.workflow.job_runner import read_workflow_log_text
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
@@ -2302,6 +2303,67 @@ class ProjectService:
                 )
             self._publish_queue_locked(project_id)
             return cancelled
+
+    def job_runtime(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        tail: int = 30,
+    ) -> dict[str, object]:
+        """Read live adapter-owned status without making it project state."""
+        job = self.queue.get(job_id)
+        if job.project_id != project_id:
+            raise KeyError(f"job {job_id} does not belong to {project_id}")
+        if not job.attempts:
+            return {
+                "project_id": project_id,
+                "job_id": job_id,
+                "status": job.status,
+                "stage": job.stage,
+                "workflow_status": None,
+                "lines": [],
+            }
+
+        attempt = job.attempts[-1]
+        attempt_dir = Path(attempt.directory).resolve(strict=False)
+        expected_dir = self._attempt_directory(
+            project_id, job_id, attempt.number
+        ).resolve(strict=False)
+        if attempt_dir != expected_dir:
+            raise ValueError("job attempt directory is outside the project job root")
+
+        status_path = attempt_dir / project_id / job.clip_id / "job_status.json"
+        workflow_status: Mapping[str, object] | None = None
+        if status_path.is_file():
+            try:
+                candidate = json.loads(status_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                candidate = None
+            if isinstance(candidate, Mapping):
+                workflow_status = candidate
+
+        log_path = Path(attempt.log_path or (attempt_dir / "adapter.log")).resolve(
+            strict=False
+        )
+        try:
+            log_path.relative_to(attempt_dir)
+        except ValueError as exc:
+            raise ValueError("job log path is outside the current attempt") from exc
+        count = max(1, min(int(tail), 2000))
+        lines = (
+            read_workflow_log_text(log_path).splitlines()[-count:]
+            if log_path.is_file()
+            else []
+        )
+        return {
+            "project_id": project_id,
+            "job_id": job_id,
+            "status": job.status,
+            "stage": job.stage,
+            "workflow_status": workflow_status,
+            "lines": lines,
+        }
 
     def prepare_job_execution(
         self,

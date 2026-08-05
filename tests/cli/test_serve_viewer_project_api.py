@@ -458,6 +458,32 @@ def test_cancel_and_retry_job_routes_delegate_through_project_service(
     assert queue.status(job_id) in {"queued", "preparing"}
 
 
+def test_job_runtime_route_delegates_to_project_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    monkeypatch.setattr(
+        api.service,
+        "job_runtime",
+        lambda project_id, job_id: {
+            "project_id": project_id,
+            "job_id": job_id,
+            "status": "running",
+            "stage": "running",
+            "workflow_status": {"operation": "sfm"},
+            "lines": ["matching"],
+        },
+        raising=False,
+    )
+
+    response = api.handle("GET", "/api/projects/p1/jobs/job-1/runtime")
+
+    assert response.status == 200
+    assert response.body["job_id"] == "job-1"
+    assert response.body["workflow_status"]["operation"] == "sfm"
+    assert response.body["lines"] == ["matching"]
+
+
 def test_cancelling_job_does_not_offer_a_second_cancel_action(tmp_path: Path) -> None:
     api, repositories, queue = _api(tmp_path, (_clip("ready"),))
     api.handle(
