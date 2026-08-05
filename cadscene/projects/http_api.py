@@ -331,18 +331,22 @@ class ProjectApi:
         }
         job_by_clip: dict[str, Mapping[str, object]] = {}
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
+        export_job_by_clip: dict[str, Mapping[str, object]] = {}
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
             if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
                 job_by_clip[clip_id] = job
             elif isinstance(clip_id, str) and job.get("job_type") == "clip_render":
                 render_job_by_clip[clip_id] = job
+            elif isinstance(clip_id, str) and job.get("job_type") == "clip_export":
+                export_job_by_clip[clip_id] = job
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
         can_render_any = False
         for clip in clips.clips:
             trajectory_job = job_by_clip.get(clip.clip_id)
             render_job = render_job_by_clip.get(clip.clip_id)
+            export_job = export_job_by_clip.get(clip.clip_id)
             job = render_job or trajectory_job
             capability = self._clip_capability(
                 project_id, clip, preflight, render_preflight, job,
@@ -384,11 +388,24 @@ class ProjectApi:
                         "output_revision": None if render_job is None else render_job.get("output_revision"),
                     },
                     "capabilities": capability,
-                    "workbench": (
-                        {"state": "unavailable", "workbench_output_revision": None}
-                        if self.workbench is None
-                        else self.workbench.snapshot_for_clip(project_id, clip)
-                    ),
+                    "workbench": {
+                        **(
+                            {"state": "unavailable", "workbench_output_revision": None}
+                            if self.workbench is None
+                            else self.workbench.snapshot_for_clip(project_id, clip)
+                        ),
+                        "preparation": (
+                            None
+                            if export_job is None
+                            else {
+                                "job_id": export_job.get("job_id"),
+                                "status": export_job.get("status"),
+                                "stage": export_job.get("stage"),
+                                "progress": export_job.get("progress"),
+                                "error": export_job.get("error"),
+                            }
+                        ),
+                    },
                     "source_interval": {
                         "start_pts": clip.analysis.get("source_start_pts"),
                         "end_pts_exclusive": clip.analysis.get(
@@ -450,11 +467,17 @@ class ProjectApi:
             if self.workbench is None
             else self.workbench.can_open(project_id, clip.clip_id)
         )
+        can_prepare_workbench = (
+            False
+            if self.workbench is None
+            else self.workbench.can_prepare(project_id, clip.clip_id)
+        )
         return {
             "can_start_trajectory": can_start,
             "trajectory_needs_confirmation": needs_confirmation,
             "reason": reason,
             "can_open_workbench": can_open_workbench,
+            "can_prepare_workbench": can_prepare_workbench,
             "can_render": not analysis_busy and (
                 clip.clip_id in render_preflight.eligible
                 or clip.clip_id in render_preflight.confirmation_required
@@ -482,6 +505,29 @@ class ProjectApi:
         return_to = payload.get("return_to")
         if not isinstance(return_to, str):
             raise InvalidWorkbenchReturnPath("return_to is required")
+        context = self.workbench.resolve_context(project_id, clip_id)
+        if not context.can_open_workbench:
+            if not self.workbench.can_prepare(project_id, clip_id):
+                raise WorkbenchPermissionDenied("片段视频或项目 CAD 尚未准备完成")
+            expected_jobs_revision = payload.get("expected_jobs_revision")
+            if not isinstance(expected_jobs_revision, int) or isinstance(
+                expected_jobs_revision, bool
+            ):
+                raise ValueError("expected_jobs_revision is required")
+            job = self.service.enqueue_workbench_clip_export(
+                project_id,
+                clip_id,
+                expected_jobs_revision=expected_jobs_revision,
+            )
+            return ApiResponse(
+                202,
+                {
+                    "state": "preparing_clip",
+                    "message": "正在按原视频时间范围准备片段视频",
+                    "job_id": job.job_id,
+                    "jobs_revision": self.repositories.jobs.load(project_id).revision,
+                },
+            )
         session = self.workbench.open(
             project_id,
             clip_id,

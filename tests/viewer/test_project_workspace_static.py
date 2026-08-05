@@ -180,3 +180,24 @@ def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     assert 'params.get("focusClip")' in script
     assert "scrollIntoView" in script
     assert '.open-workbench", row).addEventListener' in script
+
+
+def test_ready_clip_prepares_inputs_then_opens_workbench_with_chinese_status() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="workbenchPreparationDialog"' in html
+    assert "can_prepare_workbench" in script
+    assert "expected_jobs_revision: state.snapshot.component_revisions.jobs" in script
+    assert "response.status === 202" in script
+    assert "waitForWorkbenchPreparation" in script
+    for source, translated in (
+        ("ready", "待处理"),
+        ("queued", "排队中"),
+        ("preparing", "准备输入"),
+        ("running", "处理中"),
+        ("validating", "验证结果"),
+        ("success", "已完成"),
+        ("failed", "失败"),
+    ):
+        assert f'{source}: "{translated}"' in script

@@ -25,6 +25,7 @@ from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.service import ProjectService
+from cadscene.projects.service import _validate_clip_export_outputs
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -862,6 +863,105 @@ def test_workflow_start_session_is_not_allowed_to_save_before_trajectory(
             session.token,
             {"ok": True},
         )
+
+
+def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    clips = repositories.clips.load("project-1")
+    clip = clips.clips[0]
+    analysis = dict(clip.analysis)
+    analysis.pop("physical_mp4_path")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(clip, analysis=analysis),)
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    capability = snapshot.body["clips"][0]["capabilities"]
+    assert capability["can_open_workbench"] is False
+    assert capability["can_prepare_workbench"] is True
+    jobs_revision = repositories.jobs.load("project-1").revision
+
+    preparing = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": jobs_revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert preparing.status == 202
+    assert preparing.body["state"] == "preparing_clip"
+    assert preparing.body["message"] == "正在按原视频时间范围准备片段视频"
+    queued = repositories.jobs.load("project-1")
+    assert queued.revision == jobs_revision + 1
+    export = next(
+        item for item in queued.jobs if item["job_id"] == preparing.body["job_id"]
+    )
+    assert export["job_type"] == "clip_export"
+    assert export["status"] in {"queued", "preparing", "running"}
+
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None
+    assert running.job_id == preparing.body["job_id"]
+    attempt = running.attempts[-1]
+    output_dir = Path(attempt.directory) / "clip_inputs"
+    output_dir.mkdir(parents=True)
+    (output_dir / "clip-1.mp4").write_bytes(b"exported-58-second-clip")
+    (output_dir / "clip_frame_map.json").write_text(
+        json.dumps(
+            {
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "source_start_pts": 0,
+                        "source_end_pts_exclusive": 100,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _validate_clip_export_outputs(
+        repositories.clips.load("project-1").clips, output_dir
+    )
+    api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    ready = api.handle("GET", "/api/projects/project-1/snapshot")
+    assert ready.body["clips"][0]["capabilities"]["can_open_workbench"] is True
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    assert opened.body["launch_mode"] == "workflow_start"
+    assert (
+        tmp_path / "data/project-1--clip-1/video/project-1--clip-1.mp4"
+    ).read_bytes() == b"exported-58-second-clip"
 
 
 def test_snapshot_never_binds_historical_success_from_an_old_clip_input(

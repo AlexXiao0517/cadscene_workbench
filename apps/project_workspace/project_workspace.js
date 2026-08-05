@@ -16,6 +16,19 @@
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
   const $ = (selector, root = document) => root.querySelector(selector);
+  const STATUS_LABELS = {
+    ready: "待处理",
+    queued: "排队中",
+    preparing: "准备输入",
+    running: "处理中",
+    validating: "验证结果",
+    success: "已完成",
+    failed: "失败",
+    interrupted: "已中断",
+    cancelled: "已取消",
+    stale_input: "输入已过期",
+    superseded: "结果已失效",
+  };
 
   function setMessage(message, isError = false) {
     const element = $("#liveMessage");
@@ -51,7 +64,13 @@
 
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
-    $(".open-workbench", row).disabled = !capabilities.can_open_workbench;
+    const open = $(".open-workbench", row);
+    open.disabled = !(
+      capabilities.can_open_workbench || capabilities.can_prepare_workbench
+    );
+    open.title = capabilities.can_open_workbench
+      ? "进入片段工作台"
+      : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪");
     $(".retry-job", row).disabled = !capabilities.can_retry;
     $(".cancel-job", row).disabled = !capabilities.can_cancel;
     $(".workflow-select", row).title = capabilities.reason || "";
@@ -80,7 +99,7 @@
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
-    $(".status-pill", row).textContent = clip.status || "ready";
+    $(".status-pill", row).textContent = STATUS_LABELS[clip.status] || clip.status || STATUS_LABELS.ready;
     const thumbnail = $(".clip-thumbnail img", row);
     thumbnail.src = clip.thumbnail_url || "";
     thumbnail.hidden = !clip.thumbnail_url;
@@ -305,21 +324,58 @@
       focusClip: clip.clip_id,
     });
     try {
-      const { body } = await request(
+      const { response, body } = await request(
         `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/workbench-sessions`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expected_revision: state.snapshot.component_revisions.clips,
+            expected_jobs_revision: state.snapshot.component_revisions.jobs,
             return_to: `/apps/project_workspace/?${returnParams.toString()}`,
           }),
         },
       );
+      if (response.status === 202) {
+        state.snapshot.component_revisions.jobs = body.jobs_revision;
+        await waitForWorkbenchPreparation(clip.clip_id);
+        return;
+      }
       state.snapshot.component_revisions.clips = body.clips_revision;
       window.location.assign(body.workbench_url);
     } catch (error) {
       $(".row-error", row).textContent = error.message;
+    }
+  }
+
+  async function waitForWorkbenchPreparation(clipId) {
+    const dialog = $("#workbenchPreparationDialog");
+    if (!dialog.open) dialog.showModal();
+    while (true) {
+      state.etag = null;
+      await pollSnapshot();
+      const clip = state.snapshot?.clips.find((item) => item.clip_id === clipId);
+      if (!clip) throw new Error("片段已不存在，无法进入工作台");
+      const preparation = clip.workbench?.preparation;
+      const fraction = preparation?.progress?.fraction;
+      const percent = typeof fraction === "number"
+        ? Math.max(0, Math.min(100, Math.round(fraction * 100)))
+        : null;
+      $("#workbenchPreparationMessage").textContent = preparation?.stage
+        ? (STATUS_LABELS[preparation.stage] || preparation.stage)
+        : "正在按原视频时间范围准备片段视频…";
+      $("#workbenchPreparationFill").style.width = percent == null ? "0%" : `${percent}%`;
+      $("#workbenchPreparationPercent").textContent = percent == null ? "—" : `${percent}%`;
+      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(preparation?.status)) {
+        dialog.close();
+        throw new Error(preparation?.error || "片段视频准备失败，请重试");
+      }
+      if (clip.capabilities?.can_open_workbench) {
+        dialog.close();
+        await openWorkbench(clip, document.querySelector(`[data-clip-id="${CSS.escape(clipId)}"]`));
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
     }
   }
 

@@ -1038,6 +1038,48 @@ class ProjectService:
                 confirmed_clip_ids=confirmed_clip_ids,
             )
 
+    def enqueue_workbench_clip_export(
+        self,
+        project_id: str,
+        clip_id: str,
+        *,
+        expected_jobs_revision: int,
+    ) -> QueueJob:
+        """Ensure one on-demand physical clip export is queued for workbench entry."""
+
+        with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
+            project = self.repositories.project.load(project_id)
+            clips = self.repositories.clips.load(project_id)
+            clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+            if clip is None:
+                raise KeyError(f"unknown clip ID: {clip_id}")
+            for existing in reversed(self.queue.jobs()):
+                if (
+                    existing.project_id == project_id
+                    and existing.clip_id == clip_id
+                    and existing.job_type == "clip_export"
+                    and existing.status
+                    in {"queued", "preparing", "running", "validating", "success"}
+                    and self._current_input_fingerprint(existing)
+                    == existing.input_fingerprint
+                ):
+                    return existing
+            export = self._new_export_job(
+                project_id,
+                clip,
+                project_assets=project.source_assets,
+                project_revision=project.revision,
+                clips_revision=clips.revision,
+            )
+            submitted = self.queue.submit(export)
+            if submitted.job_id == export.job_id:
+                Path(submitted.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+            self._publish_queue_locked(project_id)
+            return submitted
+
     def update_clip_workflow(
         self,
         project_id: str,

@@ -1209,6 +1209,21 @@ class ProjectWorkbenchService:
         state = self.snapshot_for_clip(project_id, clip)["state"]
         return state not in {"editing", "pending_save", "recovery_required"}
 
+    def can_prepare(self, project_id: str, clip_id: str) -> bool:
+        project = self.repositories.project.load(project_id)
+        clips = self.repositories.clips.load(project_id)
+        clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+        if clip is None or clip.resolved_workflow is None:
+            return False
+        snapshot = clip.analysis.get("input_snapshot")
+        video = snapshot.get("video") if isinstance(snapshot, Mapping) else None
+        source_path = video.get("path") if isinstance(video, Mapping) else None
+        return bool(
+            source_path
+            and Path(str(source_path)).is_file()
+            and self._cad_design_for_context(clip) is not None
+        )
+
     def workbench_url(self, session: WorkbenchSession) -> str:
         from urllib.parse import urlencode
 
@@ -1265,6 +1280,8 @@ class ProjectWorkbenchService:
                 candidate.status == "success"
                 and candidate.output_validated
                 and candidate.validated_input_fingerprint == candidate.input_fingerprint
+                and self.project_service._current_input_fingerprint(candidate)
+                == candidate.input_fingerprint
                 and video
                 and Path(video).is_file()
             ):
