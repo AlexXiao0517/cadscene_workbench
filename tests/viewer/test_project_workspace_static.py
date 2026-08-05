@@ -99,6 +99,21 @@ def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> 
     assert "confirmed_clip_ids: confirmedClipIds" in script
 
 
+def test_final_workflow_selector_only_exposes_sfm_and_opengv() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    workflow_select = html.split('class="workflow-select"', 1)[1].split(
+        "</select>", 1
+    )[0]
+    assert workflow_select.count("<option") == 2
+    assert '<option value="sfm_only">三维重建（SfM）</option>' in workflow_select
+    assert '<option value="pure_rotation">旋转估计（OpenGV）</option>' in workflow_select
+    assert "使用系统推荐" not in workflow_select
+    assert "function visibleWorkflowChoice(clip, edit)" in script
+    assert "clip.resolved_workflow" in script
+
+
 def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 

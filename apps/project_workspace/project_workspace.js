@@ -44,6 +44,11 @@
     return edit.name === null ? clip.generated_display_name : edit.name;
   }
 
+  function visibleWorkflowChoice(clip, edit) {
+    const workflow = edit.workflow || clip.resolved_workflow;
+    return workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";
+  }
+
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
     $(".open-workbench", row).disabled = !capabilities.can_open_workbench;
@@ -72,7 +77,7 @@
     $(".confidence", row).textContent = clip.confidence == null ? "" : `置信度 ${Math.round(clip.confidence * 100)}%`;
     $(".workflow-recommendation", row).textContent = clip.recommended_workflow || "需人工确认";
     const workflow = $(".workflow-select", row);
-    workflow.value = edit.workflow || "";
+    workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
     $(".status-pill", row).textContent = clip.status || "ready";
