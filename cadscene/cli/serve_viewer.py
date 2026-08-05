@@ -236,7 +236,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "project API unavailable")
             return
         project_id, clip_id = match["project"], match["clip"]
-        project = api.repositories.project.load(project_id)
+        try:
+            project = api.repositories.project.load(project_id)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND, "project not found")
+            return
         asset = project.source_assets.get("video")
         if not isinstance(asset, dict) or not asset.get("path"):
             self.send_error(HTTPStatus.NOT_FOUND, "source video not found")
