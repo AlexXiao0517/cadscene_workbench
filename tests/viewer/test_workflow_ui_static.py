@@ -143,8 +143,11 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     script = _read("workflow.js")
 
     assert 'params.get("projectWorkbenchToken")' in script
+    assert 'params.get("projectId") || dataset' in script
+    assert 'params.get("workflowStage")' in script
+    assert "stageOrder.includes(requestedWorkflowStage)" in script
     assert "bootstrapProjectWorkbenchSession" in script
-    assert "/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`" in script
+    assert "/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`" in script
     existing_save = script.index('/api/workflow/save-camera-track')
     coordinated_save = script.index('/save`', existing_save)
     assert existing_save < coordinated_save
@@ -172,6 +175,10 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "await saveCurrentCameraTrack()" in quality_finish
     assert "await finalizeProjectWorkbenchSave" in quality_finish
     assert "projectWorkbenchBootstrapPromise" in script
+    assert "async function runProjectWorkbenchTrajectory" in script
+    assert "trajectory-jobs" in script
+    assert "trajectory-ready" in script
+    assert "return runProjectWorkbenchTrajectory()" in script
 
 
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:

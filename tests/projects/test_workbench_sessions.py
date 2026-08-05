@@ -964,6 +964,93 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     ).read_bytes() == b"exported-58-second-clip"
 
 
+def test_user_started_trajectory_is_attached_to_open_workbench_session(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, job = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    assert opened.body["launch_mode"] == "workflow_start"
+    assert opened.body["save_permissions"] == []
+
+    source_run = Path(job.attempts[-1].directory) / "project-1/clip-1"
+    trajectory = source_run / "02_sfm/camera_trajectory.json"
+    trajectory.parent.mkdir(parents=True, exist_ok=True)
+    trajectory.write_text(
+        json.dumps({"poses": [{"frame_index": 0}]}), encoding="utf-8"
+    )
+    completed = replace(
+        job,
+        status="success",
+        stage="success",
+        output_revision="trajectory-output-user-started",
+        output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
+        output_validated=True,
+        validated_input_fingerprint=job.input_fingerprint,
+        published_outputs={"trajectory": str(trajectory)},
+    )
+    current_jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=current_jobs.revision,
+        mutate=lambda value: replace(value, jobs=(completed.to_dict(),)),
+    )
+
+    attached = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/trajectory-ready",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+        },
+    )
+
+    assert attached.status == 200
+    assert attached.body["launch_mode"] == "trajectory_ready"
+    assert attached.body["trajectory_job_id"] == job.job_id
+    assert attached.body["save_permissions"] == ["save"]
+    published = (
+        runs_root
+        / "project-1--clip-1/clip-1/02_sfm/camera_trajectory.json"
+    )
+    assert json.loads(published.read_text(encoding="utf-8"))["poses"]
+    inspected = api.handle(
+        "GET",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}",
+    )
+    assert inspected.status == 200
+    assert inspected.body["trajectory_job_id"] == job.job_id
+    manual = (
+        runs_root
+        / "project-1--clip-1/clip-1/01_keyframes/camera_track_manual.json"
+    )
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(json.dumps(_manual_track()), encoding="utf-8")
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+    assert saved.body["state"] == "saved"
+
+
 def test_snapshot_never_binds_historical_success_from_an_old_clip_input(
     tmp_path: Path,
 ) -> None:

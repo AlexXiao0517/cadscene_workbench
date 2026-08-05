@@ -988,6 +988,77 @@ class ProjectWorkbenchService:
             )
             return self.coordinator.inspect(project_id, token)
 
+    def attach_trajectory(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        expected_clips_revision: int,
+    ) -> WorkbenchSession:
+        """Bind a user-started, validated trajectory to an existing workbench session."""
+
+        with self.project_service._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            self._require_clips_revision(
+                current.revision, expected_clips_revision, project_id
+            )
+            session = self.coordinator.store.load(project_id, token)
+            if session.state != "editing" or session.launch_mode != "workflow_start":
+                raise WorkbenchPermissionDenied(
+                    "当前工作台会话不能绑定新的轨迹结果"
+                )
+            if self.coordinator._expired(session):
+                raise WorkbenchPermissionDenied("工作台会话已过期")
+            clip = next(
+                (item for item in current.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            if clip is None:
+                raise StaleWorkbenchSession("workbench session clip no longer exists")
+            self._require_session_reference(
+                session,
+                self._workbench_reference(clip),
+                allow_saved_repair=False,
+            )
+            context = self.resolve_context(project_id, session.clip_id)
+            if (
+                context.project_input_revision != session.project_input_revision
+                or context.clip_input_revision != session.clip_input_revision
+                or context.workflow != session.workflow
+            ):
+                raise StaleWorkbenchSession("workbench input changed")
+            if not (
+                context.trajectory_job_id
+                and context.trajectory_output_revision
+                and context.trajectory_output_fingerprint
+                and context.save_permissions
+            ):
+                raise WorkbenchPermissionDenied("轨迹解算尚未成功或输出未通过验证")
+            self._materialize_trajectory_run(project_id, clip, context.trajectory_job_id)
+            attached = self.coordinator.store.update(
+                project_id,
+                token,
+                expected_revision=session.revision,
+                mutate=lambda value: replace(
+                    value,
+                    operation_id=uuid4().hex,
+                    input_fingerprint=context.input_fingerprint,
+                    trajectory_job_id=context.trajectory_job_id,
+                    trajectory_run_id=context.trajectory_run_id,
+                    trajectory_output_revision=context.trajectory_output_revision,
+                    trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+                    launch_mode="trajectory_ready",
+                    save_permissions=tuple(context.save_permissions),
+                ),
+            )
+            self._publish_clip_state(
+                current,
+                attached,
+                state="editing",
+                expected_revision=expected_clips_revision,
+            )
+            return attached
+
     def save(
         self,
         project_id: str,
@@ -1377,6 +1448,51 @@ class ProjectWorkbenchService:
             if temporary_manifest.exists():
                 temporary_manifest.unlink()
 
+    def _materialize_trajectory_run(
+        self, project_id: str, clip: ClipDefinition, job_id: str
+    ) -> None:
+        jobs = self.repositories.jobs.load(project_id)
+        payload = next(
+            (item for item in jobs.jobs if item.get("job_id") == job_id), None
+        )
+        if payload is None:
+            raise WorkbenchPermissionDenied("找不到已完成的轨迹任务")
+        job = QueueJob.from_dict(payload)
+        if not job.attempts:
+            raise WorkbenchPermissionDenied("轨迹任务缺少输出目录")
+        source = (
+            Path(job.attempts[-1].directory) / project_id / clip.clip_id
+        ).resolve(strict=False)
+        if not source.is_dir():
+            raise WorkbenchPermissionDenied("轨迹任务输出目录不存在")
+        trajectory = job.published_outputs.get("trajectory")
+        if not trajectory or not Path(trajectory).is_file():
+            raise WorkbenchPermissionDenied("轨迹任务输出未通过验证")
+        try:
+            Path(trajectory).resolve(strict=True).relative_to(source.resolve(strict=True))
+        except ValueError as exc:
+            raise WorkbenchPermissionDenied("轨迹任务输出不属于当前片段") from exc
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        target = (self.viewer_runs_root / dataset / clip.clip_id).resolve(strict=False)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.parent / f".{target.name}.{uuid4().hex}.tmp"
+        stale = target.parent / f".{target.name}.{uuid4().hex}.stale"
+        shutil.copytree(source, temporary)
+        moved_old = False
+        try:
+            if target.exists():
+                os.replace(target, stale)
+                moved_old = True
+            os.replace(temporary, target)
+            _fsync_directory(target.parent)
+        except Exception:
+            if moved_old and stale.exists() and not target.exists():
+                os.replace(stale, target)
+            raise
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
     def _publish_clip_state(
         self,
         current,
@@ -1465,19 +1581,14 @@ class ProjectWorkbenchService:
         supplied = receipt.get("path")
         if not isinstance(supplied, str) or not supplied:
             raise InvalidWorkbenchOutput("existing workbench save path is missing")
-        expected = (
-            self.viewer_runs_root
-            / session.project_id
-            / session.trajectory_run_id
-            / "01_keyframes"
-            / "camera_track_manual.json"
-        ).resolve(strict=False)
+        expected_paths = tuple(
+            (
+                root / "01_keyframes" / "camera_track_manual.json"
+            ).resolve(strict=False)
+            for root in self._bound_workbench_run_roots(session)
+        )
         actual = Path(supplied).resolve(strict=False)
-        try:
-            expected.relative_to(self.viewer_runs_root)
-        except ValueError as exc:
-            raise InvalidWorkbenchOutput("path is not the bound workbench output") from exc
-        if actual != expected:
+        if actual not in expected_paths:
             raise InvalidWorkbenchOutput("path is not the bound workbench output")
         if not actual.is_file():
             raise InvalidWorkbenchOutput("bound workbench output is missing")
@@ -1505,15 +1616,44 @@ class ProjectWorkbenchService:
             raise InvalidWorkbenchOutput(
                 "pure-rotation workbench save receipt is invalid"
             )
-        run_root = (
-            self.viewer_runs_root / session.project_id / session.trajectory_run_id
-        ).resolve(strict=False)
+        roots = self._bound_workbench_run_roots(session)
+        run_root = next(
+            (
+                root
+                for root in roots
+                if (
+                    root
+                    / "03_pure_rotation_placement"
+                    / "camera_track_cad_base.json"
+                ).is_file()
+            ),
+            roots[0],
+        )
         try:
             run_root.relative_to(self.viewer_runs_root)
         except ValueError as exc:
             raise InvalidWorkbenchOutput("pure-rotation run path escaped root") from exc
         with pure_rotation_run_lock(run_root):
             return self._validate_pure_rotation_run_snapshot(run_root)
+
+    def _bound_workbench_run_roots(
+        self, session: WorkbenchSession
+    ) -> tuple[Path, ...]:
+        bridge = (
+            self.viewer_runs_root
+            / self._workbench_dataset_id(session.project_id, session.clip_id)
+            / session.trajectory_run_id
+        ).resolve(strict=False)
+        legacy = (
+            self.viewer_runs_root / session.project_id / session.trajectory_run_id
+        ).resolve(strict=False)
+        roots = (bridge, legacy)
+        try:
+            for root in roots:
+                root.relative_to(self.viewer_runs_root)
+        except ValueError as exc:
+            raise InvalidWorkbenchOutput("workbench run path escaped root") from exc
+        return roots
 
     @staticmethod
     def _validate_pure_rotation_run_snapshot(

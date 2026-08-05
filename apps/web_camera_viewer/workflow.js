@@ -5,6 +5,8 @@
   const dataset = params.get("dataset") || "";
   const runId = params.get("runId") || "";
   const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
+  const projectWorkbenchProjectId = params.get("projectId") || dataset;
+  const requestedWorkflowStage = params.get("workflowStage") || "";
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
   const stageTitles = {
@@ -51,6 +53,7 @@
   let projectWorkbenchSession = null;
   let projectWorkbenchBootstrapPromise = null;
   let projectWorkbenchSaveInFlight = false;
+  let projectWorkbenchTrajectoryJobId = null;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
@@ -764,7 +767,7 @@
       ? "OpenGV 旋转轨迹恢复"
       : (latestJobStatus?.status === "running" && operation === "alignment" ? "路线拟合" : stageTitles[stage]);
     title.textContent = `当前任务：${taskTitle}`;
-    stateLabel.textContent = stageStatus?.status || "pending";
+    stateLabel.textContent = stageStatus?.status || "待启动";
     progress.value = Number(stageStatus?.progress || 0);
     message.textContent = stageStatus?.error || stageStatus?.message || "等待任务";
     if (stage === "render" && operation === "render" && latestJobStatus?.status === "running") {
@@ -1122,6 +1125,10 @@
     if (!dataset || !runId) {
       throw new Error("请先通过 URL 指定 dataset 和 runId。");
     }
+    if (projectWorkbenchToken && stage === "sfm") {
+      await ensureProjectWorkbenchSession();
+      return runProjectWorkbenchTrajectory();
+    }
     const result = await apiPost("/api/workflow/run-stage", {
       dataset,
       runId,
@@ -1145,6 +1152,10 @@
     }
     if (!dataset || !runId) {
       throw new Error("请先通过 URL 指定 dataset 和 runId。");
+    }
+    if (projectWorkbenchToken) {
+      await ensureProjectWorkbenchSession();
+      return runProjectWorkbenchTrajectory();
     }
     if (!force && await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"))) {
       await initializePureRotationViewer();
@@ -1183,9 +1194,9 @@
   }
 
   async function bootstrapProjectWorkbenchSession() {
-    if (!projectWorkbenchToken || !dataset) return null;
+    if (!projectWorkbenchToken || !projectWorkbenchProjectId) return null;
     const response = await fetch(
-      `/api/projects/${encodeURIComponent(dataset)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`,
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`,
       { cache: "no-store" },
     );
     const payload = await response.json().catch(() => ({}));
@@ -1201,6 +1212,106 @@
       projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
     }
     return projectWorkbenchBootstrapPromise;
+  }
+
+  async function projectWorkbenchRequest(path, body) {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}${path}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    }
+    return payload;
+  }
+
+  function projectTrajectoryStatusCopy(status, stage) {
+    const labels = {
+      queued: "已进入资源队列",
+      preparing: "正在准备轨迹解算输入",
+      running: "正在进行轨迹解算",
+      validating: "正在验证轨迹结果",
+      success: "轨迹解算完成",
+      failed: "轨迹解算失败",
+      interrupted: "轨迹解算已中断",
+      cancelled: "轨迹解算已取消",
+      stale_input: "输入已变化，本次结果未发布",
+      superseded: "本次结果已被新任务取代",
+    };
+    return labels[status] || stage || "等待轨迹任务";
+  }
+
+  async function waitForProjectWorkbenchTrajectory(jobId) {
+    const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    while (true) {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
+      if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
+      const fraction = clip.progress?.fraction;
+      if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
+      stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+      message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+      if (terminal.has(clip.status)) {
+        if (clip.status !== "success") {
+          throw new Error(clip.progress?.message || projectTrajectoryStatusCopy(clip.status, clip.stage));
+        }
+        const attached = await projectWorkbenchRequest(
+          `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/trajectory-ready`,
+          { expected_revision: snapshot.component_revisions.clips },
+        );
+        projectWorkbenchSession = { ...projectWorkbenchSession, ...attached };
+        progress.value = 1;
+        stateLabel.textContent = "已完成";
+        message.textContent = "轨迹结果已验证，正在载入关键帧标定工作台";
+        window.location.reload();
+        return attached;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+  }
+
+  async function runProjectWorkbenchTrajectory() {
+    if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
+    if (projectWorkbenchSession.launch_mode === "trajectory_ready") {
+      throw new Error("当前片段已有可用轨迹；如需重算，请返回片段管理页面重试");
+    }
+    const clipId = projectWorkbenchSession.clip_id;
+    const preflight = await projectWorkbenchRequest("/trajectory-jobs", {
+      expected_revision: projectWorkbenchSession.jobs_revision,
+      clip_ids: [clipId],
+      enqueue: false,
+    });
+    const confirmed = (preflight.needs_confirmation || []).includes(clipId) ? [clipId] : [];
+    const queued = await projectWorkbenchRequest("/trajectory-jobs", {
+      expected_revision: projectWorkbenchSession.jobs_revision,
+      clip_ids: [clipId],
+      confirmed_clip_ids: confirmed,
+      enqueue: true,
+    });
+    const jobId = queued.job_ids?.[0];
+    if (!jobId) throw new Error("轨迹任务未能进入队列");
+    projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+    projectWorkbenchTrajectoryJobId = jobId;
+    runningStage = isPureRotationWorkflow() ? "pure_rotation" : "sfm";
+    progress.value = 0;
+    stateLabel.textContent = "排队中";
+    message.textContent = "已进入资源队列，算法将在获得资源后启动";
+    document.querySelector("#workflowCancel").hidden = false;
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = true;
+    });
+    return waitForProjectWorkbenchTrajectory(jobId);
   }
 
   async function finalizeProjectWorkbenchSave(result) {
@@ -1412,6 +1523,15 @@
   }
 
   async function cancelRunningJob() {
+    if (projectWorkbenchToken && projectWorkbenchTrajectoryJobId) {
+      const cancelled = await projectWorkbenchRequest(
+        `/jobs/${encodeURIComponent(projectWorkbenchTrajectoryJobId)}/cancel`,
+        { expected_revision: projectWorkbenchSession.jobs_revision },
+      );
+      projectWorkbenchSession.jobs_revision = cancelled.jobs_revision;
+      message.textContent = "已请求取消轨迹任务";
+      return cancelled;
+    }
     await apiPost("/api/workflow/cancel", { dataset, runId });
     runningStage = null;
     sessionStorage.removeItem(`cadsceneJobReload:${dataset}:${runId}`);
@@ -1701,7 +1821,9 @@
   loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
   const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
-  if (stageOrder.includes(restoredWorkflowStage)) {
+  if (stageOrder.includes(requestedWorkflowStage)) {
+    setWorkflowStage(requestedWorkflowStage);
+  } else if (stageOrder.includes(restoredWorkflowStage)) {
     sessionStorage.removeItem(restoredWorkflowStageKey());
     setWorkflowStage(restoredWorkflowStage);
   } else {
