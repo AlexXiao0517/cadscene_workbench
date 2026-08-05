@@ -1309,6 +1309,8 @@ class ProjectWorkbenchService:
                 "workflowStage": "sfm",
                 "video": f"/data/{dataset}/video/{dataset}.mp4",
                 "cad": f"/data/{dataset}/cad/design.json",
+                "cadScale": "0.06",
+                "originXY": "0,0",
             }
         )
 

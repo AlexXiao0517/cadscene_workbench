@@ -181,6 +181,12 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "return runProjectWorkbenchTrajectory()" in script
     assert "projectWorkbenchTrajectoryIsPending" in script
     assert "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建" in script
+    availability = script[
+        script.index("function refreshSupplementalWorkflowActionAvailability") :
+        script.index("function blockTrajectoryWorkflowActionsUntilResolved")
+    ]
+    assert 'querySelectorAll("[data-job-action]")' in availability
+    assert "button.disabled = blocked" in availability
 
 
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:

@@ -829,6 +829,8 @@ def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
     assert query["dataset"] == ["project-1-clip-1"]
     assert slugify_dataset_name(query["dataset"][0]) == query["dataset"][0]
     assert query["projectId"] == ["project-1"]
+    assert query["cadScale"] == ["0.06"]
+    assert query["originXY"] == ["0,0"]
     assert query["video"] == ["/data/project-1-clip-1/video/project-1-clip-1.mp4"]
     assert query["cad"] == ["/data/project-1-clip-1/cad/design.json"]
     assert (

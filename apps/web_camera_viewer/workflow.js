@@ -563,6 +563,10 @@
 
   function refreshSupplementalWorkflowActionAvailability(isRunning = false) {
     const blocked = Boolean(isRunning) || trajectoryWorkflowActionsAreBlocked();
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = blocked;
+      if (!blocked) button.removeAttribute("title");
+    });
     const generate = document.querySelector("#workflowGenerateKeyframes");
     const finishQuality = document.querySelector("#workflowFinishQuality");
     const returnKeyframes = document.querySelector("#workflowReturnKeyframes");
