@@ -86,11 +86,15 @@
     thumbnail.hidden = !clip.thumbnail_url;
     const progressTrack = $(".progress-track", row);
     const progressFill = $(".progress-fill", row);
+    const progressPercent = $(".progress-percent", row);
     const fraction = clip.progress?.fraction;
     const active = ["preparing", "running", "validating"].includes(clip.status);
-    progressTrack.hidden = !active;
-    progressTrack.classList.toggle("progress-indeterminate", active && typeof fraction !== "number");
-    progressFill.style.width = typeof fraction === "number" ? `${Math.round(fraction * 100)}%` : "42%";
+    const hasPercentage = typeof fraction === "number";
+    const percent = hasPercentage ? Math.max(0, Math.min(100, Math.round(fraction * 100))) : null;
+    progressTrack.hidden = !active && !hasPercentage;
+    progressFill.style.width = hasPercentage ? `${percent}%` : "0%";
+    if (hasPercentage) progressPercent.textContent = `${percent}%`;
+    else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));

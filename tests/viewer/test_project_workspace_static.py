@@ -74,7 +74,7 @@ def test_workflow_portal_waits_for_analysis_before_navigating_and_has_no_hover_c
     assert "window.location.assign(target.toString())" in script
 
 
-def test_workspace_uses_icon_sidebar_video_thumbnails_and_indeterminate_progress() -> None:
+def test_workspace_uses_icon_sidebar_video_thumbnails_and_progress_track() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
@@ -83,9 +83,45 @@ def test_workspace_uses_icon_sidebar_video_thumbnails_and_indeterminate_progress
     assert 'class="source-video-thumb"' in html
     assert 'class="clip-thumbnail"' in html
     assert "thumbnail_url" in script
-    assert "progress-indeterminate" in script
     assert ".sidebar-label" in css and "max-width" in css
     assert ".progress-track" in css
+
+
+def test_workspace_progress_uses_reported_percentage_without_fake_animation() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="progress-percent"' in html
+    assert "Math.round(fraction * 100)" in script
+    assert 'progressPercent.textContent = `${percent}%`' in script
+    assert 'progressPercent.textContent = "—"' in script
+    assert "progress-indeterminate" not in script
+    assert "progress-sweep" not in css
+
+
+def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png"' in html
+    assert 'class="brand-logo" src="assets/mediaflow-logo.png"' in html
+    assert (WORKSPACE / "assets" / "mediaflow-logo.png").is_file()
+    assert ".app-shell.sidebar-collapsed .nav-item" in css
+    assert "grid-template-columns: 24px 0fr" in css
+    assert "transition: grid-template-columns" in css
+
+
+def test_upload_workspace_and_workbench_share_the_product_favicon() -> None:
+    favicon = '<link rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png">'
+    pages = (
+        ROOT / "apps" / "workflow_portal" / "index.html",
+        WORKSPACE / "index.html",
+        ROOT / "apps" / "web_camera_viewer" / "index.html",
+    )
+
+    for page in pages:
+        assert favicon in page.read_text(encoding="utf-8")
 
 
 def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> None:
