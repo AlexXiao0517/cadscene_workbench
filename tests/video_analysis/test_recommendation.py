@@ -66,7 +66,8 @@ def test_srt_file_without_temporal_clip_coverage_does_not_override_motion() -> N
     recommendation = recommend_workflow(MotionMode.ROTATION_DOMINANT, 0.88, coverage)
 
     assert coverage.kind is SrtCoverageKind.NONE
-    assert recommendation.recommended_workflow == "pure_rotation"
+    assert recommendation.recommended_workflow == "sfm_only"
+    assert recommendation.needs_review is True
 
 
 def test_no_srt_general_motion_recommends_sfm_only() -> None:
@@ -96,7 +97,26 @@ def test_unknown_or_low_confidence_is_review_only_and_never_auto_selects() -> No
 
     assert unknown.recommended_workflow == "sfm_only"
     assert unknown.needs_review is True
-    assert low_rotation.recommended_workflow == "pure_rotation"
+    assert low_rotation.recommended_workflow == "sfm_only"
     assert low_rotation.needs_review is True
     assert unknown.auto_selected is False
     assert low_rotation.auto_selected is False
+
+
+def test_pure_rotation_requires_explicit_verification() -> None:
+    coverage = assess_clip_srt_coverage(
+        [],
+        clip_source_start_pts_sec=0.0,
+        clip_source_end_pts_sec=20.0,
+        video_source_start_pts_sec=0.0,
+    )
+
+    recommendation = recommend_workflow(
+        MotionMode.ROTATION_DOMINANT,
+        0.9,
+        coverage,
+        pure_rotation_verified=True,
+    )
+
+    assert recommendation.recommended_workflow == "pure_rotation"
+    assert recommendation.needs_review is False

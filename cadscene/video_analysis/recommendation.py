@@ -130,6 +130,7 @@ def recommend_workflow(
     srt_coverage: ClipSrtCoverage,
     *,
     confidence_threshold: float = 0.6,
+    pure_rotation_verified: bool = False,
 ) -> WorkflowRecommendation:
     reasons: list[str] = []
     if srt_coverage.kind is SrtCoverageKind.FULL_POSE:
@@ -138,15 +139,24 @@ def recommend_workflow(
     elif srt_coverage.kind is SrtCoverageKind.PARTIAL:
         workflow = "srt_sfm_fused"
         reasons.append("valid_partial_srt_coverage")
-    elif motion_mode is MotionMode.ROTATION_DOMINANT:
+    elif motion_mode is MotionMode.ROTATION_DOMINANT and pure_rotation_verified:
         workflow = "pure_rotation"
-        reasons.append("rotation_dominant_without_srt")
+        reasons.append("verified_pure_rotation_without_srt")
     else:
         workflow = "sfm_only"
-        reasons.append("general_or_conservative_without_srt")
+        reasons.append(
+            "rotation_dominant_without_verified_pure_rotation"
+            if motion_mode is MotionMode.ROTATION_DOMINANT
+            else "general_or_conservative_without_srt"
+        )
 
     needs_review = (
         motion_mode in {MotionMode.UNKNOWN, MotionMode.STATIC}
+        or (
+            motion_mode is MotionMode.ROTATION_DOMINANT
+            and srt_coverage.kind is SrtCoverageKind.NONE
+            and not pure_rotation_verified
+        )
         or motion_confidence < confidence_threshold
     )
     if motion_mode is MotionMode.UNKNOWN:
@@ -154,4 +164,3 @@ def recommend_workflow(
     if motion_confidence < confidence_threshold:
         reasons.append("low_motion_confidence")
     return WorkflowRecommendation(workflow, needs_review, False, tuple(reasons))
-
