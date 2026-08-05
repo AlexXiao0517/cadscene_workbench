@@ -58,6 +58,36 @@ def test_workflow_portal_redirects_new_uploads_to_project_workspace() -> None:
     assert "state.manifest = null" in script
 
 
+def test_workflow_portal_waits_for_analysis_before_navigating_and_has_no_hover_choice() -> None:
+    html = (ROOT / "apps" / "workflow_portal" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    script = (ROOT / "apps" / "workflow_portal" / "workflow_portal.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "无人机悬停，仅转动视角" not in html
+    assert 'id="analysisOverlay"' in html
+    assert "waitForAnalysisCompletion" in script
+    assert "/snapshot" in script
+    assert "analysis_failed" in script
+    assert "window.location.assign(target.toString())" in script
+
+
+def test_workspace_uses_icon_sidebar_video_thumbnails_and_indeterminate_progress() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert "<svg" in html
+    assert 'class="source-video-thumb"' in html
+    assert 'class="clip-thumbnail"' in html
+    assert "thumbnail_url" in script
+    assert "progress-indeterminate" in script
+    assert ".sidebar-label" in css and "max-width" in css
+    assert ".progress-track" in css
+
+
 def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

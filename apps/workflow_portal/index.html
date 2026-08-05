@@ -30,17 +30,6 @@
           <label class="file-picker">选择 SRT<input id="portalSrt" type="file" accept=".srt" /></label>
           <progress id="srtProgress" max="1" value="0"></progress>
         </section>
-        <section id="portalMotionMode" class="motion-card" aria-labelledby="motionModeLabel">
-          <div>
-            <strong id="motionModeLabel">无 SRT 拍摄模式</strong>
-            <span>默认使用通用 SfM 三维重建流程</span>
-          </div>
-          <label class="motion-choice">
-            <input id="portalHoveringDeclared" type="checkbox" />
-            无人机悬停，仅转动视角（实验）
-          </label>
-          <p>勾选后使用 OpenGV 恢复相对旋转；不恢复相机平移，后续需要人工设置固定相机位置。</p>
-        </section>
         <p id="portalMessage" class="message" role="status">请选择所需文件。</p>
         <button id="portalSubmit" type="submit">创建并上传</button>
       </form>
@@ -65,6 +54,15 @@
         </details>
       </section>
     </main>
-    <script src="./workflow_portal.js?v=20260730-pure-rotation-v1"></script>
+    <div id="analysisOverlay" class="analysis-overlay" hidden role="status" aria-live="polite" aria-label="项目分析中">
+      <div class="analysis-card">
+        <div class="analysis-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">MEDIAFLOW</p>
+        <h2 id="analysisTitle">正在准备分析</h2>
+        <p id="analysisDetail">正在读取上传文件…</p>
+        <div class="analysis-steps"><span id="analysisCadStep">CAD 读取</span><span id="analysisVideoStep">视频分析</span></div>
+      </div>
+    </div>
+    <script src="./workflow_portal.js?v=20260805-project-analysis-v1"></script>
   </body>
 </html>

@@ -189,9 +189,12 @@ def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     by_id = {item["clip_id"]: item for item in response.body["clips"]}
 
     assert response.body["capabilities"]["can_merge"] is False
+    assert response.body["display_name"] == "p1"
+    assert response.body["assets"]["video"]["thumbnail_url"] == "/api/projects/p1/thumbnails/source"
     assert by_id["ready"]["display_name"] == "场景 02 · 第 1 段"
     assert by_id["ready"]["time_range"] == "01:30 – 02:30"
     assert by_id["ready"]["duration"] == "01:00"
+    assert by_id["ready"]["thumbnail_url"] == "/api/projects/p1/thumbnails/clips/ready"
     assert by_id["ready"]["capabilities"]["can_start_trajectory"] is True
     assert by_id["full-pose"]["recommended_workflow"] == "srt_full_pose"
     assert by_id["full-pose"]["capabilities"]["can_start_trajectory"] is False

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from contextlib import ExitStack
 from fractions import Fraction
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import BinaryIO, Callable, Mapping
 from uuid import uuid4
@@ -185,6 +186,21 @@ class ProjectApi:
             str(payload.get("project_id") or f"project-{self._identity()}")
         )
         self.repositories.create_project(project_id, updated_at=self.now())
+        display_name = str(payload.get("display_name") or "").strip()
+        if display_name:
+            project = self.repositories.project.load(project_id)
+            self.repositories.project.update(
+                project_id,
+                expected_revision=project.revision,
+                mutate=lambda current: replace(
+                    current,
+                    updated_at=self.now(),
+                    source_assets={
+                        **current.source_assets,
+                        "display_name": display_name[:120],
+                    },
+                ),
+            )
         return ApiResponse(
             201,
             {
@@ -339,6 +355,9 @@ class ProjectApi:
                     "clip_id": clip.clip_id,
                     "job_id": None if job is None else job.get("job_id"),
                     "display_name": clip.display_name,
+                    "thumbnail_url": (
+                        f"/api/projects/{project_id}/thumbnails/clips/{clip.clip_id}"
+                    ),
                     "generated_display_name": clip.generated_display_name,
                     "custom_display_name": clip.custom_display_name,
                     "time_range": _friendly_range(clip),
@@ -379,10 +398,11 @@ class ProjectApi:
             )
         snapshot = {
             "project_id": project_id,
+            "display_name": str(project.source_assets.get("display_name") or project_id),
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
-            "assets": dict(project.source_assets),
+            "assets": _snapshot_assets(project_id, project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,
                 "can_render": can_render_any,
@@ -745,6 +765,24 @@ def _friendly_range(clip: ClipDefinition) -> str:
 def _friendly_duration(clip: ClipDefinition) -> str:
     start, end = _clip_seconds(clip)
     return _clock(end - start)
+
+
+def _snapshot_assets(
+    project_id: str, source_assets: Mapping[str, object]
+) -> dict[str, object]:
+    assets: dict[str, object] = dict(source_assets)
+    video = assets.get("video")
+    if not isinstance(video, Mapping) and assets.get("video_path"):
+        video = {
+            "path": str(assets["video_path"]),
+            "original_filename": Path(str(assets["video_path"])).name,
+        }
+    if isinstance(video, Mapping):
+        assets["video"] = {
+            **video,
+            "thumbnail_url": f"/api/projects/{project_id}/thumbnails/source",
+        }
+    return assets
 
 
 def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:

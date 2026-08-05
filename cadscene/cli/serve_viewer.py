@@ -223,6 +223,71 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             response = ApiResponse(400, {"error": str(exc)})
         self._project_response(response)
 
+    def _send_project_thumbnail(self, path: str) -> None:
+        match = re.fullmatch(
+            r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
+            path,
+        )
+        if match is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "thumbnail not found")
+            return
+        api = getattr(self.server, "project_api", None)
+        if api is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "project API unavailable")
+            return
+        project_id, clip_id = match["project"], match["clip"]
+        project = api.repositories.project.load(project_id)
+        asset = project.source_assets.get("video")
+        if not isinstance(asset, dict) or not asset.get("path"):
+            self.send_error(HTTPStatus.NOT_FOUND, "source video not found")
+            return
+        seek_sec = 0.0
+        if clip_id:
+            from fractions import Fraction
+
+            clips = api.repositories.clips.load(project_id)
+            clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+            if clip is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "clip not found")
+                return
+            time_base = clip.analysis.get("source_time_base")
+            if not isinstance(time_base, dict):
+                self.send_error(HTTPStatus.CONFLICT, "clip time base is unavailable")
+                return
+            seek_sec = float(
+                Fraction(int(clip.analysis["source_start_pts"]))
+                * Fraction(int(time_base["numerator"]), int(time_base["denominator"]))
+            )
+        cache_dir = Path(self.server.storage_root_dir) / "projects" / project_id / "thumbnails"
+        cached = cache_dir / ("source.jpg" if not clip_id else f"{clip_id}.jpg")
+        if not cached.is_file():
+            import cv2
+
+            capture = cv2.VideoCapture(str(asset["path"]))
+            try:
+                capture.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
+                ok, frame = capture.read()
+            finally:
+                capture.release()
+            if not ok:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "thumbnail frame unavailable")
+                return
+            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if not ok:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "thumbnail encoding failed")
+                return
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            temporary = cached.with_suffix(".tmp")
+            temporary.write_bytes(encoded.tobytes())
+            os.replace(temporary, cached)
+        body = cached.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
         if length <= 0 or length > 10 * 1024 * 1024:
@@ -591,6 +656,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/projects/") and "/thumbnails/" in parsed.path:
+            self._send_project_thumbnail(parsed.path)
+            return
         if parsed.path.startswith("/api/projects/"):
             self._dispatch_project_api("GET")
             return

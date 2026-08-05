@@ -40,13 +40,35 @@
     );
   }
 
-  function updateMotionModeAvailability() {
-    const srt = $("#portalSrt").files[0];
-    const motionSection = $("#portalMotionMode");
-    const hoveringInput = $("#portalHoveringDeclared");
-    motionSection.hidden = Boolean(srt);
-    hoveringInput.disabled = Boolean(srt);
-    if (srt) hoveringInput.checked = false;
+  function setAnalysisState(title, detail, { cad = false, video = false } = {}) {
+    $("#analysisTitle").textContent = title;
+    $("#analysisDetail").textContent = detail;
+    $("#analysisCadStep").classList.toggle("is-complete", cad);
+    $("#analysisVideoStep").classList.toggle("is-complete", video);
+  }
+
+  function showAnalysisOverlay() { $("#analysisOverlay").hidden = false; }
+
+  async function waitForAnalysisCompletion() {
+    const snapshotUrl = `/api/projects/${encodeURIComponent(state.dataset)}/snapshot`;
+    while (true) {
+      const response = await fetch(snapshotUrl, { cache: "no-store" });
+      const snapshot = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(snapshot.error || "无法读取分析状态");
+      const projectState = snapshot.project_state || "analyzing";
+      const cadDone = Boolean(snapshot.assets?.cad);
+      const videoDone = projectState === "ready" && Boolean(snapshot.clips?.length);
+      setAnalysisState(
+        videoDone ? "分析完成，正在打开片段管理" : "正在分析项目素材",
+        videoDone ? "逻辑片段已生成。" : (cadDone ? "CAD 已读取，正在分析视频与场景边界…" : "正在读取 CAD 图纸…"),
+        { cad: cadDone, video: videoDone },
+      );
+      if (videoDone) return snapshot;
+      if (["analysis_failed", "analysis_interrupted", "analysis_cancelled"].includes(projectState)) {
+        throw new Error(`项目分析未完成：${projectState}`);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
   }
 
   async function postJson(path, payload) {
@@ -98,7 +120,6 @@
     const video = $("#portalVideo").files[0];
     const cad = $("#portalCad").files[0];
     const srt = $("#portalSrt").files[0];
-    const hoveringDeclared = Boolean(!srt && $("#portalHoveringDeclared").checked);
     if (!video || !cad) { setMessage("请先选择视频和 CAD 文件。"); return; }
     $("#portalSubmit").disabled = true;
     state.dataset = generatedId("dataset");
@@ -107,7 +128,7 @@
     state.manifest = null;
     try {
       setMessage("正在创建项目…");
-      await postJson("/api/projects", { project_id: state.dataset, hoveringDeclared });
+      await postJson("/api/projects", { project_id: state.dataset, display_name: video.name.replace(/\.[^.]+$/, "") });
       const videoResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/video?expectedRevision=${state.projectRevision}`, video, "video");
       state.projectRevision = videoResult.project_revision;
       setFileStatus("video", "视频已上传", 1);
@@ -120,7 +141,10 @@
       const cadResult = await upload(`/api/projects/${encodeURIComponent(state.dataset)}/uploads/cad?expectedRevision=${state.projectRevision}`, cad, "cad");
       state.projectRevision = cadResult.project_revision;
       setFileStatus("cad", "CAD 已上传并进入分析队列", 1);
-      setMessage("上传完成，正在进入项目片段管理。");
+      showAnalysisOverlay();
+      setAnalysisState("正在读取项目素材", "正在读取 CAD 图纸并准备视频分析…");
+      await waitForAnalysisCompletion();
+      setMessage("分析完成，正在进入项目片段管理。");
       const target = new URL("/apps/project_workspace/", window.location.origin);
       target.searchParams.set("projectId", state.dataset);
       window.location.assign(target.toString());
@@ -133,10 +157,8 @@
   ["video", "cad", "srt"].forEach((kind) => {
     $(`#portal${kind[0].toUpperCase()}${kind.slice(1)}`).addEventListener("change", () => {
       updateSelectedFileStatus(kind, kind !== "srt");
-      if (kind === "srt") updateMotionModeAvailability();
     });
   });
-  updateMotionModeAvailability();
   $("#portalEnter").addEventListener("click", () => {
     const mode = debugEnabled && $("#portalModeOverride").value ? $("#portalModeOverride").value : state.mode;
     const target = new URL("/apps/web_camera_viewer/", window.location.origin);

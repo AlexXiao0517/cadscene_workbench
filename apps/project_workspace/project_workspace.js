@@ -76,12 +76,16 @@
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
     $(".status-pill", row).textContent = clip.status || "ready";
-    $(".stage-label", row).textContent = clip.stage || "";
-    const progress = $("progress", row);
+    const thumbnail = $(".clip-thumbnail img", row);
+    thumbnail.src = clip.thumbnail_url || "";
+    thumbnail.hidden = !clip.thumbnail_url;
+    const progressTrack = $(".progress-track", row);
+    const progressFill = $(".progress-fill", row);
     const fraction = clip.progress?.fraction;
-    progress.hidden = typeof fraction !== "number";
-    if (!progress.hidden) progress.value = fraction;
-    $(".stage-only", row).textContent = progress.hidden ? (clip.progress?.message || clip.stage || "—") : `${Math.round(fraction * 100)}%`;
+    const active = ["preparing", "running", "validating"].includes(clip.status);
+    progressTrack.hidden = !active;
+    progressTrack.classList.toggle("progress-indeterminate", active && typeof fraction !== "number");
+    progressFill.style.width = typeof fraction === "number" ? `${Math.round(fraction * 100)}%` : "42%";
     applyCapabilities(clip, row);
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
@@ -91,8 +95,8 @@
 
   function renderSnapshot(snapshot) {
     state.snapshot = snapshot;
-    $("#sidebarProjectName").textContent = snapshot.project_id;
-    $("#projectBreadcrumb").textContent = `${snapshot.project_id} · ${snapshot.project_state}`;
+    $("#sidebarProjectName").textContent = snapshot.display_name || snapshot.project_id;
+    $("#projectBreadcrumb").textContent = `${snapshot.display_name || snapshot.project_id} · ${snapshot.project_state}`;
     const assets = snapshot.assets || {};
     for (const [kind, nameId, metaId] of [["video", "sourceVideoName", "sourceVideoMeta"], ["cad", "cadName", "cadMeta"], ["srt", "srtName", "srtMeta"]]) {
       const asset = assets[kind];
@@ -100,6 +104,9 @@
       $(`#${nameId}`).textContent = asset.original_filename || kind;
       $(`#${metaId}`).textContent = asset.size_bytes ? `${(asset.size_bytes / 1048576).toFixed(1)} MB` : "已验证";
     }
+    const sourceThumb = $("#sourceVideoThumbnail");
+    sourceThumb.src = assets.video?.thumbnail_url || "";
+    sourceThumb.hidden = !assets.video?.thumbnail_url;
     $("#clipCount").textContent = snapshot.clips.length;
     $("#pendingCount").textContent = snapshot.clips.filter((clip) => ["ready", "queued"].includes(clip.status)).length;
     $("#runningCount").textContent = snapshot.clips.filter((clip) => ["preparing", "running", "validating"].includes(clip.status)).length;
