@@ -82,10 +82,11 @@ function showSelectedFile(kind, file) {
   preview.hidden = false;
   preview.querySelector(".file-name").textContent = file.name;
   preview.querySelector(".file-meta").textContent = fileSize(file.size);
-  const card = $(`[data-upload-kind="${kind}"]`);
-  card.classList.add("has-file");
-  card.querySelector(".drop-copy").hidden = true;
-  card.querySelector(".upload-glyph").hidden = true;
+  const pane = $(`[data-upload-kind="${kind}"]`);
+  pane.classList.add("has-file");
+  pane.classList.remove("is-complete", "is-error");
+  pane.querySelector(".drop-copy").hidden = true;
+  pane.querySelector(".upload-glyph").hidden = true;
   $(`#${kind}ProgressWrap`).hidden = false;
   if (kind === "video") {
     const video = preview.querySelector("video");
@@ -99,6 +100,8 @@ async function startAssetUpload(kind, file) {
   state.completed[kind] = false;
   updateCreateAvailability();
   showSelectedFile(kind, file);
+  const pane = kind === "srt" ? null : $(`[data-upload-kind="${kind}"]`);
+  if (pane) pane.classList.add("is-uploading");
   if (kind !== "srt") $(`[data-reselect="${kind}"]`).hidden = true;
   try {
     await ensureProject(file);
@@ -106,10 +109,12 @@ async function startAssetUpload(kind, file) {
       setUploadVisual(kind, loaded, total, acknowledged);
     });
     state.completed[kind] = true;
+    const progressWrap = kind === "srt" ? $("#srtProgressWrap") : $(`#${kind}ProgressWrap`);
+    progressWrap.hidden = true;
     if (kind === "srt") $("#srtStatus").textContent = `${file.name} · 上传完成`;
     else {
-      const card = $(`[data-upload-kind="${kind}"]`);
-      card.classList.add("is-complete");
+      pane.classList.remove("is-uploading");
+      pane.classList.add("is-complete");
       $(`[data-reselect="${kind}"]`).hidden = false;
     }
     updateCreateAvailability();
@@ -117,6 +122,10 @@ async function startAssetUpload(kind, file) {
     return result;
   } catch (error) {
     state.completed[kind] = false;
+    if (pane) {
+      pane.classList.remove("is-uploading");
+      pane.classList.add("is-error");
+    }
     updateCreateAvailability();
     setMessage(`${kind === "video" ? "视频" : kind === "cad" ? "CAD" : "SRT"}上传失败：${error.message}`, true);
     throw error;

@@ -97,7 +97,7 @@ def test_portal_shows_video_preview_and_only_enables_create_after_both_uploads()
 def test_completed_upload_replaces_the_picker_copy_instead_of_stacking_both() -> None:
     script, css = _read("workflow_portal.js"), _read("style.css")
 
-    assert 'card.classList.add("has-file")' in script
+    assert 'pane.classList.add("has-file")' in script
     assert ".drop-copy[hidden]" in css
     assert ".upload-glyph[hidden]" in css
     assert ".file-preview[hidden]" in css
@@ -126,7 +126,7 @@ def test_upload_columns_are_not_wrapped_in_visual_cards() -> None:
     assert 'class="upload-pane"' in html
     assert 'class="upload-card"' not in html
     assert ".upload-pane {" in css
-    assert ".upload-pane { min-width: 0; padding: 0; border: 0; background: transparent; }" in css
+    assert ".upload-pane { position: relative; min-width: 0; padding: 0; border: 0; background: transparent; }" in css
 
 
 def test_portal_uses_transparent_cad_video_logo_and_pill_buttons() -> None:
@@ -150,6 +150,32 @@ def test_portal_supports_persisted_light_and_dark_themes() -> None:
     assert 'setAttribute("data-theme", theme)' in script
 
 
+def test_new_project_title_lives_in_the_flat_top_navigation() -> None:
+    html, css = _read("index.html"), _read("style.css")
+
+    assert 'class="top-navigation"' in html
+    assert 'class="current-product">新建项目</span>' in html
+    assert 'class="heading-copy"' not in html
+    assert ".current-product {" in css
+
+
+def test_upload_pane_has_distinct_uploading_and_completed_visual_states() -> None:
+    script, css = _read("workflow_portal.js"), _read("style.css")
+
+    assert 'pane.classList.add("is-uploading")' in script
+    assert 'pane.classList.remove("is-uploading")' in script
+    assert 'progressWrap.hidden = true' in script
+    assert ".upload-pane.is-uploading .drop-zone" in css
+    assert ".upload-pane.is-complete .drop-zone" in css
+
+
+def test_successful_upload_hides_progress_instead_of_leaving_one_hundred_percent_visible() -> None:
+    script = _read("workflow_portal.js")
+
+    success_block = script[script.index("state.completed[kind] = true") : script.index("return result;")]
+    assert 'progressWrap.hidden = true' in success_block
+
+
 def test_analysis_modal_has_close_control_and_animated_circular_real_progress() -> None:
     html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
 
@@ -167,10 +193,10 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
     assert "form { padding: 0; border: 0; background: transparent; }" in css
 
 
-def test_portal_busts_cached_assets_for_the_theme_and_logo_redesign() -> None:
+def test_portal_busts_cached_assets_for_the_flat_upload_state_redesign() -> None:
     html = _read("index.html")
 
-    assert "20260806-upload-v4" in html
+    assert "20260806-upload-v5" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
