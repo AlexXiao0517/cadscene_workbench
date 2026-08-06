@@ -3,12 +3,13 @@ import { createProject, getSnapshot, retryAnalysis, uploadAsset } from "./portal
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
 const legacyRouteCompatibility = [
   "/api/workflow/create-dataset", "/api/workflow/upload-video",
-  "/api/workflow/upload-cad", "/api/workflow/upload-srt",
+  "/api/workflow/upload-cad", "/api/workflow/upload-srt", "/snapshot",
 ];
 void legacyRouteCompatibility;
 
 const state = {
-  projectId: "", projectPromise: null, files: {}, uploads: {},
+  projectId: "", dataset: "", projectRevision: 0, manifest: null,
+  projectPromise: null, files: {}, uploads: {},
   completed: { video: false, cad: false, srt: false }, etag: "", snapshot: null,
 };
 const $ = (selector) => document.querySelector(selector);
@@ -28,6 +29,9 @@ function setMessage(message, error = false) {
 function ensureProject(file) {
   if (state.projectPromise) return state.projectPromise;
   state.projectId = generatedId();
+  state.dataset = state.projectId;
+  state.projectRevision = 0;
+  state.manifest = null;
   const displayName = file.name.replace(/\.[^.]+$/, "") || "新建视频项目";
   state.projectPromise = createProject(state.projectId, displayName);
   return state.projectPromise;
@@ -185,7 +189,7 @@ async function submit(event) {
     await waitForAnalysisCompletion();
     await delay(450);
     const target = new URL("/apps/project_workspace/", window.location.origin);
-    target.searchParams.set("projectId", state.projectId);
+    target.searchParams.set("projectId", state.dataset);
     window.location.assign(target.toString());
   } catch (error) {
     $("#analysisError").textContent = `任务停止：${error.message}`;
