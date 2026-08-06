@@ -3,67 +3,124 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CAD 场景工作流</title>
-    <link rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png">
-    <link rel="stylesheet" href="./style.css?v=20260730-pure-rotation-v1" />
+    <title>新建视频叠加项目 · MediaFlow</title>
+    <link rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png" />
+    <link rel="stylesheet" href="./style.css?v=20260806-upload-v2" />
   </head>
   <body>
     <main class="portal-shell">
-      <header>
-        <p class="eyebrow">CAD SCENE</p>
-        <h1>新建项目</h1>
-        <p>上传航拍视频和 CAD 图纸；如有 DJI SRT，可一并上传以自动识别轨迹工作模式。</p>
+      <header class="portal-header">
+        <a class="brand" href="/" aria-label="MediaFlow 首页">
+          <img src="/apps/project_workspace/assets/mediaflow-logo.png" alt="" />
+          <span><strong>MediaFlow</strong><small>CAD 视频叠加工作台</small></span>
+        </a>
+        <div class="heading-copy">
+          <p class="eyebrow">新建项目</p>
+          <h1>创建视频叠加任务</h1>
+          <p>上传航拍视频与 CAD 图纸。文件上传完成后，系统将读取 CAD 并分析视频场景。</p>
+        </div>
       </header>
 
       <form id="portalForm" novalidate>
-        <section class="upload-card" aria-labelledby="videoLabel">
-          <div><strong id="videoLabel">视频 <em>必传</em></strong><span id="videoStatus">尚未选择</span></div>
-          <label class="file-picker">选择视频<input id="portalVideo" type="file" accept="video/*,.mp4,.mov,.avi,.mkv" required /></label>
-          <progress id="videoProgress" max="1" value="0"></progress>
-        </section>
-        <section class="upload-card" aria-labelledby="cadLabel">
-          <div><strong id="cadLabel">CAD <em>必传</em></strong><span id="cadStatus">尚未选择</span></div>
-          <label class="file-picker">选择 CAD<input id="portalCad" type="file" accept=".dxf,.dwg" required /></label>
-          <progress id="cadProgress" max="1" value="0"></progress>
-        </section>
-        <section class="upload-card" aria-labelledby="srtLabel">
-          <div><strong id="srtLabel">SRT 遥测 <i>选填</i></strong><span id="srtStatus">不上传也可使用 SfM 工作流</span></div>
-          <label class="file-picker">选择 SRT<input id="portalSrt" type="file" accept=".srt" /></label>
-          <progress id="srtProgress" max="1" value="0"></progress>
-        </section>
-        <p id="portalMessage" class="message" role="status">请选择所需文件。</p>
-        <button id="portalSubmit" type="submit">创建并上传</button>
-      </form>
+        <div class="upload-grid">
+          <section class="upload-card" data-upload-kind="video" aria-labelledby="videoLabel">
+            <div class="card-heading">
+              <span><strong id="videoLabel">上传视频</strong><em>必传</em></span>
+              <small>仅支持 MP4</small>
+            </div>
+            <label class="drop-zone" for="portalVideo">
+              <input id="portalVideo" type="file" accept=".mp4,video/mp4" required />
+              <span class="upload-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg>
+              </span>
+              <span class="drop-copy"><strong>点击选择或拖放视频到此处</strong><small>建议使用原始 MP4 文件</small></span>
+              <span class="file-preview" id="videoPreview" hidden>
+                <video muted preload="metadata"></video>
+                <span><strong class="file-name"></strong><small class="file-meta"></small></span>
+              </span>
+            </label>
+            <div class="upload-progress" id="videoProgressWrap" hidden>
+              <div><span id="videoStatus">等待选择</span><strong id="videoPercent">0%</strong></div>
+              <div class="meter"><span id="videoProgress"></span></div>
+            </div>
+            <button class="reselect" data-reselect="video" type="button" hidden>重新选择</button>
+          </section>
 
-      <section id="portalResult" class="result" hidden aria-live="polite">
-        <h2>检测结果</h2>
-        <p id="portalMode"></p>
-        <p id="portalSummary"></p>
-        <button id="portalEnter" type="button" disabled>进入项目</button>
-        <details id="portalDebug" class="debug-only">
-          <summary>调试信息</summary>
-          <p id="portalIdentifiers"></p>
-          <label>模式覆盖
-            <select id="portalModeOverride">
-              <option value="">自动检测</option>
-              <option value="sfm_only">仅 SfM</option>
-              <option value="pure_rotation">悬停旋转（实验）</option>
-              <option value="srt_sfm_fused">SRT + SfM（接口）</option>
-              <option value="srt_full_pose">SRT 完整姿态（接口）</option>
-            </select>
-          </label>
+          <section class="upload-card" data-upload-kind="cad" aria-labelledby="cadLabel">
+            <div class="card-heading">
+              <span><strong id="cadLabel">上传 CAD 图纸</strong><em>必传</em></span>
+              <small>仅支持 DXF</small>
+            </div>
+            <label class="drop-zone" for="portalCad">
+              <input id="portalCad" type="file" accept=".dxf,application/dxf" required />
+              <span class="upload-glyph cad-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 18.5 9 13l3 3 4-5 4 3.5M5 4h14a1 1 0 0 1 1 1v14H4V5a1 1 0 0 1 1-1Z"/></svg>
+              </span>
+              <span class="drop-copy"><strong>点击选择或拖放图纸到此处</strong><small>上传后将在任务中解析图层与实体</small></span>
+              <span class="file-preview cad-preview" id="cadPreview" hidden>
+                <span class="cad-sheet" aria-hidden="true">DXF</span>
+                <span><strong class="file-name"></strong><small class="file-meta"></small></span>
+              </span>
+            </label>
+            <div class="upload-progress" id="cadProgressWrap" hidden>
+              <div><span id="cadStatus">等待选择</span><strong id="cadPercent">0%</strong></div>
+              <div class="meter"><span id="cadProgress"></span></div>
+            </div>
+            <button class="reselect" data-reselect="cad" type="button" hidden>重新选择</button>
+          </section>
+        </div>
+
+        <details class="optional-upload">
+          <summary><span>SRT 遥测 <i>可选</i></span><small>如有 DJI SRT，可辅助推荐片段工作流</small></summary>
+          <div class="optional-body">
+            <input id="portalSrt" type="file" accept=".srt,application/x-subrip" />
+            <button id="srtPicker" type="button">选择 SRT</button>
+            <span id="srtStatus">未选择</span>
+            <div class="meter"><span id="srtProgress"></span></div><strong id="srtPercent">0%</strong>
+          </div>
         </details>
-      </section>
+
+        <p id="portalMessage" class="message" role="status">请选择视频和 CAD 图纸，文件会在选择后立即上传。</p>
+        <button id="portalSubmit" class="primary-action" type="submit" disabled>
+          <span>创建叠加任务</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"/></svg>
+        </button>
+
+        <details id="portalDebug" class="debug-only">
+          <summary>调试信息</summary><pre id="portalIdentifiers"></pre>
+        </details>
+      </form>
     </main>
-    <div id="analysisOverlay" class="analysis-overlay" hidden role="status" aria-live="polite" aria-label="项目分析中">
-      <div class="analysis-card">
-        <div class="analysis-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
-        <p class="eyebrow">MEDIAFLOW</p>
-        <h2 id="analysisTitle">正在准备分析</h2>
-        <p id="analysisDetail">正在读取上传文件…</p>
-        <div class="analysis-steps"><span id="analysisCadStep">CAD 读取</span><span id="analysisVideoStep">视频分析</span></div>
-      </div>
+
+    <div id="analysisOverlay" class="analysis-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="analysisTitle">
+      <section class="analysis-card">
+        <div class="modal-heading">
+          <div><p class="eyebrow">MEDIAFLOW</p><h2 id="analysisTitle">正在创建叠加任务</h2></div>
+          <span class="live-dot" aria-label="任务运行中"></span>
+        </div>
+        <p id="analysisDetail">正在读取项目状态…</p>
+        <ol class="task-stages">
+          <li id="taskStageUpload" class="is-complete">
+            <span class="stage-icon">1</span><div><strong>上传文件</strong><small>视频与 CAD 已原子发布</small><div class="meter"><span></span></div></div><b>100%</b>
+          </li>
+          <li id="taskStageCad">
+            <span class="stage-icon">2</span><div><strong>解析 CAD</strong><small>等待任务启动</small><div class="meter"><span></span></div></div><b>0%</b>
+          </li>
+          <li id="taskStageVideo">
+            <span class="stage-icon">3</span><div><strong>解析视频</strong><small>等待 CAD 解析完成</small><div class="meter"><span></span></div></div><b>0%</b>
+          </li>
+          <li id="taskStageWorkspace">
+            <span class="stage-icon">4</span><div><strong>初始化工作台</strong><small>等待生成逻辑片段</small><div class="meter"><span></span></div></div><b>0%</b>
+          </li>
+        </ol>
+        <div class="overall-progress">
+          <div><span>总体进度</span><strong id="taskOverallPercent">15%</strong></div>
+          <div class="meter"><span id="taskOverallProgress"></span></div>
+        </div>
+        <p id="analysisError" class="analysis-error" hidden></p>
+        <button id="analysisRetry" class="retry-action" type="button" hidden>重试失败阶段</button>
+      </section>
     </div>
-    <script src="./workflow_portal.js?v=20260805-project-analysis-v1"></script>
+
+    <script type="module" src="./workflow_portal.js?v=20260806-upload-v2"></script>
   </body>
 </html>

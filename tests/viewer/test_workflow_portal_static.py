@@ -6,89 +6,102 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _read(name: str) -> str:
+    return (ROOT / "apps/workflow_portal" / name).read_text(encoding="utf-8")
+
+
 def test_workflow_routing_documentation_describes_all_three_modes() -> None:
     text = (ROOT / "docs/workflow_routing.md").read_text(encoding="utf-8")
-
     assert all(mode in text for mode in ("sfm_only", "srt_sfm_fused", "srt_full_pose"))
 
 
 def test_portal_marks_video_and_cad_required_but_srt_optional() -> None:
-    html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
-
-    assert "视频" in html and "必传" in html
-    assert "CAD" in html and "必传" in html
-    assert "SRT" in html and "选填" in html
+    html = _read("index.html")
+    assert "上传视频" in html and "必传" in html
+    assert "上传 CAD 图纸" in html and "必传" in html
+    assert "SRT" in html and "可选" in html
 
 
 def test_portal_keeps_internal_identifiers_debug_only() -> None:
-    html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-    css = (ROOT / "apps/workflow_portal/style.css").read_text(encoding="utf-8")
-
+    html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
     assert 'id="portalDebug"' in html
     assert "debug=1" in script
     assert ".debug-only" in css
 
 
-def test_portal_uses_existing_upload_apis_and_viewer_route() -> None:
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-
+def test_portal_keeps_legacy_routes_documented_and_uses_project_workspace() -> None:
+    script = _read("workflow_portal.js")
     for route in (
         "/api/workflow/create-dataset",
         "/api/workflow/upload-video",
         "/api/workflow/upload-cad",
         "/api/workflow/upload-srt",
-        "/apps/web_camera_viewer/",
+        "/apps/project_workspace/",
     ):
         assert route in script
 
 
-def test_portal_shows_selected_files_before_uploading() -> None:
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-
-    assert 'addEventListener("change", () => {' in script
-    assert '"已选择，等待上传"' in script
-
-
-def test_portal_passes_manifest_resource_paths_to_existing_viewer() -> None:
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-
-    assert 'target.searchParams.set("video", state.manifest.video.url)' in script
-    assert 'target.searchParams.set("cad", state.manifest.cad.url)' in script
-    assert 'target.searchParams.set("cadScale", String(state.manifest.defaults.cad_scale))' in script
-    assert 'target.searchParams.set("originXY", state.manifest.defaults.origin_xy.join(","))' in script
+def test_portal_uploads_each_selected_file_immediately() -> None:
+    script = _read("workflow_portal.js")
+    assert "startAssetUpload(kind, file)" in script
+    assert "state.uploads.video" in script and "state.uploads.cad" in script
 
 
 def test_portal_removes_the_legacy_hovering_rotation_choice() -> None:
-    html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-
+    html, script = _read("index.html"), _read("workflow_portal.js")
     assert 'id="portalMotionMode"' not in html
     assert 'id="portalHoveringDeclared"' not in html
-    assert "无人机悬停，仅转动视角（实验）" not in html
+    assert "无人机悬停" not in html
     assert "updateMotionModeAvailability" not in script
 
 
-def test_portal_waits_for_project_analysis_instead_of_sending_hovering_declaration() -> None:
-    html = (ROOT / "apps/workflow_portal/index.html").read_text(encoding="utf-8")
-    script = (ROOT / "apps/workflow_portal/workflow_portal.js").read_text(encoding="utf-8")
-
+def test_portal_waits_for_project_analysis() -> None:
+    html, script = _read("index.html"), _read("workflow_portal.js")
     assert "hoveringDeclared" not in script
     assert "waitForAnalysisCompletion" in script
     assert 'id="analysisOverlay"' in html
 
 
+def test_portal_uses_real_upload_bytes_and_never_timer_drives_upload_progress() -> None:
+    api, script = _read("portal_api.js"), _read("workflow_portal.js")
+    assert "event.loaded" in api and "event.total" in api
+    assert "useCurrentRevision=1" in api
+    assert "setInterval" not in api
+    assert "simulateProgress" not in script
+    assert "fakeProgress" not in script
+
+
+def test_portal_has_two_drag_drop_cards_and_four_real_task_stages() -> None:
+    html, script = _read("index.html"), _read("workflow_portal.js")
+    assert 'data-upload-kind="video"' in html
+    assert 'data-upload-kind="cad"' in html
+    assert 'accept=".mp4,video/mp4"' in html
+    assert 'accept=".dxf,application/dxf"' in html
+    assert all(
+        f'id="taskStage{stage}"' in html
+        for stage in ("Upload", "Cad", "Video", "Workspace")
+    )
+    assert 'id="taskOverallProgress"' in html
+    assert 'addEventListener("dragover"' in script
+    assert 'addEventListener("drop"' in script
+
+
+def test_portal_shows_video_preview_and_only_enables_create_after_both_uploads() -> None:
+    html, script = _read("index.html"), _read("workflow_portal.js")
+    assert 'id="videoPreview"' in html
+    assert "URL.createObjectURL(file)" in script
+    assert "state.completed.video && state.completed.cad" in script
+    assert 'id="portalSubmit"' in html and "disabled" in html
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
-
     assert "interface_only" in script
     assert "trajectoryWorkflowLoaded" in script
-    assert "正在确认轨迹工作模式" in script
 
 
 def test_viewer_manifest_fetch_failure_falls_back_to_ready_sfm_only() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
-
     assert 'trajectory_mode: "sfm_only"' in script
     assert 'implementation_status: "ready"' in script
     assert "trajectoryWorkflowLoaded = true" in script
