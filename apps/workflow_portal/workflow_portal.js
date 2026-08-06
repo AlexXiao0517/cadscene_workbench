@@ -11,6 +11,7 @@ const state = {
   projectId: "", dataset: "", projectRevision: 0, manifest: null,
   projectPromise: null, files: {}, uploads: {},
   completed: { video: false, cad: false, srt: false }, etag: "", snapshot: null,
+  overlayDismissed: false, analysisComplete: false,
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -141,7 +142,8 @@ function renderTaskStage(name, percent, message, active) {
   element.classList.toggle("is-complete", percent >= 100);
   element.querySelector("small").textContent = message;
   element.querySelector("b").textContent = `${percent}%`;
-  element.querySelector(".meter span").style.width = `${percent}%`;
+  const meter = element.querySelector(".meter span");
+  if (meter) meter.style.width = `${percent}%`;
 }
 function renderAnalysis(snapshot) {
   const jobs = Object.fromEntries((snapshot.analysis?.jobs || []).map((job) => [job.job_type, job]));
@@ -156,6 +158,8 @@ function renderAnalysis(snapshot) {
   renderTaskStage("Workspace", workspace, workspace ? "项目片段已生成" : "等待生成逻辑片段", video >= 100);
   const overall = Math.round(15 + cad * .15 + video * .65 + workspace * .05);
   $("#taskOverallPercent").textContent = `${overall}%`;
+  $("#taskCirclePercent").textContent = `${overall}%`;
+  $("#taskCircleProgress").style.strokeDashoffset = String(100 - overall);
   $("#taskOverallProgress").style.width = `${overall}%`;
   $("#analysisDetail").textContent = workspace ? "分析完成，正在进入项目片段管理…" : stageMessage(videoJob, stageMessage(cadJob, "任务已进入队列"));
 }
@@ -179,39 +183,61 @@ async function waitForAnalysisCompletion() {
     await delay(500);
   }
 }
+function openWorkspace() {
+  const target = new URL("/apps/project_workspace/", window.location.origin);
+  target.searchParams.set("projectId", state.dataset);
+  window.location.assign(target.toString());
+}
 async function submit(event) {
   event.preventDefault();
   if (!(state.completed.video && state.completed.cad)) return;
+  if (state.analysisComplete) { openWorkspace(); return; }
   $("#portalSubmit").disabled = true;
   $("#analysisOverlay").hidden = false;
+  state.overlayDismissed = false;
   $("#analysisError").hidden = true;
   $("#analysisRetry").hidden = true;
   try {
     await Promise.all([state.uploads.video, state.uploads.cad]);
     await waitForAnalysisCompletion();
+    state.analysisComplete = true;
+    $("#portalSubmit").disabled = false;
+    $("#portalSubmit span").textContent = "进入片段管理";
+    if (state.overlayDismissed) {
+      setMessage("分析完成，可以进入片段管理。");
+      return;
+    }
     await delay(450);
-    const target = new URL("/apps/project_workspace/", window.location.origin);
-    target.searchParams.set("projectId", state.dataset);
-    window.location.assign(target.toString());
+    openWorkspace();
   } catch (error) {
     $("#analysisError").textContent = `任务停止：${error.message}`;
     $("#analysisError").hidden = false;
     $("#analysisRetry").hidden = false;
     $("#analysisDetail").textContent = "请查看失败原因后重试";
+    $("#portalSubmit").disabled = false;
+    if (state.overlayDismissed) setMessage(`分析失败：${error.message}`, true);
   }
 }
 
 bindUpload("video"); bindUpload("cad"); bindUpload("srt");
 document.querySelectorAll("[data-reselect]").forEach((button) => button.addEventListener("click", () => $(`#portal${button.dataset.reselect[0].toUpperCase()}${button.dataset.reselect.slice(1)}`).click()));
 $("#portalForm").addEventListener("submit", submit);
+$("#analysisClose").addEventListener("click", () => {
+  state.overlayDismissed = true;
+  $("#analysisOverlay").hidden = true;
+  setMessage("分析仍在后台运行，可继续停留在此页面。完成后可进入片段管理。");
+});
 $("#analysisRetry").addEventListener("click", async () => {
   $("#analysisRetry").hidden = true; $("#analysisError").hidden = true;
   try {
     await retryAnalysis(state.projectId, state.snapshot.component_revisions.project);
     state.etag = "";
     await waitForAnalysisCompletion();
-    const target = new URL("/apps/project_workspace/", window.location.origin);
-    target.searchParams.set("projectId", state.projectId); window.location.assign(target.toString());
+    state.analysisComplete = true;
+    $("#portalSubmit").disabled = false;
+    $("#portalSubmit span").textContent = "进入片段管理";
+    if (state.overlayDismissed) { setMessage("分析完成，可以进入片段管理。"); return; }
+    openWorkspace();
   } catch (error) { $("#analysisError").textContent = `重试失败：${error.message}`; $("#analysisError").hidden = false; $("#analysisRetry").hidden = false; }
 });
 if (debugEnabled) { document.documentElement.classList.add("debug-enabled"); $("#portalIdentifiers").textContent = "debug=1"; }

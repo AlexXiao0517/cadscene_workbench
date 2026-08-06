@@ -92,29 +92,39 @@
 
     <div id="analysisOverlay" class="analysis-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="analysisTitle">
       <section class="analysis-card">
+        <button id="analysisClose" class="analysis-close" type="button" aria-label="关闭进度窗口">×</button>
         <div class="modal-heading">
           <div><p class="eyebrow">MEDIAFLOW</p><h2 id="analysisTitle">正在创建叠加任务</h2></div>
-          <span class="live-dot" aria-label="任务运行中"></span>
         </div>
-        <p id="analysisDetail">正在读取项目状态…</p>
+        <div class="analysis-summary">
+          <div class="progress-ring" aria-label="总体进度">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="ring-track" cx="60" cy="60" r="52" pathLength="100"></circle>
+              <circle id="taskCircleProgress" class="ring-value" cx="60" cy="60" r="52" pathLength="100"></circle>
+            </svg>
+            <span class="progress-orbit" aria-hidden="true"></span>
+            <strong id="taskCirclePercent">15%</strong>
+          </div>
+          <div class="analysis-copy">
+            <span>总体进度 <strong id="taskOverallPercent">15%</strong></span>
+            <p id="analysisDetail">正在读取项目状态…</p>
+          </div>
+        </div>
         <ol class="task-stages">
           <li id="taskStageUpload" class="is-complete">
-            <span class="stage-icon">1</span><div><strong>上传文件</strong><small>视频与 CAD 已原子发布</small><div class="meter"><span></span></div></div><b>100%</b>
+            <span class="stage-icon">1</span><div><strong>上传文件</strong><small>视频与 CAD 已原子发布</small></div><b>100%</b>
           </li>
           <li id="taskStageCad">
-            <span class="stage-icon">2</span><div><strong>解析 CAD</strong><small>等待任务启动</small><div class="meter"><span></span></div></div><b>0%</b>
+            <span class="stage-icon">2</span><div><strong>解析 CAD</strong><small>等待任务启动</small></div><b>0%</b>
           </li>
           <li id="taskStageVideo">
-            <span class="stage-icon">3</span><div><strong>解析视频</strong><small>等待 CAD 解析完成</small><div class="meter"><span></span></div></div><b>0%</b>
+            <span class="stage-icon">3</span><div><strong>解析视频</strong><small>等待 CAD 解析完成</small></div><b>0%</b>
           </li>
           <li id="taskStageWorkspace">
-            <span class="stage-icon">4</span><div><strong>初始化工作台</strong><small>等待生成逻辑片段</small><div class="meter"><span></span></div></div><b>0%</b>
+            <span class="stage-icon">4</span><div><strong>初始化工作台</strong><small>等待生成逻辑片段</small></div><b>0%</b>
           </li>
         </ol>
-        <div class="overall-progress">
-          <div><span>总体进度</span><strong id="taskOverallPercent">15%</strong></div>
-          <div class="meter"><span id="taskOverallProgress"></span></div>
-        </div>
+        <div class="overall-progress"><div class="meter"><span id="taskOverallProgress"></span></div></div>
         <p id="analysisError" class="analysis-error" hidden></p>
         <button id="analysisRetry" class="retry-action" type="button" hidden>重试失败阶段</button>
       </section>

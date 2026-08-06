@@ -111,6 +111,23 @@ def test_portal_keeps_the_mockup_information_density() -> None:
     assert "文件已上传，可以创建叠加任务。解析进度将在弹窗中显示。" in html
 
 
+def test_analysis_modal_has_close_control_and_animated_circular_real_progress() -> None:
+    html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
+
+    assert 'id="analysisClose"' in html
+    assert 'id="taskCircleProgress"' in html
+    assert 'id="taskCirclePercent"' in html
+    assert "strokeDashoffset" in script
+    assert "state.overlayDismissed" in script
+    assert ".progress-orbit" in css and "@keyframes orbit" in css
+
+
+def test_upload_layout_uses_one_card_layer_only() -> None:
+    css = _read("style.css")
+
+    assert "form { padding: 0; border: 0; background: transparent; }" in css
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     assert "interface_only" in script

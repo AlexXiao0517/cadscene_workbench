@@ -12,6 +12,7 @@ from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.analysis_adapters import tree_fingerprint, validate_video_outputs
 from cadscene.projects.analysis_publication import AnalysisArtifactPublisher
 from cadscene.projects.analysis_worker import (
+    AttemptProgressReporter,
     _cad_progress,
     main as analysis_worker_main,
 )
@@ -39,6 +40,44 @@ def test_cad_worker_normalizes_legacy_callback_text_for_the_portal() -> None:
         ("parsing_cad", "正在解析 DXF 图纸", 0.35),
         ("generating_cad", "正在生成 CAD 场景数据", 0.75),
     ]
+
+
+def test_attempt_progress_retries_a_transient_windows_replace_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reporter = AttemptProgressReporter(tmp_path)
+    original = __import__("os").replace
+    attempts = 0
+
+    def transient_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "file is temporarily locked")
+        return original(source, destination)
+
+    monkeypatch.setattr("cadscene.projects.analysis_worker.os.replace", transient_replace)
+
+    reporter.report("sampling_frames", "正在分析抽样画面", 0.42)
+
+    payload = json.loads(reporter.path.read_text(encoding="utf-8"))
+    assert attempts == 3
+    assert payload["fraction"] == 0.42
+
+
+def test_attempt_progress_never_aborts_analysis_when_telemetry_stays_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reporter = AttemptProgressReporter(tmp_path)
+    monkeypatch.setattr(
+        "cadscene.projects.analysis_worker.os.replace",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(5, "locked")),
+    )
+
+    reporter.report("sampling_frames", "正在分析抽样画面", 0.42)
+
+    assert not reporter.path.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def _service(tmp_path: Path):

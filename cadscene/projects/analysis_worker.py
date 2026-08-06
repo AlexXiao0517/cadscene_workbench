@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import sys
+import time
 from uuid import uuid4
 
 from cadscene.video_analysis.analyzer import analyze_video
@@ -32,7 +34,22 @@ class AttemptProgressReporter:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, self.path)
+        try:
+            for attempt in range(20):
+                try:
+                    os.replace(temporary, self.path)
+                    return
+                except PermissionError as exc:
+                    if attempt == 19:
+                        print(
+                            f"warning: progress update skipped after Windows file-lock retries: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        return
+                    time.sleep(0.01)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _cad_progress(reporter: AttemptProgressReporter, message: str) -> None:
