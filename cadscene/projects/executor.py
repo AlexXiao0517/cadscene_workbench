@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Callable, Protocol
 from uuid import uuid4
 
@@ -206,7 +207,14 @@ class LocalJobExecutor:
                 attempt_number=attempt_number,
                 claim_token=claim_token,
             )
-            returncode = process.wait()
+            returncode = self._wait_for_process(
+                process,
+                attempt_dir / "adapter_progress.json",
+                project_id=job.project_id,
+                job_id=job.job_id,
+                attempt_number=attempt_number,
+                claim_token=claim_token,
+            )
             current = queue.get(job.job_id)
             if current.status in {
                 "cancelled",
@@ -285,6 +293,49 @@ class LocalJobExecutor:
                 )
             except ValueError:
                 pass
+
+    def _wait_for_process(
+        self,
+        process: subprocess.Popen,
+        progress_path: Path,
+        *,
+        project_id: str,
+        job_id: str,
+        attempt_number: int,
+        claim_token: str,
+    ) -> int:
+        last_payload: str | None = None
+        while True:
+            returncode = process.poll()
+            if progress_path.is_file():
+                try:
+                    serialized = progress_path.read_text(encoding="utf-8")
+                    if serialized != last_payload:
+                        candidate = json.loads(serialized)
+                        progress = AdapterProgress(
+                            stage=str(candidate["stage"]),
+                            message=str(candidate["message"]),
+                            fraction=(
+                                None
+                                if candidate.get("fraction") is None
+                                else float(candidate["fraction"])
+                            ),
+                        )
+                        self.coordinator.update_job_progress(
+                            project_id,
+                            job_id,
+                            progress,
+                            attempt_number=attempt_number,
+                            claim_token=claim_token,
+                        )
+                        last_payload = serialized
+                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    # The adapter owns this transient sidecar. Ignore an invalid or
+                    # concurrently replaced read and retry on the next poll.
+                    pass
+            if returncode is not None:
+                return int(returncode)
+            time.sleep(0.25)
 
 
 def _process_start_time(pid: int) -> str:

@@ -159,6 +159,54 @@ def test_executor_runs_commands_sequentially_and_service_publishes_validation(
     assert Path(attempt_state["log_path"]).is_file()
 
 
+def test_executor_forwards_structured_adapter_progress_while_process_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    job_id = queue.running_ids()[0]
+    attempt = Path(queue.get(job_id).attempts[-1].directory)
+    progress_path = attempt / "adapter_progress.json"
+    command = (
+        sys.executable,
+        "-c",
+        (
+            "import json,time; from pathlib import Path; "
+            f"p=Path({str(progress_path)!r}); "
+            "p.write_text(json.dumps({'schema_version':'1.0','stage':'parsing_video',"
+            "'message':'正在分析抽样画面','fraction':0.42}),encoding='utf-8'); "
+            "time.sleep(0.6)"
+        ),
+    )
+    plan = JobExecutionPlan(
+        commands=(command,),
+        validate=lambda: AdapterResult.success(
+            output_revision="validated-1",
+            output_fingerprint="validated-fingerprint",
+            outputs={},
+        ),
+    )
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
+    reported = []
+    original = service.update_job_progress
+
+    def record_progress(project_id, current_job_id, progress, **lease):
+        reported.append(progress)
+        return original(project_id, current_job_id, progress, **lease)
+
+    monkeypatch.setattr(service, "update_job_progress", record_progress)
+
+    completed = LocalJobExecutor(service).run_next()
+
+    assert completed is not None and completed.status == "success"
+    assert any(
+        item.stage == "parsing_video" and item.fraction == 0.42
+        for item in reported
+    )
+
+
 def test_executor_claims_a_reserved_job_only_once_across_concurrent_workers(
     tmp_path: Path,
     monkeypatch,

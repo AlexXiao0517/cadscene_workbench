@@ -226,7 +226,7 @@ class ProjectService:
         project_id: str,
         upload: PublishedUpload,
         *,
-        expected_revision: int,
+        expected_revision: int | None,
     ) -> RegisterUploadResult:
         """Atomically register immutable upload state and any new analysis DAG."""
 
@@ -236,7 +236,7 @@ class ProjectService:
             raise FileNotFoundError("immutable upload media/report is unavailable")
         with self._state_guard(project_id):
             project = self.repositories.project.load(project_id)
-            if project.revision != expected_revision:
+            if expected_revision is not None and project.revision != expected_revision:
                 raise RevisionConflict(
                     project_id=project_id,
                     expected_revision=expected_revision,

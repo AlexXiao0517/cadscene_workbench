@@ -11,7 +11,10 @@ import pytest
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.analysis_adapters import tree_fingerprint, validate_video_outputs
 from cadscene.projects.analysis_publication import AnalysisArtifactPublisher
-from cadscene.projects.analysis_worker import main as analysis_worker_main
+from cadscene.projects.analysis_worker import (
+    _cad_progress,
+    main as analysis_worker_main,
+)
 from cadscene.projects.executor import LocalJobExecutor
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.queue import LocalResourceQueue, QueueJob
@@ -20,6 +23,22 @@ from cadscene.projects.service import ProjectService
 from cadscene.projects.uploads import PublishedUpload
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.workflow.data_import import load_dataset_manifest
+
+
+def test_cad_worker_normalizes_legacy_callback_text_for_the_portal() -> None:
+    reported: list[tuple[str, str, float | None]] = []
+
+    class Reporter:
+        def report(self, stage: str, message: str, fraction: float | None) -> None:
+            reported.append((stage, message, fraction))
+
+    _cad_progress(Reporter(), "legacy mojibake DXF callback")
+    _cad_progress(Reporter(), "legacy mojibake design.json callback")
+
+    assert reported == [
+        ("parsing_cad", "正在解析 DXF 图纸", 0.35),
+        ("generating_cad", "正在生成 CAD 场景数据", 0.75),
+    ]
 
 
 def _service(tmp_path: Path):
@@ -1157,6 +1176,15 @@ def test_real_cad_attempt_is_rebased_to_immutable_dataset_id(tmp_path: Path) -> 
             attempt.directory,
         ]
     ) == 0
+    progress = json.loads(
+        (Path(attempt.directory) / "adapter_progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["schema_version"] == "1.0"
+    assert progress["stage"] == "complete"
+    assert progress["message"] == "CAD 解析完成"
+    assert progress["fraction"] == 1.0
     dataset = Path(attempt.directory) / "scratch" / "data" / "p1"
     service.finish_job(
         "p1",

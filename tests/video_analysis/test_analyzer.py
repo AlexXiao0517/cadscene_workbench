@@ -36,6 +36,7 @@ def _make_short_video(path: Path) -> Path:
 
 def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Path) -> None:
     video = _make_short_video(tmp_path / "short.mkv")
+    progress: list[tuple[str, str, float | None]] = []
 
     published = analyze_video(
         video_path=video,
@@ -43,6 +44,9 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
         project_id="project-short",
         analysis_revision="analysis-test-0001",
         sample_interval_sec=0.5,
+        progress_callback=lambda stage, message, fraction: progress.append(
+            (stage, message, fraction)
+        ),
     )
 
     output = tmp_path / "run" / "02_video_analysis"
@@ -107,6 +111,11 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
     assert clip["analysis_revision"] == "analysis-test-0001"
     assert manifest["executes_workflow"] is False
     assert not list(output.rglob("*.mp4"))
+    measured = [item[2] for item in progress if item[2] is not None]
+    assert progress[0][0] == "probing_pts"
+    assert progress[-1] == ("complete", "视频分析完成", 1.0)
+    assert measured == sorted(measured)
+    assert any(stage == "sampling_frames" for stage, _message, _value in progress)
 
 
 def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path) -> None:

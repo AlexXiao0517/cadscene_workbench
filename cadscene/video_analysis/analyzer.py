@@ -4,9 +4,10 @@ import csv
 from datetime import datetime, timezone
 import io
 import json
+import math
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 from cadscene.srt.parser import analyze_srt_stream
 
@@ -196,21 +197,34 @@ def analyze_video(
     sample_interval_sec: float = 0.5,
     ffmpeg_executable: str | Path | None = None,
     ffprobe_executable: str | Path | None = None,
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
 ) -> Path:
+    def report(stage: str, message: str, fraction: float | None) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, message, fraction)
+
     started = time.perf_counter()
     source = Path(video_path)
     revision = analysis_revision or _new_revision()
+    report("probing_pts", "正在读取视频时间戳", 0.02)
     packet_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
+    report("probing_pts", "视频封装时间戳读取完成", 0.08)
     frame_index = probe_decoded_frame_index(
         source,
         ffprobe_executable=ffprobe_executable,
         ffmpeg_executable=ffmpeg_executable,
     )
+    report("probing_pts", "权威展示帧索引建立完成", 0.25)
     sampled_pts: list[float] = []
     sampled_lumas: list[float] = []
     pair_evidence = []
     shot_boundaries: list[BoundaryEvidence] = []
     previous_frame = None
+    duration_sec = (
+        frame_index.source_end_pts_exclusive_sec - frame_index.source_start_pts_sec
+    )
+    expected_samples = max(2, math.ceil(duration_sec / sample_interval_sec) + 1)
+    progress_stride = max(1, expected_samples // 100)
     for frame in iter_sparse_frames(
         source,
         index=frame_index,
@@ -218,6 +232,12 @@ def analyze_video(
         ffmpeg_executable=ffmpeg_executable,
     ):
         sampled_pts.append(frame.pts_sec)
+        if len(sampled_pts) == 1 or len(sampled_pts) % progress_stride == 0:
+            report(
+                "sampling_frames",
+                f"正在分析抽样画面 {len(sampled_pts)}/{expected_samples}",
+                min(0.80, 0.25 + 0.55 * len(sampled_pts) / expected_samples),
+            )
         sampled_lumas.append(float(frame.image.mean()))
         if previous_frame is not None:
             evidence = analyze_frame_pair(previous_frame, frame)
@@ -232,6 +252,7 @@ def analyze_video(
         previous_frame = frame
     if len(sampled_pts) < 2:
         raise ValueError("video analysis requires at least two decoded PTS samples")
+    report("segmenting", "正在检测场景边界与规划片段", 0.84)
     raw_windows = build_motion_windows(pair_evidence, MotionAnalysisConfig())
     stable_windows, motion_boundaries = stabilize_motion_windows(
         raw_windows, MotionAnalysisConfig()
@@ -323,6 +344,8 @@ def analyze_video(
         }
         clip_payloads.append(clip)
 
+    report("publishing", "正在验证并发布分析结果", 0.94)
+
     detected = sorted(
         [*shot_boundaries, *motion_boundaries],
         key=lambda item: (item.pts_sec, item.reasons),
@@ -398,6 +421,8 @@ def analyze_video(
             boundary_count=len(detected),
         ),
     }
-    return publish_analysis_revision(
+    published = publish_analysis_revision(
         Path(output_root) / "02_video_analysis", revision, payloads
     )
+    report("complete", "视频分析完成", 1.0)
+    return published

@@ -244,7 +244,10 @@ class ProjectApi:
         payload: Mapping[str, object],
         request: UploadRequest,
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
+        use_current_revision = payload.get("use_current_revision") is True
+        expected_revision = (
+            None if use_current_revision else _required_revision(payload)
+        )
         pending = self.uploads.begin(
             project_id,
             asset_type,
@@ -331,6 +334,29 @@ class ProjectApi:
             "running",
             "validating",
         }
+        analysis_job_ids = (
+            tuple(str(item) for item in analysis_state.get("job_ids", ()))
+            if isinstance(analysis_state, Mapping)
+            else ()
+        )
+        analysis_jobs_by_id = {
+            str(item.get("job_id")): item for item in jobs.jobs
+        }
+        analysis_jobs = [
+            {
+                "job_id": job_id,
+                "job_type": candidate.get("job_type"),
+                "status": candidate.get("status"),
+                "stage": candidate.get("stage"),
+                "progress": candidate.get("progress"),
+                "depends_on_job_ids": list(
+                    candidate.get("depends_on_job_ids", ())
+                ),
+                "error": candidate.get("error"),
+            }
+            for job_id in analysis_job_ids
+            if (candidate := analysis_jobs_by_id.get(job_id)) is not None
+        ]
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=[clip.clip_id for clip in clips.clips]
         )
@@ -436,6 +462,10 @@ class ProjectApi:
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
+            "analysis": {
+                "status": analysis_status,
+                "jobs": analysis_jobs,
+            },
             "assets": _snapshot_assets(project_id, project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,

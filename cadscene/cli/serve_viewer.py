@@ -197,12 +197,19 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     stream.seek(0)
                     query = parse_qs(parsed.query)
                     raw_revision = (query.get("expectedRevision") or query.get("expected_revision") or [""])[0]
-                    if not str(raw_revision).isdigit():
+                    use_current_revision = (
+                        (query.get("useCurrentRevision") or [""])[0] == "1"
+                    )
+                    if not use_current_revision and not str(raw_revision).isdigit():
                         raise ValueError("expectedRevision query parameter is required")
                     response = api.handle(
                         method,
                         parsed.path,
-                        json_body={"expected_revision": int(raw_revision)},
+                        json_body=(
+                            {"use_current_revision": True}
+                            if use_current_revision
+                            else {"expected_revision": int(raw_revision)}
+                        ),
                         upload=UploadRequest(
                             filename=filename,
                             stream=stream,

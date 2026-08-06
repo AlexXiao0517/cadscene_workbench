@@ -9,6 +9,7 @@ import threading
 
 import pytest
 
+from cadscene.projects.adapters import AdapterProgress
 from cadscene.projects.http_api import ProjectApi, UploadRequest
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
@@ -244,6 +245,58 @@ def test_analysis_queued_disables_all_trajectory_capabilities(tmp_path: Path) ->
     assert "analysis is still running" in preflight.reasons["ready"]
     enqueue = api.service.enqueue_trajectory_jobs("p1")
     assert enqueue.job_ids == ()
+
+
+def test_snapshot_exposes_real_analysis_job_progress(tmp_path: Path) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("ready"),))
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                "video": {
+                    "path": str(tmp_path / "source.mp4"),
+                    "sha256": "a" * 64,
+                    "original_filename": "source.mp4",
+                },
+                "cad": {
+                    "path": str(tmp_path / "design.dxf"),
+                    "sha256": "b" * 64,
+                    "original_filename": "design.dxf",
+                },
+                "_analysis": {"request_key": "request-1", "status": "queued"},
+            },
+            project_state="analyzing",
+        ),
+    )
+    enqueued = api.service.enqueue_analysis_jobs("p1")
+    cad_job = queue.claim_next_unstarted()
+    assert cad_job is not None and cad_job.job_id == enqueued.job_ids[0]
+    attempt = cad_job.attempts[-1]
+    api.service.update_job_progress(
+        "p1",
+        cad_job.job_id,
+        AdapterProgress(
+            stage="parsing_cad", message="正在解析 CAD", fraction=0.42
+        ),
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert snapshot.body["analysis"]["status"] == "parsing_cad"
+    by_type = {
+        item["job_type"]: item for item in snapshot.body["analysis"]["jobs"]
+    }
+    assert by_type["cad_analysis"]["progress"] == {
+        "stage": "parsing_cad",
+        "message": "正在解析 CAD",
+        "fraction": 0.42,
+    }
+    assert by_type["video_analysis"]["depends_on_job_ids"] == [cad_job.job_id]
 
 
 def test_snapshot_reads_all_manifests_under_fixed_lock_order(
@@ -663,6 +716,37 @@ def test_analysis_dag_is_published_once_only_after_all_required_assets_publish(
     )
     assert repeated.status == 201
     assert len(api.service.queue.jobs()) == 2
+
+
+def test_browser_uploads_can_register_parallel_assets_using_current_revision(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    api.uploads = ValidatedUploadStore(
+        tmp_path / "projects",
+        validators={
+            "video": lambda *_: {"decoded": True},
+            "cad": lambda *_: {"parsed": True},
+        },
+    )
+
+    video = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/video",
+        json_body={"use_current_revision": True},
+        upload=UploadRequest("source.mp4", BytesIO(b"video"), 5),
+    )
+    cad = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/cad",
+        json_body={"use_current_revision": True},
+        upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
+    )
+
+    assert video.status == 201
+    assert cad.status == 201
+    project = repositories.project.load("p1")
+    assert set(project.source_assets) >= {"video", "cad", "_analysis"}
 
 
 def test_upload_registration_failure_leaves_no_canonical_or_queued_intent(
