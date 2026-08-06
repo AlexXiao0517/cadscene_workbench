@@ -128,6 +128,12 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
     assert "form { padding: 0; border: 0; background: transparent; }" in css
 
 
+def test_portal_busts_cached_assets_for_the_modal_redesign() -> None:
+    html = _read("index.html")
+
+    assert "20260806-upload-v3" in html
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     assert "interface_only" in script
