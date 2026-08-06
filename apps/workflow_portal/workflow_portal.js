@@ -79,16 +79,14 @@ function showSelectedFile(kind, file) {
     return;
   }
   const preview = $(`#${kind}Preview`);
-  preview.hidden = false;
-  preview.querySelector(".file-name").textContent = file.name;
-  preview.querySelector(".file-meta").textContent = fileSize(file.size);
   const pane = $(`[data-upload-kind="${kind}"]`);
   pane.classList.add("has-file");
   pane.classList.remove("is-complete", "is-error");
-  pane.querySelector(".drop-copy").hidden = true;
-  pane.querySelector(".upload-glyph").hidden = true;
   $(`#${kind}ProgressWrap`).hidden = false;
   if (kind === "video") {
+    preview.hidden = false;
+    pane.querySelector(".drop-copy").hidden = true;
+    pane.querySelector(".upload-glyph").hidden = true;
     const video = preview.querySelector("video");
     if (video.src) URL.revokeObjectURL(video.src);
     video.src = URL.createObjectURL(file);
@@ -115,6 +113,13 @@ async function startAssetUpload(kind, file) {
     else {
       pane.classList.remove("is-uploading");
       pane.classList.add("is-complete");
+      if (kind === "cad") {
+        const preview = $("#cadPreview");
+        $("#cadPreviewImage").src = `/api/projects/${encodeURIComponent(state.projectId)}/thumbnails/cad`;
+        preview.hidden = false;
+        pane.querySelector(".drop-copy").hidden = true;
+        pane.querySelector(".upload-glyph").hidden = true;
+      }
       $(`[data-reselect="${kind}"]`).hidden = false;
     }
     updateCreateAvailability();

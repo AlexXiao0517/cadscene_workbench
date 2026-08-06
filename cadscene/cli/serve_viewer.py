@@ -39,6 +39,59 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 
+def _cad_thumbnail_svg(design: dict, *, segment_budget: int = 12000) -> bytes:
+    """Render a bounded, transparent SVG preview from parsed CAD geometry."""
+    canvas_width, canvas_height, padding = 1200.0, 720.0, 36.0
+    meta = design.get("meta") if isinstance(design, dict) else None
+    width = float(meta.get("width", 0.0)) if isinstance(meta, dict) else 0.0
+    height = float(meta.get("height", 0.0)) if isinstance(meta, dict) else 0.0
+    if width <= 0.0 or height <= 0.0:
+        raise ValueError("CAD preview bounds are unavailable")
+    entities: list[list[list[float]]] = []
+    for layer in design.get("layers", []):
+        if not isinstance(layer, dict):
+            continue
+        for entity in layer.get("entities", []):
+            points = entity.get("points") if isinstance(entity, dict) else None
+            if isinstance(points, list) and len(points) >= 2:
+                entities.append(points)
+    segment_count = sum(max(0, len(points) - 1) for points in entities)
+    if segment_count <= 0:
+        raise ValueError("CAD preview contains no drawable geometry")
+    stride = max(1, (segment_count + segment_budget - 1) // segment_budget)
+    scale = min(
+        (canvas_width - 2.0 * padding) / width,
+        (canvas_height - 2.0 * padding) / height,
+    )
+    offset_x = (canvas_width - width * scale) / 2.0
+    offset_y = (canvas_height - height * scale) / 2.0
+    paths: list[str] = []
+    for points in entities:
+        sampled = points[::stride]
+        if sampled[-1] is not points[-1]:
+            sampled = [*sampled, points[-1]]
+        commands: list[str] = []
+        for index, point in enumerate(sampled):
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            x = offset_x + float(point[0]) * scale
+            y = offset_y + float(point[1]) * scale
+            commands.append(f"{'M' if not commands else 'L'}{x:.1f} {y:.1f}")
+        if len(commands) >= 2:
+            paths.append(f'<path d="{" ".join(commands)}"/>')
+    if not paths:
+        raise ValueError("CAD preview contains no valid geometry")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" '
+        'preserveAspectRatio="xMidYMid meet">'
+        '<g fill="none" stroke="#4d8dff" stroke-width="1.45" '
+        'stroke-linecap="round" stroke-linejoin="round" opacity="0.9">'
+        + "".join(paths)
+        + "</g></svg>"
+    )
+    return svg.encode("utf-8")
+
+
 def _atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -232,7 +285,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def _send_project_thumbnail(self, path: str) -> None:
         match = re.fullmatch(
-            r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
+            r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<cad>cad)|(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
             path,
         )
         if match is None:
@@ -247,6 +300,39 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             project = api.repositories.project.load(project_id)
         except FileNotFoundError:
             self.send_error(HTTPStatus.NOT_FOUND, "project not found")
+            return
+        if match["cad"]:
+            asset = project.source_assets.get("cad")
+            if not isinstance(asset, dict) or not asset.get("path"):
+                self.send_error(HTTPStatus.NOT_FOUND, "CAD source not found")
+                return
+            source = Path(str(asset["path"]))
+            if source.suffix.lower() != ".dxf" or not source.is_file():
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "CAD thumbnail requires DXF")
+                return
+            cache_dir = Path(self.server.storage_root_dir) / "projects" / project_id / "thumbnails"
+            fingerprint = str(asset.get("sha256") or source.stat().st_mtime_ns)[:20]
+            cached = cache_dir / f"cad-{fingerprint}.svg"
+            if not cached.is_file():
+                from cadscene.cad.dxf_parser import parse_dxf
+
+                try:
+                    design, _statistics = parse_dxf(source)
+                    body = _cad_thumbnail_svg(design)
+                except (RuntimeError, ValueError, OSError) as exc:
+                    self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+                    return
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                temporary = cached.with_suffix(".tmp")
+                temporary.write_bytes(body)
+                os.replace(temporary, cached)
+            body = cached.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         asset = project.source_assets.get("video")
         if not isinstance(asset, dict) or not asset.get("path"):

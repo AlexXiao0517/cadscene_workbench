@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>新建项目 · MediaFlow</title>
     <link rel="icon" href="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./style.css?v=20260806-upload-v5" />
+    <link rel="stylesheet" href="./style.css?v=20260806-upload-v6" />
   </head>
   <body>
     <main class="portal-shell">
@@ -37,7 +37,6 @@
               <span class="drop-copy"><strong>点击选择或拖放视频到此处</strong><small>建议使用原始 MP4 文件</small></span>
               <span class="file-preview" id="videoPreview" hidden>
                 <video muted preload="metadata"></video>
-                <span><strong class="file-name"></strong><small class="file-meta"></small></span>
               </span>
             </label>
             <div class="upload-progress" id="videoProgressWrap" hidden>
@@ -59,8 +58,7 @@
               </span>
               <span class="drop-copy"><strong>点击选择或拖放图纸到此处</strong><small>上传后将在任务中解析图层与实体</small></span>
               <span class="file-preview cad-preview" id="cadPreview" hidden>
-                <span class="cad-sheet" aria-hidden="true">DXF</span>
-                <span><strong class="file-name"></strong><small class="file-meta"></small></span>
+                <img id="cadPreviewImage" alt="CAD 图纸缩略图" />
               </span>
             </label>
             <div class="upload-progress" id="cadProgressWrap" hidden>
@@ -131,6 +129,6 @@
       </section>
     </div>
 
-    <script type="module" src="./workflow_portal.js?v=20260806-upload-v5"></script>
+    <script type="module" src="./workflow_portal.js?v=20260806-upload-v6"></script>
   </body>
 </html>

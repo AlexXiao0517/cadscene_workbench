@@ -18,8 +18,32 @@ from cadscene.projects.service import ProjectService, RegisterUploadResult
 from cadscene.projects.service import EnqueueRenderResult, RenderPreflight
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
-from cadscene.cli.serve_viewer import RangeRequestHandler, ViewerHTTPServer
+from cadscene.cli.serve_viewer import (
+    RangeRequestHandler,
+    ViewerHTTPServer,
+    _cad_thumbnail_svg,
+)
 from cadscene.projects.http_api import ApiResponse
+
+
+def test_cad_thumbnail_svg_renders_actual_design_geometry() -> None:
+    svg = _cad_thumbnail_svg(
+        {
+            "meta": {"width": 100.0, "height": 50.0},
+            "layers": [
+                {
+                    "entities": [
+                        {"points": [[0.0, 0.0], [50.0, 25.0], [100.0, 50.0]]}
+                    ]
+                }
+            ],
+        }
+    )
+
+    assert svg.startswith(b"<svg")
+    assert b'viewBox="0 0 1200 720"' in svg
+    assert b"<path" in svg
+    assert b"DXF" not in svg
 
 
 def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() -> None:

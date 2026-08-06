@@ -176,6 +176,34 @@ def test_successful_upload_hides_progress_instead_of_leaving_one_hundred_percent
     assert 'progressWrap.hidden = true' in success_block
 
 
+def test_flat_navigation_has_no_rule_and_uses_hover_color_only() -> None:
+    css = _read("style.css")
+
+    navigation = css[css.index(".top-navigation {") : css.index(".brand {")]
+    product = css[css.index(".current-product {") : css.index(".theme-toggle {")]
+    assert "border-bottom" not in navigation
+    assert "border-bottom" not in product
+    assert ".current-product:hover" in css
+
+
+def test_flat_portal_uses_no_box_shadows() -> None:
+    css = _read("style.css")
+
+    assert "box-shadow:" not in css
+
+
+def test_completed_video_and_cad_previews_fill_the_drop_zone_without_file_copy() -> None:
+    html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
+
+    assert '<video muted preload="metadata"></video>' in html
+    assert 'id="cadPreviewImage"' in html
+    assert 'class="file-name"' not in html
+    assert 'class="file-meta"' not in html
+    assert 'thumbnails/cad' in script
+    assert "object-fit: cover" in css
+    assert ".file-preview { position: absolute; inset: 0;" in css
+
+
 def test_analysis_modal_has_close_control_and_animated_circular_real_progress() -> None:
     html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
 
@@ -193,10 +221,10 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
     assert "form { padding: 0; border: 0; background: transparent; }" in css
 
 
-def test_portal_busts_cached_assets_for_the_flat_upload_state_redesign() -> None:
+def test_portal_busts_cached_assets_for_the_thumbnail_redesign() -> None:
     html = _read("index.html")
 
-    assert "20260806-upload-v5" in html
+    assert "20260806-upload-v6" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
