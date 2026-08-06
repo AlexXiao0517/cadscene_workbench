@@ -279,6 +279,58 @@ def test_video_validation_rejects_decode_error_even_when_ffmpeg_returns_zero(
     assert "-xerror" in observed[0]
 
 
+def test_video_upload_validation_is_bounded_and_defers_full_pts_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "long.mp4"
+    video.write_bytes(b"video")
+    observed: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        observed.append([str(item) for item in command])
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("cadscene.projects.uploads.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "cadscene.video_analysis.pts.resolve_ffmpeg_executable",
+        lambda: Path("ffmpeg"),
+    )
+    monkeypatch.setattr(
+        "cadscene.video_analysis.pts.probe_decoded_frame_index",
+        lambda *_args, **_kwargs: pytest.fail(
+            "upload validation must not build the authoritative full frame index"
+        ),
+    )
+
+    result = _validate_video(video, "video")
+
+    assert result == {"decodable": True, "validation_scope": "bounded_probe"}
+    assert len(observed) == 1
+    assert observed[0][observed[0].index("-frames:v") + 1] == "1"
+
+
+def test_successful_validation_does_not_rehash_unchanged_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"video": _accept}
+    )
+    pending = store.begin("p1", "video", "source.mp4", expected_size=5)
+    pending.write(b"video")
+    rehashed: list[Path] = []
+
+    def track_rehash(path: Path) -> str:
+        rehashed.append(path)
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    monkeypatch.setattr("cadscene.projects.uploads._file_fingerprint", track_rehash)
+
+    result = pending.complete_staged()
+
+    assert result.path.read_bytes() == b"video"
+    assert rehashed == []
+
+
 def test_failed_immutable_publish_report_keeps_previous_canonical_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -107,14 +107,15 @@ class PendingUpload:
                 )
             if self.expected_sha256 is not None and digest != self.expected_sha256:
                 raise UploadValidationError("upload SHA-256 fingerprint mismatch")
+            before_validation = _stat_signature(self.temporary_path)
             validation = dict(
                 self._store.validator_for(self.asset_type)(
                     self.temporary_path, self.asset_type
                 )
             )
-            validated_size = self.temporary_path.stat().st_size
-            validated_digest = _file_fingerprint(self.temporary_path)
-            if validated_size != self._size or validated_digest != digest:
+            after_validation = _stat_signature(self.temporary_path)
+            changed = before_validation != after_validation
+            if changed and _file_fingerprint(self.temporary_path) != digest:
                 raise UploadValidationError(
                     "upload bytes changed during validation"
                 )
@@ -383,11 +384,13 @@ def _file_fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stat_signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+
+
 def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:
-    from cadscene.video_analysis.pts import (
-        probe_decoded_frame_index,
-        resolve_ffmpeg_executable,
-    )
+    from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
     ffmpeg = resolve_ffmpeg_executable()
     process = subprocess.run(
@@ -400,6 +403,8 @@ def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:
             str(path),
             "-map",
             "0:v:0",
+            "-frames:v",
+            "1",
             "-f",
             "null",
             "-",
@@ -409,18 +414,8 @@ def _validate_video(path: Path, _asset_type: str) -> Mapping[str, object]:
         check=False,
     )
     if process.returncode != 0 or process.stderr.strip():
-        raise ValueError(f"video full decode failed: {process.stderr[-1000:]}")
-    index = probe_decoded_frame_index(path, ffmpeg_executable=ffmpeg)
-    return {
-        "full_decode": True,
-        "decoded_frame_count": len(index.frames),
-        "source_start_pts": index.source_start_pts,
-        "source_end_pts_exclusive": index.source_end_pts_exclusive,
-        "source_time_base": {
-            "numerator": index.time_base.numerator,
-            "denominator": index.time_base.denominator,
-        },
-    }
+        raise ValueError(f"video bounded decode failed: {process.stderr[-1000:]}")
+    return {"decodable": True, "validation_scope": "bounded_probe"}
 
 
 def _validate_srt(path: Path, _asset_type: str) -> Mapping[str, object]:
