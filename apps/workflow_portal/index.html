@@ -70,17 +70,16 @@
           </section>
         </div>
 
-        <details class="optional-upload">
-          <summary><span>SRT 遥测 <i>可选</i></span><small>如有 DJI SRT，可辅助推荐片段工作流</small></summary>
-          <div class="optional-body">
-            <input id="portalSrt" type="file" accept=".srt,application/x-subrip" />
-            <button id="srtPicker" type="button">选择 SRT</button>
-            <span id="srtStatus">未选择</span>
-            <div class="meter"><span id="srtProgress"></span></div><strong id="srtPercent">0%</strong>
-          </div>
-        </details>
+        <label class="srt-row" for="portalSrt">
+          <input id="portalSrt" type="file" accept=".srt,application/x-subrip" />
+          <span class="srt-title">SRT 遥测 <i>可选</i></span>
+          <span id="srtStatus">如有 DJI SRT，可辅助推荐片段工作流</span>
+          <span id="srtProgressWrap" class="srt-progress" hidden>
+            <span class="meter"><span id="srtProgress"></span></span><strong id="srtPercent">0%</strong>
+          </span>
+        </label>
 
-        <p id="portalMessage" class="message" role="status">请选择视频和 CAD 图纸，文件会在选择后立即上传。</p>
+        <p id="portalMessage" class="message" role="status">文件已上传，可以创建叠加任务。解析进度将在弹窗中显示。</p>
         <button id="portalSubmit" class="primary-action" type="submit" disabled>
           <span>创建叠加任务</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"/></svg>
         </button>

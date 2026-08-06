@@ -57,6 +57,7 @@ function updateCreateAvailability() {
 function showSelectedFile(kind, file) {
   if (kind === "srt") {
     $("#srtStatus").textContent = `${file.name} · 准备上传`;
+    $("#srtProgressWrap").hidden = false;
     return;
   }
   const preview = $(`#${kind}Preview`);
@@ -64,6 +65,7 @@ function showSelectedFile(kind, file) {
   preview.querySelector(".file-name").textContent = file.name;
   preview.querySelector(".file-meta").textContent = fileSize(file.size);
   const card = $(`[data-upload-kind="${kind}"]`);
+  card.classList.add("has-file");
   card.querySelector(".drop-copy").hidden = true;
   card.querySelector(".upload-glyph").hidden = true;
   $(`#${kind}ProgressWrap`).hidden = false;
@@ -201,7 +203,6 @@ async function submit(event) {
 
 bindUpload("video"); bindUpload("cad"); bindUpload("srt");
 document.querySelectorAll("[data-reselect]").forEach((button) => button.addEventListener("click", () => $(`#portal${button.dataset.reselect[0].toUpperCase()}${button.dataset.reselect.slice(1)}`).click()));
-$("#srtPicker").addEventListener("click", () => $("#portalSrt").click());
 $("#portalForm").addEventListener("submit", submit);
 $("#analysisRetry").addEventListener("click", async () => {
   $("#analysisRetry").hidden = true; $("#analysisError").hidden = true;

@@ -94,6 +94,23 @@ def test_portal_shows_video_preview_and_only_enables_create_after_both_uploads()
     assert 'id="portalSubmit"' in html and "disabled" in html
 
 
+def test_completed_upload_replaces_the_picker_copy_instead_of_stacking_both() -> None:
+    script, css = _read("workflow_portal.js"), _read("style.css")
+
+    assert 'card.classList.add("has-file")' in script
+    assert ".drop-copy[hidden]" in css
+    assert ".upload-glyph[hidden]" in css
+    assert ".file-preview[hidden]" in css
+
+
+def test_portal_keeps_the_mockup_information_density() -> None:
+    html = _read("index.html")
+
+    assert 'class="srt-row"' in html
+    assert '<details class="optional-upload">' not in html
+    assert "文件已上传，可以创建叠加任务。解析进度将在弹窗中显示。" in html
+
+
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
     script = (ROOT / "apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     assert "interface_only" in script
