@@ -108,7 +108,46 @@ def test_portal_keeps_the_mockup_information_density() -> None:
 
     assert 'class="srt-row"' in html
     assert '<details class="optional-upload">' not in html
-    assert "文件已上传，可以创建叠加任务。解析进度将在弹窗中显示。" in html
+    assert "文件已上传，可以新建项目。解析进度将在弹窗中显示。" in html
+
+
+def test_portal_uses_new_project_copy_everywhere() -> None:
+    html, script = _read("index.html"), _read("workflow_portal.js")
+
+    assert "创建视频叠加任务" not in html
+    assert "创建叠加任务" not in html
+    assert "创建叠加任务" not in script
+    assert "新建项目" in html
+
+
+def test_upload_columns_are_not_wrapped_in_visual_cards() -> None:
+    html, css = _read("index.html"), _read("style.css")
+
+    assert 'class="upload-pane"' in html
+    assert 'class="upload-card"' not in html
+    assert ".upload-pane {" in css
+    assert ".upload-pane { min-width: 0; padding: 0; border: 0; background: transparent; }" in css
+
+
+def test_portal_uses_transparent_cad_video_logo_and_pill_buttons() -> None:
+    html, css = _read("index.html"), _read("style.css")
+    logo = ROOT / "apps/workflow_portal/assets/mediaflow-cad-video-logo.svg"
+
+    assert logo.is_file()
+    assert "mediaflow-cad-video-logo.svg" in html
+    assert "<svg" in logo.read_text(encoding="utf-8")
+    assert "<rect" not in logo.read_text(encoding="utf-8")
+    assert "border-radius: 999px" in css
+
+
+def test_portal_supports_persisted_light_and_dark_themes() -> None:
+    html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
+
+    assert 'id="themeToggle"' in html
+    assert 'data-theme="light"' in css
+    assert "localStorage.getItem(THEME_STORAGE_KEY)" in script
+    assert "localStorage.setItem(THEME_STORAGE_KEY" in script
+    assert 'setAttribute("data-theme", theme)' in script
 
 
 def test_analysis_modal_has_close_control_and_animated_circular_real_progress() -> None:
@@ -128,10 +167,10 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
     assert "form { padding: 0; border: 0; background: transparent; }" in css
 
 
-def test_portal_busts_cached_assets_for_the_modal_redesign() -> None:
+def test_portal_busts_cached_assets_for_the_theme_and_logo_redesign() -> None:
     html = _read("index.html")
 
-    assert "20260806-upload-v3" in html
+    assert "20260806-upload-v4" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:

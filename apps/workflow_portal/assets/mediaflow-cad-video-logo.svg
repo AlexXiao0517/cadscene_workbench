@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">MediaFlow CAD 与视频叠加标志</title>
+  <defs>
+    <linearGradient id="cad" x1="13" y1="9" x2="46" y2="39" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#63D7FF"/>
+      <stop offset="1" stop-color="#6877FF"/>
+    </linearGradient>
+    <linearGradient id="video" x1="20" y1="34" x2="51" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5F8DFF"/>
+      <stop offset="1" stop-color="#885CFF"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#cad)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 25 24 10l18 4 7 15-15 11-19-4Z" stroke-width="2.4"/>
+    <path d="m24 10 10 30m8-26L15 36m-2-11 36 4" stroke-width="1.25" opacity=".78"/>
+    <circle cx="24" cy="10" r="2.2" fill="#63D7FF" stroke="none"/>
+    <circle cx="42" cy="14" r="2.2" fill="#7186FF" stroke="none"/>
+    <circle cx="49" cy="29" r="2.2" fill="#766FFF" stroke="none"/>
+    <circle cx="15" cy="36" r="2.2" fill="#61C7FF" stroke="none"/>
+  </g>
+  <path d="M17 35.5v13.8A7.7 7.7 0 0 0 24.7 57h22.6a7.7 7.7 0 0 0 7.7-7.7V35.5" fill="none" stroke="url(#video)" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="m31 38.5 13 7.7-13 7.7Z" fill="url(#video)"/>
+</svg>

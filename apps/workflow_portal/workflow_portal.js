@@ -1,6 +1,7 @@
 import { createProject, getSnapshot, retryAnalysis, uploadAsset } from "./portal_api.js?v=20260806-upload-v2";
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
+const THEME_STORAGE_KEY = "mediaflow-theme";
 const legacyRouteCompatibility = [
   "/api/workflow/create-dataset", "/api/workflow/upload-video",
   "/api/workflow/upload-cad", "/api/workflow/upload-srt", "/snapshot",
@@ -14,6 +15,22 @@ const state = {
   overlayDismissed: false, analysisComplete: false,
 };
 const $ = (selector) => document.querySelector(selector);
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const toggle = $("#themeToggle");
+  if (!toggle) return;
+  const isLight = theme === "light";
+  toggle.setAttribute("aria-pressed", String(isLight));
+  toggle.setAttribute("aria-label", isLight ? "切换为黑夜模式" : "切换为白天模式");
+  toggle.querySelector("span").textContent = isLight ? "黑夜模式" : "白天模式";
+}
+
+function initializeTheme() {
+  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+  const preferred = window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  applyTheme(saved === "light" || saved === "dark" ? saved : preferred);
+}
 
 function generatedId() {
   const suffix = (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^a-z0-9-]/gi, "");
@@ -96,7 +113,7 @@ async function startAssetUpload(kind, file) {
       $(`[data-reselect="${kind}"]`).hidden = false;
     }
     updateCreateAvailability();
-    if (state.completed.video && state.completed.cad) setMessage("文件已上传，可以创建叠加任务。解析进度将在弹窗中显示。");
+    if (state.completed.video && state.completed.cad) setMessage("文件已上传，可以新建项目。解析进度将在弹窗中显示。");
     return result;
   } catch (error) {
     state.completed[kind] = false;
@@ -220,6 +237,12 @@ async function submit(event) {
 }
 
 bindUpload("video"); bindUpload("cad"); bindUpload("srt");
+initializeTheme();
+$("#themeToggle").addEventListener("click", () => {
+  const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  applyTheme(theme);
+});
 document.querySelectorAll("[data-reselect]").forEach((button) => button.addEventListener("click", () => $(`#portal${button.dataset.reselect[0].toUpperCase()}${button.dataset.reselect.slice(1)}`).click()));
 $("#portalForm").addEventListener("submit", submit);
 $("#analysisClose").addEventListener("click", () => {

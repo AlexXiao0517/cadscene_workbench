@@ -104,16 +104,16 @@ def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation()
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
 
-    assert 'rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png"' in html
-    assert 'class="brand-logo" src="assets/mediaflow-logo.png"' in html
-    assert (WORKSPACE / "assets" / "mediaflow-logo.png").is_file()
+    assert 'rel="icon" href="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg"' in html
+    assert 'class="brand-logo" src="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg"' in html
+    assert (ROOT / "apps/workflow_portal/assets/mediaflow-cad-video-logo.svg").is_file()
     assert ".app-shell.sidebar-collapsed .nav-item" in css
     assert "grid-template-columns: 24px 0fr" in css
     assert "transition: grid-template-columns" in css
 
 
 def test_upload_workspace_and_workbench_share_the_product_favicon() -> None:
-    favicon = '<link rel="icon" href="/apps/project_workspace/assets/mediaflow-logo.png">'
+    favicon = '<link rel="icon" href="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg" type="image/svg+xml">'
     pages = (
         ROOT / "apps" / "workflow_portal" / "index.html",
         WORKSPACE / "index.html",
