@@ -1372,7 +1372,11 @@ class ProjectWorkbenchService:
                 "projectId": session.project_id,
                 "runId": session.trajectory_run_id,
                 "projectWorkbenchToken": session.token,
-                "workflowStage": "sfm",
+                "workflowStage": (
+                    "keyframes"
+                    if session.launch_mode == "trajectory_ready"
+                    else "sfm"
+                ),
                 "video": f"/data/{dataset}/video/{dataset}.mp4",
                 "cad": f"/data/{dataset}/cad/design.json",
                 "cadScale": "0.06",

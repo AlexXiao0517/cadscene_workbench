@@ -1026,6 +1026,11 @@ def test_user_started_trajectory_is_attached_to_open_workbench_session(
     assert attached.body["launch_mode"] == "trajectory_ready"
     assert attached.body["trajectory_job_id"] == job.job_id
     assert attached.body["save_permissions"] == ["save"]
+    attached_session = api.workbench.inspect("project-1", opened.body["token"])
+    attached_query = parse_qs(
+        urlsplit(api.workbench.workbench_url(attached_session)).query
+    )
+    assert attached_query["workflowStage"] == ["keyframes"]
     published = (
         runs_root
         / "project-1-clip-1/clip-1/02_sfm/camera_trajectory.json"

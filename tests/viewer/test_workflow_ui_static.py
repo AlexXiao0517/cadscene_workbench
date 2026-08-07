@@ -247,6 +247,20 @@ def test_project_workbench_renews_session_during_long_trajectory_jobs() -> None:
     assert wait.rindex("renewProjectWorkbenchSession", 0, trajectory_ready) >= 0
 
 
+def test_successful_project_trajectory_navigates_to_keyframe_stage() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert 'nextUrl.searchParams.set("workflowStage", "keyframes")' in wait
+    assert "window.location.replace(nextUrl.toString())" in wait
+    assert wait.index("/trajectory-ready`") < wait.index(
+        'nextUrl.searchParams.set("workflowStage", "keyframes")'
+    )
+
+
 def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
     script = _read("workflow.js")
     start = script[

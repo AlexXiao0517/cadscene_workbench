@@ -1323,7 +1323,9 @@
         progress.value = 1;
         stateLabel.textContent = "已完成";
         message.textContent = "轨迹结果已验证，正在载入关键帧标定工作台";
-        window.location.reload();
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.set("workflowStage", "keyframes");
+        window.location.replace(nextUrl.toString());
         return attached;
       }
       const now = Date.now();
