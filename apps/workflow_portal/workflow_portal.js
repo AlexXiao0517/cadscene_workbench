@@ -116,7 +116,7 @@ async function startAssetUpload(kind, file) {
       pane.classList.add("is-complete");
       if (kind === "cad") {
         const preview = $("#cadPreview");
-        $("#cadPreviewImage").src = `/api/projects/${encodeURIComponent(state.projectId)}/thumbnails/cad`;
+        $("#cadPreviewImage").src = `/api/projects/${encodeURIComponent(state.projectId)}/thumbnails/cad?asset=${encodeURIComponent(result.fingerprint)}`;
         preview.hidden = false;
         pane.querySelector(".drop-copy").hidden = true;
         pane.querySelector(".upload-glyph").hidden = true;

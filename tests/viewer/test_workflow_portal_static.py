@@ -237,6 +237,19 @@ def test_completed_video_and_cad_previews_fill_the_drop_zone_without_file_copy()
     assert ".file-preview { position: absolute; inset: 2px;" in css
 
 
+def test_reselected_cad_preview_uses_the_published_asset_fingerprint() -> None:
+    html, script = _read("index.html"), _read("workflow_portal.js")
+    cad_success = script[
+        script.index('if (kind === "cad")') : script.index(
+            '$(`[data-reselect="${kind}"]`).hidden = false'
+        )
+    ]
+
+    assert "result.fingerprint" in cad_success
+    assert "?asset=${encodeURIComponent(result.fingerprint)}" in cad_success
+    assert "workflow_portal.js?v=20260807-upload-v8" in html
+
+
 def test_preview_keeps_the_drop_zone_as_its_containing_block_across_upload_states() -> None:
     css = _read("style.css")
 
