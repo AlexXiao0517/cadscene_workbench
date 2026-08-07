@@ -57,6 +57,7 @@
   let projectWorkbenchTrajectoryJobId = null;
   let projectWorkbenchTrajectoryStatus = null;
   let projectWorkbenchTrajectoryStartPromise = null;
+  let projectWorkbenchInternalNavigation = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
   function uploadTimestamp() {
@@ -1329,6 +1330,7 @@
           : "轨迹结果已验证，正在载入关键帧标定工作台";
         const nextUrl = new URL(window.location.href);
         nextUrl.searchParams.set("workflowStage", "keyframes");
+        projectWorkbenchInternalNavigation = true;
         window.location.replace(nextUrl.toString());
         return attached;
       }
@@ -1480,7 +1482,12 @@
   }
 
   window.addEventListener("pagehide", () => {
-    if (projectWorkbenchSaveInFlight || !projectWorkbenchSession || projectWorkbenchSession.state !== "editing") return;
+    if (
+      projectWorkbenchInternalNavigation
+      || projectWorkbenchSaveInFlight
+      || !projectWorkbenchSession
+      || projectWorkbenchSession.state !== "editing"
+    ) return;
     fetch(
       `/api/projects/${encodeURIComponent(projectWorkbenchSession.project_id)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/close`,
       {

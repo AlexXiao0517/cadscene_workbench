@@ -174,7 +174,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     assert "style.css?v=20260729-local-camera-v8" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
     assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260807-pure-layout-sync" in html
+    assert "workflow.js?v=20260807-project-stage-navigation" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -242,6 +242,22 @@ def test_loading_pure_rotation_refreshes_an_already_selected_stage_title() -> No
 
     assert "if (selectedWorkflowStage)" in layout
     assert "renderWorkflowPanel(selectedWorkflowStage)" in layout
+
+
+def test_project_trajectory_transition_does_not_close_its_workbench_session() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    completion = workflow.split("async function waitForProjectWorkbenchTrajectory(jobId)", 1)[1].split(
+        "async function runProjectWorkbenchTrajectory()", 1
+    )[0]
+    pagehide = workflow.split('window.addEventListener("pagehide"', 1)[1].split(
+        "function updateKeyframePlanUi", 1
+    )[0]
+
+    assert "projectWorkbenchInternalNavigation = true" in completion
+    assert completion.index("projectWorkbenchInternalNavigation = true") < completion.index(
+        "window.location.replace"
+    )
+    assert "projectWorkbenchInternalNavigation" in pagehide
 
 
 def test_pure_rotation_debug_actions_are_compact_and_mode_stable() -> None:
@@ -510,7 +526,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260807-pure-layout-sync" in html
+    assert "workflow.js?v=20260807-project-stage-navigation" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1
