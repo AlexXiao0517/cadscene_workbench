@@ -150,6 +150,39 @@ def test_portal_supports_persisted_light_and_dark_themes() -> None:
     assert 'setAttribute("data-theme", theme)' in script
 
 
+def test_theme_toggle_is_a_flat_icon_only_control_with_hover_help() -> None:
+    html, script, css = _read("index.html"), _read("workflow_portal.js"), _read("style.css")
+    toggle = html[html.index('<button id="themeToggle"') : html.index("</button>", html.index('<button id="themeToggle"'))]
+    theme_css = css[css.index(".theme-toggle {") : css.index(".theme-toggle:hover")]
+
+    assert "<span>" not in toggle
+    assert 'title="切换为浅色模式"' in toggle
+    assert 'setAttribute("title"' in script
+    assert "width: 36px" in theme_css and "height: 36px" in theme_css
+    assert "padding: 0" in theme_css
+    assert "border: 0" in theme_css
+    assert "background: transparent" in theme_css
+    assert "border-radius" not in theme_css
+
+
+def test_upload_prompts_use_distinct_transparent_gray_png_icons() -> None:
+    html, css = _read("index.html"), _read("style.css")
+    assets = ROOT / "apps/workflow_portal/assets"
+    names = ("upload-video-gray.png", "upload-cad-gray.png")
+
+    for name in names:
+        data = (assets / name).read_bytes()
+        assert data.startswith(b"\x89PNG\r\n\x1a\n")
+        assert data[24] == 8  # 8-bit channels
+        assert data[25] == 6  # RGBA, including transparent background
+        assert f'/apps/workflow_portal/assets/{name}' in html
+    glyph_css = css[css.index(".upload-glyph {") : css.index(".drop-copy {")]
+    assert ".upload-glyph img" in glyph_css
+    assert "opacity:" in glyph_css
+    assert "background: transparent" in glyph_css
+    assert ".upload-glyph svg" not in glyph_css
+
+
 def test_new_project_title_lives_in_the_flat_top_navigation() -> None:
     html, css = _read("index.html"), _read("style.css")
 
@@ -235,7 +268,7 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
 def test_portal_busts_cached_assets_for_the_stable_preview_layout() -> None:
     html = _read("index.html")
 
-    assert "20260807-upload-v7" in html
+    assert "20260807-upload-v8" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:

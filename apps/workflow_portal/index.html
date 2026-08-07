@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>新建项目 · MediaFlow</title>
     <link rel="icon" href="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./style.css?v=20260807-upload-v7" />
+    <link rel="stylesheet" href="./style.css?v=20260807-upload-v8" />
   </head>
   <body>
     <main class="portal-shell">
@@ -15,10 +15,9 @@
           <span><strong>MediaFlow</strong><small>CAD 视频叠加工作台</small></span>
         </a>
         <span class="current-product">新建项目</span>
-        <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换为白天模式" aria-pressed="false">
+        <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换为浅色模式" title="切换为浅色模式" aria-pressed="false">
           <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
           <svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"/></svg>
-          <span>白天模式</span>
         </button>
       </header>
 
@@ -32,7 +31,7 @@
             <label class="drop-zone" for="portalVideo">
               <input id="portalVideo" type="file" accept=".mp4,video/mp4" required />
               <span class="upload-glyph" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg>
+                <img src="/apps/workflow_portal/assets/upload-video-gray.png" alt="" />
               </span>
               <span class="drop-copy"><strong>点击选择或拖放视频到此处</strong><small>建议使用原始 MP4 文件</small></span>
               <span class="file-preview" id="videoPreview" hidden>
@@ -54,7 +53,7 @@
             <label class="drop-zone" for="portalCad">
               <input id="portalCad" type="file" accept=".dxf,application/dxf" required />
               <span class="upload-glyph cad-glyph" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M4 18.5 9 13l3 3 4-5 4 3.5M5 4h14a1 1 0 0 1 1 1v14H4V5a1 1 0 0 1 1-1Z"/></svg>
+                <img src="/apps/workflow_portal/assets/upload-cad-gray.png" alt="" />
               </span>
               <span class="drop-copy"><strong>点击选择或拖放图纸到此处</strong><small>上传后将在任务中解析图层与实体</small></span>
               <span class="file-preview cad-preview" id="cadPreview" hidden>

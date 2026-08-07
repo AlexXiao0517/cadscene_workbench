@@ -62,9 +62,10 @@ button { color: inherit; }
 .eyebrow { margin: 0 0 13px; color: #66a8ff; font-size: 13px; font-weight: 750; }
 .current-product { justify-self: start; padding: 26px 4px 22px; color: var(--text); font-size: 16px; font-weight: 750; transition: color .18s ease; }
 .current-product:hover { color: var(--blue); }
-.theme-toggle { min-width: 116px; min-height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: var(--text); background: transparent; cursor: pointer; transition: color .18s ease, border-color .18s ease, background .18s ease; }
-.theme-toggle:hover { color: var(--blue); border-color: var(--blue); background: color-mix(in srgb, var(--blue) 7%, transparent); }
-.theme-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.theme-toggle { width: 36px; height: 36px; padding: 0; border: 0; display: inline-grid; place-items: center; color: var(--muted); background: transparent; cursor: pointer; transition: color .18s ease, transform .18s ease; }
+.theme-toggle:hover { color: var(--text); transform: translateY(-1px); }
+.theme-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
+.theme-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .theme-toggle .moon-icon, :root[data-theme="light"] .theme-toggle .sun-icon { display: none; }
 :root[data-theme="light"] .theme-toggle .moon-icon { display: block; }
 form { padding: 32px; border: 1px solid #304965; border-radius: 25px; background: rgba(8, 20, 34, .88); }
@@ -98,9 +99,10 @@ form { padding: 0; border: 0; background: transparent; }
 }
 .drop-zone:hover { border-color: #78b2f8; background: var(--surface-hover); }
 .drop-zone input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.upload-glyph { width: 72px; height: 72px; display: grid; place-items: center; border-radius: 50%; color: #83b7ff; background: #1b3557; }
-.upload-glyph svg { width: 35px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.cad-glyph { color: #85d8ba; background: #17383d; }
+.upload-glyph { width: 68px; height: 68px; display: grid; place-items: center; opacity: .78; background: transparent; transition: opacity .18s ease, transform .18s ease; }
+.upload-glyph img { width: 58px; height: 58px; display: block; object-fit: contain; }
+.drop-zone:hover .upload-glyph { opacity: .96; transform: translateY(-2px); }
+:root[data-theme="light"] .upload-glyph { opacity: .68; }
 .drop-copy { display: grid; gap: 7px; }
 .drop-copy strong { font-size: 16px; }
 .drop-copy small { color: var(--muted); font-size: 13px; }

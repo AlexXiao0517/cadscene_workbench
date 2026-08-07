@@ -22,8 +22,9 @@ function applyTheme(theme) {
   if (!toggle) return;
   const isLight = theme === "light";
   toggle.setAttribute("aria-pressed", String(isLight));
-  toggle.setAttribute("aria-label", isLight ? "切换为黑夜模式" : "切换为白天模式");
-  toggle.querySelector("span").textContent = isLight ? "黑夜模式" : "白天模式";
+  const help = isLight ? "切换为深色模式" : "切换为浅色模式";
+  toggle.setAttribute("aria-label", help);
+  toggle.setAttribute("title", help);
 }
 
 function initializeTheme() {
