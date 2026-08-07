@@ -201,7 +201,18 @@ def test_completed_video_and_cad_previews_fill_the_drop_zone_without_file_copy()
     assert 'class="file-meta"' not in html
     assert 'thumbnails/cad' in script
     assert "object-fit: cover" in css
-    assert ".file-preview { position: absolute; inset: 0;" in css
+    assert ".file-preview { position: absolute; inset: 2px;" in css
+
+
+def test_preview_keeps_the_drop_zone_as_its_containing_block_across_upload_states() -> None:
+    css = _read("style.css")
+
+    drop_zone = css[css.index(".drop-zone {") : css.index(".drop-zone:hover")]
+    preview = css[css.index(".file-preview {") : css.index(".file-preview video")]
+    assert "position: relative" in drop_zone
+    assert "inset: 2px" in preview
+    assert "border-radius: 14px" in preview
+    assert "overflow: hidden" in preview
 
 
 def test_analysis_modal_has_close_control_and_animated_circular_real_progress() -> None:
@@ -221,10 +232,10 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
     assert "form { padding: 0; border: 0; background: transparent; }" in css
 
 
-def test_portal_busts_cached_assets_for_the_thumbnail_redesign() -> None:
+def test_portal_busts_cached_assets_for_the_stable_preview_layout() -> None:
     html = _read("index.html")
 
-    assert "20260806-upload-v6" in html
+    assert "20260807-upload-v7" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:
