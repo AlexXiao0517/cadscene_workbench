@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from cadscene.video_analysis.pts import (
     DecodedFrameIndex,
@@ -135,6 +135,7 @@ def export_video_clips(
     preset: str = "fast",
     crf: int = 18,
     require_full_source_partition: bool = True,
+    progress_callback: Callable[[str, str, float], None] | None = None,
 ) -> list[Path]:
     source = Path(video_path)
     manifest = Path(manifest_path)
@@ -152,6 +153,11 @@ def export_video_clips(
     if isinstance(crf, bool) or not isinstance(crf, int) or not 0 <= crf <= 51:
         raise ValueError("crf must be an integer from 0 to 51")
 
+    def report(stage: str, message: str, fraction: float) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, message, fraction)
+
+    report("indexing_source", "正在读取源视频帧索引", 0.0)
     strategy = _publication_strategy()
     clips = load_export_clips(manifest)
     ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
@@ -164,6 +170,9 @@ def export_video_clips(
         clips,
         require_full_source_partition=require_full_source_partition,
     )
+    total_frames = sum(len(item["frames"]) for item in frame_map["clips"])
+    completed_frames = 0
+    report("preparing_export", "已建立源视频帧映射", 0.1)
     reservation = _reserve_output_directory(output)
     temporary_dir: Path | None = None
     published = False
@@ -174,19 +183,35 @@ def export_video_clips(
         _write_json_atomic(temporary_dir / "clip_frame_map.json", frame_map)
         for clip in clips:
             clip_path = temporary_dir / f"{clip.clip_id}.mp4"
-            process = subprocess.run(
-                _build_ffmpeg_clip_command(
+            expected_count = next(
+                len(item["frames"])
+                for item in frame_map["clips"]
+                if item["clip_id"] == clip.clip_id
+            )
+            command = _build_ffmpeg_clip_command(
                     ffmpeg=ffmpeg,
                     source=source,
                     clip=clip,
                     clip_path=clip_path,
                     preset=preset,
                     crf=crf,
-                ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
+                )
+            if progress_callback is None:
+                process = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            else:
+                process = _run_ffmpeg_with_progress(
+                    command,
+                    clip_id=clip.clip_id,
+                    expected_frames=expected_count,
+                    completed_frames=completed_frames,
+                    total_frames=total_frames,
+                    callback=progress_callback,
+                )
             if process.returncode != 0:
                 stderr = process.stderr.decode("utf-8", errors="replace")
                 raise RuntimeError(
@@ -200,20 +225,23 @@ def export_video_clips(
                 clip_path,
                 ffmpeg_executable=ffmpeg,
             )
-            expected_count = next(
-                len(item["frames"])
-                for item in frame_map["clips"]
-                if item["clip_id"] == clip.clip_id
-            )
             if len(output_index.frames) != expected_count:
                 raise RuntimeError(
                     f"exported frame count disagrees with clip_frame_map.json for "
                     f"{clip.clip_id}: expected {expected_count}, got "
                     f"{len(output_index.frames)}"
                 )
+            completed_frames += expected_count
+            report(
+                "verifying_clip",
+                f"已验证片段帧 {completed_frames}/{total_frames}",
+                0.1 + 0.8 * completed_frames / total_frames,
+            )
 
+        report("publishing_export", "正在发布片段视频", 0.95)
         _publish_output_directory(temporary_dir, output, strategy=strategy)
         published = True
+        report("complete", "片段视频准备完成", 1.0)
         return [output / f"{clip.clip_id}.mp4" for clip in clips]
     finally:
         try:
@@ -221,6 +249,61 @@ def export_video_clips(
                 shutil.rmtree(temporary_dir)
         finally:
             reservation.rmdir()
+
+
+def _run_ffmpeg_with_progress(
+    command: list[str],
+    *,
+    clip_id: str,
+    expected_frames: int,
+    completed_frames: int,
+    total_frames: int,
+    callback: Callable[[str, str, float], None],
+) -> subprocess.CompletedProcess[bytes]:
+    progress_command = [
+        *command[:-1],
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        command[-1],
+    ]
+    last_frame = -1
+    with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+        process = subprocess.Popen(
+            progress_command,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            key, separator, value = line.strip().partition("=")
+            if separator != "=" or key != "frame":
+                continue
+            try:
+                frame = max(0, min(expected_frames, int(value)))
+            except ValueError:
+                continue
+            if frame <= last_frame:
+                continue
+            last_frame = frame
+            processed = completed_frames + frame
+            callback(
+                "encoding_clip",
+                f"正在导出片段帧 {processed}/{total_frames}",
+                0.1 + 0.8 * processed / total_frames,
+            )
+        returncode = process.wait()
+        stderr_file.seek(0)
+        stderr = stderr_file.read()
+    return subprocess.CompletedProcess(
+        progress_command,
+        returncode,
+        stdout=b"",
+        stderr=stderr,
+    )
 
 
 def _reserve_output_directory(output: Path) -> Path:

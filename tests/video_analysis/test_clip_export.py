@@ -159,6 +159,31 @@ def test_export_video_clips_reencodes_source_pts_ranges_atomically(
     assert not list(tmp_path.glob(".clips.tmp-*"))
 
 
+def test_export_video_clips_reports_monotonic_real_frame_progress(
+    tmp_path: Path,
+) -> None:
+    video, ffmpeg = _make_ffv1_video(tmp_path)
+    manifest = _two_clip_manifest(tmp_path)
+    updates: list[tuple[str, str, float]] = []
+
+    export_video_clips(
+        video,
+        manifest,
+        tmp_path / "clips-progress",
+        ffmpeg_executable=ffmpeg,
+        progress_callback=lambda stage, message, fraction: updates.append(
+            (stage, message, fraction)
+        ),
+    )
+
+    fractions = [fraction for _stage, _message, fraction in updates]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0.0
+    assert fractions[-1] == 1.0
+    assert any(0.1 < fraction < 0.9 for fraction in fractions)
+    assert any(stage == "encoding_clip" for stage, _message, _fraction in updates)
+
+
 def test_export_video_clips_can_publish_one_requested_subinterval(
     tmp_path: Path,
 ) -> None:

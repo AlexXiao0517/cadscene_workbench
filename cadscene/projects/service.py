@@ -3766,6 +3766,8 @@ class ProjectService:
             str(manifest_path),
             "--output-dir",
             str(output_dir),
+            "--progress-file",
+            str(attempt / "adapter_progress.json"),
             "--allow-subset",
         )
         return JobExecutionPlan(

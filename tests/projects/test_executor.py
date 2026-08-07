@@ -411,8 +411,10 @@ def test_service_builds_existing_clip_export_cli_plan_inside_attempt(
     assert command[1:3] == ("-m", "cadscene.cli.export_video_clips")
     manifest_path = Path(command[command.index("--manifest") + 1])
     output_dir = Path(command[command.index("--output-dir") + 1])
+    progress_path = Path(command[command.index("--progress-file") + 1])
     assert manifest_path.parent == Path(queue.get(export_id).attempts[-1].directory)
     assert output_dir.parent == manifest_path.parent
+    assert progress_path == manifest_path.parent / "adapter_progress.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["clips"][0]["interval_semantics"] == "half_open"
 

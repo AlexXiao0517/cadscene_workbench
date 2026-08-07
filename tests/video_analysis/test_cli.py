@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from pathlib import Path
 import tomllib
 
@@ -216,6 +217,40 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
         str(output_dir.resolve()),
         "Exported 2 clips",
     ]
+
+
+def test_export_video_clips_cli_publishes_structured_progress_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    progress_path = tmp_path / "adapter_progress.json"
+
+    def export(video_path, manifest_path, output_dir, **options):
+        callback = options["progress_callback"]
+        callback("encoding_clip", "正在导出片段帧 8/10", 0.8)
+        return [Path(output_dir) / "clip-0001.mp4"]
+
+    monkeypatch.setattr(export_video_clips_cli, "export_video_clips", export)
+
+    assert export_video_clips_cli.main(
+        [
+            "--video",
+            "source.mp4",
+            "--manifest",
+            "manifest.json",
+            "--output-dir",
+            str(tmp_path / "clips"),
+            "--progress-file",
+            str(progress_path),
+        ]
+    ) == 0
+
+    payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "schema_version": "1.0",
+        "stage": "encoding_clip",
+        "message": "正在导出片段帧 8/10",
+        "fraction": 0.8,
+    }
 
 
 def test_video_analysis_extra_declares_pts_and_visual_runtime_dependencies() -> None:
