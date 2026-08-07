@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Mapping
 
 from cadscene.video_analysis.clip_export import (
@@ -37,6 +38,8 @@ from .render_adapters import RenderExecutionPlan
 
 OUTPUT_VIDEO_NAME = "rendered.mp4"
 OUTPUT_FRAME_MAP_NAME = "render_frame_map.json"
+_ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
+_ATOMIC_WRITE_LOCKS: dict[str, threading.RLock] = {}
 
 
 @dataclass(frozen=True)
@@ -511,6 +514,14 @@ def _validate_files(
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    lock_key = str(path.absolute()).casefold()
+    with _ATOMIC_WRITE_LOCKS_GUARD:
+        write_lock = _ATOMIC_WRITE_LOCKS.setdefault(lock_key, threading.RLock())
+    with write_lock:
+        _write_json_atomic_locked(path, payload)
+
+
+def _write_json_atomic_locked(path: Path, payload: Mapping[str, object]) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
