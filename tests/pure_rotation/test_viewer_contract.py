@@ -174,7 +174,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     assert "style.css?v=20260729-local-camera-v8" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
     assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260807-project-keyframes" in html
+    assert "workflow.js?v=20260807-pure-auto-debug" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -183,7 +183,7 @@ def test_pure_rotation_job_status_occupies_sfm_workflow_slot() -> None:
     assert '"pure_rotation": "sfm"' in runner
 
 
-def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition() -> None:
+def test_pure_rotation_uses_four_product_stages_without_manual_recovery_transition() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
@@ -191,9 +191,9 @@ def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition
         "pureRotationRecoveryActions",
         "workflowStartPureRotation",
         "workflowRerunPureRotation",
-        "workflowEnterPureCalibration",
     ):
         assert f'id="{identifier}"' in html
+    assert 'id="workflowEnterPureCalibration"' not in html
     assert 'document.querySelector(\'#workflowSteps li[data-stage="quality"]\')' in workflow
     assert 'toggleAttribute("hidden", pure)' in workflow
     assert 'renderOrdinal.textContent = pure ? "4" : "5"' in workflow
@@ -201,8 +201,18 @@ def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition
     assert 'sfm: "keyframes"' in pure_next
     assert 'keyframes: "render"' in pure_next
     assert "quality" not in pure_next
-    assert 'document.querySelector("#workflowEnterPureCalibration")' in workflow
+    assert 'document.querySelector("#workflowEnterPureCalibration")' not in workflow
     assert "updatePureRotationRecoveryActions" in workflow
+
+
+def test_reused_pure_rotation_result_auto_enters_debug() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    reused = workflow.split(
+        'if (!force && await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json")))', 1
+    )[1].split('const result = await apiPost("/api/pure-rotation/run"', 1)[0]
+
+    assert 'setWorkflowStage("keyframes")' in reused
+    assert "进入关键帧标定" not in reused
 
 
 def test_pure_rotation_workflow_uses_single_step_badge_and_auto_enters_debug() -> None:
@@ -490,7 +500,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260807-project-keyframes" in html
+    assert "workflow.js?v=20260807-pure-auto-debug" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1

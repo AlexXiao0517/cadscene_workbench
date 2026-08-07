@@ -113,7 +113,6 @@
   function updatePureRotationRecoveryActions({ ready = false, running = false } = {}) {
     const runButton = document.querySelector("#workflowStartPureRotation");
     const rerunButton = document.querySelector("#workflowRerunPureRotation");
-    const enterButton = document.querySelector("#workflowEnterPureCalibration");
     const blocked = trajectoryWorkflowActionsAreBlocked();
     if (runButton) {
       runButton.hidden = false;
@@ -123,7 +122,6 @@
       rerunButton.hidden = !ready;
       rerunButton.disabled = !ready || running || blocked;
     }
-    if (enterButton) enterButton.disabled = !ready || running;
   }
 
   function applyPureRotationWorkflowLayout(mode) {
@@ -1178,8 +1176,9 @@
     if (!force && await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"))) {
       await initializePureRotationViewer();
       updatePureRotationRecoveryActions({ ready: true });
-      setWorkflowStage("sfm");
-      message.textContent = "旋转轨迹恢复已完成，可以进入关键帧标定。";
+      sessionStorage.setItem(restoredWorkflowStageKey(), "keyframes");
+      setWorkflowStage("keyframes");
+      message.textContent = "旋转轨迹恢复已完成，已进入调试环节。";
       return { ok: true, reused: true };
     }
     const result = await apiPost("/api/pure-rotation/run", {
@@ -1322,7 +1321,9 @@
         projectWorkbenchSession = { ...projectWorkbenchSession, ...attached };
         progress.value = 1;
         stateLabel.textContent = "已完成";
-        message.textContent = "轨迹结果已验证，正在载入关键帧标定工作台";
+        message.textContent = isPureRotationWorkflow()
+          ? "旋转轨迹已验证，正在进入调试环节"
+          : "轨迹结果已验证，正在载入关键帧标定工作台";
         const nextUrl = new URL(window.location.href);
         nextUrl.searchParams.set("workflowStage", "keyframes");
         window.location.replace(nextUrl.toString());
@@ -1834,11 +1835,6 @@
   document.querySelector("#workflowStartSfm")?.addEventListener("click", () => runWithMessage(() => runStage("sfm")));
   document.querySelector("#workflowStartPureRotation")?.addEventListener("click", () => runWithMessage(() => runPureRotationStage()));
   document.querySelector("#workflowRerunPureRotation")?.addEventListener("click", () => runWithMessage(() => runPureRotationStage({ force: true })));
-  document.querySelector("#workflowEnterPureCalibration")?.addEventListener("click", () => {
-    setWorkflowStage("keyframes");
-    setPureRotationEditMode("placement");
-    document.querySelector("#cameraControls")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  });
   // 路线拟合放在关键帧标定阶段：先保存当前关键帧，再启动 alignment job。
   document.querySelector("#workflowRunAlignment")?.addEventListener("click", () => runWithMessage(startAlignmentStage));
   // 质量检测只启动 quality job（不再包含路线拟合）。

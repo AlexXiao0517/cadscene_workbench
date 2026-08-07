@@ -666,7 +666,7 @@ class JobRunner:
             log_handle = log_file.open("wb", buffering=0)
             process = subprocess.Popen(
                 [str(item) for item in command],
-                cwd=str(self.root_dir),
+                cwd=str(Path(__file__).resolve().parents[2]),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 env=_child_process_environment(),
