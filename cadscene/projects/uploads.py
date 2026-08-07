@@ -115,7 +115,10 @@ class PendingUpload:
             )
             after_validation = _stat_signature(self.temporary_path)
             changed = before_validation != after_validation
-            if changed and _file_fingerprint(self.temporary_path) != digest:
+            must_rehash = changed or self._store.has_custom_validator(
+                self.asset_type
+            )
+            if must_rehash and _file_fingerprint(self.temporary_path) != digest:
                 raise UploadValidationError(
                     "upload bytes changed during validation"
                 )
@@ -261,6 +264,9 @@ class ValidatedUploadStore:
 
     def validator_for(self, asset_type: str) -> Validator:
         return self._validators.get(asset_type, _DEFAULT_VALIDATORS[asset_type])
+
+    def has_custom_validator(self, asset_type: str) -> bool:
+        return asset_type in self._validators
 
     def validation_report_path(self, project_id: str, asset_type: str) -> Path:
         self._validate_project_id(project_id)
@@ -456,19 +462,42 @@ def _validate_cad(path: Path, _asset_type: str) -> Mapping[str, object]:
             if bad is not None:
                 raise ValueError(f"CAD archive member failed CRC: {bad}")
             return {"format": "assets_zip", "member_count": len(archive.infolist())}
-    header = path.read_bytes()[:64]
+    with path.open("rb") as stream:
+        header = stream.read(64)
     if extension == ".dwg" and not header.startswith(b"AC10"):
         raise ValueError("invalid DWG signature")
     if extension == ".dxf":
-        from cadscene.cad.dxf_parser import parse_dxf
-
-        _design, statistics = parse_dxf(path)
+        _validate_dxf_structure_bounded(path)
         return {
             "format": "dxf",
-            "entity_count": int(statistics.get("entity_count", 0)),
-            "segment_count": int(statistics.get("segment_count", 0)),
+            "validation_scope": "bounded_structure_probe",
         }
     return {"format": extension.lstrip(".")}
+
+
+def _validate_dxf_structure_bounded(path: Path, *, window_bytes: int = 64 * 1024) -> None:
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError("empty DXF file")
+    with path.open("rb") as stream:
+        head = stream.read(window_bytes)
+        if size > window_bytes:
+            stream.seek(max(0, size - window_bytes))
+            tail = stream.read(window_bytes)
+        else:
+            tail = head
+
+    def pairs(data: bytes) -> set[tuple[bytes, bytes]]:
+        lines = [
+            line.strip().upper()
+            for line in data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        ]
+        return set(zip(lines, lines[1:]))
+
+    if (b"0", b"SECTION") not in pairs(head):
+        raise ValueError("invalid DXF header structure")
+    if (b"0", b"EOF") not in pairs(tail):
+        raise ValueError("DXF EOF marker is unavailable")
 
 
 _DEFAULT_VALIDATORS: Mapping[str, Validator] = {

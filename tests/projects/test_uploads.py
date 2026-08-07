@@ -12,6 +12,7 @@ import pytest
 from cadscene.projects.uploads import (
     UploadValidationError,
     ValidatedUploadStore,
+    _validate_cad,
     _validate_video,
 )
 
@@ -191,6 +192,34 @@ def test_invalid_dxf_is_rejected_before_publication(tmp_path: Path) -> None:
     assert not store.published_path("p1", "cad").exists()
 
 
+def test_dxf_upload_validation_is_bounded_and_defers_full_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dxf = tmp_path / "design.dxf"
+    dxf.write_bytes(b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n")
+    monkeypatch.setattr(
+        "cadscene.cad.dxf_parser.parse_dxf",
+        lambda *_args, **_kwargs: pytest.fail(
+            "upload validation must defer full DXF parsing to the CAD analysis job"
+        ),
+    )
+    original_read_bytes = Path.read_bytes
+
+    def reject_full_file_read(path: Path) -> bytes:
+        if path == dxf:
+            pytest.fail("bounded DXF validation must not read the complete file")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_full_file_read)
+
+    result = _validate_cad(dxf, "cad")
+
+    assert result == {
+        "format": "dxf",
+        "validation_scope": "bounded_structure_probe",
+    }
+
+
 def test_failed_replacement_keeps_previous_valid_publication(tmp_path: Path) -> None:
     root = tmp_path / "projects"
     first_store = ValidatedUploadStore(root, validators={"video": _accept})
@@ -312,11 +341,10 @@ def test_video_upload_validation_is_bounded_and_defers_full_pts_index(
 def test_successful_validation_does_not_rehash_unchanged_upload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = ValidatedUploadStore(
-        tmp_path / "projects", validators={"video": _accept}
-    )
-    pending = store.begin("p1", "video", "source.mp4", expected_size=5)
-    pending.write(b"video")
+    payload = b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n"
+    store = ValidatedUploadStore(tmp_path / "projects")
+    pending = store.begin("p1", "cad", "design.dxf", expected_size=len(payload))
+    pending.write(payload)
     rehashed: list[Path] = []
 
     def track_rehash(path: Path) -> str:
@@ -327,7 +355,7 @@ def test_successful_validation_does_not_rehash_unchanged_upload(
 
     result = pending.complete_staged()
 
-    assert result.path.read_bytes() == b"video"
+    assert result.path.read_bytes() == payload
     assert rehashed == []
 
 
