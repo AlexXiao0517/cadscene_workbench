@@ -204,6 +204,71 @@ demuxer -> ist_index:0 type:video next_dts:233566 next_dts_time:0.233566 next_pt
     assert packets[1].duration_sec == 0.06673333333333334
 
 
+def test_decoded_debug_parser_preserves_presentation_pts_and_exact_time_base() -> None:
+    debug_output = """
+[dec:h264] decoder -> pts:5000 pts_time:5 pkt_dts:4960 pkt_dts_time:4.96 duration:40 duration_time:0.04 keyframe:1 frame_type:1 time_base:1/1000
+[dec:h264] decoder -> pts:5040 pts_time:5.04 pkt_dts:5000 pkt_dts_time:5 duration:40 duration_time:0.04 keyframe:0 frame_type:3 time_base:1/1000
+[dec:h264] decoder -> pts:5120 pts_time:5.12 pkt_dts:5040 pkt_dts_time:5.04 duration:80 duration_time:0.08 keyframe:0 frame_type:2 time_base:1/1000
+"""
+
+    index = pts.parse_decoded_debug_frame_index(
+        debug_output, packet_pts=frozenset({5000, 5120})
+    )
+
+    assert index.time_base == Fraction(1, 1000)
+    assert [frame.pts for frame in index.frames] == [5000, 5040, 5120]
+    assert [frame.duration_pts for frame in index.frames] == [40, 40, 80]
+    assert index.frames[0].timestamp_source == "pts"
+    assert index.frames[1].timestamp_source == "best_effort_timestamp"
+
+
+def test_one_ffmpeg_pass_returns_decoded_index_and_sparse_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mkv"
+    video.write_bytes(b"video")
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_bytes(b"encoder")
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_: object) -> SimpleNamespace:
+        calls.append(command)
+        Path(command[-1]).write_bytes(bytes(range(8)))
+        return SimpleNamespace(
+            returncode=0,
+            stderr=(
+                b"[dec:h264] decoder -> pts:5000 pts_time:5 duration:40 "
+                b"duration_time:0.04 time_base:1/1000\n"
+                b"[showinfo] n: 0 pts: 5000 pts_time:5 duration:40\n"
+                b"[dec:h264] decoder -> pts:5040 pts_time:5.04 duration:40 "
+                b"duration_time:0.04 time_base:1/1000\n"
+                b"[dec:h264] decoder -> pts:5080 pts_time:5.08 duration:40 "
+                b"duration_time:0.04 time_base:1/1000\n"
+                b"[showinfo] n: 1 pts: 5080 pts_time:5.08 duration:40\n"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    index, frames = pts.decode_indexed_sparse_frames(
+        video,
+        interval_sec=0.05,
+        output_size=(2, 2),
+        packet_pts=frozenset({5000, 5040, 5080}),
+        ffmpeg_executable=ffmpeg,
+    )
+
+    assert len(calls) == 1
+    assert "-debug_ts" in calls[0]
+    assert "-show_frames" not in calls[0]
+    assert [frame.pts for frame in index.frames] == [5000, 5040, 5080]
+    assert [frame.pts for frame in frames] == [5000, 5080]
+    assert [frame.image.tolist() for frame in frames] == [
+        [[0, 1], [2, 3]],
+        [[4, 5], [6, 7]],
+    ]
+
+
 def test_sparse_selection_uses_packet_pts_and_always_keeps_ends() -> None:
     packets = [
         PacketTimestamp(pts=0, pts_sec=0.0, duration_sec=0.1),

@@ -19,7 +19,7 @@ from .motion import (
     build_motion_windows,
     stabilize_motion_windows,
 )
-from .pts import iter_sparse_frames, probe_decoded_frame_index, probe_video_pts
+from .pts import decode_indexed_sparse_frames, probe_video_pts
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
 from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
 from .shot_detection import analyze_frame_pair, coalesce_boundaries, detect_shot_boundaries
@@ -209,9 +209,10 @@ def analyze_video(
     report("probing_pts", "正在读取视频时间戳", 0.02)
     packet_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
     report("probing_pts", "视频封装时间戳读取完成", 0.08)
-    frame_index = probe_decoded_frame_index(
+    frame_index, sparse_frames = decode_indexed_sparse_frames(
         source,
-        ffprobe_executable=ffprobe_executable,
+        interval_sec=sample_interval_sec,
+        packet_pts=frozenset(packet.pts for packet in packet_index.packets),
         ffmpeg_executable=ffmpeg_executable,
     )
     report("probing_pts", "权威展示帧索引建立完成", 0.25)
@@ -225,12 +226,7 @@ def analyze_video(
     )
     expected_samples = max(2, math.ceil(duration_sec / sample_interval_sec) + 1)
     progress_stride = max(1, expected_samples // 100)
-    for frame in iter_sparse_frames(
-        source,
-        index=frame_index,
-        interval_sec=sample_interval_sec,
-        ffmpeg_executable=ffmpeg_executable,
-    ):
+    for frame in sparse_frames:
         sampled_pts.append(frame.pts_sec)
         if len(sampled_pts) == 1 or len(sampled_pts) % progress_stride == 0:
             report(
@@ -370,6 +366,7 @@ def analyze_video(
         "packet_count": len(packet_index.packets),
         "sample_interval_sec": sample_interval_sec,
         "sampled_frame_count": len(sampled_pts),
+        "decode_pass_count": 1,
     }
     configuration = {
         "sample_interval_sec": sample_interval_sec,

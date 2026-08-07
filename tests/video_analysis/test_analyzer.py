@@ -68,6 +68,7 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
     assert metadata["source_end_pts_exclusive_sec"] == 4.0
     assert metadata["sample_interval_sec"] == 0.5
     assert metadata["sampled_frame_count"] > 1
+    assert metadata["decode_pass_count"] == 1
     assert len(clips) == 1
     clip = clips[0]
     assert clip["project_id"] == "project-short"

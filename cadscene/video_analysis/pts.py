@@ -440,6 +440,149 @@ def probe_video_pts(
 
 
 _SHOWINFO_PTS_RE = re.compile(r"\bn:\s*\d+\s+pts:\s*(?P<pts>-?\d+)")
+_DECODED_DEBUG_RE = re.compile(
+    r"decoder -> pts:(?P<pts>-?\d+).*?"
+    r"\bduration:(?P<duration>-?\d+).*?"
+    r"\btime_base:(?P<time_base>\d+/\d+)"
+)
+
+
+def parse_decoded_debug_frame_index(
+    debug_output: str,
+    *,
+    packet_pts: frozenset[int] = frozenset(),
+) -> DecodedFrameIndex:
+    """Build the authoritative presentation-order index from FFmpeg decoder output."""
+
+    decoder_lines = [
+        line for line in debug_output.splitlines() if "decoder ->" in line
+    ]
+    if not decoder_lines:
+        raise ValueError("FFmpeg debug output contains no decoded video frames")
+    records: list[tuple[int, int | None, Fraction]] = []
+    for line in decoder_lines:
+        match = _DECODED_DEBUG_RE.search(line)
+        if match is None:
+            raise ValueError("decoded video frame has no usable presentation PTS")
+        duration = int(match.group("duration"))
+        records.append(
+            (
+                int(match.group("pts")),
+                duration if duration > 0 else None,
+                _parse_exact_time_base(
+                    match.group("time_base"), source="FFmpeg decoder"
+                ),
+            )
+        )
+    time_bases = {record[2] for record in records}
+    if len(time_bases) != 1:
+        raise ValueError("decoded video frame time base changed during decoding")
+    time_base = next(iter(time_bases))
+    frames = tuple(
+        DecodedFrameTimestamp(
+            ordinal=ordinal,
+            pts=frame_pts,
+            duration_pts=duration,
+            timestamp_source=(
+                "pts" if frame_pts in packet_pts else "best_effort_timestamp"
+            ),
+        )
+        for ordinal, (frame_pts, duration, _time_base) in enumerate(records)
+    )
+    return DecodedFrameIndex(time_base, frames)
+
+
+def decode_indexed_sparse_frames(
+    video_path: Path,
+    *,
+    interval_sec: float,
+    output_size: tuple[int, int] = (320, 180),
+    packet_pts: frozenset[int] = frozenset(),
+    ffmpeg_executable: str | Path | None = None,
+) -> tuple[DecodedFrameIndex, list[DecodedFrame]]:
+    """Decode once, collecting every decoded PTS and selected analysis frames."""
+
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"video not found: {source}")
+    if interval_sec <= 0:
+        raise ValueError("interval_sec must be positive")
+    width, height = output_size
+    if width <= 0 or height <= 0:
+        raise ValueError("output dimensions must be positive")
+    ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
+    escaped_interval = f"{interval_sec:.9f}"
+    video_filter = (
+        "select=isnan(prev_selected_t)+"
+        f"gte(t-prev_selected_t\\,{escaped_interval}),"
+        f"scale={width}:{height}:flags=area,format=gray,showinfo"
+    )
+    temporary_dir = Path(tempfile.mkdtemp(prefix="cadscene-video-analysis-"))
+    raw_path = temporary_dir / "sparse.gray"
+    try:
+        process = subprocess.run(
+            [
+                str(ffmpeg),
+                "-hide_banner",
+                "-debug_ts",
+                "-copyts",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-vf",
+                video_filter,
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gray",
+                "-y",
+                str(raw_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        stderr = process.stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            raise RuntimeError(f"FFmpeg indexed sparse decode failed: {stderr[-1000:]}")
+        index = parse_decoded_debug_frame_index(
+            stderr, packet_pts=packet_pts
+        )
+        selected_pts = [
+            int(match.group("pts")) for match in _SHOWINFO_PTS_RE.finditer(stderr)
+        ]
+        exact_pts = {
+            frame.pts: float(frame.pts * index.time_base)
+            for frame in index.frames
+        }
+        frame_size = width * height
+        if raw_path.stat().st_size != len(selected_pts) * frame_size:
+            raise ValueError("sparse decode frame bytes and PTS metadata disagree")
+        frames: list[DecodedFrame] = []
+        with raw_path.open("rb") as stream:
+            for frame_pts in selected_pts:
+                if frame_pts not in exact_pts:
+                    raise ValueError(
+                        f"decoded frame PTS missing from source frame index: {frame_pts}"
+                    )
+                frame_bytes = stream.read(frame_size)
+                if len(frame_bytes) != frame_size:
+                    raise ValueError("sparse raw frame is truncated")
+                frames.append(
+                    DecodedFrame(
+                        pts=frame_pts,
+                        pts_sec=exact_pts[frame_pts],
+                        image=np.frombuffer(frame_bytes, dtype=np.uint8)
+                        .reshape(height, width)
+                        .copy(),
+                    )
+                )
+        return index, frames
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
 
 
 def decode_sparse_frames(
