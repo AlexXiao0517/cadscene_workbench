@@ -1,4 +1,4 @@
-import { activateCandidateAnalysis, createProject, getSnapshot, retryAnalysis, uploadAsset } from "./portal_api.js?v=20260807-upload-v3";
+import { activateCandidateAnalysis, createProject, getSnapshot, retryAnalysis, startAnalysis, uploadAsset } from "./portal_api.js?v=20260807-upload-v4";
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
 const THEME_STORAGE_KEY = "mediaflow-theme";
@@ -246,6 +246,16 @@ async function submit(event) {
   $("#analysisRetry").hidden = true;
   try {
     await Promise.all([state.uploads.video, state.uploads.cad]);
+    const current = await getSnapshot(state.projectId, "");
+    state.snapshot = current.snapshot;
+    state.etag = current.etag;
+    if (!state.snapshot) throw new Error("无法读取已上传项目状态");
+    await startAnalysis(
+      state.projectId,
+      state.snapshot.component_revisions.project,
+    );
+    state.etag = "";
+    state.snapshot = null;
     await waitForAnalysisCompletion();
     state.analysisComplete = true;
     $("#portalSubmit").disabled = false;

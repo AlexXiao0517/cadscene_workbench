@@ -694,7 +694,7 @@ def test_serve_viewer_serves_real_project_snapshot_over_http(tmp_path: Path) -> 
     assert body["clips"][0]["clip_id"] == "clip-1"
 
 
-def test_analysis_dag_is_published_once_only_after_all_required_assets_publish(
+def test_analysis_dag_is_published_once_only_after_explicit_start(
     tmp_path: Path,
 ) -> None:
     api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
@@ -726,21 +726,25 @@ def test_analysis_dag_is_published_once_only_after_all_required_assets_publish(
         upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
     )
     assert cad.status == 201
+    project = repositories.project.load("p1")
+    assert set(project.source_assets) >= {"video", "cad"}
+    assert "_analysis" not in project.source_assets
+    assert api.service.queue.jobs() == ()
+
+    started = api.handle(
+        "POST",
+        "/api/projects/p1/analysis/start",
+        json_body={"expected_revision": cad.body["project_revision"]},
+    )
+    assert started.status == 202
     analysis = repositories.project.load("p1").source_assets["_analysis"]
     assert analysis["status"] == "queued"
     assert len(analysis["job_ids"]) == 2
+    assert tuple(started.body["job_ids"]) == tuple(analysis["job_ids"])
     assert [job.job_type for job in api.service.queue.jobs()] == [
         "cad_analysis",
         "video_analysis",
     ]
-    repeated = api.handle(
-        "POST",
-        "/api/projects/p1/uploads/cad",
-        json_body={"expected_revision": cad.body["project_revision"]},
-        upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
-    )
-    assert repeated.status == 201
-    assert len(api.service.queue.jobs()) == 2
 
 
 def test_browser_uploads_can_register_parallel_assets_using_current_revision(
@@ -771,7 +775,9 @@ def test_browser_uploads_can_register_parallel_assets_using_current_revision(
     assert video.status == 201
     assert cad.status == 201
     project = repositories.project.load("p1")
-    assert set(project.source_assets) >= {"video", "cad", "_analysis"}
+    assert set(project.source_assets) >= {"video", "cad"}
+    assert "_analysis" not in project.source_assets
+    assert api.service.queue.jobs() == ()
 
 
 def test_upload_registration_failure_leaves_no_canonical_or_queued_intent(
@@ -801,7 +807,7 @@ def test_upload_registration_failure_leaves_no_canonical_or_queued_intent(
     assert not api.uploads.validation_report_path("p1", "video").exists()
 
 
-def test_second_upload_recovers_analysis_dag_publication_prefix(
+def test_explicit_analysis_start_recovers_dag_publication_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api, repositories, queue = _api(tmp_path, (_clip("clip-1"),))
@@ -819,6 +825,15 @@ def test_second_upload_recovers_analysis_dag_publication_prefix(
         json_body={"expected_revision": revision},
         upload=UploadRequest("source.mp4", BytesIO(b"video"), 5),
     )
+    cad = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/cad",
+        json_body={"expected_revision": video.body["project_revision"]},
+        upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
+    )
+
+    assert cad.status == 201
+    assert queue.jobs() == ()
     original = repositories.jobs._publish_prepared_unchecked
     failed_once = False
 
@@ -830,15 +845,13 @@ def test_second_upload_recovers_analysis_dag_publication_prefix(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(repositories.jobs, "_publish_prepared_unchecked", fail_once)
-
-    cad = api.handle(
+    started = api.handle(
         "POST",
-        "/api/projects/p1/uploads/cad",
-        json_body={"expected_revision": video.body["project_revision"]},
-        upload=UploadRequest("design.dxf", BytesIO(b"0\nEOF"), 5),
+        "/api/projects/p1/analysis/start",
+        json_body={"expected_revision": cad.body["project_revision"]},
     )
 
-    assert cad.status == 201
+    assert started.status == 202
     state = repositories.project.load("p1").source_assets["_analysis"]
     job_ids = tuple(state["job_ids"])
     assert len(job_ids) == 2

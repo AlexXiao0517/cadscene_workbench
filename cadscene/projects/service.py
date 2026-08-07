@@ -236,7 +236,7 @@ class ProjectService:
         *,
         expected_revision: int | None,
     ) -> RegisterUploadResult:
-        """Atomically register immutable upload state and any new analysis DAG."""
+        """Atomically register immutable upload state without starting analysis."""
 
         if upload.project_id != project_id:
             raise ValueError("published upload belongs to another project")
@@ -260,109 +260,21 @@ class ProjectService:
                 "validation_report": str(upload.validation_report_path),
             }
             request_key = _analysis_request_key_from_assets(assets)
-            previous = assets.get("_analysis")
-            previous_key = (
-                str(previous.get("request_key"))
-                if isinstance(previous, Mapping) and previous.get("request_key")
-                else None
-            )
-            batch: PreparedSubmissionBatch | None = None
-            prepared: tuple[QueueJob, ...] = ()
-            job_ids: tuple[str, ...] = ()
-            current_jobs = self.repositories.jobs.load(project_id)
-            if request_key is not None and request_key != previous_key:
-                batch = self._prepare_analysis_submission(
-                    project_id,
-                    request_key=request_key,
-                    project_assets=assets,
-                )
-                prepared = batch.jobs
-                job_ids = batch.job_ids
-
-            existing_jobs = tuple(
-                item for item in self.queue.jobs() if item.project_id == project_id
-            )
-            order = tuple(
-                dict.fromkeys(
-                    (
-                        *(
-                            job_id
-                            for job_id in self.queue.queue_order()
-                            if self.queue.get(job_id).project_id == project_id
-                        ),
-                        *(item.job_id for item in prepared),
-                    )
-                )
-            )
-            by_id = {item.job_id: item for item in existing_jobs}
-            by_id.update({item.job_id: item for item in prepared})
-
-            def mutate_project(
-                value: ProjectManifest, operation_id: str
-            ) -> ProjectManifest:
-                published_assets = dict(assets)
-                project_state = value.project_state
-                if prepared:
-                    assert batch is not None and request_key is not None
-                    base_state = dict(
-                        published_assets.get("_analysis", {})
-                        if isinstance(
-                            published_assets.get("_analysis"), Mapping
-                        )
-                        else {}
-                    )
-                    base_state.setdefault("requested_at", self.now())
-                    state, project_state = self._analysis_state_for_submission(
-                        batch=batch,
-                        project=value,
-                        project_assets=published_assets,
-                        request_key=request_key,
-                        base_state=base_state,
-                        operation_id=operation_id,
-                    )
-                    published_assets["_analysis"] = state
-                return replace(
-                    value,
-                    updated_at=self.now(),
-                    source_assets=published_assets,
-                    project_state=project_state,
-                )
-
-            mutations = [
-                ManifestMutation(
-                    repository=self.repositories.project,
-                    project_id=project_id,
-                    expected_revision=project.revision,
-                    mutate=mutate_project,
-                )
-            ]
-            if prepared:
-                def mutate_jobs(
-                    value: JobsManifest, operation_id: str
-                ) -> JobsManifest:
-                    assert batch is not None
-                    return replace(
-                        value,
-                        updated_at=self.now(),
-                        queue_order=order,
-                        jobs=self._analysis_submission_payload(
-                            by_id=by_id,
-                            order=order,
-                            batch=batch,
-                            operation_id=operation_id,
-                        ),
-                    )
-
-                mutations.append(
-                    ManifestMutation(
-                        repository=self.repositories.jobs,
-                        project_id=project_id,
-                        expected_revision=current_jobs.revision,
-                        mutate=mutate_jobs,
-                    )
-                )
             try:
-                publication = publish_manifests(mutations)
+                publication = publish_manifests(
+                    [
+                        ManifestMutation(
+                            repository=self.repositories.project,
+                            project_id=project_id,
+                            expected_revision=project.revision,
+                            mutate=lambda value, _operation_id: replace(
+                                value,
+                                updated_at=self.now(),
+                                source_assets=assets,
+                            ),
+                        )
+                    ]
+                )
             except Exception as publication_error:
                 from .recovery import reconcile_project
 
@@ -371,43 +283,18 @@ class ProjectService:
                 recovered_asset = recovered_project.source_assets.get(
                     upload.asset_type
                 )
-                recovered_jobs = self.repositories.jobs.load(project_id)
-                recovered_by_id = {
-                    str(item["job_id"]): QueueJob.from_dict(item)
-                    for item in recovered_jobs.jobs
-                }
                 asset_recovered = (
                     isinstance(recovered_asset, Mapping)
                     and recovered_asset.get("path") == str(upload.path)
                     and recovered_asset.get("sha256") == upload.sha256
                 )
-                jobs_recovered = all(
-                    job_id in recovered_by_id for job_id in job_ids
-                )
-                if not asset_recovered or (prepared and not jobs_recovered):
+                if not asset_recovered:
                     raise publication_error
-                if prepared:
-                    assert batch is not None
-                    self._commit_analysis_submission(batch, recovered_by_id)
-                    self.queue.acknowledge_publication(project_id)
                 return RegisterUploadResult(
                     project_revision=recovered_project.revision,
                     request_key=request_key,
-                    analysis_job_ids=job_ids,
+                    analysis_job_ids=(),
                 )
-            if prepared:
-                jobs = next(
-                    item
-                    for item in publication.manifests
-                    if isinstance(item, JobsManifest)
-                )
-                persisted = {
-                    str(item["job_id"]): QueueJob.from_dict(item)
-                    for item in jobs.jobs
-                }
-                assert batch is not None
-                self._commit_analysis_submission(batch, persisted)
-                self.queue.acknowledge_publication(project_id)
             updated_project = next(
                 item
                 for item in publication.manifests
@@ -416,7 +303,7 @@ class ProjectService:
             return RegisterUploadResult(
                 project_revision=updated_project.revision,
                 request_key=request_key,
-                analysis_job_ids=job_ids,
+                analysis_job_ids=(),
             )
 
     def request_reanalysis(

@@ -41,7 +41,7 @@ export async function getSnapshot(projectId, etag = "") {
   return { snapshot, etag: response.headers.get("ETag") || "" };
 }
 
-export async function retryAnalysis(projectId, expectedRevision) {
+export async function startAnalysis(projectId, expectedRevision) {
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/analysis/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -50,6 +50,10 @@ export async function retryAnalysis(projectId, expectedRevision) {
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || `重试失败（HTTP ${response.status}）`);
   return result;
+}
+
+export async function retryAnalysis(projectId, expectedRevision) {
+  return startAnalysis(projectId, expectedRevision);
 }
 
 export async function activateCandidateAnalysis(

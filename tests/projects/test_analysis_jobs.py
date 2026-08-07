@@ -86,8 +86,12 @@ def _service(tmp_path: Path):
     repositories.create_project("p1", updated_at="now")
     video = tmp_path / "source.mp4"
     cad = tmp_path / "design.json"
+    video_report = tmp_path / "source.validation.json"
+    cad_report = tmp_path / "design.validation.json"
     video.write_bytes(b"video")
     cad.write_text("{}", encoding="utf-8")
+    video_report.write_text("{}", encoding="utf-8")
+    cad_report.write_text("{}", encoding="utf-8")
     current = repositories.project.load("p1")
     repositories.project.update(
         "p1",
@@ -99,11 +103,13 @@ def _service(tmp_path: Path):
                     "path": str(video),
                     "sha256": "a" * 64,
                     "original_filename": "source.mp4",
+                    "validation_report": str(video_report),
                 },
                 "cad": {
                     "path": str(cad),
                     "sha256": "b" * 64,
                     "original_filename": "design.json",
+                    "validation_report": str(cad_report),
                 },
                 "_analysis": {"request_key": "request-1", "status": "queued"},
             },
@@ -374,7 +380,7 @@ def test_enqueue_restores_reused_cancelled_dag_as_terminal(
     assert queue.claim_next_unstarted() is None
 
 
-def test_upload_restores_reused_success_dag_and_immutable_descriptor(
+def test_explicit_reanalysis_preserves_immutable_descriptor_and_starts_fresh_dag(
     tmp_path: Path,
 ) -> None:
     service, repositories, queue = _service(tmp_path)
@@ -441,14 +447,19 @@ def test_upload_restores_reused_success_dag_and_immutable_descriptor(
         expected_revision=project.revision,
     )
 
-    assert registered.analysis_job_ids == first.job_ids
-    restored = repositories.project.load("p1")
-    state = restored.source_assets["_analysis"]
-    assert state["status"] == "success"
-    assert state["analysis_revision"] == revision
-    assert state["analysis_artifact_id"] == descriptor["analysis_artifact_id"]
-    assert restored.project_state == "ready"
-    assert queue.claim_next_unstarted() is None
+    assert registered.analysis_job_ids == ()
+    started = service.request_reanalysis(
+        "p1", expected_revision=registered.project_revision
+    )
+    assert len(started.analysis_job_ids) == 2
+    assert started.analysis_job_ids != first.job_ids
+    restarted = repositories.project.load("p1")
+    state = restarted.source_assets["_analysis"]
+    assert state["status"] == "queued"
+    assert state["request_kind"] == "manual"
+    assert restarted.source_assets["_analysis_revisions"][revision] == descriptor
+    assert restarted.project_state == "analyzing"
+    assert queue.claim_next_unstarted() is not None
 
 
 def test_new_request_clears_previous_analysis_result_provenance(
@@ -476,7 +487,7 @@ def test_new_request_clears_previous_analysis_result_provenance(
     report = tmp_path / "new-source.validation.json"
     report.write_text("{}", encoding="utf-8")
 
-    service.register_uploaded_asset(
+    registered = service.register_uploaded_asset(
         "p1",
         PublishedUpload(
             project_id="p1",
@@ -491,6 +502,11 @@ def test_new_request_clears_previous_analysis_result_provenance(
         expected_revision=project.revision,
     )
 
+    unchanged = repositories.project.load("p1").source_assets["_analysis"]
+    assert unchanged == stale_state
+    service.request_reanalysis(
+        "p1", expected_revision=registered.project_revision
+    )
     state = repositories.project.load("p1").source_assets["_analysis"]
     assert state["request_key"] != "request-1"
     for key in (
@@ -2076,7 +2092,11 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
         ),
         expected_revision=project.revision,
     )
-    assert len(registered.analysis_job_ids) == 2
+    assert registered.analysis_job_ids == ()
+    started = service.request_reanalysis(
+        "p1", expected_revision=registered.project_revision
+    )
+    assert len(started.analysis_job_ids) == 2
     durable_jobs = {
         str(item["job_id"]): item for item in repositories.jobs.load("p1").jobs
     }
@@ -2124,7 +2144,7 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
         ),
     )
     repaired_candidate = service.enqueue_analysis_jobs("p1")
-    assert repaired_candidate.job_ids == registered.analysis_job_ids
+    assert repaired_candidate.job_ids == started.analysis_job_ids
     project = repositories.project.load("p1")
     assert project.source_assets["_analysis"]["status"] == "success"
     assert project.project_state == "analysis_candidate_ready"
@@ -2190,7 +2210,7 @@ def test_explicit_candidate_activation_publishes_latest_clips_and_preserves_user
     report = tmp_path / "video-candidate.validation.json"
     report.write_text("{}", encoding="utf-8")
     project = repositories.project.load("p1")
-    service.register_uploaded_asset(
+    registered = service.register_uploaded_asset(
         "p1",
         PublishedUpload(
             project_id="p1",
@@ -2203,6 +2223,9 @@ def test_explicit_candidate_activation_publishes_latest_clips_and_preserves_user
             validation_report_path=report,
         ),
         expected_revision=project.revision,
+    )
+    service.request_reanalysis(
+        "p1", expected_revision=registered.project_revision
     )
     _finish_cad(service, queue, tmp_path)
     candidate_job = queue.claim_next_unstarted()
