@@ -32,6 +32,23 @@ def test_build_parser_accepts_storage_root() -> None:
     assert args.storage_root == "storage"
 
 
+def test_build_parser_accepts_pure_rotation_backend_configuration() -> None:
+    args = serve_viewer.build_parser().parse_args(
+        [
+            "--pure-rotation-backend-root",
+            "D:/pure_rotation_camera_poc",
+            "--pure-rotation-python",
+            "D:/anaconda3/envs/pure_rotation_poc/python.exe",
+            "--pure-rotation-calibration-root",
+            "D:/cadscene/calibrations",
+        ]
+    )
+
+    assert args.pure_rotation_backend_root == "D:/pure_rotation_camera_poc"
+    assert args.pure_rotation_python.endswith("pure_rotation_poc/python.exe")
+    assert args.pure_rotation_calibration_root == "D:/cadscene/calibrations"
+
+
 def test_main_returns_one_for_missing_storage_root(tmp_path: Path) -> None:
     missing_storage_root = tmp_path / "missing-storage"
 

@@ -29,6 +29,9 @@ class ExistingWorkflowAdapter:
     requires_physical_mp4: bool = True
     available: bool = True
     unavailable_reason: str | None = None
+    pure_rotation_backend_root: Path | None = None
+    pure_rotation_backend_command: tuple[str, ...] | None = None
+    pure_rotation_calibration_root: Path | None = None
 
     def prepare_inputs(self, inputs: AdapterInputs) -> AdapterInputs:
         if self.requires_physical_mp4 and not inputs.video_path.is_file():
@@ -65,6 +68,8 @@ class ExistingWorkflowAdapter:
             elif module == "cadscene.cli.fuse_srt_sfm":
                 commands.append(self._srt_fusion_command(inputs))
             elif module == "cadscene.cli.run_pure_rotation":
+                if self.pure_rotation_calibration_root is not None:
+                    commands.append(self._pure_rotation_calibration_command(inputs))
                 commands.append(self._pure_rotation_command(inputs))
             else:  # pragma: no cover - constructor constants are closed
                 raise ValueError(f"unsupported existing workflow module: {module}")
@@ -173,7 +178,7 @@ class ExistingWorkflowAdapter:
         return tuple(command)
 
     def _pure_rotation_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
-        return (
+        command = [
             sys.executable,
             "-m",
             "cadscene.cli.run_pure_rotation",
@@ -185,6 +190,48 @@ class ExistingWorkflowAdapter:
             str(inputs.attempt_directory),
             "--video",
             str(inputs.video_path),
+        ]
+        if self.pure_rotation_backend_root is not None:
+            command.extend(
+                ["--backend-root", str(self.pure_rotation_backend_root)]
+            )
+        if self.pure_rotation_backend_command is not None:
+            command.extend(
+                [
+                    "--backend-command-json",
+                    json.dumps(list(self.pure_rotation_backend_command)),
+                ]
+            )
+        if self.pure_rotation_calibration_root is not None:
+            command.extend(
+                [
+                    "--cadscene-readonly",
+                    str(inputs.attempt_directory / "pure_rotation_calibration"),
+                ]
+            )
+        return tuple(command)
+
+    def _pure_rotation_calibration_command(
+        self, inputs: AdapterInputs
+    ) -> tuple[str, ...]:
+        if (
+            self.pure_rotation_backend_root is None
+            or self.pure_rotation_backend_command is None
+            or self.pure_rotation_calibration_root is None
+        ):
+            raise ValueError("pure-rotation calibration configuration is incomplete")
+        return (
+            self.pure_rotation_backend_command[0],
+            "-m",
+            "cadscene.cli.prepare_pure_rotation_calibration",
+            "--backend-root",
+            str(self.pure_rotation_backend_root),
+            "--source-root",
+            str(self.pure_rotation_calibration_root),
+            "--video",
+            str(inputs.video_path),
+            "--output-dir",
+            str(inputs.attempt_directory / "pure_rotation_calibration"),
         )
 
     def _find_output(self, inputs: AdapterInputs) -> Path | None:
@@ -193,7 +240,12 @@ class ExistingWorkflowAdapter:
         return next((path for path in (direct, nested) if path.is_file()), None)
 
 
-def default_workflow_adapters() -> WorkflowAdapterRegistry:
+def default_workflow_adapters(
+    *,
+    pure_rotation_backend_root: Path | None = None,
+    pure_rotation_backend_command: tuple[str, ...] | None = None,
+    pure_rotation_calibration_root: Path | None = None,
+) -> WorkflowAdapterRegistry:
     return WorkflowAdapterRegistry(
         (
             ExistingWorkflowAdapter(
@@ -230,6 +282,9 @@ def default_workflow_adapters() -> WorkflowAdapterRegistry:
                 srt_requirement="none",
                 modules=("cadscene.cli.run_pure_rotation",),
                 output_relative_path="02_pure_rotation/camera_rotation_raw.json",
+                pure_rotation_backend_root=pure_rotation_backend_root,
+                pure_rotation_backend_command=pure_rotation_backend_command,
+                pure_rotation_calibration_root=pure_rotation_calibration_root,
             ),
         )
     )

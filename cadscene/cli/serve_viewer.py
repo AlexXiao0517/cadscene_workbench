@@ -920,6 +920,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Store workflow data and runs under this root; defaults to --root.",
     )
     parser.add_argument("--extra-root", action="append", default=[], metavar="NAME=PATH", help="Mount an additional read-only root, for example legacy=D:\\data.")
+    parser.add_argument(
+        "--pure-rotation-backend-root",
+        default=os.environ.get("PURE_ROTATION_BACKEND_ROOT"),
+        help="Path to the pinned external OpenGV pure-rotation repository.",
+    )
+    parser.add_argument(
+        "--pure-rotation-python",
+        default=os.environ.get("PURE_ROTATION_PYTHON"),
+        help="Python executable for the external pure-rotation environment.",
+    )
+    parser.add_argument(
+        "--pure-rotation-calibration-root",
+        default=os.environ.get("PURE_ROTATION_CALIBRATION_ROOT"),
+        help="Read-only root containing COLMAP camera calibration candidates.",
+    )
     return parser
 
 
@@ -987,10 +1002,30 @@ def main(argv: list[str] | None = None) -> int:
     projects_root.mkdir(parents=True, exist_ok=True)
     repositories = project_repositories(projects_root)
     queue = LocalResourceQueue()
+    pure_rotation_root = (
+        Path(args.pure_rotation_backend_root).resolve()
+        if args.pure_rotation_backend_root
+        else None
+    )
+    pure_rotation_command = None
+    if pure_rotation_root is not None and args.pure_rotation_python:
+        pure_rotation_command = (
+            str(Path(args.pure_rotation_python).resolve()),
+            str(pure_rotation_root / "scripts" / "run_full_video_exploration.py"),
+        )
+    pure_rotation_calibration_root = (
+        Path(args.pure_rotation_calibration_root).resolve()
+        if args.pure_rotation_calibration_root
+        else None
+    )
     project_service = ProjectService(
         repositories,
         queue,
-        default_workflow_adapters(),
+        default_workflow_adapters(
+            pure_rotation_backend_root=pure_rotation_root,
+            pure_rotation_backend_command=pure_rotation_command,
+            pure_rotation_calibration_root=pure_rotation_calibration_root,
+        ),
         projects_root=projects_root,
         now=lambda: datetime.now(timezone.utc).isoformat(),
     )

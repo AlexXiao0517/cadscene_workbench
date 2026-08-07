@@ -40,6 +40,7 @@ def main() -> int:
     parser.add_argument("--video", required=True, type=Path)
     parser.add_argument("--backend-root")
     parser.add_argument("--backend-command")
+    parser.add_argument("--backend-command-json")
     parser.add_argument("--cadscene-readonly", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -47,7 +48,22 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     staging_root = Path(tempfile.mkdtemp(prefix=".pure-rotation-run-", dir=str(output.parent)))
     staged_output = staging_root / output.name
-    backend = ExternalOpenGVBackend(backend_root=args.backend_root, backend_command=[args.backend_command] if args.backend_command else None)
+    backend_command = None
+    if args.backend_command_json:
+        decoded = json.loads(args.backend_command_json)
+        if (
+            not isinstance(decoded, list)
+            or not decoded
+            or not all(isinstance(item, str) and item for item in decoded)
+        ):
+            parser.error("--backend-command-json must be a non-empty string array")
+        backend_command = decoded
+    elif args.backend_command:
+        backend_command = [args.backend_command]
+    backend = ExternalOpenGVBackend(
+        backend_root=args.backend_root,
+        backend_command=backend_command,
+    )
     try:
         result = backend.run_video(
             video=args.video,

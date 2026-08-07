@@ -250,6 +250,57 @@ def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:
     assert command[1:3] == ("-m", "cadscene.cli.run_pure_rotation")
 
 
+def test_pure_rotation_adapter_passes_configured_external_backend(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"mp4")
+    backend = tmp_path / "pure-rotation-backend"
+    backend.mkdir()
+    command_prefix = ("C:/conda/python.exe", "C:/backend/run.py")
+    inputs = AdapterInputs("p1", "c1", video, None, tmp_path / "attempt-1")
+    adapter = default_workflow_adapters(
+        pure_rotation_backend_root=backend,
+        pure_rotation_backend_command=command_prefix,
+    ).for_workflow("pure_rotation")
+
+    command = adapter.build_command(adapter.prepare_inputs(inputs))
+
+    assert command[command.index("--backend-root") + 1] == str(backend)
+    encoded = command[command.index("--backend-command-json") + 1]
+    assert json.loads(encoded) == list(command_prefix)
+
+
+def test_pure_rotation_adapter_prepares_scaled_calibration_before_opengv(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"mp4")
+    backend = tmp_path / "pure-rotation-backend"
+    calibration_root = tmp_path / "calibration-source"
+    backend.mkdir()
+    calibration_root.mkdir()
+    command_prefix = ("C:/conda/python.exe", "C:/backend/run.py")
+    inputs = AdapterInputs("p1", "c1", video, None, tmp_path / "attempt-1")
+    adapter = default_workflow_adapters(
+        pure_rotation_backend_root=backend,
+        pure_rotation_backend_command=command_prefix,
+        pure_rotation_calibration_root=calibration_root,
+    ).for_workflow("pure_rotation")
+
+    commands = adapter.build_commands(adapter.prepare_inputs(inputs))
+
+    assert len(commands) == 2
+    assert commands[0][1:3] == (
+        "-m",
+        "cadscene.cli.prepare_pure_rotation_calibration",
+    )
+    assert commands[0][commands[0].index("--source-root") + 1] == str(
+        calibration_root
+    )
+    assert commands[1][commands[1].index("--cadscene-readonly") + 1] == str(
+        inputs.attempt_directory / "pure_rotation_calibration"
+    )
+
+
 def test_preflight_rejects_missing_physical_inputs(tmp_path: Path) -> None:
     adapter = default_workflow_adapters().for_workflow("srt_sfm_fused")
     inputs = AdapterInputs(
