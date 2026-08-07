@@ -174,7 +174,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     assert "style.css?v=20260729-local-camera-v8" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
     assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260807-pure-auto-debug" in html
+    assert "workflow.js?v=20260807-pure-layout-sync" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -232,6 +232,16 @@ def test_pure_rotation_workflow_uses_single_step_badge_and_auto_enters_debug() -
     )[0]
     assert 'operation === "pure_rotation"' in status
     assert 'setWorkflowStage("keyframes")' in status
+
+
+def test_loading_pure_rotation_refreshes_an_already_selected_stage_title() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
+        "function pureRotationPoseAtPts", 1
+    )[0]
+
+    assert "if (selectedWorkflowStage)" in layout
+    assert "renderWorkflowPanel(selectedWorkflowStage)" in layout
 
 
 def test_pure_rotation_debug_actions_are_compact_and_mode_stable() -> None:
@@ -500,7 +510,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260807-pure-auto-debug" in html
+    assert "workflow.js?v=20260807-pure-layout-sync" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1

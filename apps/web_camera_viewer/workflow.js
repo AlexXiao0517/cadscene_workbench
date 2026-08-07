@@ -181,6 +181,9 @@
       setPureRotationEditMode("placement");
       updatePureRotationRecoveryActions();
     }
+    if (selectedWorkflowStage) {
+      renderWorkflowPanel(selectedWorkflowStage);
+    }
   }
 
   function pureRotationPoseAtPts(trajectory, pts_time_sec) {
