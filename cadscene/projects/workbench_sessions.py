@@ -1060,6 +1060,72 @@ class ProjectWorkbenchService:
             )
             return attached
 
+    def heartbeat(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        expected_clips_revision: int,
+    ) -> WorkbenchSession:
+        """Extend an active browser-owned session without reviving stale state."""
+
+        with self.project_service._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            self._require_clips_revision(
+                current.revision, expected_clips_revision, project_id
+            )
+            session = self.coordinator.store.load(project_id, token)
+            if session.state != "editing":
+                raise StaleWorkbenchSession("workbench session is not editable")
+            if self.coordinator._expired(session):
+                expired = self.coordinator.inspect(project_id, token)
+                self._publish_clip_state(
+                    current,
+                    expired,
+                    state="ready",
+                    expected_revision=expected_clips_revision,
+                )
+                raise StaleWorkbenchSession("workbench session expired")
+            clip = next(
+                (item for item in current.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            if clip is None:
+                raise StaleWorkbenchSession("workbench session clip no longer exists")
+            self._require_session_reference(
+                session,
+                self._workbench_reference(clip),
+                allow_saved_repair=False,
+            )
+            context = self.resolve_context(project_id, session.clip_id)
+            if (
+                context.project_input_revision != session.project_input_revision
+                or context.clip_input_revision != session.clip_input_revision
+                or context.workflow != session.workflow
+                or not context.can_open_workbench
+            ):
+                raise StaleWorkbenchSession("workbench input changed")
+            if session.launch_mode == "trajectory_ready":
+                self.coordinator._validate_binding(session, context)
+            operation_id = uuid4().hex
+            renewed = self.coordinator.store.update(
+                project_id,
+                token,
+                expected_revision=session.revision,
+                mutate=lambda value: replace(
+                    value,
+                    operation_id=operation_id,
+                    expires_at=_timestamp(self.now() + self.coordinator.ttl),
+                ),
+            )
+            self._publish_clip_state(
+                current,
+                renewed,
+                state="editing",
+                expected_revision=expected_clips_revision,
+            )
+            return renewed
+
     def save(
         self,
         project_id: str,

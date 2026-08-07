@@ -233,6 +233,20 @@ def test_project_trajectory_polling_reuses_workflow_progress_and_log_panels() ->
     assert 'runtime.lines.join("\\n")' in wait
 
 
+def test_project_workbench_renews_session_during_long_trajectory_jobs() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert "PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000" in script
+    assert "/heartbeat`" in script
+    assert "renewProjectWorkbenchSession" in wait
+    trajectory_ready = wait.index("/trajectory-ready`")
+    assert wait.rindex("renewProjectWorkbenchSession", 0, trajectory_ready) >= 0
+
+
 def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
     script = _read("workflow.js")
     start = script[

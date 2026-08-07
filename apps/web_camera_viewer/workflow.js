@@ -7,6 +7,7 @@
   const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
   const projectWorkbenchProjectId = params.get("projectId") || dataset;
   const requestedWorkflowStage = params.get("workflowStage") || "";
+  const PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000;
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
   const stageTitles = {
@@ -1266,6 +1267,15 @@
     return payload;
   }
 
+  async function renewProjectWorkbenchSession(expectedRevision) {
+    const renewed = await projectWorkbenchRequest(
+      `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/heartbeat`,
+      { expected_revision: expectedRevision },
+    );
+    projectWorkbenchSession = { ...projectWorkbenchSession, ...renewed };
+    return renewed;
+  }
+
   function projectTrajectoryStatusCopy(status, stage) {
     const labels = {
       queued: "已进入资源队列",
@@ -1284,6 +1294,7 @@
 
   async function waitForProjectWorkbenchTrajectory(jobId) {
     const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    let lastHeartbeatAt = 0;
     while (true) {
       const response = await fetch(
         `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
@@ -1292,6 +1303,7 @@
       const snapshot = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
       projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
       const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
       if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
       projectWorkbenchTrajectoryStatus = String(clip.status || clip.stage || "queued");
@@ -1302,9 +1314,10 @@
         if (clip.status !== "success") {
           throw new Error(projectTrajectoryStatusCopy(clip.status, clip.stage));
         }
+        const renewed = await renewProjectWorkbenchSession(snapshot.component_revisions.clips);
         const attached = await projectWorkbenchRequest(
           `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/trajectory-ready`,
-          { expected_revision: snapshot.component_revisions.clips },
+          { expected_revision: renewed.clips_revision },
         );
         projectWorkbenchSession = { ...projectWorkbenchSession, ...attached };
         progress.value = 1;
@@ -1312,6 +1325,11 @@
         message.textContent = "轨迹结果已验证，正在载入关键帧标定工作台";
         window.location.reload();
         return attached;
+      }
+      const now = Date.now();
+      if (now - lastHeartbeatAt >= PROJECT_WORKBENCH_HEARTBEAT_MS) {
+        await renewProjectWorkbenchSession(snapshot.component_revisions.clips);
+        lastHeartbeatAt = now;
       }
       let renderedRuntime = false;
       try {

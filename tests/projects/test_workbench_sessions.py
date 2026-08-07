@@ -1055,6 +1055,78 @@ def test_user_started_trajectory_is_attached_to_open_workbench_session(
     assert saved.body["state"] == "saved"
 
 
+def test_workbench_heartbeat_extends_editing_session_lease(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    original_expiry = opened.body["expires_at"]
+    clock = api.workbench.coordinator.now
+    clock.value += timedelta(minutes=29)
+
+    renewed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/heartbeat",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+        },
+    )
+
+    assert renewed.status == 200
+    assert renewed.body["state"] == "editing"
+    assert renewed.body["expires_at"] > original_expiry
+    reference = repositories.clips.load("project-1").clips[0].references[-1]
+    assert reference.value["expires_at"] == renewed.body["expires_at"]
+    clock.value += timedelta(minutes=2)
+    inspected = api.handle(
+        "GET",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}",
+    )
+    assert inspected.status == 200
+    assert inspected.body["state"] == "editing"
+
+
+def test_workbench_heartbeat_does_not_revive_expired_session(tmp_path: Path) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    clock = api.workbench.coordinator.now
+    clock.value += timedelta(minutes=31)
+
+    renewed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/heartbeat",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+        },
+    )
+
+    assert renewed.status == 409
+    assert renewed.body["error"] == "stale_workbench_session"
+
+
 def test_snapshot_never_binds_historical_success_from_an_old_clip_input(
     tmp_path: Path,
 ) -> None:

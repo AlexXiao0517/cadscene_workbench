@@ -53,7 +53,7 @@ _WORKBENCH_CREATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workbench-sessions$"
 )
 _WORKBENCH_SESSION = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|trajectory-ready))?$"
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready))?$"
 )
 
 
@@ -167,6 +167,10 @@ class ProjectApi:
             if match and method == "POST" and match["action"] in {"save", "close"}:
                 return self._mutate_workbench_session(
                     match["project"], match["token"], match["action"], payload
+                )
+            if match and method == "POST" and match["action"] == "heartbeat":
+                return self._heartbeat_workbench_session(
+                    match["project"], match["token"], payload
                 )
             if match and method == "POST" and match["action"] == "trajectory-ready":
                 return self._attach_workbench_trajectory(
@@ -608,6 +612,24 @@ class ProjectApi:
         if self.workbench is None:
             raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
         session = self.workbench.attach_trajectory(
+            project_id,
+            token,
+            expected_clips_revision=_required_revision(payload),
+        )
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
+
+    def _heartbeat_workbench_session(
+        self, project_id: str, token: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+        session = self.workbench.heartbeat(
             project_id,
             token,
             expected_clips_revision=_required_revision(payload),
