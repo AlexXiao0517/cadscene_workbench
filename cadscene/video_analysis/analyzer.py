@@ -6,6 +6,7 @@ import io
 import json
 import math
 from pathlib import Path
+from statistics import fmean, median
 import time
 from typing import Any, Callable
 
@@ -54,6 +55,62 @@ def _dominant_motion(
         return MotionMode.UNKNOWN, 0.3
     mode = max(scores, key=scores.get)
     return mode, confidence_weight[mode] / scores[mode]
+
+
+def _mandatory_boundaries_for_source(
+    boundaries: list[BoundaryEvidence],
+    *,
+    source_start_pts_sec: float,
+    source_end_pts_exclusive_sec: float,
+    hard_max_sec: float = 60.0,
+) -> list[BoundaryEvidence]:
+    """Keep an entire short upload as one logical clip.
+
+    Shot evidence remains in ``detected_boundaries.json`` for diagnostics.  It
+    only stops being a mandatory logical cut when the complete source already
+    satisfies the strict duration limit.
+    """
+    duration = source_end_pts_exclusive_sec - source_start_pts_sec
+    if duration < hard_max_sec:
+        return []
+    return list(boundaries)
+
+
+def _rotation_evidence_verified(
+    windows: list[MotionWindow],
+    *,
+    source_start_pts_sec: float,
+    source_end_pts_exclusive_sec: float,
+) -> bool:
+    """Conservatively confirm a short, sustained rotation-only source."""
+    if source_end_pts_exclusive_sec - source_start_pts_sec >= 60.0:
+        return False
+    selected = [
+        window
+        for window in windows
+        if window.end_pts_sec > source_start_pts_sec
+        and window.start_pts_sec < source_end_pts_exclusive_sec
+    ]
+    rotation = [
+        window
+        for window in selected
+        if window.motion_mode is MotionMode.ROTATION_DOMINANT
+    ]
+    contradictory = [
+        window
+        for window in selected
+        if window.motion_mode in {MotionMode.GENERAL_MOTION, MotionMode.UNKNOWN}
+    ]
+    if len(rotation) < 3 or contradictory:
+        return False
+    if len(rotation) / len(selected) < 0.6:
+        return False
+    return (
+        fmean(window.confidence for window in rotation) >= 0.85
+        and median(window.median_homography_inlier_ratio for window in rotation)
+        >= 0.85
+        and median(window.median_residual_px for window in rotation) <= 1.5
+    )
 
 
 def _analysis_range(
@@ -262,6 +319,11 @@ def analyze_video(
         recent_frame_lumas=sampled_lumas,
         terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
     )
+    mandatory_boundaries = _mandatory_boundaries_for_source(
+        mandatory_boundaries,
+        source_start_pts_sec=frame_index.source_start_pts_sec,
+        source_end_pts_exclusive_sec=frame_index.source_end_pts_exclusive_sec,
+    )
     mandatory_boundaries = coalesce_boundaries(
         mandatory_boundaries, within_sec=sample_interval_sec * 2.0
     )
@@ -296,6 +358,11 @@ def analyze_video(
         srt_records = list(srt_analysis.get("records", []))
 
     clip_payloads: list[dict[str, Any]] = []
+    source_rotation_verified = len(planned) == 1 and _rotation_evidence_verified(
+        stable_windows,
+        source_start_pts_sec=frame_index.source_start_pts_sec,
+        source_end_pts_exclusive_sec=frame_index.source_end_pts_exclusive_sec,
+    )
     for index, interval in enumerate(planned, start=1):
         mode, confidence = _dominant_motion(
             stable_windows, interval.start_pts_sec, interval.end_pts_sec
@@ -306,7 +373,14 @@ def analyze_video(
             clip_source_end_pts_sec=interval.end_pts_sec,
             video_source_start_pts_sec=frame_index.source_start_pts_sec,
         )
-        recommendation = recommend_workflow(mode, confidence, srt_coverage)
+        recommendation = recommend_workflow(
+            mode,
+            confidence,
+            srt_coverage,
+            pure_rotation_verified=(
+                source_rotation_verified and mode is MotionMode.ROTATION_DOMINANT
+            ),
+        )
         analysis_start, analysis_end = _analysis_range(
             sampled_pts, interval.start_pts_sec, interval.end_pts_sec
         )

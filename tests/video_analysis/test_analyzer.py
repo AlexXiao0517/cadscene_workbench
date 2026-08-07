@@ -5,9 +5,13 @@ from pathlib import Path
 import subprocess
 
 from cadscene.video_analysis.analyzer import (
+    _mandatory_boundaries_for_source,
+    _rotation_evidence_verified,
     _scene_boundaries_for_segmentation,
     analyze_video,
 )
+from cadscene.video_analysis.motion import MotionWindow
+from cadscene.video_analysis.models import MotionMode
 from cadscene.video_analysis.artifacts import REQUIRED_ARTIFACTS
 from cadscene.video_analysis.models import BoundaryEvidence
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
@@ -117,6 +121,69 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
     assert progress[-1] == ("complete", "视频分析完成", 1.0)
     assert measured == sorted(measured)
     assert any(stage == "sampling_frames" for stage, _message, _value in progress)
+
+
+def test_short_source_keeps_one_logical_clip_despite_detected_boundaries() -> None:
+    boundaries = [
+        BoundaryEvidence(19.019, ("image_discontinuity",), 0.98),
+        BoundaryEvidence(21.5215, ("image_discontinuity",), 0.98),
+    ]
+
+    assert _mandatory_boundaries_for_source(
+        boundaries,
+        source_start_pts_sec=0.0,
+        source_end_pts_exclusive_sec=37.78775,
+    ) == []
+
+
+def test_short_sustained_rotation_is_verified_for_recommendation() -> None:
+    windows = [
+        MotionWindow(
+            start_pts_sec=float(index),
+            end_pts_sec=float(index + 4),
+            motion_mode=(
+                MotionMode.STATIC if index in {8, 9} else MotionMode.ROTATION_DOMINANT
+            ),
+            confidence=0.92,
+            evidence_count=9,
+            median_flow_px=0.3 if index in {8, 9} else 8.0,
+            median_residual_px=0.8,
+            median_homography_inlier_ratio=0.94,
+        )
+        for index in range(20)
+    ]
+
+    assert _rotation_evidence_verified(
+        windows,
+        source_start_pts_sec=0.0,
+        source_end_pts_exclusive_sec=23.0,
+    ) is True
+
+
+def test_rotation_recommendation_verification_rejects_general_motion_counterevidence() -> None:
+    windows = [
+        MotionWindow(
+            start_pts_sec=float(index),
+            end_pts_sec=float(index + 4),
+            motion_mode=(
+                MotionMode.GENERAL_MOTION
+                if index >= 8
+                else MotionMode.ROTATION_DOMINANT
+            ),
+            confidence=0.92,
+            evidence_count=9,
+            median_flow_px=8.0,
+            median_residual_px=0.8,
+            median_homography_inlier_ratio=0.94,
+        )
+        for index in range(12)
+    ]
+
+    assert _rotation_evidence_verified(
+        windows,
+        source_start_pts_sec=0.0,
+        source_end_pts_exclusive_sec=15.0,
+    ) is False
 
 
 def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path) -> None:
