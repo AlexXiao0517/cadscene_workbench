@@ -5,6 +5,7 @@ from http.client import HTTPConnection
 from io import BytesIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 
 import pytest
@@ -958,6 +959,51 @@ def test_manual_reanalysis_advances_revision_and_captures_a_new_request_key(
         .body["capabilities"]["can_reanalyze"]
         is False
     )
+
+
+def test_activate_candidate_analysis_endpoint_requires_both_manifest_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    calls: list[tuple[object, ...]] = []
+
+    def activate(project_id: str, **kwargs: object) -> object:
+        calls.append((project_id, kwargs))
+        return SimpleNamespace(
+            analysis_revision="analysis-2",
+            project_revision=7,
+            clips_revision=5,
+        )
+
+    monkeypatch.setattr(api.service, "activate_candidate_analysis", activate, raising=False)
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/analysis/activate",
+        json_body={
+            "candidate_analysis_revision": "analysis-2",
+            "expected_revision": 6,
+            "expected_clips_revision": 4,
+        },
+    )
+
+    assert response.status == 200
+    assert response.body == {
+        "project_id": "p1",
+        "active_analysis_revision": "analysis-2",
+        "project_revision": 7,
+        "clips_revision": 5,
+    }
+    assert calls == [
+        (
+            "p1",
+            {
+                "candidate_analysis_revision": "analysis-2",
+                "expected_project_revision": 6,
+                "expected_clips_revision": 4,
+            },
+        )
+    ]
 
 
 def test_manual_reanalysis_recovers_jobs_manifest_publication_prefix(

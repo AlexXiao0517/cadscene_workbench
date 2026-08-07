@@ -62,6 +62,23 @@ def test_portal_waits_for_project_analysis() -> None:
     assert 'id="analysisOverlay"' in html
 
 
+def test_new_project_flow_explicitly_activates_a_completed_candidate_analysis() -> None:
+    api, script, html = (
+        _read("portal_api.js"),
+        _read("workflow_portal.js"),
+        _read("index.html"),
+    )
+
+    assert "activateCandidateAnalysis" in api
+    assert "/analysis/activate" in api
+    assert 'project_state === "analysis_candidate_ready"' in script
+    assert "snapshot.candidate_analysis_revision" in script
+    assert "snapshot.component_revisions.project" in script
+    assert "snapshot.component_revisions.clips" in script
+    assert "await activateCandidateAnalysis(" in script
+    assert "workflow_portal.js?v=20260807-upload-v9" in html
+
+
 def test_portal_uses_real_upload_bytes_and_never_timer_drives_upload_progress() -> None:
     api, script = _read("portal_api.js"), _read("workflow_portal.js")
     assert "event.loaded" in api and "event.total" in api
@@ -247,7 +264,7 @@ def test_reselected_cad_preview_uses_the_published_asset_fingerprint() -> None:
 
     assert "result.fingerprint" in cad_success
     assert "?asset=${encodeURIComponent(result.fingerprint)}" in cad_success
-    assert "workflow_portal.js?v=20260807-upload-v8" in html
+    assert "workflow_portal.js?v=20260807-upload-v9" in html
 
 
 def test_preview_keeps_the_drop_zone_as_its_containing_block_across_upload_states() -> None:
@@ -281,7 +298,7 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
 def test_portal_busts_cached_assets_for_the_stable_preview_layout() -> None:
     html = _read("index.html")
 
-    assert "20260807-upload-v8" in html
+    assert "20260807-upload-v9" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:

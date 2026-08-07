@@ -51,3 +51,23 @@ export async function retryAnalysis(projectId, expectedRevision) {
   if (!response.ok) throw new Error(result.error || `重试失败（HTTP ${response.status}）`);
   return result;
 }
+
+export async function activateCandidateAnalysis(
+  projectId,
+  candidateAnalysisRevision,
+  expectedProjectRevision,
+  expectedClipsRevision,
+) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/analysis/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidate_analysis_revision: candidateAnalysisRevision,
+      expected_revision: expectedProjectRevision,
+      expected_clips_revision: expectedClipsRevision,
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `激活分析结果失败（HTTP ${response.status}）`);
+  return result;
+}

@@ -32,6 +32,7 @@ from .models import (
     ProjectManifest,
     RenderManifest,
     StateReference,
+    activate_analysis_revision,
     register_analysis_revision,
 )
 from .media import (
@@ -110,6 +111,13 @@ class RegisterUploadResult:
     project_revision: int
     request_key: str | None
     analysis_job_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ActivateAnalysisResult:
+    analysis_revision: str
+    project_revision: int
+    clips_revision: int
 
 
 class _AnalysisPublicationPending(RuntimeError):
@@ -566,6 +574,131 @@ class ProjectService:
                 project_revision=updated_project.revision,
                 request_key=request_key,
                 analysis_job_ids=job_ids,
+            )
+
+    def activate_candidate_analysis(
+        self,
+        project_id: str,
+        *,
+        candidate_analysis_revision: str,
+        expected_project_revision: int,
+        expected_clips_revision: int,
+    ) -> ActivateAnalysisResult:
+        """Explicitly activate one immutable candidate analysis revision."""
+
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            existing_clips = self.repositories.clips.load(project_id)
+            if project.revision != expected_project_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_project_revision,
+                    current_revision=project.revision,
+                )
+            if existing_clips.revision != expected_clips_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_clips_revision,
+                    current_revision=existing_clips.revision,
+                )
+            if project.candidate_analysis_revision != candidate_analysis_revision:
+                raise ValueError("candidate analysis revision is no longer current")
+
+            revision_descriptors = project.source_assets.get("_analysis_revisions")
+            if not isinstance(revision_descriptors, Mapping):
+                raise ValueError("analysis revision descriptors are unavailable")
+            descriptor = revision_descriptors.get(candidate_analysis_revision)
+            if not isinstance(descriptor, Mapping):
+                raise ValueError("candidate analysis descriptor is unavailable")
+            input_snapshot = descriptor.get("input_snapshot")
+            if not isinstance(input_snapshot, Mapping):
+                raise ValueError("candidate analysis input snapshot is unavailable")
+            artifact_root = Path(str(descriptor.get("analysis_artifact_path") or ""))
+            clip_manifest_path = (
+                artifact_root / "02_video_analysis" / "clip_manifest.json"
+            )
+            if not clip_manifest_path.is_file():
+                raise FileNotFoundError("candidate clip manifest is unavailable")
+            payload = json.loads(clip_manifest_path.read_text(encoding="utf-8"))
+            if payload.get("analysis_revision") != candidate_analysis_revision:
+                raise ValueError("candidate clip manifest revision does not match")
+            candidate_clips = tuple(
+                ClipDefinition.from_analysis(
+                    {**item, "input_snapshot": dict(input_snapshot)},
+                    generated_display_name=(
+                        f"场景 {int(item.get('scene_index', 1)):02d} · "
+                        f"第 {int(item.get('segment_index', 1))} 段"
+                    ),
+                )
+                for item in payload.get("clips", ())
+            )
+            candidate_manifest = ClipsManifest.new(
+                project_id,
+                analysis_revision=candidate_analysis_revision,
+                clips=candidate_clips,
+                updated_at=self.now(),
+            )
+
+            def mutate_project(
+                value: ProjectManifest, operation_id: str
+            ) -> ProjectManifest:
+                activated, _ = activate_analysis_revision(
+                    value,
+                    existing_clips,
+                    candidate_manifest,
+                    operation_id=operation_id,
+                )
+                return replace(
+                    activated,
+                    updated_at=self.now(),
+                    project_state="ready",
+                )
+
+            def mutate_clips(
+                value: ClipsManifest, operation_id: str
+            ) -> ClipsManifest:
+                _, activated = activate_analysis_revision(
+                    project,
+                    value,
+                    candidate_manifest,
+                    operation_id=operation_id,
+                )
+                return replace(
+                    activated,
+                    revision=value.revision,
+                    updated_at=self.now(),
+                )
+
+            publication = publish_manifests(
+                (
+                    ManifestMutation(
+                        repository=self.repositories.project,
+                        project_id=project_id,
+                        expected_revision=expected_project_revision,
+                        mutate=mutate_project,
+                    ),
+                    ManifestMutation(
+                        repository=self.repositories.clips,
+                        project_id=project_id,
+                        expected_revision=expected_clips_revision,
+                        mutate=mutate_clips,
+                    ),
+                )
+            )
+            published_project = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, ProjectManifest)
+            )
+            published_clips = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, ClipsManifest)
+            )
+            return ActivateAnalysisResult(
+                analysis_revision=candidate_analysis_revision,
+                project_revision=published_project.revision,
+                clips_revision=published_clips.revision,
             )
 
     def enqueue_analysis_jobs(self, project_id: str) -> EnqueueAnalysisResult:

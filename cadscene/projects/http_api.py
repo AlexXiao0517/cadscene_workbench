@@ -32,6 +32,9 @@ _UPLOAD = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt)$"
 )
 _ANALYSIS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/start$")
+_ANALYSIS_ACTIVATE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/activate$"
+)
 _SNAPSHOT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/snapshot$")
 _WORKFLOW = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workflow$"
@@ -128,6 +131,9 @@ class ProjectApi:
             match = _ANALYSIS.fullmatch(path)
             if method == "POST" and match:
                 return self._start_analysis(match["project"], payload)
+            match = _ANALYSIS_ACTIVATE.fullmatch(path)
+            if method == "POST" and match:
+                return self._activate_analysis(match["project"], payload)
             match = _WORKFLOW.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_workflow(
@@ -305,6 +311,37 @@ class ProjectApi:
             },
         )
 
+    def _activate_analysis(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        candidate_revision = payload.get("candidate_analysis_revision")
+        if not isinstance(candidate_revision, str) or not candidate_revision:
+            raise ValueError("candidate_analysis_revision must be a non-empty string")
+        expected_clips_revision = payload.get("expected_clips_revision")
+        if (
+            isinstance(expected_clips_revision, bool)
+            or not isinstance(expected_clips_revision, int)
+            or expected_clips_revision < 0
+        ):
+            raise ValueError(
+                "expected_clips_revision must be a non-negative integer"
+            )
+        result = self.service.activate_candidate_analysis(
+            project_id,
+            candidate_analysis_revision=candidate_revision,
+            expected_project_revision=_required_revision(payload),
+            expected_clips_revision=expected_clips_revision,
+        )
+        return ApiResponse(
+            200,
+            {
+                "project_id": project_id,
+                "active_analysis_revision": result.analysis_revision,
+                "project_revision": result.project_revision,
+                "clips_revision": result.clips_revision,
+            },
+        )
+
     def _snapshot(
         self, project_id: str, headers: Mapping[str, str]
     ) -> ApiResponse:
@@ -466,6 +503,7 @@ class ProjectApi:
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
+            "candidate_analysis_revision": project.candidate_analysis_revision,
             "analysis": {
                 "status": analysis_status,
                 "jobs": analysis_jobs,

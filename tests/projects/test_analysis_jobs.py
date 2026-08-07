@@ -2146,6 +2146,102 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
     assert old_video != replacement
 
 
+def test_explicit_candidate_activation_publishes_latest_clips_and_preserves_user_layers(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    first_video_job = queue.claim_next_unstarted()
+    assert first_video_job is not None
+    first_output, first_revision = _video_output(first_video_job, tmp_path)
+    first_attempt = first_video_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        first_video_job.job_id,
+        AdapterResult.success(
+            output_revision=first_revision,
+            output_fingerprint=tree_fingerprint(first_output),
+            outputs={"analysis_output": str(first_output)},
+        ),
+        attempt_number=first_attempt.number,
+        claim_token=str(first_attempt.worker_claim_token),
+    )
+    active = repositories.clips.load("p1")
+    customized = repositories.clips.update(
+        "p1",
+        expected_revision=active.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=(
+                    replace(
+                        value.clips[0],
+                        custom_display_name="用户命名片段",
+                        display_name="用户命名片段",
+                        workflow_override="pure_rotation",
+                        resolved_workflow="pure_rotation",
+                    ),
+            ),
+        ),
+    )
+
+    replacement = tmp_path / "video-candidate.mp4"
+    replacement.write_bytes(b"candidate-video")
+    report = tmp_path / "video-candidate.validation.json"
+    report.write_text("{}", encoding="utf-8")
+    project = repositories.project.load("p1")
+    service.register_uploaded_asset(
+        "p1",
+        PublishedUpload(
+            project_id="p1",
+            asset_type="video",
+            original_filename="video-candidate.mp4",
+            path=replacement,
+            size_bytes=replacement.stat().st_size,
+            sha256="f" * 64,
+            validation={"decoded": True},
+            validation_report_path=report,
+        ),
+        expected_revision=project.revision,
+    )
+    _finish_cad(service, queue, tmp_path)
+    candidate_job = queue.claim_next_unstarted()
+    assert candidate_job is not None
+    candidate_output, candidate_revision = _video_output(candidate_job, tmp_path)
+    candidate_attempt = candidate_job.attempts[-1]
+    service.finish_job(
+        "p1",
+        candidate_job.job_id,
+        AdapterResult.success(
+            output_revision=candidate_revision,
+            output_fingerprint=tree_fingerprint(candidate_output),
+            outputs={"analysis_output": str(candidate_output)},
+        ),
+        attempt_number=candidate_attempt.number,
+        claim_token=str(candidate_attempt.worker_claim_token),
+    )
+    candidate_project = repositories.project.load("p1")
+    assert candidate_project.project_state == "analysis_candidate_ready"
+
+    result = service.activate_candidate_analysis(
+        "p1",
+        candidate_analysis_revision=candidate_revision,
+        expected_project_revision=candidate_project.revision,
+        expected_clips_revision=customized.revision,
+    )
+
+    activated_project = repositories.project.load("p1")
+    activated_clips = repositories.clips.load("p1")
+    assert activated_project.project_state == "ready"
+    assert activated_project.active_analysis_revision == candidate_revision
+    assert activated_project.candidate_analysis_revision is None
+    assert activated_clips.analysis_revision == candidate_revision
+    assert activated_clips.clips[0].custom_display_name == "用户命名片段"
+    assert activated_clips.clips[0].workflow_override == "pure_rotation"
+    assert result.project_revision == activated_project.revision
+    assert result.clips_revision == activated_clips.revision
+
+
 def test_analysis_publisher_rejects_fingerprint_that_does_not_match_content(
     tmp_path: Path,
 ) -> None:

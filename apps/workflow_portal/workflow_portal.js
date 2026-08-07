@@ -1,4 +1,4 @@
-import { createProject, getSnapshot, retryAnalysis, uploadAsset } from "./portal_api.js?v=20260806-upload-v2";
+import { activateCandidateAnalysis, createProject, getSnapshot, retryAnalysis, uploadAsset } from "./portal_api.js?v=20260807-upload-v3";
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
 const THEME_STORAGE_KEY = "mediaflow-theme";
@@ -211,6 +211,21 @@ async function waitForAnalysisCompletion() {
     renderAnalysis(state.snapshot);
     const failure = analysisFailure(state.snapshot);
     if (failure) throw new Error(failure);
+    if (state.snapshot.project_state === "analysis_candidate_ready") {
+      const snapshot = state.snapshot;
+      if (!snapshot.candidate_analysis_revision) {
+        throw new Error("候选分析结果缺少修订版标识");
+      }
+      await activateCandidateAnalysis(
+        state.projectId,
+        snapshot.candidate_analysis_revision,
+        snapshot.component_revisions.project,
+        snapshot.component_revisions.clips,
+      );
+      state.etag = "";
+      state.snapshot = null;
+      continue;
+    }
     if (state.snapshot.project_state === "ready" && state.snapshot.clips?.length) return state.snapshot;
     await delay(500);
   }
