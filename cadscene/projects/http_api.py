@@ -118,6 +118,9 @@ class ProjectApi:
         try:
             if method == "POST" and path == "/api/projects":
                 return self._create_project(payload)
+            match = _PROJECT.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_project_name(match["project"], payload)
             match = _SNAPSHOT.fullmatch(path)
             if method == "GET" and match:
                 return self._snapshot(match["project"], headers)
@@ -233,6 +236,25 @@ class ProjectApi:
                 "project_id": project_id,
                 "project_revision": project_revision,
                 "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
+            },
+        )
+
+    def _update_project_name(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if not isinstance(payload.get("display_name"), str):
+            raise TypeError("display_name must be a string")
+        updated = self.service.update_project_display_name(
+            project_id,
+            expected_revision=_required_revision(payload),
+            display_name=str(payload["display_name"]),
+        )
+        return ApiResponse(
+            200,
+            {
+                "project_id": project_id,
+                "project_revision": updated.revision,
+                "display_name": str(updated.source_assets["display_name"]),
             },
         )
 

@@ -109,6 +109,24 @@ def test_workspace_reserves_one_hundred_percent_for_terminal_success() -> None:
     assert "Math.min(99" in script
 
 
+def test_sidebar_project_name_supports_inline_blur_rename() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="projectRenameButton"' in html
+    assert 'id="sidebarProjectNameInput"' in html
+    assert "async function saveProjectRename" in script
+    assert "function startProjectRename" in script
+    assert 'addEventListener("blur", saveProjectRename)' in script
+    assert 'event.key === "Enter"' in script
+    assert 'event.key === "Escape"' in script
+    assert "state.projectNameEditing" in script
+    assert "expected_revision: state.snapshot.component_revisions.project" in script
+    assert "/api/projects/${encodeURIComponent(projectId)}`" in script
+    assert ".project-rename-button" in css
+
+
 def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")

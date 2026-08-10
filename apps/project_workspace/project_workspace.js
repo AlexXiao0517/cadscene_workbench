@@ -12,6 +12,7 @@
     dirtyEdits: new Map(),
     selectedClipIds: new Set(),
     pendingPreflight: null,
+    projectNameEditing: false,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -129,7 +130,9 @@
 
   function renderSnapshot(snapshot) {
     state.snapshot = snapshot;
-    $("#sidebarProjectName").textContent = snapshot.display_name || snapshot.project_id;
+    if (!state.projectNameEditing) {
+      $("#sidebarProjectName").textContent = snapshot.display_name || snapshot.project_id;
+    }
     $("#projectBreadcrumb").textContent = `${snapshot.display_name || snapshot.project_id} · ${snapshot.project_state}`;
     const assets = snapshot.assets || {};
     for (const [kind, nameId, metaId] of [["video", "sourceVideoName", "sourceVideoMeta"], ["cad", "cadName", "cadMeta"], ["srt", "srtName", "srtMeta"]]) {
@@ -164,6 +167,59 @@
       item.textContent = `${effectiveDisplayName(clip)} · ${clip.duration}`;
       return item;
     }));
+  }
+
+  function cancelProjectRename() {
+    state.projectNameEditing = false;
+    $("#sidebarProjectNameInput").hidden = true;
+    $("#sidebarProjectName").hidden = false;
+    $("#projectRenameButton").hidden = false;
+    if (state.snapshot) {
+      $("#sidebarProjectName").textContent = state.snapshot.display_name || state.snapshot.project_id;
+    }
+  }
+
+  function startProjectRename() {
+    if (!state.snapshot || state.projectNameEditing) return;
+    state.projectNameEditing = true;
+    const input = $("#sidebarProjectNameInput");
+    input.value = state.snapshot.display_name || state.snapshot.project_id;
+    $("#sidebarProjectName").hidden = true;
+    $("#projectRenameButton").hidden = true;
+    input.hidden = false;
+    input.focus();
+    input.select();
+  }
+
+  async function saveProjectRename() {
+    if (!state.projectNameEditing || !state.snapshot) return;
+    const input = $("#sidebarProjectNameInput");
+    const displayName = input.value.trim();
+    if (!displayName) {
+      cancelProjectRename();
+      return;
+    }
+    try {
+      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.snapshot.component_revisions.project,
+          display_name: displayName,
+        }),
+      });
+      state.snapshot.component_revisions.project = body.project_revision;
+      state.snapshot.display_name = body.display_name;
+      state.etag = null;
+      cancelProjectRename();
+      $("#projectBreadcrumb").textContent = `${body.display_name} · ${state.snapshot.project_state}`;
+      setMessage("项目名称已保存");
+    } catch (error) {
+      cancelProjectRename();
+      state.etag = null;
+      setMessage(`项目重命名失败：${error.message}`, true);
+      await pollSnapshot();
+    }
   }
 
   async function pollSnapshot() {
@@ -389,6 +445,15 @@
     const collapsed = $("#appShell").classList.toggle("sidebar-collapsed");
     event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
     event.currentTarget.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
+  });
+  $("#projectRenameButton").addEventListener("click", startProjectRename);
+  $("#sidebarProjectNameInput").addEventListener("blur", saveProjectRename);
+  $("#sidebarProjectNameInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelProjectRename();
+    }
   });
   $("#selectAll").addEventListener("change", (event) => {
     for (const clip of state.snapshot?.clips || []) {

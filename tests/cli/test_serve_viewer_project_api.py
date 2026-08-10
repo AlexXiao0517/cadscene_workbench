@@ -620,6 +620,61 @@ def test_create_project_returns_the_revision_after_persisting_display_name(
     assert repositories.project.load("new-project").source_assets["display_name"] == "金华项目"
 
 
+def test_project_display_name_can_be_renamed_with_expected_revision(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    revision = repositories.project.load("p1").revision
+
+    response = api.handle(
+        "PATCH",
+        "/api/projects/p1",
+        json_body={"expected_revision": revision, "display_name": "  总线项目  "},
+    )
+
+    assert response.status == 200
+    assert response.body == {
+        "project_id": "p1",
+        "project_revision": revision + 1,
+        "display_name": "总线项目",
+    }
+    assert repositories.project.load("p1").source_assets["display_name"] == "总线项目"
+
+
+@pytest.mark.parametrize("display_name", ["", "   ", "项" * 121])
+def test_project_display_name_rejects_invalid_values(
+    tmp_path: Path, display_name: str
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+
+    response = api.handle(
+        "PATCH",
+        "/api/projects/p1",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "display_name": display_name,
+        },
+    )
+
+    assert response.status == 400
+    assert "display_name must contain 1 to 120 characters" in response.body["error"]
+
+
+def test_project_display_name_rename_rejects_stale_revision(tmp_path: Path) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    current = repositories.project.load("p1").revision
+
+    response = api.handle(
+        "PATCH",
+        "/api/projects/p1",
+        json_body={"expected_revision": current - 1, "display_name": "旧请求"},
+    )
+
+    assert response.status == 409
+    assert response.body["error"] == "revision_conflict"
+    assert response.body["current_revision"] == current
+
+
 def test_serve_viewer_only_dispatches_project_transport_to_project_api(
     tmp_path: Path,
 ) -> None:

@@ -1233,6 +1233,35 @@ class ProjectService:
                 ),
             )
 
+    def update_project_display_name(
+        self,
+        project_id: str,
+        *,
+        expected_revision: int,
+        display_name: str,
+    ) -> ProjectManifest:
+        normalized = display_name.strip()
+        if not normalized or len(normalized) > 120:
+            raise ValueError("display_name must contain 1 to 120 characters")
+        current = self.repositories.project.load(project_id)
+        if current.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=current.revision,
+            )
+        if current.source_assets.get("display_name") == normalized:
+            return current
+        return self.repositories.project.update(
+            project_id,
+            expected_revision=expected_revision,
+            mutate=lambda value: replace(
+                value,
+                updated_at=self.now(),
+                source_assets={**value.source_assets, "display_name": normalized},
+            ),
+        )
+
     def _enqueue_trajectory_jobs_locked(
         self,
         project_id: str,
