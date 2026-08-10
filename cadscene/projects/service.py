@@ -1829,9 +1829,11 @@ class ProjectService:
     ) -> _ValidatedRenderBundle:
         clips = self.repositories.clips.load(job.project_id)
         clip = next(item for item in clips.clips if item.clip_id == job.clip_id)
-        source_map_path = _clip_frame_map_path(clip)
-        if source_map_path is None:
-            raise ValueError("authoritative source frame map is missing")
+        stored_jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(job.project_id).jobs
+        )
+        _, source_map_path = _render_physical_inputs(clip, stored_jobs)
         source_frames = _load_authoritative_source_frames(clip, source_map_path)
         time_base = _fraction_time_base(clip)
         project = self.repositories.project.load(job.project_id)
