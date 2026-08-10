@@ -131,7 +131,7 @@
   function renderSnapshot(snapshot) {
     state.snapshot = snapshot;
     if (!state.projectNameEditing) {
-      $("#sidebarProjectName").textContent = snapshot.display_name || snapshot.project_id;
+      $("#sidebarProjectName").value = snapshot.display_name || snapshot.project_id;
     }
     $("#projectBreadcrumb").textContent = `${snapshot.display_name || snapshot.project_id} · ${snapshot.project_state}`;
     const assets = snapshot.assets || {};
@@ -171,30 +171,31 @@
 
   function cancelProjectRename() {
     state.projectNameEditing = false;
-    $("#sidebarProjectNameInput").hidden = true;
-    $("#sidebarProjectName").hidden = false;
+    const $holder = $("#sidebarProjectName");
+    $holder.setAttribute("readonly", "");
+    $holder.classList.remove("is-editing");
     $("#projectRenameButton").hidden = false;
     if (state.snapshot) {
-      $("#sidebarProjectName").textContent = state.snapshot.display_name || state.snapshot.project_id;
+      $holder.value = state.snapshot.display_name || state.snapshot.project_id;
     }
   }
 
   function startProjectRename() {
     if (!state.snapshot || state.projectNameEditing) return;
     state.projectNameEditing = true;
-    const input = $("#sidebarProjectNameInput");
-    input.value = state.snapshot.display_name || state.snapshot.project_id;
-    $("#sidebarProjectName").hidden = true;
+    const $holder = $("#sidebarProjectName");
+    $holder.value = state.snapshot.display_name || state.snapshot.project_id;
+    $holder.removeAttribute("readonly");
+    $holder.classList.add("is-editing");
     $("#projectRenameButton").hidden = true;
-    input.hidden = false;
-    input.focus();
-    input.select();
+    $holder.focus();
+    $holder.select();
   }
 
   async function saveProjectRename() {
     if (!state.projectNameEditing || !state.snapshot) return;
-    const input = $("#sidebarProjectNameInput");
-    const displayName = input.value.trim();
+    const $holder = $("#sidebarProjectName");
+    const displayName = $holder.value.trim();
     if (!displayName) {
       cancelProjectRename();
       return;
@@ -447,8 +448,8 @@
     event.currentTarget.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
   });
   $("#projectRenameButton").addEventListener("click", startProjectRename);
-  $("#sidebarProjectNameInput").addEventListener("blur", saveProjectRename);
-  $("#sidebarProjectNameInput").addEventListener("keydown", (event) => {
+  $("#sidebarProjectName").addEventListener("blur", saveProjectRename);
+  $("#sidebarProjectName").addEventListener("keydown", (event) => {
     if (event.key === "Enter") event.currentTarget.blur();
     if (event.key === "Escape") {
       event.preventDefault();

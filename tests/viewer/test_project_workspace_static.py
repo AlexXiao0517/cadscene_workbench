@@ -115,16 +115,22 @@ def test_sidebar_project_name_supports_inline_blur_rename() -> None:
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
 
     assert 'id="projectRenameButton"' in html
-    assert 'id="sidebarProjectNameInput"' in html
+    assert '<input id="sidebarProjectName"' in html
+    assert 'id="sidebarProjectNameInput"' not in html
+    assert "readonly" in html[html.index('<input id="sidebarProjectName"') :]
     assert "async function saveProjectRename" in script
     assert "function startProjectRename" in script
     assert 'addEventListener("blur", saveProjectRename)' in script
     assert 'event.key === "Enter"' in script
     assert 'event.key === "Escape"' in script
     assert "state.projectNameEditing" in script
+    assert '$holder.removeAttribute("readonly")' in script
+    assert '$holder.setAttribute("readonly", "")' in script
+    assert '$("#sidebarProjectNameInput")' not in script
     assert "expected_revision: state.snapshot.component_revisions.project" in script
     assert "/api/projects/${encodeURIComponent(projectId)}`" in script
     assert ".project-rename-button" in css
+    assert ".project-name-field" in css
 
 
 def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation() -> None:
