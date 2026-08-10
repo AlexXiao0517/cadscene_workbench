@@ -37,6 +37,7 @@
   let keyframePlan = null;
   let keyframeSaveInFlight = false;
   let renderProgressState = null;
+  let projectRenderVisibleProgress = 0;
   let pureRotationCorrections = [];
   let pureRotationTrajectory = null;
   let pureRotationTrajectoryKind = null;
@@ -819,6 +820,17 @@
     stateLabel.textContent = stageStatus?.status || "待启动";
     progress.value = Number(stageStatus?.progress || 0);
     message.textContent = stageStatus?.error || stageStatus?.message || "等待任务";
+    if (stage === "render" && projectWorkbenchRenderJobId) {
+      progress.value = projectRenderVisibleProgress;
+      stateLabel.textContent = projectRenderStatusCopy(
+        projectWorkbenchRenderStatus,
+        projectWorkbenchRenderStatus,
+      );
+      message.textContent = projectWorkbenchRenderStatus === "validating"
+        ? "正在封装并验证渲染结果"
+        : projectRenderStatusCopy(projectWorkbenchRenderStatus, projectWorkbenchRenderStatus);
+      return;
+    }
     if (stage === "render" && operation === "render" && latestJobStatus?.status === "running") {
       if (renderProgressState) progress.value = renderProgressState.completed / renderProgressState.total;
       message.textContent = "正在渲染";
@@ -1754,6 +1766,15 @@
     return labels[status] || stage || "等待渲染任务";
   }
 
+  function setProjectRenderVisibleProgress(candidate, { complete = false } = {}) {
+    const numeric = Number(candidate);
+    if (!Number.isFinite(numeric)) return projectRenderVisibleProgress;
+    const bounded = complete ? 1 : Math.min(0.99, Math.max(0, numeric));
+    projectRenderVisibleProgress = Math.max(projectRenderVisibleProgress, bounded);
+    progress.value = projectRenderVisibleProgress;
+    return projectRenderVisibleProgress;
+  }
+
   function projectRenderPreflightCopy(reason) {
     const value = String(reason || "");
     if (value.includes("media specification")) return "项目视频规格尚未准备完成，请重新分析后再试";
@@ -1783,18 +1804,27 @@
       const render = clip.render;
       projectWorkbenchRenderStatus = String(render.status || render.stage || "queued");
       if (terminal.has(render.status)) {
+        if (render.status === "success") {
+          setProjectRenderVisibleProgress(1, { complete: true });
+        }
         projectWorkbenchRenderJobId = null;
         projectWorkbenchRenderStatus = null;
         runningStage = null;
         if (render.status !== "success") {
           throw new Error(projectRenderStatusCopy(render.status, render.stage));
         }
-        progress.value = 1;
         stateLabel.textContent = "已完成";
         message.textContent = "片段渲染完成；可返回项目管理继续处理其他片段。";
         return render;
       }
-      let renderedRuntime = false;
+      const fraction = render.progress?.fraction;
+      if (typeof fraction === "number") setProjectRenderVisibleProgress(fraction);
+      stateLabel.textContent = projectRenderStatusCopy(render.status, render.stage);
+      if (render.status === "validating") {
+        message.textContent = "正在封装并验证渲染结果";
+      } else {
+        message.textContent = projectRenderStatusCopy(render.status, render.stage);
+      }
       try {
         const runtimeResponse = await fetch(
           `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
@@ -1802,22 +1832,12 @@
         );
         if (runtimeResponse.ok) {
           const runtime = await runtimeResponse.json();
-          if (runtime.workflow_status) {
-            await renderStatus(runtime.workflow_status);
-            renderedRuntime = true;
-          }
           const content = document.querySelector("#workflowLogContent");
           if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
           updateRenderProgressFromLog("render", runtime.lines || []);
         }
       } catch (error) {
         // 实时日志暂不可用时继续依赖项目 snapshot 跟踪后台任务。
-      }
-      if (!renderedRuntime) {
-        const fraction = render.progress?.fraction;
-        if (typeof fraction === "number") progress.value = Math.max(0, Math.min(0.99, fraction));
-        stateLabel.textContent = projectRenderStatusCopy(render.status, render.stage);
-        message.textContent = projectRenderStatusCopy(render.status, render.stage);
       }
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
@@ -1840,6 +1860,8 @@
       const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
       const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
       if (currentClip?.render?.job_id && activeStatuses.has(currentClip.render.status)) {
+        renderProgressState = null;
+        projectRenderVisibleProgress = 0;
         projectWorkbenchRenderJobId = currentClip.render.job_id;
         projectWorkbenchRenderStatus = currentClip.render.status;
         runningStage = "project_render";
@@ -1866,6 +1888,8 @@
       const jobId = queued.job_ids?.[0];
       if (!jobId) throw new Error("渲染任务未能进入项目队列");
       projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+      renderProgressState = null;
+      projectRenderVisibleProgress = 0;
       projectWorkbenchRenderJobId = jobId;
       projectWorkbenchRenderStatus = "queued";
       runningStage = "project_render";
@@ -1916,8 +1940,15 @@
       const completed = Number(match[1]);
       const total = Math.max(1, Number(match[2]));
       renderProgressState = { completed, total };
-      progress.value = Math.min(1, completed / total);
-      message.textContent = "正在渲染";
+      if (projectWorkbenchRenderJobId) {
+        setProjectRenderVisibleProgress(completed / total);
+        message.textContent = completed >= total
+          ? "正在封装并验证渲染结果"
+          : `正在渲染 ${completed}/${total}`;
+      } else {
+        progress.value = Math.min(1, completed / total);
+        message.textContent = "正在渲染";
+      }
       return;
     }
   }

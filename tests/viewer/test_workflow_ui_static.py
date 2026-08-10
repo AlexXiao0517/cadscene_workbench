@@ -592,6 +592,22 @@ def test_project_render_runtime_log_drives_the_visible_progress_bar() -> None:
     assert 'stateLabel.textContent = "无法开始渲染"' in script
 
 
+def test_project_render_progress_is_monotonic_and_only_completes_on_success() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+    helper_start = script.index("function setProjectRenderVisibleProgress")
+    helper_end = script.index("\n  function ", helper_start + 1)
+    helper = script[helper_start:helper_end]
+
+    assert "Math.max(projectRenderVisibleProgress" in helper
+    assert "complete ? 1 : Math.min(0.99" in helper
+    assert "await renderStatus(runtime.workflow_status)" not in wait
+    assert "setProjectRenderVisibleProgress(1, { complete: true })" in wait
+    assert 'message.textContent = "正在封装并验证渲染结果"' in wait
+
+
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:
     html = _read("index.html")
     script = _read("workflow.js")
