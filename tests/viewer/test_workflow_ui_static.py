@@ -564,6 +564,23 @@ def test_workbench_shares_theme_and_uses_product_copy() -> None:
     assert "justify-content: center" in button_rule
 
 
+def test_workbench_light_theme_uses_semantic_component_surfaces() -> None:
+    css = _read("style.css")
+
+    for variable in (
+        "--active-bg",
+        "--media-stage",
+        "--floating-panel",
+        "--dialog-backdrop",
+        "--input-bg",
+    ):
+        assert css.count(variable) >= 3
+    assert "background: var(--active-bg)" in css
+    assert "background: var(--media-stage)" in css
+    assert "background: var(--floating-panel)" in css
+    assert "background: var(--input-bg)" in css
+
+
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:
     html = _read("index.html")
     script = _read("workflow.js")

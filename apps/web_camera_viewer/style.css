@@ -9,6 +9,12 @@
   --accent: #56c2ff;
   --accent-2: #ffd36e;
   --strip: #0e1116;
+  --active-bg: #173448;
+  --media-stage: #050607;
+  --floating-panel: rgba(14, 17, 22, 0.94);
+  --dialog-backdrop: rgba(4, 9, 15, 0.66);
+  --input-bg: #0e1116;
+  --log-text: #cdd7e3;
 }
 
 :root[data-theme="light"] {
@@ -22,6 +28,12 @@
   --accent: #327ddd;
   --accent-2: #9b6800;
   --strip: #f6f8fb;
+  --active-bg: #dcecff;
+  --media-stage: #e8eef5;
+  --floating-panel: rgba(255, 255, 255, 0.96);
+  --dialog-backdrop: rgba(57, 72, 91, 0.28);
+  --input-bg: #ffffff;
+  --log-text: #33465d;
 }
 
 * {
@@ -224,7 +236,7 @@ h2 {
 
 .workflow-steps li.is-active > span:first-child {
   border-color: var(--accent);
-  background: #173448;
+  background: var(--active-bg);
 }
 
 .workflow-steps li.is-success > span:first-child {
@@ -386,7 +398,7 @@ h2 {
   margin: 0;
   padding: 8px 10px;
   border-top: 1px solid var(--line);
-  color: #cdd7e3;
+  color: var(--log-text);
   white-space: pre-wrap;
 }
 
@@ -583,7 +595,7 @@ h2 {
 .scene-stage {
   position: relative;
   min-height: 520px;
-  background: #050607;
+  background: var(--media-stage);
   overflow: hidden;
 }
 
@@ -644,7 +656,7 @@ h2 {
   z-index: 3;
   max-width: calc(100% - 24px);
   border: 1px solid var(--line);
-  background: rgba(14, 17, 22, 0.86);
+  background: var(--floating-panel);
   color: var(--text);
   padding: 8px 10px;
   font-size: 12px;
@@ -686,8 +698,8 @@ button:hover,
 
 button.is-active {
   border-color: var(--accent);
-  color: #ffffff;
-  background: #173448;
+  color: var(--text);
+  background: var(--active-bg);
 }
 
 .file-button input {
@@ -748,7 +760,7 @@ button.is-active {
 .control-item input[type="number"] {
   width: 100%;
   border: 1px solid var(--line);
-  background: #0e1116;
+  background: var(--input-bg);
   color: var(--text);
   padding: 6px 7px;
 }
@@ -809,7 +821,7 @@ button.is-active {
 }
 
 .workbench-return-dialog { width: min(500px, calc(100vw - 32px)); color: var(--text); border: 1px solid var(--line); background: var(--panel); }
-.workbench-return-dialog::backdrop { background: rgba(4, 9, 15, .66); backdrop-filter: blur(3px); }
+.workbench-return-dialog::backdrop { background: var(--dialog-backdrop); backdrop-filter: blur(3px); }
 .workbench-return-dialog form { padding: 18px; }
 .workbench-return-dialog p { margin-top: 12px; color: var(--muted); line-height: 1.65; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -819,7 +831,7 @@ button.is-active {
   width: 100%;
   height: 46px;
   cursor: pointer;
-  background: #0e1116;
+  background: var(--input-bg);
   border: 1px solid var(--line);
 }
 
@@ -870,7 +882,7 @@ button.is-active {
   position: absolute;
   pointer-events: none;
   transform: translate(-50%, 0);
-  background: rgba(8, 10, 14, 0.95);
+  background: var(--floating-panel);
   border: 1px solid var(--line);
   color: var(--text);
   font-size: 11px;
@@ -927,7 +939,7 @@ button.is-active {
 }
 
 .sfm-row select {
-  background: #0e1116;
+  background: var(--input-bg);
   color: var(--text);
   border: 1px solid var(--line);
   padding: 2px 6px;
@@ -944,7 +956,7 @@ button.is-active {
   position: absolute;
   pointer-events: none;
   transform: translate(-50%, calc(-100% - 10px));
-  background: rgba(8, 10, 14, 0.96);
+  background: var(--floating-panel);
   border: 1px solid var(--line);
   color: var(--text);
   font-size: 11px;
