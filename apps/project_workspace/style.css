@@ -91,6 +91,8 @@ tbody tr:hover { background: rgba(255,255,255,.025); }
 .progress-cell { display: flex; align-items: center; gap: 8px; }
 .progress-track { position: relative; width: 82px; height: 7px; overflow: hidden; border-radius: 99px; background: #202c38; }
 .progress-fill { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#4685ff,#74b0ff); transition: width .32s cubic-bezier(.22,1,.36,1); }
+.progress-track.progress-indeterminate .progress-fill { width: 38%; animation: progress-sweep 1.15s ease-in-out infinite; }
+@keyframes progress-sweep { from { transform: translateX(-115%); } to { transform: translateX(275%); } }
 .progress-percent { min-width: 36px; color: #c8d7e8; font-variant-numeric: tabular-nums; font-size: 12px; text-align: right; }
 .row-actions { display: flex; gap: 5px; }
 .row-error { display: block; max-width: 170px; color: var(--danger); margin-top: 5px; font-size: 11px; }

@@ -87,7 +87,7 @@ def test_workspace_uses_icon_sidebar_video_thumbnails_and_progress_track() -> No
     assert ".progress-track" in css
 
 
-def test_workspace_progress_uses_reported_percentage_without_fake_animation() -> None:
+def test_workspace_progress_uses_reported_percentage_or_honest_indeterminate_bar() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
@@ -96,8 +96,9 @@ def test_workspace_progress_uses_reported_percentage_without_fake_animation() ->
     assert "Math.round(fraction * 100)" in script
     assert 'progressPercent.textContent = `${percent}%`' in script
     assert 'progressPercent.textContent = "—"' in script
-    assert "progress-indeterminate" not in script
-    assert "progress-sweep" not in css
+    assert 'progressTrack.classList.toggle("progress-indeterminate"' in script
+    assert "progress-indeterminate" in css
+    assert "progress-sweep" in css
 
 
 def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation() -> None:

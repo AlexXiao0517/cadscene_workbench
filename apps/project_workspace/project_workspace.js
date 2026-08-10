@@ -107,11 +107,12 @@
     const progressFill = $(".progress-fill", row);
     const progressPercent = $(".progress-percent", row);
     const fraction = clip.progress?.fraction;
-    const active = ["preparing", "running", "validating"].includes(clip.status);
+    const active = ["queued", "preparing", "running", "validating"].includes(clip.status);
     const hasPercentage = typeof fraction === "number";
     const percent = hasPercentage ? Math.max(0, Math.min(100, Math.round(fraction * 100))) : null;
     progressTrack.hidden = !active && !hasPercentage;
-    progressFill.style.width = hasPercentage ? `${percent}%` : "0%";
+    progressTrack.classList.toggle("progress-indeterminate", active && !hasPercentage);
+    progressFill.style.width = hasPercentage ? `${percent}%` : "";
     if (hasPercentage) progressPercent.textContent = `${percent}%`;
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);

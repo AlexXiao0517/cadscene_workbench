@@ -429,6 +429,23 @@ class ProjectApi:
             render_job = render_job_by_clip.get(clip.clip_id)
             export_job = export_job_by_clip.get(clip.clip_id)
             job = render_job or trajectory_job
+            display_job = job
+            if job is not None and job.get("status") == "queued":
+                display_job = next(
+                    (
+                        dependency
+                        for dependency_id in job.get("depends_on_job_ids", ())
+                        if (
+                            dependency := analysis_jobs_by_id.get(
+                                str(dependency_id)
+                            )
+                        )
+                        is not None
+                        and dependency.get("status")
+                        in {"preparing", "running", "validating"}
+                    ),
+                    job,
+                )
             capability = self._clip_capability(
                 project_id, clip, preflight, render_preflight, job,
                 analysis_busy=analysis_busy,
@@ -458,9 +475,15 @@ class ProjectApi:
                     "workflow_override": clip.workflow_override,
                     "resolved_workflow": clip.resolved_workflow,
                     "needs_review": bool(clip.analysis.get("needs_review", False)),
-                    "status": "ready" if job is None else job.get("status"),
-                    "stage": None if job is None else job.get("stage"),
-                    "progress": None if job is None else job.get("progress"),
+                    "status": (
+                        "ready" if display_job is None else display_job.get("status")
+                    ),
+                    "stage": (
+                        None if display_job is None else display_job.get("stage")
+                    ),
+                    "progress": (
+                        None if display_job is None else display_job.get("progress")
+                    ),
                     "render": {
                         "job_id": None if render_job is None else render_job.get("job_id"),
                         "status": "not_started" if render_job is None else render_job.get("status"),

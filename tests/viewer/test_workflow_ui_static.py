@@ -261,6 +261,22 @@ def test_successful_project_trajectory_navigates_to_keyframe_stage() -> None:
     )
 
 
+def test_existing_pure_rotation_trajectory_opens_directly_in_debug_stage() -> None:
+    script = _read("workflow.js")
+    detection = script[
+        script.index("async function detectWorkflowStageFromArtifacts") :
+        script.index("function updateWorkflowStepActive")
+    ]
+
+    pure_branch = detection[
+        detection.index("if (isPureRotationWorkflow())") :
+        detection.index("const renderReady")
+    ]
+    assert 'runPath("02_pure_rotation/camera_rotation_raw.json")' in pure_branch
+    assert 'if (rawReady)' in pure_branch
+    assert 'return "keyframes"' in pure_branch
+
+
 def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
     script = _read("workflow.js")
     start = script[

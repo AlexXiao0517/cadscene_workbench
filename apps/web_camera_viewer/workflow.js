@@ -733,7 +733,7 @@
       const rawReady = await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"));
       if (rawReady) {
         updatePureRotationRecoveryActions({ ready: true });
-        return "sfm";
+        return "keyframes";
       }
       const viewerPaths = window.resolveViewerPaths ? window.resolveViewerPaths() : {};
       const videoReady = await resourceExists(viewerPaths.video);

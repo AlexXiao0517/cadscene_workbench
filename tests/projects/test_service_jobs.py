@@ -264,6 +264,27 @@ def test_batch_creates_durable_jobs_but_capacity_starts_only_one_sfm(
         } <= stored.keys()
 
 
+def test_batch_routes_pure_rotation_selection_to_opengv_adapter(
+    tmp_path: Path,
+) -> None:
+    physical = tmp_path / "rotation-clip.mp4"
+    physical.write_bytes(b"clip")
+    selected = clip("rotation", workflow="pure_rotation")
+    selected = replace(
+        selected,
+        analysis={**selected.analysis, "physical_mp4_path": str(physical)},
+    )
+    service, _repositories, queue = service_with_clips(tmp_path, (selected,))
+
+    result = service.enqueue_trajectory_jobs("p1", clip_ids=("rotation",))
+
+    assert len(result.job_ids) == 1
+    solve = queue.get(result.job_ids[0])
+    assert solve.job_type == "trajectory"
+    assert solve.adapter_name == "pure_rotation"
+    assert solve.resource_class == "heavy_compute"
+
+
 def test_changed_input_marks_active_job_stale_input_and_never_publishes(
     tmp_path: Path,
 ) -> None:

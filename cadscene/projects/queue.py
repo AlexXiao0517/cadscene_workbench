@@ -1008,6 +1008,11 @@ class LocalResourceQueue:
                 validation_proof=(
                     None if validation_proof is None else dict(validation_proof)
                 ),
+                progress={
+                    "stage": "complete",
+                    "message": "completed",
+                    "fraction": 1.0,
+                },
                 error=None,
             )
             self._schedule_locked()
@@ -1045,6 +1050,11 @@ class LocalResourceQueue:
                 validation_proof=(
                     None if validation_proof is None else dict(validation_proof)
                 ),
+                progress={
+                    "stage": "complete",
+                    "message": "completed",
+                    "fraction": 1.0,
+                },
                 error=None,
             )
 

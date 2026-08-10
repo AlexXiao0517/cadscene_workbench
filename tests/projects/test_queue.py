@@ -89,6 +89,11 @@ def test_dependency_must_be_validated_success_for_current_output() -> None:
         attempt_number=lease.number,
         claim_token=lease.worker_claim_token,
     )
+    assert queue.get("export").progress == {
+        "stage": "complete",
+        "message": "completed",
+        "fraction": 1.0,
+    }
     assert queue.status("solve") == "queued"
 
     queue.validate_output("export", current_input_fingerprint="input-v1")

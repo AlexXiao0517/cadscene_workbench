@@ -951,6 +951,19 @@ class ProjectWorkbenchService:
                         "clip already has an active workbench session"
                     )
             self._publish_workbench_inputs(project_id, clip)
+            context = self.resolve_context(project_id, clip_id)
+            if (
+                context.trajectory_job_id
+                and context.trajectory_run_id
+                and context.trajectory_output_revision
+                and context.trajectory_output_fingerprint
+            ):
+                # Batch trajectory jobs finish before a workbench session exists.
+                # Publish their validated, immutable attempt output into the
+                # viewer run tree before issuing a trajectory-ready session.
+                self._materialize_trajectory_run(
+                    project_id, clip, context.trajectory_job_id
+                )
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )

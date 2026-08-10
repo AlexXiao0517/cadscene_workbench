@@ -740,14 +740,35 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         project_revision=project.revision,
         clips_revision=clips.revision,
     )
-    trajectory = tmp_path / "trajectory.json"
-    trajectory.write_text('{"poses":[{"frame_index":0}]}', encoding="utf-8")
+    trajectory = (
+        Path(job.attempts[-1].directory)
+        / "project-1/clip-1"
+        / (
+            "02_pure_rotation/camera_rotation_raw.json"
+            if workflow == "pure_rotation"
+            else "02_sfm/camera_trajectory.json"
+        )
+    )
+    trajectory.parent.mkdir(parents=True, exist_ok=True)
+    trajectory.write_text(
+        json.dumps(
+            {
+                "poses": [{"frame_index": 0}],
+                **(
+                    {"trajectory_mode": "pure_rotation_only"}
+                    if workflow == "pure_rotation"
+                    else {}
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
     job = replace(
         job,
         status="success",
         stage="success",
         output_revision="trajectory-output-1",
-        output_fingerprint="a" * 64,
+        output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
         output_validated=True,
         validated_input_fingerprint=job.input_fingerprint,
         published_outputs={"trajectory": str(trajectory)},
@@ -794,6 +815,52 @@ def test_snapshot_exposes_server_derived_workbench_capability_and_state(
     assert clip["capabilities"]["can_open_workbench"] is True
     assert clip["workbench"]["state"] == "ready"
     assert clip["workbench"]["workbench_output_revision"] is None
+
+
+def test_batch_completed_trajectory_is_materialized_when_workbench_opens(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, job = _project_api_with_workbench(
+        tmp_path, workflow="pure_rotation"
+    )
+    source_run = Path(job.attempts[-1].directory) / "project-1/clip-1"
+    trajectory = source_run / "02_pure_rotation/camera_rotation_raw.json"
+    trajectory.parent.mkdir(parents=True, exist_ok=True)
+    trajectory.write_text(
+        json.dumps({"trajectory_mode": "pure_rotation_only", "poses": [{"frame": 0}]}),
+        encoding="utf-8",
+    )
+    completed = replace(
+        job,
+        published_outputs={"trajectory": str(trajectory)},
+        output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=(completed.to_dict(),)),
+    )
+
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert opened.status == 201
+    assert opened.body["launch_mode"] == "trajectory_ready"
+    assert parse_qs(urlsplit(opened.body["workbench_url"]).query)["workflowStage"] == [
+        "keyframes"
+    ]
+    published = (
+        runs_root
+        / "project-1-clip-1/clip-1/02_pure_rotation/camera_rotation_raw.json"
+    )
+    assert json.loads(published.read_text(encoding="utf-8"))["poses"]
 
 
 def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
@@ -1058,6 +1125,55 @@ def test_user_started_trajectory_is_attached_to_open_workbench_session(
     )
     assert saved.status == 200
     assert saved.body["state"] == "saved"
+
+
+def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow="pure_rotation"
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    clips = repositories.clips.load("project-1")
+    clip = clips.clips[0]
+    analysis = dict(clip.analysis)
+    analysis.pop("physical_mp4_path")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(clip, analysis=analysis),)
+        ),
+    )
+
+    enqueued = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-1"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+
+    assert enqueued.status == 202
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    payload = snapshot.body["clips"][0]
+    trajectory = next(
+        item
+        for item in repositories.jobs.load("project-1").jobs
+        if item["job_type"] == "trajectory"
+    )
+    assert trajectory["status"] == "queued"
+    assert payload["job_id"] == trajectory["job_id"]
+    assert payload["status"] == "running"
+    assert payload["stage"] == "running"
 
 
 def test_workbench_heartbeat_extends_editing_session_lease(
