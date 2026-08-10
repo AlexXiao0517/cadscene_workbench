@@ -162,7 +162,12 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
         script.index("async function previewPureRotationFittedTrack")
     ]
     assert "await refreshPureRotationFittedPreview()" in pure_finish
-    assert 'await finalizeProjectWorkbenchSave({ ok: true, kind: "pure_rotation_calibration" })' in pure_finish
+    assert "await finalizeProjectWorkbenchSave(" in pure_finish
+    assert '{ ok: true, kind: "pure_rotation_calibration" }' in pure_finish
+    assert "{ navigate: false }" in pure_finish
+    assert pure_finish.index("finalizeProjectWorkbenchSave") < pure_finish.index(
+        'setWorkflowStage("render")'
+    )
     save_track = script[
         script.index("async function saveCurrentCameraTrack") :
         script.index("async function bootstrapProjectWorkbenchSession")
@@ -187,6 +192,25 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     ]
     assert 'querySelectorAll("[data-job-action]")' in availability
     assert "button.disabled = blocked" in availability
+
+
+def test_project_workbench_workflow_never_falls_back_to_sfm_on_manifest_read_error() -> None:
+    script = _read("workflow.js")
+    loader = script[
+        script.index("async function loadManifestBackedTrajectoryWorkflow") :
+        script.index("async function updateSfmSummary")
+    ]
+
+    assert "projectWorkbenchSession.workflow" in loader
+    assert "projectWorkbenchWorkflowMode" in loader
+    assert "trajectoryWorkflow = projectWorkbenchWorkflowMode" in loader
+    catch_branch = loader[loader.index("catch (error)") :]
+    project_branch = catch_branch[
+        catch_branch.index("if (projectWorkbenchWorkflowMode)") :
+        catch_branch.index("// Preserve legacy dataset/run URLs")
+    ]
+    assert 'trajectory_mode: projectWorkbenchWorkflowMode' in project_branch
+    assert 'trajectory_mode: "sfm_only"' not in project_branch
 
 
 def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() -> None:

@@ -520,7 +520,10 @@
     }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
-    await finalizeProjectWorkbenchSave({ ok: true, kind: "pure_rotation_calibration" });
+    await finalizeProjectWorkbenchSave(
+      { ok: true, kind: "pure_rotation_calibration" },
+      { navigate: false },
+    );
     setWorkflowStage("render");
     message.textContent = "当前相机设置和关键帧拟合轨迹已保存，可以预览或开始渲染。";
   }
@@ -623,15 +626,42 @@
 
   async function loadManifestBackedTrajectoryWorkflow() {
     if (!dataset) return;
+    let projectWorkbenchWorkflowMode = null;
+    if (projectWorkbenchToken) {
+      try {
+        await ensureProjectWorkbenchSession();
+        projectWorkbenchWorkflowMode = projectWorkbenchSession.workflow === "pure_rotation"
+          ? "pure_rotation"
+          : "sfm_only";
+      } catch (error) {
+        trajectoryWorkflowLoaded = false;
+        message.textContent = `项目会话不可用：${error.message}`;
+        return;
+      }
+    }
     try {
       const response = await fetch(`/api/workflow/dataset-manifest?dataset=${encodeURIComponent(dataset)}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       if (ensureManifestViewerPaths(payload?.manifest)) return;
-      trajectoryWorkflow = payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" };
+      const manifestWorkflow = payload?.manifest?.workflow || {};
+      trajectoryWorkflow = projectWorkbenchWorkflowMode
+        ? {
+            ...manifestWorkflow,
+            trajectory_mode: projectWorkbenchWorkflowMode,
+            implementation_status: "ready",
+          }
+        : (payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" });
     } catch (error) {
+      if (projectWorkbenchWorkflowMode) {
+        trajectoryWorkflow = {
+          trajectory_mode: projectWorkbenchWorkflowMode,
+          implementation_status: "ready",
+        };
+      } else {
       // Preserve legacy dataset/run URLs when a manifest is unavailable.
-      trajectoryWorkflow = { trajectory_mode: "sfm_only", implementation_status: "ready" };
+        trajectoryWorkflow = { trajectory_mode: "sfm_only", implementation_status: "ready" };
+      }
     }
     trajectoryWorkflowLoaded = true;
     renderTrajectoryWorkflow(trajectoryWorkflow);
@@ -1446,7 +1476,7 @@
     return waitForProjectWorkbenchTrajectory(jobId);
   }
 
-  async function finalizeProjectWorkbenchSave(result) {
+  async function finalizeProjectWorkbenchSave(result, { navigate = true } = {}) {
     if (!projectWorkbenchToken) return null;
     if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
     if (projectWorkbenchSaveInFlight) return null;
@@ -1467,7 +1497,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
       projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
-      window.location.assign(projectWorkbenchSession.return_to);
+      if (navigate) window.location.assign(projectWorkbenchSession.return_to);
       return payload;
     } finally {
       projectWorkbenchSaveInFlight = false;
