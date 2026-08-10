@@ -347,9 +347,10 @@ def parse_project_media_spec(
         color_primaries=_text(
             stream.get("color_primaries", "bt709"), "video.color_primaries"
         ),
-        nominal_frame_rate=_optional_fraction(
-            stream.get("avg_frame_rate"), "video.avg_frame_rate"
-        ),
+        # Frame identity and timing are governed by the authoritative PTS map.
+        # A nominal rate would incorrectly reject VFR and legacy one-frame-in /
+        # one-frame-out renderers that round 23.976 to 24 without dropping frames.
+        nominal_frame_rate=None,
     )
 
 

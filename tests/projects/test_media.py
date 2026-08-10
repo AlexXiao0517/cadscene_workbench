@@ -55,6 +55,7 @@ def test_project_media_spec_uses_display_dimensions_and_canonical_h264() -> None
     assert spec.profile == "High"
     assert spec.pixel_format == "yuv420p"
     assert spec.time_base == Fraction(1, 30000)
+    assert spec.nominal_frame_rate is None
 
 
 @pytest.mark.skipif(

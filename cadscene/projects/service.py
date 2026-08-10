@@ -239,13 +239,14 @@ class ProjectService:
 
         with self._state_guard(project_id):
             current = self.repositories.project.load(project_id)
-            if _project_media_binding(current) is not None:
-                return current
             source = current.source_assets.get("video")
             path_value = source.get("path") if isinstance(source, Mapping) else None
             if not isinstance(path_value, str) or not path_value:
                 raise ValueError("project source video is unavailable")
             spec = self.project_media_spec_probe(Path(path_value))
+            existing = _project_media_binding(current)
+            if existing is not None and existing[1] == spec:
+                return current
             return self.repositories.project.update(
                 project_id,
                 expected_revision=current.revision,
