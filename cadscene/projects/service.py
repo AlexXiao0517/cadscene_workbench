@@ -930,7 +930,12 @@ class ProjectService:
                 )
                 continue
             try:
-                _render_input_asset_identity(clip)
+                physical_video, physical_map = _render_physical_inputs(
+                    clip, stored_jobs
+                )
+                _render_input_asset_identity(
+                    clip, video_path=physical_video, frame_map_path=physical_map
+                )
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 skipped.append(clip.clip_id)
                 reasons[clip.clip_id] = (
@@ -1026,6 +1031,9 @@ class ProjectService:
                 adapter = self.render_adapters.for_workflow(
                     str(clip.resolved_workflow)
                 )
+                physical_video, physical_map = _render_physical_inputs(
+                    clip, stored_jobs
+                )
                 render = self._new_render_job(
                     project_id,
                     clip,
@@ -1037,6 +1045,8 @@ class ProjectService:
                     clips_revision=clips_manifest.revision,
                     media_spec=media_spec,
                     media_spec_revision=media_spec_revision,
+                    physical_video_path=physical_video,
+                    physical_frame_map_path=physical_map,
                 )
                 submitted = self.queue.submit(render)
                 if submitted.job_id == render.job_id:
@@ -2562,8 +2572,11 @@ class ProjectService:
         adapter = self.render_adapters.for_workflow(str(clip.resolved_workflow))
         if adapter.name != job.adapter_name or adapter.version != job.adapter_version:
             raise RuntimeError("clip render adapter identity changed")
-        physical_video = _clip_output_path(clip)
-        frame_map = _clip_frame_map_path(clip)
+        stored_jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(job.project_id).jobs
+        )
+        physical_video, frame_map = _render_physical_inputs(clip, stored_jobs)
         if physical_video is None or frame_map is None:
             raise RuntimeError("clip render physical inputs are unavailable")
         workbench = _saved_workbench_reference(clip)
@@ -3638,6 +3651,8 @@ class ProjectService:
         clips_revision: int,
         media_spec: ProjectMediaSpec,
         media_spec_revision: str,
+        physical_video_path: Path | None = None,
+        physical_frame_map_path: Path | None = None,
     ) -> QueueJob:
         identity_payload = _render_identity_payload(
             clip=clip,
@@ -3649,6 +3664,8 @@ class ProjectService:
             media_spec_revision=media_spec_revision,
             adapter_name=adapter_name,
             adapter_version=adapter_version,
+            physical_video_path=physical_video_path,
+            physical_frame_map_path=physical_frame_map_path,
         )
         input_fingerprint = _fingerprint(identity_payload)
         revision_fingerprint = _fingerprint(
@@ -3768,6 +3785,10 @@ class ProjectService:
                 return None
             media_spec_revision, media_spec = media_binding
             try:
+                physical_video, physical_map = _render_physical_inputs(
+                    clip,
+                    tuple(QueueJob.from_dict(item) for item in jobs_manifest.jobs),
+                )
                 return _fingerprint(
                     _render_identity_payload(
                         clip=clip,
@@ -3779,6 +3800,8 @@ class ProjectService:
                         media_spec_revision=media_spec_revision,
                         adapter_name=render_adapter.name,
                         adapter_version=render_adapter.version,
+                        physical_video_path=physical_video,
+                        physical_frame_map_path=physical_map,
                     )
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -3956,6 +3979,27 @@ def _clip_frame_map_path(clip: ClipDefinition) -> Path | None:
         "clip_frame_map_path"
     )
     return None if value in (None, "") else Path(str(value))
+
+
+def _render_physical_inputs(
+    clip: ClipDefinition, jobs: Sequence[QueueJob]
+) -> tuple[Path, Path]:
+    direct_video = _clip_output_path(clip)
+    direct_map = _clip_frame_map_path(clip)
+    if direct_video is not None and direct_map is not None:
+        return direct_video, direct_map
+    for job in reversed(tuple(jobs)):
+        if (
+            job.job_type != "clip_export"
+            or job.clip_id != clip.clip_id
+            or not _has_exact_success_proof(job)
+        ):
+            continue
+        video = job.published_outputs.get(f"video:{clip.clip_id}")
+        frame_map = job.published_outputs.get(f"frame_map:{clip.clip_id}")
+        if isinstance(video, str) and video and isinstance(frame_map, str) and frame_map:
+            return Path(video), Path(frame_map)
+    raise ValueError("clip render physical inputs are unavailable")
 
 
 def _load_authoritative_source_frames(
@@ -4353,6 +4397,8 @@ def _render_identity_payload(
     media_spec_revision: str,
     adapter_name: str,
     adapter_version: str,
+    physical_video_path: Path | None = None,
+    physical_frame_map_path: Path | None = None,
 ) -> Mapping[str, object]:
     return {
         "job_type": "clip_render",
@@ -4363,7 +4409,11 @@ def _render_identity_payload(
         "analysis_revision": clip.analysis_revision,
         "resolved_workflow": clip.resolved_workflow,
         "parameters": dict(clip.manual_definition),
-        "physical_inputs": _render_input_asset_identity(clip),
+        "physical_inputs": _render_input_asset_identity(
+            clip,
+            video_path=physical_video_path,
+            frame_map_path=physical_frame_map_path,
+        ),
         "trajectory": {
             "job_id": trajectory.job_id,
             "input_revision": trajectory.input_revision,
@@ -4386,9 +4436,14 @@ def _render_identity_payload(
     }
 
 
-def _render_input_asset_identity(clip: ClipDefinition) -> Mapping[str, object]:
-    video_path = _clip_output_path(clip)
-    frame_map_path = _clip_frame_map_path(clip)
+def _render_input_asset_identity(
+    clip: ClipDefinition,
+    *,
+    video_path: Path | None = None,
+    frame_map_path: Path | None = None,
+) -> Mapping[str, object]:
+    video_path = video_path or _clip_output_path(clip)
+    frame_map_path = frame_map_path or _clip_frame_map_path(clip)
     if video_path is None or frame_map_path is None:
         raise ValueError("clip render physical inputs are unavailable")
     clip_time_base = clip.analysis.get("source_time_base")

@@ -16,6 +16,7 @@ from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.render_adapters import RenderAdapterRegistry, RenderExecutionPlan
 from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _render_identity_payload
+from cadscene.projects.service import _render_physical_inputs
 import cadscene.projects.service as service_module
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -338,6 +339,43 @@ def test_render_preflight_requires_current_trajectory_and_saved_workbench_proof(
     assert "trajectory" in result.reasons["stale"]
     assert "render adapter" in result.reasons["unsupported"]
     assert repositories.render.load("p1") == render_before
+
+
+def test_render_reuses_validated_export_job_when_clip_has_no_embedded_paths(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    original = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    analysis = dict(original.analysis)
+    video = Path(str(analysis.pop("physical_mp4_path")))
+    frame_map = Path(str(analysis.pop("frame_map_path")))
+    logical_only = replace(original, analysis=analysis)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    export = service._new_export_job(
+        "p1",
+        logical_only,
+        project_assets=project.source_assets,
+        project_revision=project.revision,
+        clips_revision=clips.revision,
+    )
+    export = replace(
+        export,
+        status="success",
+        stage="success",
+        output_revision="clip-export-1",
+        output_fingerprint="e" * 64,
+        output_validated=True,
+        validated_input_fingerprint=export.input_fingerprint,
+        published_outputs={
+            "video:ready": str(video),
+            "frame_map:ready": str(frame_map),
+        },
+    )
+
+    assert _render_physical_inputs(logical_only, (export,)) == (video, frame_map)
 
 
 def test_preflight_rejects_tampered_workbench_artifact(tmp_path: Path) -> None:
