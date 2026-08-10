@@ -49,7 +49,9 @@
   let pureRotationHasPlacement = false;
   let pureRotationSavedPlacement = null;
   let pureRotationEditModeReady = Promise.resolve(null);
+  let pureRotationEditModeTransitioning = false;
   let pureRotationCorrectionDraftBase = null;
+  let pureRotationCorrectionDraftDirty = false;
   let pureRotationWorldYawDeg = 0;
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
   let projectWorkbenchSession = null;
@@ -284,9 +286,38 @@
     return window.CadscenePureRotationMath.viewerEulerToMatrix(manual);
   }
 
+  function seedPureRotationCorrectionDraftFromManual(manual) {
+    const active = window.pureRotationViewer?.pose;
+    if (!active || !manual) return null;
+    const rotation = manualRotationMatrix(manual);
+    const center = [Number(manual.x), Number(manual.y), Number(manual.z)];
+    pureRotationCorrectionDraftBase = {
+      decoded_frame_index: Number(active.decoded_frame_index),
+      pts_time_sec: Number(active.pts_time_sec),
+      segment_id: Number(active.segment_id),
+      rotation_cad_from_camera: rotation,
+    };
+    pureRotationCorrectionDraftDirty = false;
+    pureRotationWorldYawDeg = 0;
+    pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+    setPureRotationWorldYawInputs(0);
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
+    window.cadsceneApplyPureRotationPose?.({
+      ...active,
+      rotation_cad_from_camera: rotation,
+      camera_center_web: center,
+      display_fov: Number(manual.fov),
+    });
+    return pureRotationCorrectionDraftBase;
+  }
+
   function refreshPureRotationCorrectionDraftBase() {
     const active = window.pureRotationViewer?.pose;
     if (!active || !window.CadscenePureRotationMath) return null;
+    const sameFrame = pureRotationCorrectionDraftBase
+      && Number(pureRotationCorrectionDraftBase.decoded_frame_index) === Number(active.decoded_frame_index)
+      && Number(pureRotationCorrectionDraftBase.segment_id) === Number(active.segment_id);
+    if (pureRotationCorrectionDraftDirty && sameFrame) return pureRotationCorrectionDraftBase;
     const rotation = active.rotation_cad_from_camera
       || window.CadscenePureRotationMath.localRotationToViewerMatrix(active.rotation_local_from_camera);
     if (!Array.isArray(rotation)) return null;
@@ -296,6 +327,7 @@
       segment_id: Number(active.segment_id),
       rotation_cad_from_camera: rotation.map((row) => row.map(Number)),
     };
+    pureRotationCorrectionDraftDirty = false;
     pureRotationWorldYawDeg = 0;
     pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
     setPureRotationWorldYawInputs(0);
@@ -320,6 +352,7 @@
   async function previewPureRotationWorldYaw(value) {
     await setPureRotationEditMode("correction");
     pureRotationWorldYawDeg = Math.max(-180, Math.min(180, Number(value) || 0));
+    pureRotationCorrectionDraftDirty = true;
     setPureRotationWorldYawInputs(pureRotationWorldYawDeg);
     applyPureRotationCorrectionPreview();
   }
@@ -330,6 +363,7 @@
       ...pureRotationLocalDelta,
       [key]: Math.max(-180, Math.min(180, Number(value) || 0)),
     };
+    pureRotationCorrectionDraftDirty = true;
     setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
     applyPureRotationCorrectionPreview();
   }
@@ -401,6 +435,9 @@
     const target = nextMode === "placement"
       ? (pureRotationHasPlacement ? "base" : "raw")
       : (pureRotationCorrections.length ? "corrected" : "base");
+    if (pureRotationEditModeTransitioning && pureRotationEditMode === nextMode) {
+      return pureRotationEditModeReady;
+    }
     if (
       pureRotationEditMode === nextMode
       && pureRotationTrajectory
@@ -409,7 +446,11 @@
       window.cadsceneSetPureRotationEditMode?.(nextMode);
       return pureRotationEditModeReady;
     }
+    const preservedManual = nextMode === "correction"
+      ? window.cadsceneGetCurrentCameraPose?.()
+      : null;
     pureRotationEditMode = nextMode;
+    pureRotationEditModeTransitioning = true;
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
     if (pureRotationEditMode === "placement") {
@@ -421,6 +462,8 @@
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
         return null;
+      }).finally(() => {
+        pureRotationEditModeTransitioning = false;
       });
       window.cadsceneEnsureVirtualCameraNearCad?.();
       window.cadsceneFocusVirtualCamera?.();
@@ -431,10 +474,13 @@
         pureRotationTrajectory = trajectory;
         pureRotationTrajectoryKind = target;
         applyPureRotationPose();
+        if (preservedManual) seedPureRotationCorrectionDraftFromManual(preservedManual);
         return trajectory;
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
         return null;
+      }).finally(() => {
+        pureRotationEditModeTransitioning = false;
       });
       message.textContent = "姿态关键帧：位置和 FOV 已锁定，只调整 Yaw/Pitch/Roll。";
     }
@@ -504,6 +550,7 @@
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
+    pureRotationCorrectionDraftDirty = false;
     await refreshPureRotationFittedPreview();
     message.textContent = `已保存姿态关键帧 ${correction.decoded_frame_index}。`;
   }
@@ -513,6 +560,7 @@
     if (!active) return;
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
+    pureRotationCorrectionDraftDirty = false;
     await refreshPureRotationFittedPreview();
     message.textContent = `已删除姿态关键帧 ${active.decoded_frame_index}。`;
   }
@@ -567,6 +615,7 @@
 
   function undoPureRotationDraft() {
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftDirty = false;
     applyPureRotationPose();
     refreshPureRotationCorrectionDraftBase();
     message.textContent = "已撤销当前未保存的姿态调整。";

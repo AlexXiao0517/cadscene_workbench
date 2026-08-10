@@ -413,6 +413,40 @@ def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
     assert 'await setPureRotationEditMode("correction")' in preview_function
 
 
+def test_world_vertical_slider_preserves_camera_state_and_dirty_draft_until_save() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert "pureRotationCorrectionDraftDirty" in workflow
+    edit_mode = workflow.split("function setPureRotationEditMode(mode)", 1)[1].split(
+        "async function savePureRotationPlacement", 1
+    )[0]
+    assert 'nextMode === "correction"' in edit_mode
+    assert "cadsceneGetCurrentCameraPose" in edit_mode
+    assert "seedPureRotationCorrectionDraftFromManual" in edit_mode
+
+    seed = workflow.split(
+        "function seedPureRotationCorrectionDraftFromManual", 1
+    )[1].split("function refreshPureRotationCorrectionDraftBase", 1)[0]
+    assert "camera_center_web" in seed
+    assert "display_fov" in seed
+    assert "cadsceneApplyPureRotationPose" in seed
+
+    refresh = workflow.split(
+        "function refreshPureRotationCorrectionDraftBase", 1
+    )[1].split("function applyPureRotationCorrectionPreview", 1)[0]
+    assert "pureRotationCorrectionDraftDirty && sameFrame" in refresh
+
+    preview = workflow.split(
+        "async function previewPureRotationWorldYaw", 1
+    )[1].split("async function previewPureRotationLocalDelta", 1)[0]
+    assert "pureRotationCorrectionDraftDirty = true" in preview
+
+    save = workflow.split("async function addPureRotationCorrection()", 1)[1].split(
+        "async function deletePureRotationCorrection", 1
+    )[0]
+    assert save.index("await apiPost") < save.index("pureRotationCorrectionDraftDirty = false")
+
+
 def test_pose_corrections_use_camera_local_axes_and_keep_world_up_separate() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
