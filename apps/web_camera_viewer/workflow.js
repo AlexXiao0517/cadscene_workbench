@@ -56,6 +56,8 @@
   let projectWorkbenchSaveInFlight = false;
   let projectWorkbenchTrajectoryJobId = null;
   let projectWorkbenchTrajectoryStatus = null;
+  let projectWorkbenchRenderJobId = null;
+  let projectWorkbenchRenderStatus = null;
   let projectWorkbenchTrajectoryStartPromise = null;
   let projectWorkbenchInternalNavigation = false;
   let focusPureRotationCameraOnce = true;
@@ -1280,7 +1282,10 @@
   }
 
   function projectWorkbenchTrajectoryOwnsStatus() {
-    return Boolean(projectWorkbenchToken && projectWorkbenchTrajectoryStatus);
+    return Boolean(
+      projectWorkbenchToken
+      && (projectWorkbenchTrajectoryStatus || projectWorkbenchRenderStatus),
+    );
   }
 
   async function ensureProjectWorkbenchSession() {
@@ -1515,8 +1520,8 @@
   async function finishQualityStage() {
     await ensureProjectWorkbenchSession();
     const result = await saveCurrentCameraTrack();
-    await finalizeProjectWorkbenchSave(result);
-    if (!projectWorkbenchToken) setWorkflowStage("render");
+    await finalizeProjectWorkbenchSave(result, { navigate: false });
+    setWorkflowStage("render");
   }
 
   async function persistWorkbenchDraftForReturn() {
@@ -1733,8 +1738,131 @@
     }
   }
 
+  function projectRenderStatusCopy(status, stage) {
+    const labels = {
+      queued: "已进入渲染队列",
+      preparing: "正在准备渲染输入",
+      running: "正在渲染片段",
+      validating: "正在验证渲染结果",
+      success: "片段渲染完成",
+      failed: "片段渲染失败",
+      interrupted: "片段渲染已中断",
+      cancelled: "片段渲染已取消",
+      stale_input: "输入已变化，本次渲染未发布",
+      superseded: "本次渲染已被新任务取代",
+    };
+    return labels[status] || stage || "等待渲染任务";
+  }
+
+  async function waitForProjectWorkbenchRender(jobId) {
+    const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    while (true) {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+      const clip = (snapshot.clips || []).find(
+        (item) => item.clip_id === projectWorkbenchSession.clip_id,
+      );
+      if (!clip || clip.render?.job_id !== jobId) {
+        throw new Error("无法读取当前片段的渲染任务状态");
+      }
+      const render = clip.render;
+      projectWorkbenchRenderStatus = String(render.status || render.stage || "queued");
+      if (terminal.has(render.status)) {
+        projectWorkbenchRenderJobId = null;
+        projectWorkbenchRenderStatus = null;
+        runningStage = null;
+        if (render.status !== "success") {
+          throw new Error(projectRenderStatusCopy(render.status, render.stage));
+        }
+        progress.value = 1;
+        stateLabel.textContent = "已完成";
+        message.textContent = "片段渲染完成；可返回项目管理继续处理其他片段。";
+        return render;
+      }
+      let renderedRuntime = false;
+      try {
+        const runtimeResponse = await fetch(
+          `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
+          { cache: "no-store" },
+        );
+        if (runtimeResponse.ok) {
+          const runtime = await runtimeResponse.json();
+          if (runtime.workflow_status) {
+            await renderStatus(runtime.workflow_status);
+            renderedRuntime = true;
+          }
+          const content = document.querySelector("#workflowLogContent");
+          if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
+        }
+      } catch (error) {
+        // 实时日志暂不可用时继续依赖项目 snapshot 跟踪后台任务。
+      }
+      if (!renderedRuntime) {
+        const fraction = render.progress?.fraction;
+        if (typeof fraction === "number") progress.value = Math.max(0, Math.min(0.99, fraction));
+        stateLabel.textContent = projectRenderStatusCopy(render.status, render.stage);
+        message.textContent = projectRenderStatusCopy(render.status, render.stage);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+  }
+
   async function startRenderStage() {
-    await saveCurrentCameraTrack();
+    const result = await saveCurrentCameraTrack();
+    if (projectWorkbenchToken) {
+      await ensureProjectWorkbenchSession();
+      await finalizeProjectWorkbenchSave(result, { navigate: false });
+      const clipId = projectWorkbenchSession.clip_id;
+      const snapshotResponse = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await snapshotResponse.json().catch(() => ({}));
+      if (!snapshotResponse.ok) throw new Error(snapshot.error || `HTTP ${snapshotResponse.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+      const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
+      const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
+      if (currentClip?.render?.job_id && activeStatuses.has(currentClip.render.status)) {
+        projectWorkbenchRenderJobId = currentClip.render.job_id;
+        projectWorkbenchRenderStatus = currentClip.render.status;
+        runningStage = "project_render";
+        message.textContent = "已恢复当前片段的后台渲染任务。";
+        return waitForProjectWorkbenchRender(currentClip.render.job_id);
+      }
+      const preflight = await projectWorkbenchRequest("/render-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        enqueue: false,
+      });
+      if (!(preflight.eligible || []).includes(clipId)) {
+        const reason = preflight.reasons?.[clipId] || "当前片段尚不满足渲染条件";
+        throw new Error(reason);
+      }
+      const queued = await projectWorkbenchRequest("/render-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        confirmed_clip_ids: [],
+        enqueue: true,
+      });
+      const jobId = queued.job_ids?.[0];
+      if (!jobId) throw new Error("渲染任务未能进入项目队列");
+      projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+      projectWorkbenchRenderJobId = jobId;
+      projectWorkbenchRenderStatus = "queued";
+      runningStage = "project_render";
+      progress.value = 0;
+      stateLabel.textContent = "排队中";
+      message.textContent = "渲染任务已进入后台队列；返回项目管理不会中断任务。";
+      document.querySelector("#workflowCancel").hidden = true;
+      return waitForProjectWorkbenchRender(jobId);
+    }
     message.textContent = "正在用最新人工关键帧重新拟合路线并渲染。";
     return runStage("render");
   }

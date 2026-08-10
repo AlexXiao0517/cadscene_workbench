@@ -338,6 +338,43 @@ def test_render_saves_frontend_track_before_refitting_and_rendering() -> None:
     assert render.index("await saveCurrentCameraTrack") < render.index('runStage("render")')
 
 
+def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function startRenderStage")
+    end = script.index("async function cancelRunningJob", start)
+    render = script[start:end]
+
+    assert "if (projectWorkbenchToken)" in render
+    assert 'projectWorkbenchRequest("/render-jobs"' in render
+    assert "enqueue: false" in render
+    assert "enqueue: true" in render
+    assert "confirmed_clip_ids: []" in render
+    assert "waitForProjectWorkbenchRender" in render
+    assert render.index("if (projectWorkbenchToken)") < render.index('runStage("render")')
+    snapshot_refresh = render.index("/snapshot")
+    preflight_request = render.index('projectWorkbenchRequest("/render-jobs"')
+    assert snapshot_refresh < preflight_request
+    assert "projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs" in render
+
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+    assert "/snapshot" in wait
+    assert "clip.render" in wait
+    assert "/runtime" in wait
+    assert 'new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"])' in wait
+
+
+def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function finishQualityStage")
+    end = script.index("async function persistWorkbenchDraftForReturn", start)
+    finish = script[start:end]
+
+    assert "await finalizeProjectWorkbenchSave(result, { navigate: false })" in finish
+    assert 'setWorkflowStage("render")' in finish
+
+
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
     script = _read("workflow.js")
 
