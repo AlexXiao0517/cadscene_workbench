@@ -13,7 +13,7 @@
 - Never report 100% before a job is terminal `success`.
 - Leaving the workbench must not cancel or terminate trajectory/render processes.
 - Browser pages modify project state only through project APIs with `expected_revision`.
-- Theme preference uses the same `cadscene-theme` local-storage key as the upload page.
+- Theme preference uses the same `mediaflow-theme` local-storage key as the upload page.
 - No changes to SfM, OpenGV, SRT, or Pure Rotation mathematical implementations.
 
 ---

@@ -478,16 +478,53 @@ def test_workflow_upload_combines_cad_selection_and_parse() -> None:
     assert 'id="workflowParseCad"' not in html
 
 
-def test_viewer_displays_manifest_backed_trajectory_mode_without_replacing_layout() -> None:
+def test_viewer_uses_manifest_backed_trajectory_mode_without_product_badge() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
 
-    assert 'id="workflowTrajectoryMode"' in html
+    assert 'id="workflowTrajectoryMode"' not in html
     assert "dataset-manifest" in workflow
     assert "interface_only" in workflow
     assert "isInterfaceOnlyTrajectoryWorkflow" in workflow
     assert "轨迹功能尚未启用" in workflow
     assert 'class="workspace"' in html
+
+
+def test_project_workbench_can_save_and_return_without_cancelling_background_jobs() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+
+    assert 'id="workbenchReturnButton"' in html
+    assert 'id="workbenchReturnDialog"' in html
+    assert "推理和渲染任务会继续在后台运行" in html
+    assert "async function persistWorkbenchDraftForReturn" in script
+    assert "async function returnToProjectWorkspace" in script
+    return_flow = script[
+        script.index("async function returnToProjectWorkspace") :
+        script.index("window.addEventListener(\"pagehide\"")
+    ]
+    assert "/close`" in return_flow
+    assert "projectWorkbenchInternalNavigation = true" in return_flow
+    assert "window.location.assign(projectWorkbenchSession.return_to)" in return_flow
+    assert "/cancel" not in return_flow
+
+
+def test_workbench_shares_theme_and_uses_product_copy() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+    css = _read("style.css")
+
+    assert "CAD航拍视频叠加工作台" in html
+    assert "虚拟相机参数设置" in html
+    assert "虚拟 UAV 相机" not in html
+    assert 'id="workbenchThemeToggle"' in html
+    assert 'const THEME_STORAGE_KEY = "mediaflow-theme"' in script
+    assert 'setAttribute("data-theme", theme)' in script
+    assert ':root[data-theme="light"]' in css
+    button_start = css.index("button,\n.file-button {")
+    button_rule = css[button_start : css.index("button:hover", button_start)]
+    assert "align-items: center" in button_rule
+    assert "justify-content: center" in button_rule
 
 
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:

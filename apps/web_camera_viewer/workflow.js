@@ -7,6 +7,7 @@
   const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
   const projectWorkbenchProjectId = params.get("projectId") || dataset;
   const requestedWorkflowStage = params.get("workflowStage") || "";
+  const THEME_STORAGE_KEY = "mediaflow-theme";
   const PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000;
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
@@ -24,7 +25,6 @@
   const message = document.querySelector("#workflowMessage");
   const stateLabel = document.querySelector("#workflowJobState");
   const title = document.querySelector("#workflowTaskTitle");
-  const trajectoryModeLabel = document.querySelector("#workflowTrajectoryMode");
   let trajectoryWorkflow = null;
   let trajectoryWorkflowLoaded = !dataset;
   let selectedWorkflowStage = null;
@@ -60,6 +60,26 @@
   let projectWorkbenchInternalNavigation = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
+
+  function applyWorkbenchTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    const toggle = document.querySelector("#workbenchThemeToggle");
+    if (!toggle) return;
+    const isLight = theme === "light";
+    const help = isLight ? "切换为深色模式" : "切换为浅色模式";
+    toggle.setAttribute("aria-pressed", String(isLight));
+    toggle.setAttribute("aria-label", help);
+    toggle.setAttribute("title", help);
+  }
+
+  function initializeWorkbenchTheme() {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    const preferred = window.matchMedia?.("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+    applyWorkbenchTheme(saved === "light" || saved === "dark" ? saved : preferred);
+  }
+
   function uploadTimestamp() {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -69,17 +89,6 @@
   function renderTrajectoryWorkflow(workflow) {
     const mode = String(workflow?.trajectory_mode || "sfm_only");
     const implementation = String(workflow?.implementation_status || "ready");
-    const copy = {
-      sfm_only: "轨迹模式：仅 SfM（可用）",
-      srt_sfm_fused: "轨迹模式：SRT + SfM（功能待启用）",
-      srt_full_pose: "轨迹模式：SRT 完整姿态（功能待启用）",
-      pure_rotation: "轨迹模式：悬停旋转（实验）",
-    };
-    if (trajectoryModeLabel) {
-      trajectoryModeLabel.hidden = false;
-      trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
-      trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
-    }
     document.querySelector("#sfmPanel")?.toggleAttribute("hidden", mode === "pure_rotation");
     applyPureRotationWorkflowLayout(mode);
     if (mode === "pure_rotation") {
@@ -93,7 +102,6 @@
       return;
     }
     const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
-    if (trajectoryModeLabel) trajectoryModeLabel.title = explanation;
     document.querySelectorAll("[data-job-action], #workflowGenerateKeyframes, #workflowContinueKeyframes, #workflowFinishKeyframes, #workflowFinishQuality, #workflowReturnKeyframes").forEach((button) => {
       button.disabled = true;
       button.title = explanation;
@@ -1511,6 +1519,48 @@
     if (!projectWorkbenchToken) setWorkflowStage("render");
   }
 
+  async function persistWorkbenchDraftForReturn() {
+    if (!projectWorkbenchToken || !projectWorkbenchSession) return null;
+    if (projectWorkbenchTrajectoryIsPending()) return null;
+    if (isPureRotationWorkflow()) {
+      if (
+        window.pureRotationViewer?.pose
+        && (pureRotationEditMode === "placement" || !pureRotationHasPlacement)
+      ) {
+        await savePureRotationPlacement();
+      }
+      if (pureRotationCorrections.length) {
+        await apiPost("/api/pure-rotation/corrections", {
+          dataset,
+          runId,
+          corrections: pureRotationCorrections,
+        });
+      }
+      return { ok: true, kind: "pure_rotation_draft" };
+    }
+    if (typeof window.cadsceneGetCameraTrack === "function") {
+      return saveCurrentCameraTrack();
+    }
+    return null;
+  }
+
+  async function returnToProjectWorkspace() {
+    await ensureProjectWorkbenchSession();
+    await persistWorkbenchDraftForReturn();
+    if (
+      projectWorkbenchSession.state === "editing"
+      || projectWorkbenchSession.state === "pending_save"
+    ) {
+      const closed = await projectWorkbenchRequest(
+        `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/close`,
+        { expected_revision: projectWorkbenchSession.clips_revision },
+      );
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...closed };
+    }
+    projectWorkbenchInternalNavigation = true;
+    window.location.assign(projectWorkbenchSession.return_to);
+  }
+
   window.addEventListener("pagehide", () => {
     if (
       projectWorkbenchInternalNavigation
@@ -1889,6 +1939,19 @@
     else runWithMessage(finishKeyframePlan);
   });
   document.querySelector("#workflowPureFinishKeyframes")?.addEventListener("click", () => runWithMessage(finishPureRotationCalibration));
+  document.querySelector("#workbenchThemeToggle")?.addEventListener("click", () => {
+    const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyWorkbenchTheme(theme);
+  });
+  const workbenchReturnButton = document.querySelector("#workbenchReturnButton");
+  if (workbenchReturnButton) workbenchReturnButton.hidden = !projectWorkbenchToken;
+  workbenchReturnButton?.addEventListener("click", () => {
+    document.querySelector("#workbenchReturnDialog")?.showModal();
+  });
+  document.querySelector("#workbenchConfirmReturn")?.addEventListener("click", () => {
+    runWithMessage(returnToProjectWorkspace);
+  });
   document.querySelector("#workflowPreviewPureFitted")?.addEventListener("click", () => runWithMessage(previewPureRotationFittedTrack));
   document.querySelector("#workflowReturnPureCalibration")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
@@ -1986,6 +2049,7 @@
   if (debugEnabled) {
     document.querySelectorAll(".dev-only-control").forEach((node) => node.classList.add("is-debug-visible"));
   }
+  initializeWorkbenchTheme();
   loadWorkflowSuggestions();
   if (projectWorkbenchToken) {
     projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();

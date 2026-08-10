@@ -8,6 +8,20 @@
   --muted: #9aa6b6;
   --accent: #56c2ff;
   --accent-2: #ffd36e;
+  --strip: #0e1116;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-2: #eef3f8;
+  --line: #c7d2df;
+  --text: #172337;
+  --muted: #64758a;
+  --accent: #327ddd;
+  --accent-2: #9b6800;
+  --strip: #f6f8fb;
 }
 
 * {
@@ -19,6 +33,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: Arial, "Microsoft YaHei", sans-serif;
+  transition: color .25s ease, background .3s ease;
 }
 
 button,
@@ -48,6 +63,14 @@ input {
   gap: 16px;
   padding: 14px 16px;
 }
+
+.topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.workbench-icon-button { width: 34px; height: 34px; padding: 0; border: 0; display: inline-grid; place-items: center; color: var(--muted); background: transparent; }
+.workbench-icon-button:hover { color: var(--text); border-color: transparent; }
+.workbench-icon-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.workbench-icon-button .moon-icon, :root[data-theme="light"] .workbench-icon-button .sun-icon { display: none; }
+:root[data-theme="light"] .workbench-icon-button .moon-icon { display: block; }
+.workbench-return-button { white-space: nowrap; }
 
 h1,
 h2,
@@ -94,7 +117,7 @@ h2 {
 
 .track-strip span {
   border: 1px solid var(--line);
-  background: #0e1116;
+  background: var(--strip);
   color: var(--muted);
   padding: 6px 8px;
   font-size: 12px;
@@ -109,7 +132,7 @@ h2 {
   align-items: center;
   gap: 6px;
   border: 1px solid var(--line);
-  background: #0e1116;
+  background: var(--strip);
   color: var(--muted);
   padding: 4px 8px;
   font-size: 12px;
@@ -650,6 +673,10 @@ button,
   min-height: 34px;
   padding: 7px 10px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
 }
 
 button:hover,
@@ -781,19 +808,11 @@ button.is-active {
   color: var(--accent-2);
 }
 
-.workflow-trajectory-mode {
-  margin-top: 8px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.workflow-trajectory-mode.interface-only {
-  border-color: #b07d35;
-  color: #ffd08a;
-}
+.workbench-return-dialog { width: min(500px, calc(100vw - 32px)); color: var(--text); border: 1px solid var(--line); background: var(--panel); }
+.workbench-return-dialog::backdrop { background: rgba(4, 9, 15, .66); backdrop-filter: blur(3px); }
+.workbench-return-dialog form { padding: 18px; }
+.workbench-return-dialog p { margin-top: 12px; color: var(--muted); line-height: 1.65; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 
 #qualityTimelineCanvas {
   display: block;
