@@ -130,8 +130,7 @@
           </div>
           <div class="workflow-stage-panel" data-stage="render">
             <div class="workflow-actions">
-              <button id="workflowPreviewPureFitted" class="workflow-hidden-control" type="button">预览拟合结果</button>
-              <button id="workflowReturnPureCalibration" class="workflow-hidden-control" type="button">返回关键帧标定</button>
+              <button id="workflowReturnPureCalibration" class="workflow-hidden-control" type="button">返回相机调整</button>
               <button id="workflowRender" data-job-action type="button">渲染视频</button>
               <button id="workflowPreviewRender" type="button" disabled>预览视频</button>
               <a id="workflowDownloadRender" class="workflow-link" href="#" download>下载结果</a>
@@ -277,27 +276,12 @@
           <button id="rejectReview" class="workflow-hidden-control" type="button">拒绝</button>
           <button id="viewCurrentSuggestion" type="button" title="查看当前建议帧" aria-label="查看当前建议帧" disabled>暂无建议</button>
           <button id="ignoreCurrentSuggestion" type="button" disabled>忽略当前建议</button>
-          <span id="pureRotationCorrectionActions" class="workflow-hidden-control">
-            <button id="pureRotationAddCorrection" type="button">添加/更新当前关键帧</button>
-            <button id="pureRotationDeleteCorrection" type="button">删除当前关键帧</button>
-            <button id="pureRotationPreviousCorrection" type="button">上一个关键帧</button>
-            <button id="pureRotationNextCorrection" type="button">下一个关键帧</button>
-            <button id="pureRotationUndoDraft" type="button">撤销当前调整</button>
-          </span>
         </div>
         <div id="cameraControls" class="controls-grid"></div>
-        <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="悬停旋转关键帧标定">
+        <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="固定相机位置与方向设置">
           <fieldset id="pureRotationPlacementSection">
-            <legend>固定相机初始设置</legend>
-            <p>设置整段视频唯一的固定相机位置和当前帧方向；调整立即预览，播放无需确认。完成调试时会自动确认当前设置。</p>
-            <div class="button-row">
-              <button id="pureRotationSavePlacement" type="button">确认当前相机位置与方向</button>
-              <button id="pureRotationRestorePlacement" type="button">撤销未确认的调整</button>
-            </div>
-          </fieldset>
-          <fieldset id="pureRotationCorrectionSection">
-            <legend>当前帧姿态微调</legend>
-            <p>相机中心保持固定；可使用绕竖直轴控制或旋转 Gizmo 调整当前帧姿态。</p>
+            <legend>固定相机位置与方向</legend>
+            <p>平移、旋转 Gizmo、相机参数和纵轴旋转会自动保留在当前草稿中；调整满意后统一确认，再播放视频检查整段旋转效果。</p>
             <div class="pure-rotation-world-yaw">
               <label for="pureRotationWorldYaw">绕竖直轴旋转</label>
               <input id="pureRotationWorldYaw" type="range" min="-180" max="180" step="0.1" value="0" />
@@ -305,11 +289,9 @@
               <span>°</span>
               <button id="pureRotationResetWorldYaw" type="button">水平旋转归零</button>
             </div>
-            <div class="pure-rotation-local-angles">
-              <span>相机局部轴微调</span>
-              <label>Yaw <input id="pureRotationLocalYaw" type="number" min="-180" max="180" step="0.1" value="0" /></label>
-              <label>Pitch <input id="pureRotationLocalPitch" type="number" min="-180" max="180" step="0.1" value="0" /></label>
-              <label>Roll <input id="pureRotationLocalRoll" type="number" min="-180" max="180" step="0.1" value="0" /></label>
+            <div class="button-row">
+              <button id="pureRotationSavePlacement" type="button">确认当前位置与方向</button>
+              <button id="pureRotationRestorePlacement" type="button">恢复上次确认</button>
             </div>
           </fieldset>
         </section>
@@ -324,8 +306,8 @@
     <script src="./fallback.js?v=20260708-data-fallback-fix3"></script>
     <script src="./video_display_transform.js?v=20260715-stage5b"></script>
     <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
-    <script src="./viewer_legacy.js?v=20260729-local-camera-v8"></script>
-    <script src="./workflow.js?v=20260810-background-ux"></script>
+    <script src="./viewer_legacy.js?v=20260810-global-placement-v9"></script>
+    <script src="./workflow.js?v=20260810-pure-placement-v2"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

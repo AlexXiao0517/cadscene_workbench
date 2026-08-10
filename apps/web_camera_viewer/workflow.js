@@ -163,8 +163,7 @@
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
     setPureVisible(
       "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
-        + "#workflowPreviewPureFitted, #workflowReturnPureCalibration, "
-        + "#pureRotationCorrectionActions",
+        + "#workflowReturnPureCalibration",
       pure,
     );
     document.querySelectorAll("#viewCurrentSuggestion, #ignoreCurrentSuggestion").forEach((node) => {
@@ -187,7 +186,7 @@
     });
     const keyframeStatus = document.querySelector("#workflowKeyframePlanStatus");
     if (pure && keyframeStatus) {
-      keyframeStatus.textContent = "先完成固定相机全局放置，再在需要的位置添加姿态关键帧；完成后直接进入渲染导出。";
+      keyframeStatus.textContent = "调整固定相机的位置与方向，确认后播放视频检查整段旋转效果；满意后进入渲染导出。";
     }
     const sfmStatus = document.querySelector("#workflowSfmStatus");
     if (pure && sfmStatus) sfmStatus.textContent = "等待 OpenGV 旋转轨迹任务；该任务只恢复旋转，不恢复平移。";
@@ -219,23 +218,27 @@
       pureRotationHasPlacement = Boolean(placement);
       const candidate = status.summary?.candidate;
       const candidateFov = window.CadscenePureRotationMath.horizontalFovDeg(candidate?.width, candidate?.fx);
-      if (Number.isFinite(candidateFov)) {
-        pureRotationDisplayFov = candidateFov;
-        pureRotationFovSource = "unverified_candidate_intrinsics";
-      } else if (placement && Number.isFinite(Number(placement.fov))) {
+      if (placement && Number.isFinite(Number(placement.fov))) {
         pureRotationDisplayFov = Number(placement.fov);
         pureRotationFovSource = "saved_placement";
+      } else if (Number.isFinite(candidateFov)) {
+        pureRotationDisplayFov = candidateFov;
+        pureRotationFovSource = "unverified_candidate_intrinsics";
       }
     }
     pureRotationRawTrajectory = await loadPureRotationTrack("raw");
-    pureRotationTrajectory = await loadPureRotationTrack("raw");
-    pureRotationTrajectoryKind = "raw";
+    const initialTrajectoryKind = pureRotationHasPlacement ? "base" : "raw";
+    pureRotationTrajectory = initialTrajectoryKind === "raw"
+      ? pureRotationRawTrajectory
+      : await loadPureRotationTrack(initialTrajectoryKind);
+    pureRotationTrajectoryKind = initialTrajectoryKind;
     updatePureRotationFovSource();
     seedPureRotationDraftPlacement();
     applyPureRotationPose();
   }
 
   function seedPureRotationDraftPlacement() {
+    if (pureRotationHasPlacement) return null;
     if (pureRotationDraftPlacement || !pureRotationRawTrajectory) return pureRotationDraftPlacement;
     const video = document.querySelector("#sourceVideo");
     const rawPose = pureRotationPoseAtPts(pureRotationRawTrajectory, video?.currentTime || 0);
@@ -350,11 +353,20 @@
   }
 
   async function previewPureRotationWorldYaw(value) {
-    await setPureRotationEditMode("correction");
+    await setPureRotationEditMode("placement");
+    const active = window.pureRotationViewer?.pose;
+    const sameFrame = pureRotationCorrectionDraftBase
+      && Number(pureRotationCorrectionDraftBase.decoded_frame_index) === Number(active?.decoded_frame_index)
+      && Number(pureRotationCorrectionDraftBase.segment_id) === Number(active?.segment_id);
+    if (!pureRotationCorrectionDraftDirty || !sameFrame) {
+      seedPureRotationCorrectionDraftFromManual(window.cadsceneGetCurrentCameraPose?.());
+    }
     pureRotationWorldYawDeg = Math.max(-180, Math.min(180, Number(value) || 0));
     pureRotationCorrectionDraftDirty = true;
     setPureRotationWorldYawInputs(pureRotationWorldYawDeg);
     applyPureRotationCorrectionPreview();
+    capturePureRotationDraftPlacement();
+    message.textContent = "当前位置与方向草稿已自动保留；可继续切换平移或旋转，满意后点击确认。";
   }
 
   async function previewPureRotationLocalDelta(key, value) {
@@ -428,6 +440,17 @@
   window.addEventListener("cadsceneViewerReady", () => {
     seedPureRotationDraftPlacement();
     applyPureRotationPose();
+  });
+  window.addEventListener("cadsceneManualCameraChanged", () => {
+    if (!isPureRotationWorkflow() || pureRotationEditMode !== "placement") return;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
+    pureRotationWorldYawDeg = 0;
+    pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+    setPureRotationWorldYawInputs(0);
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
+    capturePureRotationDraftPlacement();
+    message.textContent = "当前位置与方向草稿已自动保留；可继续切换平移或旋转，满意后点击确认。";
   });
 
   function setPureRotationEditMode(mode) {
@@ -505,15 +528,20 @@
     pureRotationHasPlacement = true;
     pureRotationSavedPlacement = placement;
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
     updatePureRotationFovSource();
     pureRotationTrajectory = await loadPureRotationTrack("base");
     pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
+    refreshPureRotationCorrectionDraftBase();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
   }
 
   async function restorePureRotationPlacement() {
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
     if (!pureRotationSavedPlacement) {
       seedPureRotationDraftPlacement();
       pureRotationFovSource = "unverified_candidate_intrinsics";
@@ -533,7 +561,7 @@
 
   async function refreshPureRotationFittedPreview() {
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
-    const target = pureRotationCorrections.length ? "corrected" : "base";
+    const target = "base";
     pureRotationTrajectory = await loadPureRotationTrack(target);
     pureRotationTrajectoryKind = target;
     pureRotationDraftPlacement = null;
@@ -569,13 +597,6 @@
     await ensureProjectWorkbenchSession();
     if (pureRotationEditMode === "placement" || !pureRotationHasPlacement) {
       await savePureRotationPlacement();
-      if (pureRotationCorrections.length) {
-        await apiPost("/api/pure-rotation/corrections", {
-          dataset,
-          runId,
-          corrections: pureRotationCorrections,
-        });
-      }
     }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
@@ -912,10 +933,6 @@
     const calibrationPanel = document.querySelector("#pureRotationCalibrationPanel");
     if (calibrationPanel) {
       calibrationPanel.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
-    }
-    const correctionActions = document.querySelector("#pureRotationCorrectionActions");
-    if (correctionActions) {
-      correctionActions.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
     }
     updateWorkflowStepActive(selectedWorkflowStage);
     renderWorkflowPanel(selectedWorkflowStage);
@@ -2172,17 +2189,10 @@
   document.querySelector("#workbenchConfirmReturn")?.addEventListener("click", () => {
     runWithMessage(returnToProjectWorkspace);
   });
-  document.querySelector("#workflowPreviewPureFitted")?.addEventListener("click", () => runWithMessage(previewPureRotationFittedTrack));
   document.querySelector("#workflowReturnPureCalibration")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
-  document.querySelector("#pureRotationCorrectionSection")?.addEventListener("focusin", () => setPureRotationEditMode("correction"));
   document.querySelector("#pureRotationSavePlacement")?.addEventListener("click", () => runWithMessage(savePureRotationPlacement));
   document.querySelector("#pureRotationRestorePlacement")?.addEventListener("click", () => runWithMessage(restorePureRotationPlacement));
-  document.querySelector("#pureRotationAddCorrection")?.addEventListener("click", () => runWithMessage(addPureRotationCorrection));
-  document.querySelector("#pureRotationDeleteCorrection")?.addEventListener("click", () => runWithMessage(deletePureRotationCorrection));
-  document.querySelector("#pureRotationPreviousCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(-1));
-  document.querySelector("#pureRotationNextCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(1));
-  document.querySelector("#pureRotationUndoDraft")?.addEventListener("click", undoPureRotationDraft);
   document.querySelector("#pureRotationWorldYaw")?.addEventListener("input", (event) => {
     previewPureRotationWorldYaw(event.target.value);
   });
