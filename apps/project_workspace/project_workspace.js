@@ -109,7 +109,12 @@
     const fraction = clip.progress?.fraction;
     const active = ["queued", "preparing", "running", "validating"].includes(clip.status);
     const hasPercentage = typeof fraction === "number";
-    const percent = hasPercentage ? Math.max(0, Math.min(100, Math.round(fraction * 100))) : null;
+    const measuredPercent = hasPercentage
+      ? Math.max(0, Math.round(fraction * 100))
+      : null;
+    const percent = clip.status === "success"
+      ? 100
+      : (measuredPercent == null ? null : Math.min(99, measuredPercent));
     progressTrack.hidden = !active && !hasPercentage;
     progressTrack.classList.toggle("progress-indeterminate", active && !hasPercentage);
     progressFill.style.width = hasPercentage ? `${percent}%` : "";

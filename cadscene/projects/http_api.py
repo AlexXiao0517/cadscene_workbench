@@ -482,13 +482,13 @@ class ProjectApi:
                         None if display_job is None else display_job.get("stage")
                     ),
                     "progress": (
-                        None if display_job is None else display_job.get("progress")
+                        _visible_job_progress(display_job)
                     ),
                     "render": {
                         "job_id": None if render_job is None else render_job.get("job_id"),
                         "status": "not_started" if render_job is None else render_job.get("status"),
                         "stage": None if render_job is None else render_job.get("stage"),
-                        "progress": None if render_job is None else render_job.get("progress"),
+                        "progress": _visible_job_progress(render_job),
                         "output_revision": None if render_job is None else render_job.get("output_revision"),
                     },
                     "capabilities": capability,
@@ -931,6 +931,22 @@ def _render_preflight_payload(preflight: RenderPreflight) -> dict[str, object]:
         "skipped": list(preflight.skipped),
         "reasons": dict(preflight.reasons),
     }
+
+
+def _visible_job_progress(
+    job: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    if job is None or not isinstance(job.get("progress"), Mapping):
+        return None
+    progress = dict(job["progress"])
+    fraction = progress.get("fraction")
+    if (
+        str(job.get("status")) in {"queued", "preparing", "running", "validating"}
+        and isinstance(fraction, (int, float))
+        and not isinstance(fraction, bool)
+    ):
+        progress["fraction"] = min(float(fraction), 0.99)
+    return progress
 
 
 def _clip_seconds(clip: ClipDefinition) -> tuple[float, float]:

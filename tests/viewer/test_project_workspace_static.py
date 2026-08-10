@@ -101,6 +101,14 @@ def test_workspace_progress_uses_reported_percentage_or_honest_indeterminate_bar
     assert "progress-sweep" in css
 
 
+def test_workspace_reserves_one_hundred_percent_for_terminal_success() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'clip.status === "success"' in script
+    assert "? 100" in script
+    assert "Math.min(99" in script
+
+
 def test_workspace_uses_product_logo_favicon_and_centered_collapsed_navigation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")

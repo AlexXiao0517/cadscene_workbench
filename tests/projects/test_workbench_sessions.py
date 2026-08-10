@@ -1176,6 +1176,74 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["stage"] == "running"
 
 
+def test_snapshot_never_reports_one_hundred_percent_for_active_dependency(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow="pure_rotation"
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    clips = repositories.clips.load("project-1")
+    clip = clips.clips[0]
+    analysis = dict(clip.analysis)
+    analysis.pop("physical_mp4_path")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(clip, analysis=analysis),)
+        ),
+    )
+    enqueued = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-1"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+    assert enqueued.status == 202
+    manifest = repositories.jobs.load("project-1")
+    active_export = next(
+        item for item in manifest.jobs if item["job_type"] == "clip_export"
+    )
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "status": "validating",
+                    "stage": "validating",
+                    "progress": {
+                        "stage": "validating",
+                        "message": "source frames exported; validating",
+                        "fraction": 1.0,
+                    },
+                }
+                if item["job_id"] == active_export["job_id"]
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    payload = snapshot.body["clips"][0]
+
+    assert payload["status"] == "validating"
+    assert payload["progress"]["fraction"] == 0.99
+
+
 def test_workbench_heartbeat_extends_editing_session_lease(
     tmp_path: Path,
 ) -> None:
