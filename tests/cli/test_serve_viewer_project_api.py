@@ -16,7 +16,11 @@ from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.service import ProjectService, RegisterUploadResult
-from cadscene.projects.service import EnqueueRenderResult, RenderPreflight
+from cadscene.projects.service import (
+    EnqueueRenderResult,
+    RenderPreflight,
+    TrajectoryPreflight,
+)
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.cli.serve_viewer import (
@@ -502,6 +506,135 @@ def test_snapshot_exposes_server_derived_render_capability(
     assert response.body["clips"][0]["render"]["status"] == "not_started"
 
 
+def test_snapshot_exposes_revision_scoped_render_preview_url_for_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    current = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=(
+                {
+                    "job_id": "render-job-1",
+                    "job_type": "clip_render",
+                    "clip_id": "ready",
+                    "status": "success",
+                    "stage": "success",
+                    "progress": {"fraction": 1.0},
+                    "output_revision": "render-abc123",
+                    "depends_on_job_ids": [],
+                },
+            ),
+        ),
+    )
+    render = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=render.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "ready:render-abc123",
+                    "clip_id": "ready",
+                    "output_revision": "render-abc123",
+                    "status": "success",
+                    "outputs": {"video": "ignored-by-snapshot"},
+                },
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        api.service,
+        "preflight_trajectory_jobs",
+        lambda _project_id, *, clip_ids=None: TrajectoryPreflight(
+            eligible=(), needs_confirmation=(), skipped=tuple(clip_ids or ()), reasons={}
+        ),
+    )
+    monkeypatch.setattr(
+        api.service,
+        "preflight_render_jobs",
+        lambda _project_id, *, clip_ids=None: RenderPreflight(
+            eligible=(), confirmation_required=(), skipped=tuple(clip_ids or ()), reasons={}
+        ),
+    )
+
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert response.status == 200
+    assert response.body["clips"][0]["render"]["preview_url"] == (
+        "/api/projects/p1/clips/ready/renders/render-abc123/video"
+    )
+
+
+def test_snapshot_keeps_stale_published_render_preview_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    jobs = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=(
+                {
+                    "job_id": "render-job-1",
+                    "job_type": "clip_render",
+                    "clip_id": "ready",
+                    "status": "superseded",
+                    "stage": "superseded",
+                    "progress": {"fraction": 1.0},
+                    "output_revision": None,
+                    "depends_on_job_ids": [],
+                },
+            ),
+        ),
+    )
+    render = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=render.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "ready:render-abc123",
+                    "clip_id": "ready",
+                    "output_revision": "render-abc123",
+                    "status": "stale_input",
+                    "outputs": {"video": "ignored-by-snapshot"},
+                },
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        api.service,
+        "preflight_trajectory_jobs",
+        lambda _project_id, *, clip_ids=None: TrajectoryPreflight(
+            eligible=(), needs_confirmation=(), skipped=tuple(clip_ids or ()), reasons={}
+        ),
+    )
+    monkeypatch.setattr(
+        api.service,
+        "preflight_render_jobs",
+        lambda _project_id, *, clip_ids=None: RenderPreflight(
+            eligible=(), confirmation_required=(), skipped=tuple(clip_ids or ()), reasons={}
+        ),
+    )
+
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert response.body["clips"][0]["render"]["status"] == "superseded"
+    assert response.body["clips"][0]["render"]["preview_url"] == (
+        "/api/projects/p1/clips/ready/renders/render-abc123/video"
+    )
+    assert response.body["clips"][0]["render"]["preview_is_current"] is False
+
+
 def test_cancel_and_retry_job_routes_delegate_through_project_service(
     tmp_path: Path,
 ) -> None:
@@ -749,6 +882,58 @@ def test_serve_viewer_serves_real_project_snapshot_over_http(tmp_path: Path) -> 
     assert response.getheader("ETag")
     assert body["project_id"] == "p1"
     assert body["clips"][0]["clip_id"] == "clip-1"
+
+
+def test_serve_viewer_streams_published_project_render_with_head_and_range(
+    tmp_path: Path,
+) -> None:
+    rendered = tmp_path / "rendered.mp4"
+    rendered.write_bytes(b"0123456789")
+
+    class FakeRenderService:
+        def published_render_video_path(self, project_id, clip_id, output_revision):
+            assert (project_id, clip_id, output_revision) == (
+                "p1",
+                "clip-1",
+                "render-1",
+            )
+            return rendered
+
+    class FakeProjectApi:
+        service = FakeRenderService()
+
+    server = ViewerHTTPServer(("127.0.0.1", 0), RangeRequestHandler)
+    server.root_dir = tmp_path
+    server.storage_root_dir = tmp_path
+    server.extra_roots = {}
+    server.project_api = FakeProjectApi()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    route = "/api/projects/p1/clips/clip-1/renders/render-1/video"
+    try:
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("HEAD", route)
+        head = connection.getresponse()
+        head_body = head.read()
+        connection.close()
+
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("GET", route, headers={"Range": "bytes=2-5"})
+        partial = connection.getresponse()
+        partial_body = partial.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert head.status == 200
+    assert head.getheader("Content-Type") == "video/mp4"
+    assert head.getheader("Content-Length") == "10"
+    assert head_body == b""
+    assert partial.status == 206
+    assert partial.getheader("Content-Range") == "bytes 2-5/10"
+    assert partial_body == b"2345"
 
 
 def test_analysis_dag_is_published_once_only_after_explicit_start(

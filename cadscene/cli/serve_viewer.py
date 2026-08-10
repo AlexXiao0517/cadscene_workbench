@@ -283,6 +283,37 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             response = ApiResponse(400, {"error": str(exc)})
         self._project_response(response)
 
+    def _send_project_render_video(self, path: str, *, send_body: bool) -> None:
+        match = re.fullmatch(
+            r"/api/projects/(?P<project>[A-Za-z0-9_.-]+)/clips/"
+            r"(?P<clip>[A-Za-z0-9_.-]+)/renders/"
+            r"(?P<revision>[A-Za-z0-9_.-]+)/video",
+            path,
+        )
+        if match is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "rendered video not found")
+            return
+        api = getattr(self.server, "project_api", None)
+        service = getattr(api, "service", None)
+        if service is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "project API unavailable")
+            return
+        try:
+            video = service.published_render_video_path(
+                match["project"], match["clip"], match["revision"]
+            )
+        except (FileNotFoundError, ValueError):
+            self.send_error(HTTPStatus.NOT_FOUND, "rendered video not found")
+            return
+        stream = self._send_file_head(Path(video))
+        if stream is None:
+            return
+        try:
+            if send_body:
+                self.copyfile(stream, self.wfile)
+        finally:
+            stream.close()
+
     def _send_project_thumbnail(self, path: str) -> None:
         match = re.fullmatch(
             r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<cad>cad)|(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
@@ -751,8 +782,26 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "API not found")
 
+    def do_HEAD(self) -> None:
+        parsed = urlsplit(self.path)
+        if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
+            r"renders/[A-Za-z0-9_.-]+/video",
+            parsed.path,
+        ):
+            self._send_project_render_video(parsed.path, send_body=False)
+            return
+        super().do_HEAD()
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
+            r"renders/[A-Za-z0-9_.-]+/video",
+            parsed.path,
+        ):
+            self._send_project_render_video(parsed.path, send_body=True)
+            return
         if parsed.path.startswith("/api/projects/") and "/thumbnails/" in parsed.path:
             self._send_project_thumbnail(parsed.path)
             return
@@ -843,10 +892,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
-    def send_head(self):
-        path = Path(self.translate_path(self.path))
-        if path.is_dir():
-            path = path / "index.html"
+    def _send_file_head(self, path: Path):
         if not path.exists() or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
@@ -874,6 +920,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.range = None
         return f
+
+    def send_head(self):
+        path = Path(self.translate_path(self.path))
+        if path.is_dir():
+            path = path / "index.html"
+        return self._send_file_head(path)
 
     def copyfile(self, source, outputfile) -> None:
         byte_range = getattr(self, "range", None)

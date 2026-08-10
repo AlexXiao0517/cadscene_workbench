@@ -512,6 +512,15 @@ class ProjectApi:
                         "stage": None if render_job is None else render_job.get("stage"),
                         "progress": _visible_job_progress(render_job),
                         "output_revision": None if render_job is None else render_job.get("output_revision"),
+                        "preview_url": _render_preview_url(
+                            project_id,
+                            clip.clip_id,
+                            render_job,
+                            render.clip_renders,
+                        ),
+                        "preview_is_current": _render_preview_is_current(
+                            clip.clip_id, render_job, render.clip_renders
+                        ),
                     },
                     "capabilities": capability,
                     "workbench": {
@@ -998,6 +1007,63 @@ def _friendly_range(clip: ClipDefinition) -> str:
 def _friendly_duration(clip: ClipDefinition) -> str:
     start, end = _clip_seconds(clip)
     return _clock(end - start)
+
+
+def _render_preview_url(
+    project_id: str,
+    clip_id: str,
+    render_job: Mapping[str, object] | None,
+    render_records: tuple[Mapping[str, object], ...],
+) -> str | None:
+    record = _render_preview_record(clip_id, render_job, render_records)
+    if record is None:
+        return None
+    output_revision = record["output_revision"]
+    return (
+        f"/api/projects/{project_id}/clips/{clip_id}/renders/"
+        f"{output_revision}/video"
+    )
+
+
+def _render_preview_is_current(
+    clip_id: str,
+    render_job: Mapping[str, object] | None,
+    render_records: tuple[Mapping[str, object], ...],
+) -> bool:
+    record = _render_preview_record(clip_id, render_job, render_records)
+    return bool(
+        record is not None
+        and isinstance(render_job, Mapping)
+        and render_job.get("status") == "success"
+        and render_job.get("output_revision") == record.get("output_revision")
+        and record.get("status") == "success"
+    )
+
+
+def _render_preview_record(
+    clip_id: str,
+    render_job: Mapping[str, object] | None,
+    render_records: tuple[Mapping[str, object], ...],
+) -> Mapping[str, object] | None:
+    output_revision = (
+        render_job.get("output_revision")
+        if isinstance(render_job, Mapping)
+        else None
+    )
+    return next(
+        (
+            record
+            for record in reversed(render_records)
+            if record.get("clip_id") == clip_id
+            and (
+                not is_safe_stable_id(output_revision)
+                or record.get("output_revision") == output_revision
+            )
+            and is_safe_stable_id(record.get("output_revision"))
+            and record.get("status") in {"success", "stale_input"}
+        ),
+        None,
+    )
 
 
 def _snapshot_assets(

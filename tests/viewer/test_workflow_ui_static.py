@@ -365,6 +365,24 @@ def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
     assert 'new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"])' in wait
 
 
+def test_project_render_success_keeps_project_status_and_uses_snapshot_preview_url() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+
+    assert 'projectWorkbenchRenderStatus = "success"' in wait
+    assert "render.preview_url" in wait
+    assert "await refreshRenderOutputState()" in wait
+
+    preview_start = script.index("async function refreshRenderOutputState")
+    preview_end = script.index("if (renderPath)", preview_start)
+    preview = script[preview_start:preview_end]
+    assert "/snapshot" in preview
+    assert "clip?.render?.preview_url" in preview
+    assert "activeRenderPath" in script
+
+
 def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None:
     script = _read("workflow.js")
     start = script.index("async function finishQualityStage")

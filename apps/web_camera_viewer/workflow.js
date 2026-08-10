@@ -38,6 +38,7 @@
   let keyframeSaveInFlight = false;
   let renderProgressState = null;
   let projectRenderVisibleProgress = 0;
+  let projectRenderOutputUrl = null;
   let pureRotationCorrections = [];
   let pureRotationTrajectory = null;
   let pureRotationTrajectoryKind = null;
@@ -1874,13 +1875,16 @@
           setProjectRenderVisibleProgress(1, { complete: true });
         }
         projectWorkbenchRenderJobId = null;
-        projectWorkbenchRenderStatus = null;
         runningStage = null;
         if (render.status !== "success") {
+          projectWorkbenchRenderStatus = null;
           throw new Error(projectRenderStatusCopy(render.status, render.stage));
         }
+        projectWorkbenchRenderStatus = "success";
+        projectRenderOutputUrl = render.preview_url || null;
         stateLabel.textContent = "已完成";
-        message.textContent = "片段渲染完成；可返回项目管理继续处理其他片段。";
+        message.textContent = "片段渲染完成；可以预览视频，或返回项目管理继续处理其他片段。";
+        await refreshRenderOutputState();
         return render;
       }
       const fraction = render.progress?.fraction;
@@ -2240,14 +2244,48 @@
   const previewDialog = document.querySelector("#workflowRenderPreviewDialog");
   const previewVideo = document.querySelector("#workflowRenderPreviewVideo");
 
+  function activeRenderPath() {
+    return projectRenderOutputUrl || renderPath;
+  }
+
   async function refreshRenderOutputState() {
-    if (!renderPath) return false;
+    if (projectWorkbenchToken && projectWorkbenchProjectId && projectWorkbenchSession?.clip_id) {
+      const snapshotResponse = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      if (snapshotResponse.ok) {
+        const snapshot = await snapshotResponse.json();
+        const clip = (snapshot.clips || []).find(
+          (item) => item.clip_id === projectWorkbenchSession.clip_id,
+        );
+        if (clip?.render?.preview_url) {
+          projectRenderOutputUrl = clip.render.preview_url;
+          if (clip.render.status === "success") {
+            projectWorkbenchRenderStatus = "success";
+            setProjectRenderVisibleProgress(1, { complete: true });
+            if (selectedWorkflowStage === "render") {
+              stateLabel.textContent = "已完成";
+              message.textContent = "渲染视频已生成，可预览或下载。";
+            }
+          } else if (selectedWorkflowStage === "render") {
+            stateLabel.textContent = projectRenderStatusCopy(
+              clip.render.status,
+              clip.render.stage,
+            );
+            message.textContent = "当前输入已变化；仍可预览或下载上一次已验证的渲染结果。";
+          }
+        }
+      }
+    }
+    const candidate = activeRenderPath();
+    if (!candidate) return false;
     try {
-      const response = await fetch(renderPath, { method: "HEAD", cache: "no-store" });
+      const response = await fetch(candidate, { method: "HEAD", cache: "no-store" });
       const ready = response.ok;
       if (preview) preview.disabled = !ready;
       if (download) {
-        download.href = ready ? renderPath : "#";
+        download.href = ready ? candidate : "#";
         download.toggleAttribute("aria-disabled", !ready);
       }
       return ready;
@@ -2261,7 +2299,9 @@
   if (renderPath) {
     preview?.addEventListener("click", () => {
       if (!previewDialog || !previewVideo) return;
-      previewVideo.src = `${renderPath}${renderPath.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const candidate = activeRenderPath();
+      if (!candidate) return;
+      previewVideo.src = `${candidate}${candidate.includes("?") ? "&" : "?"}t=${Date.now()}`;
       if (typeof previewDialog.showModal === "function") previewDialog.showModal();
       else previewDialog.setAttribute("open", "");
     });

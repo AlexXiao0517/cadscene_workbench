@@ -977,6 +977,47 @@ class ProjectService:
             reasons=reasons,
         )
 
+    def published_render_video_path(
+        self,
+        project_id: str,
+        clip_id: str,
+        output_revision: str,
+    ) -> Path:
+        """Resolve one immutable, service-owned published render video."""
+
+        if not all(
+            is_safe_stable_id(value)
+            for value in (project_id, clip_id, output_revision)
+        ):
+            raise ValueError("invalid published render identity")
+        expected = (
+            self.projects_root
+            / project_id
+            / "render_outputs"
+            / clip_id
+            / output_revision
+            / "rendered.mp4"
+        ).resolve()
+        record = next(
+            (
+                item
+                for item in reversed(
+                    self.repositories.render.load(project_id).clip_renders
+                )
+                if item.get("clip_id") == clip_id
+                and item.get("output_revision") == output_revision
+                and item.get("status") in {"success", "stale_input"}
+            ),
+            None,
+        )
+        outputs = record.get("outputs") if isinstance(record, Mapping) else None
+        raw_video = outputs.get("video") if isinstance(outputs, Mapping) else None
+        if not isinstance(raw_video, str) or Path(raw_video).resolve() != expected:
+            raise FileNotFoundError("published render video is unavailable")
+        if not expected.is_file():
+            raise FileNotFoundError("published render video is unavailable")
+        return expected
+
     def enqueue_render_jobs(
         self,
         project_id: str,

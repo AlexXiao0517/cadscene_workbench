@@ -324,6 +324,73 @@ def _system(tmp_path: Path):
     return service, repositories, queue, render_adapter, trajectories
 
 
+def test_published_render_video_path_resolves_only_the_owned_revision(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _jobs = _system(tmp_path)
+    target = (
+        tmp_path
+        / "projects"
+        / "p1"
+        / "render_outputs"
+        / "ready"
+        / "render-1"
+    )
+    target.mkdir(parents=True)
+    video = target / "rendered.mp4"
+    video.write_bytes(b"rendered")
+    current = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "ready:render-1",
+                    "clip_id": "ready",
+                    "output_revision": "render-1",
+                    "status": "success",
+                    "outputs": {"video": str(video)},
+                },
+            ),
+        ),
+    )
+
+    assert service.published_render_video_path("p1", "ready", "render-1") == video
+    with pytest.raises(FileNotFoundError):
+        service.published_render_video_path("p1", "ready", "render-other")
+
+
+def test_published_render_video_path_keeps_stale_input_revision_previewable(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _jobs = _system(tmp_path)
+    target = tmp_path / "projects" / "p1" / "render_outputs" / "ready" / "render-1"
+    target.mkdir(parents=True)
+    video = target / "rendered.mp4"
+    video.write_bytes(b"rendered")
+    current = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "ready:render-1",
+                    "clip_id": "ready",
+                    "output_revision": "render-1",
+                    "status": "stale_input",
+                    "outputs": {"video": str(video)},
+                },
+            ),
+        ),
+    )
+
+    assert service.published_render_video_path("p1", "ready", "render-1") == video
+
+
 def test_render_preflight_requires_current_trajectory_and_saved_workbench_proof(
     tmp_path: Path,
 ) -> None:
