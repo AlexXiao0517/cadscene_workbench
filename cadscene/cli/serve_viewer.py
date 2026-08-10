@@ -997,6 +997,9 @@ def main(argv: list[str] | None = None) -> int:
         ProjectWorkbenchService,
     )
     from cadscene.projects.workflow_adapters import default_workflow_adapters
+    from cadscene.projects.workbench_render_adapter import (
+        default_workbench_render_adapters,
+    )
 
     projects_root = storage_root / "projects"
     projects_root.mkdir(parents=True, exist_ok=True)
@@ -1028,6 +1031,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         projects_root=projects_root,
         now=lambda: datetime.now(timezone.utc).isoformat(),
+        render_adapters=default_workbench_render_adapters(
+            application_root=root
+        ),
     )
     project_runtime = ProjectRuntime(
         projects_root=projects_root,

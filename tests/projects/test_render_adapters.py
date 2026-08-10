@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 from cadscene.projects.adapters import AdapterProgress, AdapterResult
-from cadscene.projects.media import ProjectMediaSpec
+from cadscene.projects.media import ProjectMediaSpec, probe_media
 from cadscene.projects.render_adapters import (
     RenderAdapterRegistry,
     RenderExecutionPlan,
     RenderInputs,
 )
+from cadscene.projects.workbench_render_adapter import default_workbench_render_adapters
+from cadscene.cli.package_project_render import (
+    _normalization_command,
+    _render_frame_map,
+    main as package_project_render_main,
+)
 from cadscene.video_analysis.pts import DecodedFrameTimestamp
+from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
 
 def _media_spec() -> ProjectMediaSpec:
@@ -232,3 +242,133 @@ def test_execution_plan_requires_structured_adapter_result() -> None:
 
     with pytest.raises(TypeError, match="AdapterResult"):
         plan.validate()
+
+
+@pytest.mark.parametrize(
+    "workflow", ("sfm_only", "srt_sfm_fused", "srt_full_pose", "pure_rotation")
+)
+def test_default_workbench_render_adapters_cover_every_project_workflow(
+    tmp_path: Path, workflow: str,
+) -> None:
+    registry = default_workbench_render_adapters(application_root=tmp_path)
+
+    assert registry.for_workflow(workflow).workflow == workflow
+
+
+def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
+    tmp_path: Path,
+) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "workflow": "pure_rotation",
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 0.06,
+                "origin_xy": [0.0, 0.0],
+            },
+        }
+    )
+    adapter = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("pure_rotation")
+
+    plan = adapter.prepare(inputs)
+    render_command, package_command = plan.commands
+
+    assert "cadscene.cli.render_pure_rotation" in render_command
+    assert str(inputs.workbench_artifact_path) in render_command
+    assert str(inputs.attempt_directory) in render_command
+    assert "cadscene.cli.package_project_render" in package_command
+    assert str(inputs.authoritative_frame_map_path) in package_command
+
+
+def test_render_packaging_preserves_authoritative_source_frame_identity(
+    tmp_path: Path,
+) -> None:
+    frame_map = _render_frame_map(
+        {
+            "source_time_base": {"numerator": 1, "denominator": 1000},
+            "clips": [
+                {
+                    "frames": [
+                        {"ordinal": 7, "pts": 5000},
+                        {"ordinal": 8, "pts": 5040},
+                    ]
+                }
+            ],
+        }
+    )
+    command = _normalization_command(
+        ffmpeg="ffmpeg",
+        source=(tmp_path / "legacy.mp4").resolve(),
+        target=(tmp_path / "rendered.mp4").resolve(),
+        spec=_media_spec(),
+    )
+
+    assert frame_map["frames"] == [
+        {
+            "output_frame_ordinal": 0,
+            "source_decoded_frame_ordinal": 7,
+            "source_pts": 5000,
+        },
+        {
+            "output_frame_ordinal": 1,
+            "source_decoded_frame_ordinal": 8,
+            "source_pts": 5040,
+        },
+    ]
+    assert command[command.index("-fps_mode") + 1] == "passthrough"
+    assert command[command.index("-enc_time_base") + 1] == "1:1000"
+    assert "-r" not in command
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe are required for render packaging",
+)
+def test_render_packaging_cli_emits_validated_frame_count(tmp_path: Path) -> None:
+    try:
+        ffmpeg = str(resolve_ffmpeg_executable())
+    except (FileNotFoundError, RuntimeError):
+        pytest.skip("an H.264-capable FFmpeg is unavailable")
+    source = tmp_path / "legacy.mp4"
+    subprocess.run(
+        (
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=25:duration=0.08",
+            "-frames:v", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(source),
+        ),
+        check=True,
+    )
+    source_map = tmp_path / "source_map.json"
+    source_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 1000},
+                "clips": [
+                    {"frames": [{"ordinal": 7, "pts": 5000}, {"ordinal": 8, "pts": 5040}]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    media_spec = tmp_path / "media_spec.json"
+    media_spec.write_text(json.dumps(_media_spec().to_dict()), encoding="utf-8")
+
+    result = package_project_render_main(
+        [
+            "--input", str(source),
+            "--source-frame-map", str(source_map),
+            "--media-spec", str(media_spec),
+            "--output-dir", str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    assert probe_media(tmp_path / "rendered.mp4").video.frame_count == 2
+    assert len(json.loads((tmp_path / "render_frame_map.json").read_text())["frames"]) == 2

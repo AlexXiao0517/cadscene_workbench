@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 import json
 from pathlib import Path
 import threading
@@ -18,6 +19,7 @@ from cadscene.projects.analysis_worker import (
 )
 from cadscene.projects.executor import LocalJobExecutor
 from cadscene.projects.json_repositories import project_repositories
+from cadscene.projects.media import ProjectMediaSpec
 from cadscene.projects.queue import LocalResourceQueue, QueueJob
 from cadscene.projects.recovery import reconcile_project
 from cadscene.projects.service import ProjectService
@@ -124,6 +126,21 @@ def _service(tmp_path: Path):
         projects_root=projects_root,
         now=lambda: "later",
         identity=iter((f"id-{index}" for index in range(20))).__next__,
+        project_media_spec_probe=lambda _path: ProjectMediaSpec(
+            width=1920,
+            height=1080,
+            display_orientation_baked=True,
+            sample_aspect_ratio=Fraction(1, 1),
+            pixel_format="yuv420p",
+            codec_name="h264",
+            profile="High",
+            time_base=Fraction(1, 1000),
+            color_range="tv",
+            color_space="bt709",
+            color_transfer="bt709",
+            color_primaries="bt709",
+            nominal_frame_rate=Fraction(25, 1),
+        ),
     )
     return service, repositories, queue
 
@@ -1152,6 +1169,9 @@ def test_video_finish_is_only_owner_that_publishes_cad_and_analysis(
     assert finished.publication_operation_id == project.active_analysis_operation_id
     assert finished.submission_operation_id
     assert project.active_analysis_revision == revision
+    assert project.media_spec_revision is not None
+    assert project.media_spec is not None
+    assert project.media_spec["codec_name"] == "h264"
     assert repositories.clips.load("p1").clips[0].clip_id == "clip-0001"
     snapshot = project.source_assets["_analysis"]["input_snapshot"]
     dataset_id = snapshot["cad"]["dataset_id"]

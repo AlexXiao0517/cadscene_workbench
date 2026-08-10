@@ -581,6 +581,17 @@ def test_workbench_light_theme_uses_semantic_component_surfaces() -> None:
     assert "background: var(--input-bg)" in css
 
 
+def test_project_render_runtime_log_drives_the_visible_progress_bar() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+
+    assert 'updateRenderProgressFromLog("render", runtime.lines || [])' in wait
+    assert "function projectRenderPreflightCopy" in script
+    assert 'stateLabel.textContent = "无法开始渲染"' in script
+
+
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:
     html = _read("index.html")
     script = _read("workflow.js")

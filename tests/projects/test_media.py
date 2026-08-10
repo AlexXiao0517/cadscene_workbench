@@ -18,6 +18,7 @@ from cadscene.projects.media import (
     media_compatibility,
     measure_audio_video_duration,
     parse_ffprobe,
+    parse_project_media_spec,
     probe_media,
     validate_audio_video_duration,
     validate_render_frame_map,
@@ -25,6 +26,35 @@ from cadscene.projects.media import (
     validate_video_pts,
 )
 from cadscene.video_analysis.pts import DecodedFrameTimestamp
+
+
+def test_project_media_spec_uses_display_dimensions_and_canonical_h264() -> None:
+    spec = parse_project_media_spec(
+        {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "width": 1080,
+                    "height": 1920,
+                    "sample_aspect_ratio": "1:1",
+                    "time_base": "1/30000",
+                    "avg_frame_rate": "30000/1001",
+                    "color_range": "tv",
+                    "color_space": "bt709",
+                    "color_transfer": "bt709",
+                    "color_primaries": "bt709",
+                    "side_data_list": [{"rotation": 90}],
+                }
+            ]
+        }
+    )
+
+    assert (spec.width, spec.height) == (1920, 1080)
+    assert spec.display_orientation_baked is True
+    assert spec.codec_name == "h264"
+    assert spec.profile == "High"
+    assert spec.pixel_format == "yuv420p"
+    assert spec.time_base == Fraction(1, 30000)
 
 
 @pytest.mark.skipif(

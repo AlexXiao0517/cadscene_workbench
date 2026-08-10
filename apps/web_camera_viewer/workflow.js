@@ -1754,6 +1754,15 @@
     return labels[status] || stage || "等待渲染任务";
   }
 
+  function projectRenderPreflightCopy(reason) {
+    const value = String(reason || "");
+    if (value.includes("media specification")) return "项目视频规格尚未准备完成，请重新分析后再试";
+    if (value.includes("render adapter is unavailable")) return "当前工作流的渲染能力尚不可用";
+    if (value.includes("saved workbench output")) return "请先保存当前工作台调试结果";
+    if (value.includes("trajectory")) return "当前轨迹结果无效或已过期，请重新解算";
+    return value || "当前片段尚不满足渲染条件";
+  }
+
   async function waitForProjectWorkbenchRender(jobId) {
     const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
     while (true) {
@@ -1799,6 +1808,7 @@
           }
           const content = document.querySelector("#workflowLogContent");
           if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
+          updateRenderProgressFromLog("render", runtime.lines || []);
         }
       } catch (error) {
         // 实时日志暂不可用时继续依赖项目 snapshot 跟踪后台任务。
@@ -1842,8 +1852,10 @@
         enqueue: false,
       });
       if (!(preflight.eligible || []).includes(clipId)) {
-        const reason = preflight.reasons?.[clipId] || "当前片段尚不满足渲染条件";
-        throw new Error(reason);
+        runningStage = null;
+        progress.value = 0;
+        stateLabel.textContent = "无法开始渲染";
+        throw new Error(projectRenderPreflightCopy(preflight.reasons?.[clipId]));
       }
       const queued = await projectWorkbenchRequest("/render-jobs", {
         expected_revision: projectWorkbenchSession.jobs_revision,

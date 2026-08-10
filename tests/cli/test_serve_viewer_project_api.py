@@ -62,6 +62,8 @@ def test_serve_viewer_wires_durable_project_runtime_and_real_queue_executor() ->
     assert "AtomicWorkbenchSessionStore(projects_root)" in source
     assert "ProjectWorkbenchService(" in source
     assert "workbench=project_workbench" in source
+    assert "default_workbench_render_adapters(" in source
+    assert "render_adapters=default_workbench_render_adapters" in source
 
 
 def _clip(

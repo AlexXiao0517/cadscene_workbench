@@ -133,6 +133,7 @@ class ProjectRuntime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_worker_error: Exception | None = None
+        self.media_spec_recovery_errors: dict[str, str] = {}
 
     def start(self) -> None:
         if self._thread is not None:
@@ -146,6 +147,13 @@ class ProjectRuntime:
                     process_probe=lambda _pid: None,
                     unverified_process_policy="interrupt",
                 )
+                try:
+                    self.service.ensure_project_media_spec(project_id)
+                    self.media_spec_recovery_errors.pop(project_id, None)
+                except (OSError, TypeError, ValueError) as exc:
+                    # Legacy/incomplete projects remain readable; render preflight
+                    # reports the unavailable media contract explicitly.
+                    self.media_spec_recovery_errors[project_id] = str(exc)
             self._thread = threading.Thread(
                 target=self._run_worker,
                 name="project-job-worker",

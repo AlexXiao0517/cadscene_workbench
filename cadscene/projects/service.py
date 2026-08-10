@@ -40,6 +40,7 @@ from .media import (
     ProjectMediaSpec,
     media_compatibility,
     probe_media,
+    probe_project_media_spec,
     validate_rendered_media,
 )
 from .identifiers import is_safe_stable_id
@@ -168,6 +169,7 @@ class ProjectService:
         render_adapters: RenderAdapterRegistry | None = None,
         source_interval_render_adapter: SourceIntervalRenderAdapter | None = None,
         media_probe: Callable[[Path], ProbedMedia] | None = None,
+        project_media_spec_probe: Callable[[Path], ProjectMediaSpec] | None = None,
     ) -> None:
         self.repositories = repositories
         self.queue = queue
@@ -181,6 +183,9 @@ class ProjectService:
             source_interval_render_adapter or SourceIntervalRenderAdapter()
         )
         self.media_probe = media_probe or probe_media
+        self.project_media_spec_probe = (
+            project_media_spec_probe or probe_project_media_spec
+        )
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
             projects_root=self.projects_root,
@@ -229,6 +234,29 @@ class ProjectService:
                 ),
             )
 
+    def ensure_project_media_spec(self, project_id: str) -> ProjectManifest:
+        """Create a missing project render contract from the immutable source video."""
+
+        with self._state_guard(project_id):
+            current = self.repositories.project.load(project_id)
+            if _project_media_binding(current) is not None:
+                return current
+            source = current.source_assets.get("video")
+            path_value = source.get("path") if isinstance(source, Mapping) else None
+            if not isinstance(path_value, str) or not path_value:
+                raise ValueError("project source video is unavailable")
+            spec = self.project_media_spec_probe(Path(path_value))
+            return self.repositories.project.update(
+                project_id,
+                expected_revision=current.revision,
+                mutate=lambda value: replace(
+                    value,
+                    media_spec_revision=_media_spec_revision(spec),
+                    media_spec=spec.to_dict(),
+                    updated_at=self.now(),
+                ),
+            )
+
     def register_uploaded_asset(
         self,
         project_id: str,
@@ -259,6 +287,7 @@ class ProjectService:
                 "validation": dict(upload.validation),
                 "validation_report": str(upload.validation_report_path),
             }
+            clears_media_spec = upload.asset_type == "video"
             request_key = _analysis_request_key_from_assets(assets)
             try:
                 publication = publish_manifests(
@@ -271,6 +300,14 @@ class ProjectService:
                                 value,
                                 updated_at=self.now(),
                                 source_assets=assets,
+                                media_spec_revision=(
+                                    None
+                                    if clears_media_spec
+                                    else value.media_spec_revision
+                                ),
+                                media_spec=(
+                                    None if clears_media_spec else value.media_spec
+                                ),
                             ),
                         )
                     ]
@@ -2148,6 +2185,14 @@ class ProjectService:
         )
         revision = str(result.output_revision)
         project = self.repositories.project.load(video_job.project_id)
+        video_asset = project.source_assets.get("video")
+        video_path_value = (
+            video_asset.get("path") if isinstance(video_asset, Mapping) else None
+        )
+        if not isinstance(video_path_value, str) or not video_path_value:
+            raise ValueError("project source video is unavailable")
+        media_spec = self.project_media_spec_probe(Path(video_path_value))
+        media_spec_revision = _media_spec_revision(media_spec)
         active_clips = self.repositories.clips.load(video_job.project_id)
         jobs_manifest = self.repositories.jobs.load(video_job.project_id)
         input_snapshot = _analysis_input_snapshot(
@@ -2209,6 +2254,8 @@ class ProjectService:
                 register_analysis_revision(value, revision, operation_id=operation_id),
                 updated_at=self.now(),
                 source_assets=assets,
+                media_spec_revision=media_spec_revision,
+                media_spec=media_spec.to_dict(),
                 project_state=(
                     "ready"
                     if value.active_analysis_revision is None
@@ -2558,6 +2605,9 @@ class ProjectService:
             project_media_spec=media_spec,
             parameters={
                 **dict(clip.manual_definition),
+                **_workbench_render_parameters(
+                    self.storage_root, job.project_id, clip
+                ),
                 "trajectory_path": dependency.published_outputs["trajectory"],
             },
         )
@@ -4127,6 +4177,42 @@ def _project_media_binding(
         return project.media_spec_revision, ProjectMediaSpec.from_dict(project.media_spec)
     except (TypeError, ValueError):
         return None
+
+
+def _media_spec_revision(spec: ProjectMediaSpec) -> str:
+    fingerprint = sha256(
+        json.dumps(
+            spec.to_dict(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"media-spec-{fingerprint[:16]}"
+
+
+def _workbench_render_parameters(
+    storage_root: Path, project_id: str, clip: ClipDefinition
+) -> dict[str, object]:
+    snapshot = clip.analysis.get("input_snapshot")
+    cad = snapshot.get("cad") if isinstance(snapshot, Mapping) else None
+    cad_path = cad.get("dataset_path") if isinstance(cad, Mapping) else None
+    parameters: dict[str, object] = {}
+    if isinstance(cad_path, str) and cad_path:
+        parameters["cad_dataset_path"] = cad_path
+    manifest_path = (
+        Path(storage_root)
+        / "data"
+        / f"{project_id}-{clip.clip_id}"
+        / "dataset_manifest.json"
+    )
+    defaults: Mapping[str, object] = {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if isinstance(payload, Mapping) and isinstance(payload.get("defaults"), Mapping):
+            defaults = payload["defaults"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    parameters["cad_scale"] = defaults.get("cad_scale", 0.06)
+    parameters["origin_xy"] = defaults.get("origin_xy", [0.0, 0.0])
+    return parameters
 
 
 def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:

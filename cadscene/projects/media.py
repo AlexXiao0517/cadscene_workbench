@@ -260,6 +260,99 @@ def probe_media(
     return parse_ffprobe(completed.stdout)
 
 
+def probe_project_media_spec(
+    path: Path, *, ffprobe_executable: str = "ffprobe"
+) -> ProjectMediaSpec:
+    """Read the lightweight stream contract used by all project renders."""
+
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise InvalidMediaContract("source video is not a regular file")
+    try:
+        completed = subprocess.run(
+            (
+                ffprobe_executable,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_streams",
+                "-print_format",
+                "json",
+                str(source),
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise InvalidMediaContract(f"ffprobe execution failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown ffprobe error"
+        raise InvalidMediaContract(f"ffprobe rejected source video: {detail}")
+    return parse_project_media_spec(completed.stdout)
+
+
+def parse_project_media_spec(
+    payload: str | Mapping[str, Any],
+) -> ProjectMediaSpec:
+    """Build the canonical H.264 project output spec from source stream metadata."""
+
+    try:
+        document = json.loads(payload) if isinstance(payload, str) else payload
+    except json.JSONDecodeError as exc:
+        raise InvalidMediaContract(f"invalid ffprobe JSON: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise InvalidMediaContract("ffprobe payload must be an object")
+    streams = document.get("streams")
+    if not isinstance(streams, list):
+        raise InvalidMediaContract("ffprobe payload requires streams")
+    stream = next(
+        (
+            item
+            for item in streams
+            if isinstance(item, Mapping)
+            and item.get("codec_type", "video") == "video"
+        ),
+        None,
+    )
+    if stream is None:
+        raise InvalidMediaContract("ffprobe payload has no video stream")
+    width = _integer(stream.get("width"), "video.width", minimum=1)
+    height = _integer(stream.get("height"), "video.height", minimum=1)
+    sar = _fraction_value(
+        stream.get("sample_aspect_ratio", "1:1"),
+        "video.sample_aspect_ratio",
+        separator=":",
+    )
+    rotation = _display_rotation(stream)
+    if rotation in {90, 270}:
+        width, height = height, width
+        sar = 1 / sar
+    return ProjectMediaSpec(
+        width=width,
+        height=height,
+        display_orientation_baked=True,
+        sample_aspect_ratio=sar,
+        pixel_format="yuv420p",
+        codec_name="h264",
+        profile="High",
+        time_base=_fraction_value(stream.get("time_base"), "video.time_base"),
+        color_range=_text(stream.get("color_range", "tv"), "video.color_range"),
+        color_space=_text(stream.get("color_space", "bt709"), "video.color_space"),
+        color_transfer=_text(
+            stream.get("color_transfer", "bt709"), "video.color_transfer"
+        ),
+        color_primaries=_text(
+            stream.get("color_primaries", "bt709"), "video.color_primaries"
+        ),
+        nominal_frame_rate=_optional_fraction(
+            stream.get("avg_frame_rate"), "video.avg_frame_rate"
+        ),
+    )
+
+
 def parse_ffprobe(payload: str | Mapping[str, Any]) -> ProbedMedia:
     try:
         document = json.loads(payload) if isinstance(payload, str) else payload
