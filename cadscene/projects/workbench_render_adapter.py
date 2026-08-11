@@ -48,6 +48,7 @@ class ExistingWorkbenchRenderAdapter:
             / "08_render"
             / "sfm_align_overlay.mp4"
         )
+        progress_path = inputs.attempt_directory / "adapter_progress.json"
         if self.workflow == "pure_rotation":
             render_command = (
                 sys.executable,
@@ -71,6 +72,8 @@ class ExistingWorkbenchRenderAdapter:
                 "--track",
                 str(inputs.workbench_artifact_path),
                 "--no-distance-limit",
+                "--progress-file",
+                str(progress_path),
             )
         else:
             trajectory = _required_path(inputs.parameters, "trajectory_path")
@@ -112,6 +115,8 @@ class ExistingWorkbenchRenderAdapter:
                 "--origin-xy",
                 str(origin_xy[0]),
                 str(origin_xy[1]),
+                "--progress-file",
+                str(progress_path),
             )
         package_command = (
             sys.executable,
@@ -141,7 +146,7 @@ def default_workbench_render_adapters(
             ExistingWorkbenchRenderAdapter(
                 workflow=workflow,
                 application_root=root,
-                version="2" if workflow == "pure_rotation" else "1",
+                version="3" if workflow == "pure_rotation" else "2",
             )
             for workflow in (
                 "sfm_only",

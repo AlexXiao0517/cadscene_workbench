@@ -274,6 +274,53 @@ def test_render_overlay_video_prints_frame_progress(tmp_path: Path, capsys) -> N
     assert "[render] frame 2/2" in captured
 
 
+def test_render_overlay_video_reports_measured_frame_progress(tmp_path: Path) -> None:
+    import cv2
+
+    video = tmp_path / "in.mp4"
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 5.0, (64, 48))
+    for _ in range(2):
+        writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+    writer.release()
+    cad_dir = tmp_path / "cad"
+    cad_dir.mkdir()
+    (cad_dir / "road_center.json").write_text(
+        '[{"points": [[0, 4], [1, 4]]}]', encoding="utf-8"
+    )
+    camera_path = tmp_path / "camera.csv"
+    write_csv_utf8_sig(
+        camera_path,
+        [
+            {
+                "frame_index": 0,
+                "camera_x": 0,
+                "camera_y": 0,
+                "camera_z": 1,
+                "yaw": 0,
+                "pitch": 0,
+                "roll": 0,
+                "fov": 70,
+            }
+        ],
+    )
+    progress: list[tuple[str, str, float]] = []
+
+    render_overlay_video(
+        RenderOverlayConfig(
+            video_path=video,
+            cad_dir=cad_dir,
+            sfm_camera_path=camera_path,
+            output_video=tmp_path / "out.mp4",
+        ),
+        progress_callback=lambda stage, message, fraction: progress.append(
+            (stage, message, fraction)
+        ),
+    )
+
+    assert [item[2] for item in progress] == [0.5, 1.0]
+    assert progress[-1][:2] == ("rendering_frames", "rendered frame 2/2")
+
+
 def test_legacy_max_distance_and_fade_use_scaled_forward_depth() -> None:
     image = np.zeros((180, 320, 3), dtype=np.uint8)
     near_line = _bundle([RoadLine(points=np.asarray([[-2.0, 10.0], [2.0, 10.0]]), kind="center")])

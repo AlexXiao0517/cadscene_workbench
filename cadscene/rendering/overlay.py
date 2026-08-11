@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -194,7 +194,11 @@ def _scale_frame(frame: np.ndarray, debug_scale: float) -> np.ndarray:
     return cv2.resize(frame, (max(1, int(round(frame.shape[1] * scale))), max(1, int(round(frame.shape[0] * scale)))))
 
 
-def render_overlay_video(config: RenderOverlayConfig) -> RenderOverlayResult:
+def render_overlay_video(
+    config: RenderOverlayConfig,
+    *,
+    progress_callback: Callable[[str, str, float], None] | None = None,
+) -> RenderOverlayResult:
     video_path = Path(config.video_path)
     if not video_path.exists():
         raise FileNotFoundError(f"video not found: {video_path}")
@@ -263,6 +267,12 @@ def render_overlay_video(config: RenderOverlayConfig) -> RenderOverlayResult:
             planned = max(1, ((end - start) // max(1, int(config.sample_every))) + 1)
             if rendered == 1 or rendered % 25 == 0 or current >= end:
                 print(f"[render] frame {rendered}/{planned} source_frame={current}", flush=True)
+                if progress_callback is not None:
+                    progress_callback(
+                        "rendering_frames",
+                        f"rendered frame {rendered}/{planned}",
+                        min(1.0, rendered / planned),
+                    )
         current += 1
 
     cap.release()

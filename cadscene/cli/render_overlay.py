@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from cadscene.cli._progress import write_progress_sidecar
 from cadscene.core.artifacts import ArtifactManager
 from cadscene.rendering.overlay import RenderOverlayConfig, render_overlay_video, write_render_outputs
 
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-frame", type=int)
     parser.add_argument("--sample-every", type=int, default=1)
     parser.add_argument("--write-sample-frames", action="store_true")
+    parser.add_argument("--progress-file", type=Path)
     return parser
 
 
@@ -70,7 +72,17 @@ def main(argv: list[str] | None = None) -> int:
             write_sample_frames=args.write_sample_frames,
             sample_frames_dir=stage_dir / "sample_frames",
         )
-        result = render_overlay_video(config)
+        progress_callback = None
+        if args.progress_file is not None:
+            write_progress_sidecar(
+                args.progress_file, "preparing_render", "preparing render", 0.0
+            )
+            progress_callback = lambda stage, message, fraction: (
+                write_progress_sidecar(
+                    args.progress_file, stage, message, float(fraction) * 0.95
+                )
+            )
+        result = render_overlay_video(config, progress_callback=progress_callback)
         inputs = {
             "config": args.config,
             "video": args.video,

@@ -485,6 +485,8 @@ class ProjectApi:
             )
             if (
                 display_job is job
+                and job is not None
+                and job.get("job_type") != "clip_render"
                 and completed_dependencies
                 and job.get("status")
                 in {"queued", "preparing", "running", "validating"}
@@ -1002,8 +1004,20 @@ def _visible_job_progress(
         return None
     progress = dict(job["progress"])
     fraction = progress.get("fraction")
+    status = str(job.get("status"))
+    if job.get("job_type") == "clip_render" and status in {
+        "queued",
+        "preparing",
+        "running",
+        "validating",
+    }:
+        if not isinstance(fraction, (int, float)) or isinstance(fraction, bool):
+            progress["fraction"] = 0.99 if status == "validating" else 0.0
+        else:
+            progress["fraction"] = min(float(fraction), 0.99)
+        return progress
     if (
-        str(job.get("status")) in {"queued", "preparing", "running", "validating"}
+        status in {"queued", "preparing", "running", "validating"}
         and isinstance(fraction, (int, float))
         and not isinstance(fraction, bool)
     ):

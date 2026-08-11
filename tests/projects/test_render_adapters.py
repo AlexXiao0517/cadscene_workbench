@@ -254,7 +254,7 @@ def test_default_workbench_render_adapters_cover_every_project_workflow(
 
     adapter = registry.for_workflow(workflow)
     assert adapter.workflow == workflow
-    assert adapter.version == ("2" if workflow == "pure_rotation" else "1")
+    assert adapter.version == ("3" if workflow == "pure_rotation" else "2")
 
 
 def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
@@ -278,7 +278,7 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
         application_root=tmp_path
     ).for_workflow("pure_rotation")
 
-    assert adapter.version == "2"
+    assert adapter.version == "3"
     plan = adapter.prepare(inputs)
     render_command, package_command = plan.commands
 
@@ -289,8 +289,43 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
     assert "--fade-start-m" not in render_command
     assert "--no-distance-limit" in render_command
     assert "--max-distance-m" not in render_command
+    assert "--progress-file" in render_command
+    assert str(inputs.attempt_directory / "adapter_progress.json") in render_command
     assert "cadscene.cli.package_project_render" in package_command
     assert str(inputs.authoritative_frame_map_path) in package_command
+
+
+def test_sfm_render_forwards_structured_progress_sidecar(tmp_path: Path) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    run_root = (tmp_path / "run").resolve()
+    trajectory = run_root / "03_alignment" / "trajectory.json"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text("{}", encoding="utf-8")
+    sparse = run_root / "02_sfm" / "sparse_points.ply"
+    sparse.parent.mkdir(parents=True)
+    sparse.write_text("ply\n", encoding="utf-8")
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 0.06,
+                "origin_xy": [0.0, 0.0],
+                "trajectory_path": str(trajectory),
+            },
+        }
+    )
+
+    plan = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("sfm_only").prepare(inputs)
+    render_command = plan.commands[0]
+
+    assert "cadscene.cli.run_pipeline" in render_command
+    assert "--progress-file" in render_command
+    assert str(inputs.attempt_directory / "adapter_progress.json") in render_command
 
 
 def test_render_packaging_preserves_authoritative_source_frame_identity(
