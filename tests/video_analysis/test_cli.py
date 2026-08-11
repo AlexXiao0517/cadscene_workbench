@@ -253,6 +253,30 @@ def test_export_video_clips_cli_publishes_structured_progress_sidecar(
     }
 
 
+def test_export_progress_retries_transient_windows_replace_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    progress_path = tmp_path / "adapter_progress.json"
+    real_replace = export_video_clips_cli.os.replace
+    calls = 0
+
+    def transient_replace(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError(5, "progress reader temporarily holds the file")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(export_video_clips_cli.os, "replace", transient_replace)
+
+    export_video_clips_cli._write_progress(
+        progress_path, "encoding_clip", "正在导出", 0.5
+    )
+
+    assert calls == 3
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["fraction"] == 0.5
+
+
 def test_video_analysis_extra_declares_pts_and_visual_runtime_dependencies() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 

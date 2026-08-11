@@ -1035,6 +1035,68 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     ).read_bytes() == b"exported-58-second-clip"
 
 
+def test_open_workbench_retries_failed_on_demand_clip_export(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    clips = repositories.clips.load("project-1")
+    clip = clips.clips[0]
+    analysis = dict(clip.analysis)
+    analysis.pop("physical_mp4_path")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(value, clips=(replace(clip, analysis=analysis),)),
+    )
+    endpoint = "/api/projects/project-1/clips/clip-1/workbench-sessions"
+    first = api.handle(
+        "POST",
+        endpoint,
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == first.body["job_id"]
+    lease = running.attempts[-1]
+    api.service.fail_job(
+        "project-1",
+        running.job_id,
+        "simulated Windows progress sidecar sharing conflict",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    api.service.queue.release_execution_claim(
+        running.job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    retried = api.handle(
+        "POST",
+        endpoint,
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert retried.status == 202
+    assert retried.body["job_id"] == first.body["job_id"]
+    retry_job = api.service.queue.get(first.body["job_id"])
+    assert retry_job.status in {"queued", "preparing", "running"}
+    assert [attempt.number for attempt in retry_job.attempts] == [1, 2]
+
+
 def test_user_started_trajectory_is_attached_to_open_workbench_session(
     tmp_path: Path,
 ) -> None:

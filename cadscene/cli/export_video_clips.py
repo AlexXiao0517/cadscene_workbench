@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 from uuid import uuid4
 
 from cadscene.video_analysis.clip_export import X264_PRESETS, export_video_clips
@@ -68,7 +69,14 @@ def _write_progress(
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(0.005 * (2**attempt), 0.05))
     finally:
         temporary.unlink(missing_ok=True)
 

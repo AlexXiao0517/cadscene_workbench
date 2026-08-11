@@ -189,13 +189,13 @@ def export_video_clips(
                 if item["clip_id"] == clip.clip_id
             )
             command = _build_ffmpeg_clip_command(
-                    ffmpeg=ffmpeg,
-                    source=source,
-                    clip=clip,
-                    clip_path=clip_path,
-                    preset=preset,
-                    crf=crf,
-                )
+                ffmpeg=ffmpeg,
+                source=source,
+                clip=clip,
+                clip_path=clip_path,
+                preset=preset,
+                crf=crf,
+            )
             if progress_callback is None:
                 process = subprocess.run(
                     command,
@@ -290,11 +290,20 @@ def _run_ffmpeg_with_progress(
                 continue
             last_frame = frame
             processed = completed_frames + frame
-            callback(
-                "encoding_clip",
-                f"正在导出片段帧 {processed}/{total_frames}",
-                0.1 + 0.8 * processed / total_frames,
-            )
+            try:
+                callback(
+                    "encoding_clip",
+                    f"正在导出片段帧 {processed}/{total_frames}",
+                    0.1 + 0.8 * processed / total_frames,
+                )
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
         returncode = process.wait()
         stderr_file.seek(0)
         stderr = stderr_file.read()

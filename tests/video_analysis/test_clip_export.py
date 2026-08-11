@@ -184,6 +184,41 @@ def test_export_video_clips_reports_monotonic_real_frame_progress(
     assert any(stage == "encoding_clip" for stage, _message, _fraction in updates)
 
 
+def test_ffmpeg_progress_callback_failure_terminates_and_waits_for_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = iter(["frame=1\n"])
+            self.terminated = False
+            self.waited = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout=None) -> int:
+            self.waited = True
+            return 1
+
+    process = FakeProcess()
+    monkeypatch.setattr(clip_export.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(RuntimeError, match="progress publication failed"):
+        clip_export._run_ffmpeg_with_progress(
+            ["ffmpeg", "input.mp4", "output.mp4"],
+            clip_id="clip-0001",
+            expected_frames=1,
+            completed_frames=0,
+            total_frames=1,
+            callback=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("progress publication failed")
+            ),
+        )
+
+    assert process.terminated is True
+    assert process.waited is True
+
+
 def test_export_video_clips_can_publish_one_requested_subinterval(
     tmp_path: Path,
 ) -> None:

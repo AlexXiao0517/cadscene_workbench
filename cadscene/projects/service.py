@@ -1169,12 +1169,29 @@ class ProjectService:
                     existing.project_id == project_id
                     and existing.clip_id == clip_id
                     and existing.job_type == "clip_export"
-                    and existing.status
-                    in {"queued", "preparing", "running", "validating", "success"}
                     and self._current_input_fingerprint(existing)
                     == existing.input_fingerprint
                 ):
-                    return existing
+                    if existing.status in {
+                        "queued",
+                        "preparing",
+                        "running",
+                        "validating",
+                        "success",
+                    }:
+                        return existing
+                    if existing.status in {
+                        "failed",
+                        "interrupted",
+                        "cancelled",
+                        "stale_input",
+                        "superseded",
+                    }:
+                        return self.retry_job(
+                            project_id,
+                            existing.job_id,
+                            expected_jobs_revision=expected_jobs_revision,
+                        )
             export = self._new_export_job(
                 project_id,
                 clip,
