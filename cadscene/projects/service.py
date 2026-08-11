@@ -4386,7 +4386,9 @@ def _validate_workbench_immutable_output(
             "workflow": clip.resolved_workflow,
             "workbench_output_revision": revision,
             "workbench_output_fingerprint": expected_fingerprint,
-            "operation_id": workbench.operation_id,
+            "operation_id": workbench.value.get(
+                "workbench_output_operation_id", workbench.operation_id
+            ),
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             return False
@@ -4447,8 +4449,6 @@ def _render_identity_payload(
     return {
         "job_type": "clip_render",
         "clip_id": clip.clip_id,
-        "project_manifest_revision": project_revision,
-        "clips_manifest_revision": clips_revision,
         "clip_interval": _authoritative_interval(clip),
         "analysis_revision": clip.analysis_revision,
         "resolved_workflow": clip.resolved_workflow,
@@ -4467,7 +4467,9 @@ def _render_identity_payload(
             "validated_input_fingerprint": trajectory.validated_input_fingerprint,
         },
         "workbench": {
-            "operation_id": workbench.operation_id,
+            "output_operation_id": workbench.value.get(
+                "workbench_output_operation_id", workbench.operation_id
+            ),
             "output_revision": workbench.value.get("workbench_output_revision"),
             "output_fingerprint": workbench.value.get(
                 "workbench_output_fingerprint"

@@ -95,6 +95,7 @@ class WorkbenchSession:
     state: str
     workbench_output_revision: str | None = None
     workbench_output_fingerprint: str | None = None
+    workbench_output_operation_id: str | None = None
     pending_output_revision: str | None = None
     pending_source_output_revision: str | None = None
     pending_source_output_fingerprint: str | None = None
@@ -125,6 +126,7 @@ class WorkbenchSession:
             "state": self.state,
             "workbench_output_revision": self.workbench_output_revision,
             "workbench_output_fingerprint": self.workbench_output_fingerprint,
+            "workbench_output_operation_id": self.workbench_output_operation_id,
             "pending_output_revision": self.pending_output_revision,
             "pending_source_output_revision": self.pending_source_output_revision,
             "pending_source_output_fingerprint": self.pending_source_output_fingerprint,
@@ -169,6 +171,15 @@ class WorkbenchSession:
             ),
             workbench_output_fingerprint=_optional_string(
                 value.get("workbench_output_fingerprint")
+            ),
+            workbench_output_operation_id=_optional_string(
+                value.get("workbench_output_operation_id")
+                or (
+                    value.get("operation_id")
+                    if value.get("workbench_output_revision")
+                    and value.get("workbench_output_fingerprint")
+                    else None
+                )
             ),
             pending_output_revision=_optional_string(
                 value.get("pending_output_revision")
@@ -571,6 +582,7 @@ class WorkbenchSessionCoordinator:
                 operation_id=operation_id,
                 workbench_output_revision=revision,
                 workbench_output_fingerprint=fingerprint,
+                workbench_output_operation_id=operation_id,
                 pending_output_revision=None,
                 pending_source_output_revision=None,
                 pending_source_output_fingerprint=None,
@@ -1005,6 +1017,9 @@ class ProjectWorkbenchService:
                         ),
                         workbench_output_fingerprint=(
                             resume_baseline.workbench_output_fingerprint
+                        ),
+                        workbench_output_operation_id=(
+                            resume_baseline.workbench_output_operation_id
                         ),
                     ),
                 )
@@ -1681,7 +1696,9 @@ class ProjectWorkbenchService:
             target,
             session=session,
             revision=revision,
-            operation_id=session.operation_id,
+            operation_id=(
+                session.workbench_output_operation_id or session.operation_id
+            ),
             source_revision=payload.get("source_output_revision"),
             source_fingerprint=payload.get("source_output_fingerprint"),
             source_artifact_name=payload.get("source_artifact_name"),
@@ -1821,6 +1838,9 @@ class ProjectWorkbenchService:
                         "expires_at": session.expires_at,
                         "workbench_output_revision": session.workbench_output_revision,
                         "workbench_output_fingerprint": session.workbench_output_fingerprint,
+                        "workbench_output_operation_id": (
+                            session.workbench_output_operation_id
+                        ),
                     },
                 )
                 clips.append(

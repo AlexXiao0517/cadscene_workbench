@@ -682,7 +682,7 @@ def test_render_identity_includes_saved_workbench_operation_id(tmp_path: Path) -
         adapter_version=adapter.version,
     )
 
-    assert payload["workbench"]["operation_id"] == "save-ready"
+    assert payload["workbench"]["output_operation_id"] == "save-ready"
 
 
 def test_project_media_specs_survive_service_rebuild_and_remain_project_scoped(
@@ -1527,6 +1527,71 @@ def test_published_render_is_idempotent_and_restores_only_with_exact_proof(
     restored = rebuilt.restore_jobs("p1")
     assert restored.get(render_id).status == "success"
     assert restored.get(render_id).validation_proof == result.validation_proof
+
+
+def test_restore_keeps_render_current_after_only_workbench_session_state_changes(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    lease = claimed.attempts[-1]
+    result = _validated_render_result(service, claimed)
+    service.finish_job(
+        "p1",
+        render_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    current = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            operation_id="session-close",
+            clips=tuple(
+                replace(
+                    clip,
+                    operation_id="session-close",
+                    references=tuple(
+                        replace(
+                            reference,
+                            operation_id="session-close",
+                            value={
+                                **reference.value,
+                                "status": "saved",
+                                "workbench_output_operation_id": "save-ready",
+                            },
+                        )
+                        if reference.key == "workbench:ready"
+                        else reference
+                        for reference in clip.references
+                    ),
+                )
+                if clip.clip_id == "ready"
+                else clip
+                for clip in value.clips
+            ),
+        ),
+    )
+    rebuilt = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-04T00:00:05Z",
+        render_adapters=RenderAdapterRegistry((FakeRenderAdapter(),)),
+        media_probe=_probe_rendered_video,
+    )
+
+    restored = rebuilt.restore_jobs("p1")
+
+    assert restored.get(render_id).status == "success"
+    assert repositories.render.load("p1").clip_renders[-1]["status"] == "success"
 
 
 def test_restore_does_not_trust_tampered_successful_render_publication(
