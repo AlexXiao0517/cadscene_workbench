@@ -1176,7 +1176,7 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["stage"] == "running"
 
 
-def test_snapshot_never_reports_one_hundred_percent_for_active_dependency(
+def test_snapshot_does_not_project_dependency_percentage_as_overall_progress(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(
@@ -1241,7 +1241,8 @@ def test_snapshot_never_reports_one_hundred_percent_for_active_dependency(
     payload = snapshot.body["clips"][0]
 
     assert payload["status"] == "validating"
-    assert payload["progress"]["fraction"] == 0.99
+    assert payload["progress"]["stage"] == "validating"
+    assert "fraction" not in payload["progress"]
 
 
 def test_workbench_heartbeat_extends_editing_session_lease(

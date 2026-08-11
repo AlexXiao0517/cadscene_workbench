@@ -282,6 +282,8 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
     assert "cadscene.cli.render_pure_rotation" in render_command
     assert str(inputs.workbench_artifact_path) in render_command
     assert str(inputs.attempt_directory) in render_command
+    assert "--faded-overlay" not in render_command
+    assert "--fade-start-m" not in render_command
     assert "cadscene.cli.package_project_render" in package_command
     assert str(inputs.authoritative_frame_map_path) in package_command
 

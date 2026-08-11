@@ -468,6 +468,13 @@ class ProjectApi:
                     ),
                     job,
                 )
+            display_progress = _visible_job_progress(display_job)
+            if display_job is not job and display_progress is not None:
+                # A dependency percentage describes only that prerequisite, not
+                # the end-to-end trajectory/render operation shown by the row.
+                # Keep its structured stage copy, but do not let a completed
+                # export look like overall completion before its parent starts.
+                display_progress.pop("fraction", None)
             capability = self._clip_capability(
                 project_id, clip, preflight, render_preflight, job,
                 analysis_busy=analysis_busy,
@@ -503,9 +510,7 @@ class ProjectApi:
                     "stage": (
                         None if display_job is None else display_job.get("stage")
                     ),
-                    "progress": (
-                        _visible_job_progress(display_job)
-                    ),
+                    "progress": display_progress,
                     "render": {
                         "job_id": None if render_job is None else render_job.get("job_id"),
                         "status": "not_started" if render_job is None else render_job.get("status"),

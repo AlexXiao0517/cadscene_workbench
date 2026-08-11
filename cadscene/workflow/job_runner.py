@@ -476,9 +476,6 @@ def build_stage_command(
             str(resolved["origin_xy"][1]),
             "--track",
             str(track),
-            "--faded-overlay",
-            "--fade-start-m",
-            "250",
             "--max-distance-m",
             "900",
         ]

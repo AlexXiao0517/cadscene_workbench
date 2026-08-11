@@ -70,9 +70,6 @@ class ExistingWorkbenchRenderAdapter:
                 str(origin_xy[1]),
                 "--track",
                 str(inputs.workbench_artifact_path),
-                "--faded-overlay",
-                "--fade-start-m",
-                "250",
                 "--max-distance-m",
                 "900",
             )
