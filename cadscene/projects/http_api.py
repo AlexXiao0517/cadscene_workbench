@@ -469,12 +469,37 @@ class ProjectApi:
                     job,
                 )
             display_progress = _visible_job_progress(display_job)
-            if display_job is not job and display_progress is not None:
-                # A dependency percentage describes only that prerequisite, not
-                # the end-to-end trajectory/render operation shown by the row.
-                # Keep its structured stage copy, but do not let a completed
-                # export look like overall completion before its parent starts.
-                display_progress.pop("fraction", None)
+            completed_dependencies = (
+                job is not None
+                and bool(job.get("depends_on_job_ids"))
+                and all(
+                    (
+                        dependency := analysis_jobs_by_id.get(
+                            str(dependency_id)
+                        )
+                    )
+                    is not None
+                    and dependency.get("status") == "success"
+                    for dependency_id in job.get("depends_on_job_ids", ())
+                )
+            )
+            if (
+                display_job is job
+                and completed_dependencies
+                and job.get("status")
+                in {"queued", "preparing", "running", "validating"}
+            ):
+                display_progress = dict(
+                    display_progress
+                    or {
+                        "stage": job.get("stage") or job.get("status"),
+                        "message": "final adapter stage is running",
+                    }
+                )
+                # The prerequisite already supplied the visible 0..99% ramp.
+                # Hold that value through an unquantified final adapter stage;
+                # terminal success remains the sole source of 100%.
+                display_progress["fraction"] = 0.99
             capability = self._clip_capability(
                 project_id, clip, preflight, render_preflight, job,
                 analysis_busy=analysis_busy,

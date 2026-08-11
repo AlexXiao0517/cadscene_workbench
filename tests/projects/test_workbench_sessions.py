@@ -1176,7 +1176,7 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["stage"] == "running"
 
 
-def test_snapshot_does_not_project_dependency_percentage_as_overall_progress(
+def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(
@@ -1242,7 +1242,51 @@ def test_snapshot_does_not_project_dependency_percentage_as_overall_progress(
 
     assert payload["status"] == "validating"
     assert payload["progress"]["stage"] == "validating"
-    assert "fraction" not in payload["progress"]
+    assert payload["progress"]["fraction"] == 0.99
+
+    manifest = repositories.jobs.load("project-1")
+    trajectory = next(
+        item for item in manifest.jobs if item["job_type"] == "trajectory"
+    )
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "status": "success",
+                    "stage": "success",
+                    "progress": {
+                        "stage": "complete",
+                        "message": "clip export completed",
+                        "fraction": 1.0,
+                    },
+                }
+                if item["job_id"] == active_export["job_id"]
+                else {
+                    **item,
+                    "status": "running",
+                    "stage": "running",
+                    "progress": {
+                        "stage": "running",
+                        "message": "trajectory adapter is running",
+                    },
+                }
+                if item["job_id"] == trajectory["job_id"]
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    payload = snapshot.body["clips"][0]
+
+    assert payload["status"] == "running"
+    assert payload["progress"]["stage"] == "running"
+    assert payload["progress"]["fraction"] == 0.99
 
 
 def test_workbench_heartbeat_extends_editing_session_lease(
