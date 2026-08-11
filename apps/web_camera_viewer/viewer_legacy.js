@@ -1588,7 +1588,8 @@
     }
 
     if (Math.abs(actualFrame - targetFrame) <= 2) {
-      manualFrameOverride = null;
+      // Preserve the requested source-frame index for keyframe saving. Near the
+      // end of a video, browser decoding may display an adjacent frame.
       syncControls();
       setStatus(`已跳转到帧 ${targetFrame}`);
     } else if (videoRangeSupported === false) {
@@ -2612,9 +2613,6 @@
       }
       const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       const targetFrame = manualFrameOverride ?? actualFrame;
-      if (manualFrameOverride !== null && Math.abs(actualFrame - manualFrameOverride) <= 1) {
-        manualFrameOverride = null;
-      }
       if (sfmFollowMode || cameraTrack.keyframes.length > 0) {
         camera = poseForFrame(targetFrame);
         syncControls();

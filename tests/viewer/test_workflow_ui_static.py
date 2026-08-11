@@ -182,8 +182,39 @@ def test_sfm_fov_is_applied_after_the_legacy_viewer_has_loaded_the_saved_track()
 
     assert "cadsceneViewerReady" in workflow
     assert "cadsceneViewerReady" in viewer
-    assert "cadsceneSfmCameraInit:v2" in workflow
+    assert "cadsceneSfmCameraInit:v4" in workflow
     assert "Array.isArray(appliedFields)" in workflow
+
+
+def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
+    workflow = _read("workflow.js")
+
+    assert "let viewerReadyForSfmCameraInit = false;" in workflow
+    auto_apply = workflow[workflow.index("function maybeAutoApplySfmCameraInit") : workflow.index("async function applySfmCameraInitializationOnce")]
+    assert "if (!viewerReadyForSfmCameraInit || isPureRotationWorkflow()) return;" in auto_apply
+    assert "viewerReadyForSfmCameraInit = true;" in workflow
+    assert "window.addEventListener(\"cadsceneViewerReady\", () => {" in workflow
+    assert "cadsceneSfmCameraInit:v4" in workflow
+
+
+def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
+    index = _read("index.html")
+
+    assert 'workflow.js?v=20260805-sfm-fov-init-v1' in index
+
+
+def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
+    workflow = _read("workflow.js")
+
+    assert "cadsceneSfmCameraInit:v4" in workflow
+
+
+def test_viewer_keeps_requested_frame_for_keyframe_save_when_video_seeks_nearby() -> None:
+    viewer = _read("viewer_legacy.js")
+    seek = viewer[viewer.index("async function seekVideoToFrame") : viewer.index("function goToFrame", viewer.index("async function seekVideoToFrame"))]
+
+    assert "manualFrameOverride = null;" not in seek
+    assert "已跳转到帧 ${targetFrame}" in seek
 
 
 def test_workflow_prefers_sfm_artifacts_over_stale_failed_job_stage_and_restores_manual_track() -> None:

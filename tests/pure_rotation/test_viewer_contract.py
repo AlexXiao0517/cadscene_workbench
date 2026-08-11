@@ -171,7 +171,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     assert "style.css?v=20260729-local-camera-v8" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
     assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260730-pure-status-copy" in html
+    assert "workflow.js?v=20260805-sfm-fov-init-v1" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -487,7 +487,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260730-pure-status-copy" in html
+    assert "workflow.js?v=20260805-sfm-fov-init-v1" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1

@@ -23,6 +23,7 @@
   const trajectoryModeLabel = document.querySelector("#workflowTrajectoryMode");
   let trajectoryWorkflow = null;
   let trajectoryWorkflowLoaded = !dataset;
+  let viewerReadyForSfmCameraInit = false;
   let selectedWorkflowStage = null;
   let latestJobStatus = null;
   let workflowSuggestions = [];
@@ -903,7 +904,8 @@
   }
 
   function maybeAutoApplySfmCameraInit() {
-    if (!trajectoryWorkflowLoaded || isPureRotationWorkflow()) return;
+    if (!trajectoryWorkflowLoaded) return;
+    if (!viewerReadyForSfmCameraInit || isPureRotationWorkflow()) return;
     if (typeof window.cadsceneApplyCameraParameters !== "function") return;
     applySfmCameraInitializationOnce().catch((error) => {
       message.textContent = `SfM 相机参数初值不可用：${error.message}`;
@@ -1375,7 +1377,7 @@
   }
 
   async function applySfmCameraInitializationOnce() {
-    const key = `cadsceneSfmCameraInit:v2:${dataset}:${runId}`;
+    const key = `cadsceneSfmCameraInit:v4:${dataset}:${runId}`;
     if (sessionStorage.getItem(key) === "1") return;
     const response = await fetch(
       `/api/workflow/sfm-camera-init?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}`,
@@ -1621,7 +1623,10 @@
       if (!selectedWorkflowStage) setWorkflowStage(stage);
     });
   }
-  window.addEventListener("cadsceneViewerReady", maybeAutoApplySfmCameraInit);
+  window.addEventListener("cadsceneViewerReady", () => {
+    viewerReadyForSfmCameraInit = true;
+    maybeAutoApplySfmCameraInit();
+  });
   pollJobStatus();
   setInterval(pollJobStatus, 1000);
   setInterval(pollJobLog, 2000);
