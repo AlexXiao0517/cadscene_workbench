@@ -250,8 +250,9 @@ def test_run_pipeline_accepts_uploaded_dataset_without_static_yaml(tmp_path: Pat
 def test_run_pipeline_synthetic_full_pipeline_and_viewer_url(tmp_path: Path) -> None:
     dataset, pipeline = _write_inputs(tmp_path)
     output_root = tmp_path / "runs"
+    progress_file = tmp_path / "adapter_progress.json"
     result = subprocess.run(
-        [sys.executable, "-m", "cadscene.cli.run_pipeline", "--dataset", str(dataset), "--config", str(pipeline), "--run-id", "full", "--output-root", str(output_root)],
+        [sys.executable, "-m", "cadscene.cli.run_pipeline", "--dataset", str(dataset), "--config", str(pipeline), "--run-id", "full", "--output-root", str(output_root), "--progress-file", str(progress_file)],
         text=True,
         capture_output=True,
         check=False,
@@ -264,6 +265,9 @@ def test_run_pipeline_synthetic_full_pipeline_and_viewer_url(tmp_path: Path) -> 
     assert (run_dir / "05_viewer_scene" / "sfm_viewer_scene.json").exists()
     assert (run_dir / "06_road_surface" / "sfm_geometry_summary.json").exists()
     assert (run_dir / "08_render" / "sfm_align_overlay.mp4").exists()
+    progress = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert progress["stage"] == "rendering_frames"
+    assert progress["fraction"] == 0.95
     assert "dataset=synthetic&runId=full" in (run_dir / "reports" / "viewer_url.txt").read_text(encoding="utf-8")
 
 

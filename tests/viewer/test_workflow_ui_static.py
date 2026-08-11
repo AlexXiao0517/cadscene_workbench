@@ -139,6 +139,184 @@ def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:
     assert 'querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack())' in script
 
 
+def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
+    script = _read("workflow.js")
+
+    assert 'params.get("projectWorkbenchToken")' in script
+    assert 'params.get("projectId") || dataset' in script
+    assert 'params.get("workflowStage")' in script
+    assert "stageOrder.includes(requestedWorkflowStage)" in script
+    assert "bootstrapProjectWorkbenchSession" in script
+    assert "/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`" in script
+    existing_save = script.index('/api/workflow/save-camera-track')
+    coordinated_save = script.index('/save`', existing_save)
+    assert existing_save < coordinated_save
+    assert "existing_save: result" in script
+    assert "expected_revision: projectWorkbenchSession.clips_revision" in script
+    assert "window.location.assign(projectWorkbenchSession.return_to)" in script
+    assert 'window.addEventListener("pagehide"' in script
+    assert 'keepalive: true' in script
+    assert "projectWorkbenchSaveInFlight" in script[script.index('window.addEventListener("pagehide"'):]
+    pure_finish = script[
+        script.index("async function finishPureRotationCalibration") :
+        script.index("async function previewPureRotationFittedTrack")
+    ]
+    assert "await refreshPureRotationFittedPreview()" in pure_finish
+    assert "await finalizeProjectWorkbenchSave(" in pure_finish
+    assert '{ ok: true, kind: "pure_rotation_calibration" }' in pure_finish
+    assert "{ navigate: false }" in pure_finish
+    assert pure_finish.index("finalizeProjectWorkbenchSave") < pure_finish.index(
+        'setWorkflowStage("render")'
+    )
+    save_track = script[
+        script.index("async function saveCurrentCameraTrack") :
+        script.index("async function bootstrapProjectWorkbenchSession")
+    ]
+    assert "finalizeProjectWorkbenchSave" not in save_track
+    assert "async function finishQualityStage" in script
+    quality_start = script.index("async function finishQualityStage")
+    quality_finish = script[quality_start:script.index("async function", quality_start + 20)]
+    assert "await ensureProjectWorkbenchSession()" in quality_finish
+    assert "await saveCurrentCameraTrack()" in quality_finish
+    assert "await finalizeProjectWorkbenchSave" in quality_finish
+    assert "projectWorkbenchBootstrapPromise" in script
+    assert "async function runProjectWorkbenchTrajectory" in script
+    assert "trajectory-jobs" in script
+    assert "trajectory-ready" in script
+    assert "return runProjectWorkbenchTrajectory()" in script
+    assert "projectWorkbenchTrajectoryIsPending" in script
+    assert "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建" in script
+    availability = script[
+        script.index("function refreshSupplementalWorkflowActionAvailability") :
+        script.index("function blockTrajectoryWorkflowActionsUntilResolved")
+    ]
+    assert 'querySelectorAll("[data-job-action]")' in availability
+    assert "button.disabled = blocked" in availability
+
+
+def test_project_workbench_workflow_never_falls_back_to_sfm_on_manifest_read_error() -> None:
+    script = _read("workflow.js")
+    loader = script[
+        script.index("async function loadManifestBackedTrajectoryWorkflow") :
+        script.index("async function updateSfmSummary")
+    ]
+
+    assert "projectWorkbenchSession.workflow" in loader
+    assert "projectWorkbenchWorkflowMode" in loader
+    assert "trajectoryWorkflow = projectWorkbenchWorkflowMode" in loader
+    catch_branch = loader[loader.index("catch (error)") :]
+    project_branch = catch_branch[
+        catch_branch.index("if (projectWorkbenchWorkflowMode)") :
+        catch_branch.index("// Preserve legacy dataset/run URLs")
+    ]
+    assert 'trajectory_mode: projectWorkbenchWorkflowMode' in project_branch
+    assert 'trajectory_mode: "sfm_only"' not in project_branch
+
+
+def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() -> None:
+    script = _read("workflow.js")
+
+    status_poll = script[
+        script.index("async function pollJobStatus") : script.index("function stageOptions")
+    ]
+    log_poll = script[
+        script.index("async function pollJobLog") : script.index("function runWithMessage")
+    ]
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+    cancel = script[
+        script.index("async function cancelRunningJob") :
+        script.index("function updateRenderProgressFromLog")
+    ]
+
+    assert "function projectWorkbenchTrajectoryOwnsStatus" in script
+    assert "if (projectWorkbenchTrajectoryOwnsStatus()) return;" in status_poll
+    assert status_poll.index("projectWorkbenchTrajectoryOwnsStatus()") < status_poll.index(
+        "projectWorkbenchTrajectoryIsPending()"
+    )
+    assert "if (projectWorkbenchTrajectoryOwnsStatus()) return;" in log_poll
+    assert "projectWorkbenchTrajectoryJobId = null" in wait
+    assert 'querySelector("#workflowCancel").hidden = true' in wait
+    assert "clip.progress?.message ||" not in wait
+    assert "if (projectWorkbenchToken)" in cancel
+    assert "if (!projectWorkbenchTrajectoryJobId) return null" in cancel
+
+
+def test_project_trajectory_polling_reuses_workflow_progress_and_log_panels() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert "/jobs/${encodeURIComponent(jobId)}/runtime" in wait
+    assert "await renderStatus(runtime.workflow_status)" in wait
+    assert 'document.querySelector("#workflowLogContent")' in wait
+    assert 'runtime.lines.join("\\n")' in wait
+
+
+def test_project_workbench_renews_session_during_long_trajectory_jobs() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert "PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000" in script
+    assert "/heartbeat`" in script
+    assert "renewProjectWorkbenchSession" in wait
+    trajectory_ready = wait.index("/trajectory-ready`")
+    assert wait.rindex("renewProjectWorkbenchSession", 0, trajectory_ready) >= 0
+
+
+def test_successful_project_trajectory_navigates_to_keyframe_stage() -> None:
+    script = _read("workflow.js")
+    wait = script[
+        script.index("async function waitForProjectWorkbenchTrajectory") :
+        script.index("async function runProjectWorkbenchTrajectory")
+    ]
+
+    assert 'nextUrl.searchParams.set("workflowStage", "keyframes")' in wait
+    assert "window.location.replace(nextUrl.toString())" in wait
+    assert wait.index("/trajectory-ready`") < wait.index(
+        'nextUrl.searchParams.set("workflowStage", "keyframes")'
+    )
+
+
+def test_existing_pure_rotation_trajectory_opens_directly_in_debug_stage() -> None:
+    script = _read("workflow.js")
+    detection = script[
+        script.index("async function detectWorkflowStageFromArtifacts") :
+        script.index("function updateWorkflowStepActive")
+    ]
+
+    pure_branch = detection[
+        detection.index("if (isPureRotationWorkflow())") :
+        detection.index("const renderReady")
+    ]
+    assert 'runPath("02_pure_rotation/camera_rotation_raw.json")' in pure_branch
+    assert 'if (rawReady)' in pure_branch
+    assert 'return "keyframes"' in pure_branch
+
+
+def test_project_trajectory_start_is_single_flight_and_retries_terminal_job() -> None:
+    script = _read("workflow.js")
+    start = script[
+        script.index("async function runProjectWorkbenchTrajectory") :
+        script.index("async function finalizeProjectWorkbenchSave")
+    ]
+
+    assert "projectWorkbenchTrajectoryStartPromise" in script
+    assert "if (projectWorkbenchTrajectoryStartPromise)" in start
+    assert "return projectWorkbenchTrajectoryStartPromise" in start
+    assert "async function runProjectWorkbenchTrajectoryOnce" in start
+    assert 'new Set(["failed", "interrupted", "cancelled", "stale_input", "superseded"])' in start
+    assert "`/jobs/${encodeURIComponent(currentClip.job_id)}/retry`" in start
+    assert "expected_revision: snapshot.component_revisions.jobs" in start
+
+
 def test_keyframe_save_is_serialized_and_advances_the_single_plan_progress() -> None:
     script = _read("workflow.js")
     start = script.index("async function persistEditedCameraTrack")
@@ -158,6 +336,61 @@ def test_render_saves_frontend_track_before_refitting_and_rendering() -> None:
     render = script[start:end]
 
     assert render.index("await saveCurrentCameraTrack") < render.index('runStage("render")')
+
+
+def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function startRenderStage")
+    end = script.index("async function cancelRunningJob", start)
+    render = script[start:end]
+
+    assert "if (projectWorkbenchToken)" in render
+    assert 'projectWorkbenchRequest("/render-jobs"' in render
+    assert "enqueue: false" in render
+    assert "enqueue: true" in render
+    assert "confirmed_clip_ids: []" in render
+    assert "waitForProjectWorkbenchRender" in render
+    assert render.index("if (projectWorkbenchToken)") < render.index('runStage("render")')
+    snapshot_refresh = render.index("/snapshot")
+    preflight_request = render.index('projectWorkbenchRequest("/render-jobs"')
+    assert snapshot_refresh < preflight_request
+    assert "projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs" in render
+
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+    assert "/snapshot" in wait
+    assert "clip.render" in wait
+    assert "/runtime" in wait
+    assert 'new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"])' in wait
+
+
+def test_project_render_success_keeps_project_status_and_uses_snapshot_preview_url() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+
+    assert 'projectWorkbenchRenderStatus = "success"' in wait
+    assert "render.preview_url" in wait
+    assert "await refreshRenderOutputState()" in wait
+
+    preview_start = script.index("async function refreshRenderOutputState")
+    preview_end = script.index("if (renderPath)", preview_start)
+    preview = script[preview_start:preview_end]
+    assert "/snapshot" in preview
+    assert "clip?.render?.preview_url" in preview
+    assert "activeRenderPath" in script
+
+
+def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function finishQualityStage")
+    end = script.index("async function persistWorkbenchDraftForReturn", start)
+    finish = script[start:end]
+
+    assert "await finalizeProjectWorkbenchSave(result, { navigate: false })" in finish
+    assert 'setWorkflowStage("render")' in finish
 
 
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
@@ -200,7 +433,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260805-sfm-fov-init-v1' in index
+    assert 'workflow.js?v=20260811-project-pipeline-v1' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
@@ -331,16 +564,97 @@ def test_workflow_upload_combines_cad_selection_and_parse() -> None:
     assert 'id="workflowParseCad"' not in html
 
 
-def test_viewer_displays_manifest_backed_trajectory_mode_without_replacing_layout() -> None:
+def test_viewer_uses_manifest_backed_trajectory_mode_without_product_badge() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
 
-    assert 'id="workflowTrajectoryMode"' in html
+    assert 'id="workflowTrajectoryMode"' not in html
     assert "dataset-manifest" in workflow
     assert "interface_only" in workflow
     assert "isInterfaceOnlyTrajectoryWorkflow" in workflow
     assert "轨迹功能尚未启用" in workflow
     assert 'class="workspace"' in html
+
+
+def test_project_workbench_can_save_and_return_without_cancelling_background_jobs() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+
+    assert 'id="workbenchReturnButton"' in html
+    assert 'id="workbenchReturnDialog"' in html
+    assert "推理和渲染任务会继续在后台运行" in html
+    assert "async function persistWorkbenchDraftForReturn" in script
+    assert "async function returnToProjectWorkspace" in script
+    return_flow = script[
+        script.index("async function returnToProjectWorkspace") :
+        script.index("window.addEventListener(\"pagehide\"")
+    ]
+    assert "/close`" in return_flow
+    assert "projectWorkbenchInternalNavigation = true" in return_flow
+    assert "window.location.assign(projectWorkbenchSession.return_to)" in return_flow
+    assert "/cancel" not in return_flow
+
+
+def test_workbench_shares_theme_and_uses_product_copy() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+    css = _read("style.css")
+
+    assert "CAD航拍视频叠加工作台" in html
+    assert "虚拟相机参数设置" in html
+    assert "虚拟 UAV 相机" not in html
+    assert 'id="workbenchThemeToggle"' in html
+    assert 'const THEME_STORAGE_KEY = "mediaflow-theme"' in script
+    assert 'setAttribute("data-theme", theme)' in script
+    assert ':root[data-theme="light"]' in css
+    button_start = css.index("button,\n.file-button {")
+    button_rule = css[button_start : css.index("button:hover", button_start)]
+    assert "align-items: center" in button_rule
+    assert "justify-content: center" in button_rule
+
+
+def test_workbench_light_theme_uses_semantic_component_surfaces() -> None:
+    css = _read("style.css")
+
+    for variable in (
+        "--active-bg",
+        "--media-stage",
+        "--floating-panel",
+        "--dialog-backdrop",
+        "--input-bg",
+    ):
+        assert css.count(variable) >= 3
+    assert "background: var(--active-bg)" in css
+    assert "background: var(--media-stage)" in css
+    assert "background: var(--floating-panel)" in css
+    assert "background: var(--input-bg)" in css
+
+
+def test_project_render_runtime_log_drives_the_visible_progress_bar() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+
+    assert 'updateRenderProgressFromLog("render", runtime.lines || [])' in wait
+    assert "function projectRenderPreflightCopy" in script
+    assert 'stateLabel.textContent = "无法开始渲染"' in script
+
+
+def test_project_render_progress_is_monotonic_and_only_completes_on_success() -> None:
+    script = _read("workflow.js")
+    wait_start = script.index("async function waitForProjectWorkbenchRender")
+    wait_end = script.index("async function startRenderStage", wait_start)
+    wait = script[wait_start:wait_end]
+    helper_start = script.index("function setProjectRenderVisibleProgress")
+    helper_end = script.index("\n  function ", helper_start + 1)
+    helper = script[helper_start:helper_end]
+
+    assert "Math.max(projectRenderVisibleProgress" in helper
+    assert "complete ? 1 : Math.min(0.99" in helper
+    assert "await renderStatus(runtime.workflow_status)" not in wait
+    assert "setProjectRenderVisibleProgress(1, { complete: true })" in wait
+    assert 'message.textContent = "正在封装并验证渲染结果"' in wait
 
 
 def test_upload_stage_uses_real_streaming_upload_apis_and_hides_advanced_fields() -> None:

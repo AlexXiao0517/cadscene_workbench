@@ -255,6 +255,12 @@
     pureRotationAuthoritativeMatrix = null;
   }
 
+  function notifyManualCameraChanged(source) {
+    window.dispatchEvent(new CustomEvent("cadsceneManualCameraChanged", {
+      detail: { source },
+    }));
+  }
+
   function worldToCamera(point, params, axes) {
     const delta = [point[0] - params.x, point[1] - params.y, point[2] - params.z];
     return [dot(delta, axes.right), dot(delta, axes.down), dot(delta, axes.forward)];
@@ -764,6 +770,7 @@
         camera[def.key] = Number(value);
         syncControls();
         updateViews();
+        notifyManualCameraChanged("parameter");
       };
       range.addEventListener("input", () => update(range.value));
       number.addEventListener("input", () => update(number.value));
@@ -1143,6 +1150,7 @@
       syncControls();
       drawOverlay();
       updateTrackStatus();
+      notifyManualCameraChanged("gizmo");
     });
 
     function setMode(mode) {

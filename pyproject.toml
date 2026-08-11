@@ -22,6 +22,10 @@ segmentation = [
   "transformers>=4.40",
   "opencv-python>=4.8",
 ]
+video_analysis = [
+  "opencv-python>=4.8",
+  "imageio-ffmpeg>=0.4.9",
+]
 diagnostics = [
   "matplotlib>=3.7",
 ]

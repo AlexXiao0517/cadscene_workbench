@@ -147,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
             metrics=result.stats,
             status="success",
         )
+        status_store.update_stage(
+            "sfm",
+            status="success",
+            progress=1.0,
+            message="SfM 重建完成，可以进入关键帧标定",
+            operation="sfm",
+        )
         print(f"SfM outputs written to {stage_dir}")
         return 0
     except Exception as exc:
@@ -164,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
             outputs={"sfm_report": report_path},
             metrics={"error": str(exc)},
             status="failed",
+        )
+        status_store.update_stage(
+            "sfm",
+            status="failed",
+            progress=0.0,
+            message="SfM 重建失败，请查看任务日志",
+            error=str(exc),
+            operation="sfm",
         )
         print(str(exc), file=sys.stderr)
         return 1

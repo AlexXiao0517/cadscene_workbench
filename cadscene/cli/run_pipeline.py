@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cad-dir", dest="cad_dir")
     parser.add_argument("--cad-scale", dest="cad_scale", type=float)
     parser.add_argument("--origin-xy", dest="origin_xy", type=float, nargs=2)
+    parser.add_argument("--progress-file", type=Path)
     return parser
 
 
@@ -211,6 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             render_params = render_stage.setdefault("params", {})
             render_params.setdefault("cad_scale", dataset.get("cad_scale"))
             render_params.setdefault("origin_xy", dataset.get("origin_xy"))
+            render_params.setdefault(
+                "progress_file",
+                None if args.progress_file is None else str(args.progress_file),
+            )
         requested = _selected_stages(args, resolved)
         resolved["stages"] = {
             name: stage for name, stage in resolved.get("stages", {}).items() if name in requested

@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from cadscene.cli._progress import write_progress_sidecar
 from cadscene.core.artifacts import ArtifactManager
 from cadscene.pure_rotation.rendering import write_camera_path_csv
 from cadscene.rendering.overlay import RenderOverlayConfig, render_overlay_video, write_render_outputs
@@ -23,8 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overlay-linewidth", type=int, default=3)
     parser.add_argument("--overlay-alpha", type=float, default=0.88)
     parser.add_argument("--faded-overlay", action="store_true")
-    parser.add_argument("--max-distance-m", type=float, default=900.0)
+    distance_group = parser.add_mutually_exclusive_group()
+    distance_group.add_argument("--max-distance-m", type=float, default=900.0)
+    distance_group.add_argument("--no-distance-limit", action="store_true")
     parser.add_argument("--fade-start-m", type=float, default=250.0)
+    parser.add_argument("--progress-file", type=Path)
     return parser
 
 
@@ -53,10 +57,22 @@ def main(argv: list[str] | None = None) -> int:
             overlay_linewidth=args.overlay_linewidth,
             overlay_alpha=args.overlay_alpha,
             faded_overlay=args.faded_overlay,
-            max_distance_m=args.max_distance_m,
+            max_distance_m=(
+                None if args.no_distance_limit else args.max_distance_m
+            ),
             fade_start_m=args.fade_start_m,
         )
-        result = render_overlay_video(config)
+        progress_callback = None
+        if args.progress_file is not None:
+            write_progress_sidecar(
+                args.progress_file, "preparing_render", "preparing render", 0.0
+            )
+            progress_callback = lambda stage, message, fraction: (
+                write_progress_sidecar(
+                    args.progress_file, stage, message, float(fraction) * 0.95
+                )
+            )
+        result = render_overlay_video(config, progress_callback=progress_callback)
         inputs = {
             "video": args.video,
             "cad_dir": args.cad_dir,

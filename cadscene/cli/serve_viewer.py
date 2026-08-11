@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import mimetypes
 import os
@@ -17,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
 from cadscene.pure_rotation.placement import apply_global_placement
 from cadscene.pure_rotation.corrections import apply_rotation_corrections
+from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 from cadscene.pure_rotation.rotation_matrix import normalize_rotation_fields
 from cadscene.workflow.job_status import JobStatusStore, append_ignored_suggestion
 from cadscene.workflow.data_import import (
@@ -36,11 +39,120 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 
+def _cad_thumbnail_svg(design: dict, *, segment_budget: int = 12000) -> bytes:
+    """Render a bounded, transparent SVG preview from parsed CAD geometry."""
+    canvas_width, canvas_height, padding = 1200.0, 720.0, 36.0
+    meta = design.get("meta") if isinstance(design, dict) else None
+    width = float(meta.get("width", 0.0)) if isinstance(meta, dict) else 0.0
+    height = float(meta.get("height", 0.0)) if isinstance(meta, dict) else 0.0
+    if width <= 0.0 or height <= 0.0:
+        raise ValueError("CAD preview bounds are unavailable")
+    entities: list[list[list[float]]] = []
+    for layer in design.get("layers", []):
+        if not isinstance(layer, dict):
+            continue
+        for entity in layer.get("entities", []):
+            points = entity.get("points") if isinstance(entity, dict) else None
+            if isinstance(points, list) and len(points) >= 2:
+                entities.append(points)
+    segment_count = sum(max(0, len(points) - 1) for points in entities)
+    if segment_count <= 0:
+        raise ValueError("CAD preview contains no drawable geometry")
+    stride = max(1, (segment_count + segment_budget - 1) // segment_budget)
+    scale = min(
+        (canvas_width - 2.0 * padding) / width,
+        (canvas_height - 2.0 * padding) / height,
+    )
+    offset_x = (canvas_width - width * scale) / 2.0
+    offset_y = (canvas_height - height * scale) / 2.0
+    paths: list[str] = []
+    for points in entities:
+        sampled = points[::stride]
+        if sampled[-1] is not points[-1]:
+            sampled = [*sampled, points[-1]]
+        commands: list[str] = []
+        for index, point in enumerate(sampled):
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            x = offset_x + float(point[0]) * scale
+            y = offset_y + float(point[1]) * scale
+            commands.append(f"{'M' if not commands else 'L'}{x:.1f} {y:.1f}")
+        if len(commands) >= 2:
+            paths.append(f'<path d="{" ".join(commands)}"/>')
+    if not paths:
+        raise ValueError("CAD preview contains no valid geometry")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" '
+        'preserveAspectRatio="xMidYMid meet">'
+        '<g fill="none" stroke="#4d8dff" stroke-width="1.45" '
+        'stroke-linecap="round" stroke-linejoin="round" opacity="0.9">'
+        + "".join(paths)
+        + "</g></svg>"
+    )
+    return svg.encode("utf-8")
+
+
 def _atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _publish_pure_rotation_placement(
+    run_dir: Path, raw_path: Path, placement: dict
+) -> Path:
+    with pure_rotation_run_lock(run_dir):
+        raw = json.loads(raw_path.read_bytes().decode("utf-8-sig"))
+        base = apply_global_placement(
+            raw,
+            segment_id=int(placement["segment_id"]),
+            anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]),
+            camera_center_web=placement["camera_center_web"],
+            manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"],
+            fov=float(placement["fov"]),
+        )
+        output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
+        _atomic_json(
+            run_dir / "03_pure_rotation_placement" / "global_camera_placement.json",
+            placement,
+        )
+        _atomic_json(output, base)
+        return output
+
+
+def _publish_pure_rotation_corrections(
+    run_dir: Path, corrections: list[dict]
+) -> Path:
+    with pure_rotation_run_lock(run_dir):
+        base_path = (
+            run_dir
+            / "03_pure_rotation_placement"
+            / "camera_track_cad_base.json"
+        )
+        base_bytes = base_path.read_bytes()
+        base = json.loads(base_bytes.decode("utf-8-sig"))
+        corrected = apply_rotation_corrections(base, corrections)
+        output = (
+            run_dir
+            / "04_pure_rotation_corrections"
+            / "camera_track_corrected.json"
+        )
+        _atomic_json(
+            output.parent / "rotation_correction_keyframes.json",
+            {"schema_version": 1, "corrections": corrections},
+        )
+        _atomic_json(output, corrected)
+        corrected_bytes = output.read_bytes()
+        _atomic_json(
+            output.parent / "correction_lineage.json",
+            {
+                "schema_version": 1,
+                "base_sha256": sha256(base_bytes).hexdigest(),
+                "corrected_sha256": sha256(corrected_bytes).hexdigest(),
+            },
+        )
+        return output
 
 
 class ViewerHTTPServer(ThreadingHTTPServer):
@@ -101,6 +213,205 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _project_response(self, response) -> None:
+        body = response.encoded_body
+        self.send_response(response.status)
+        for name, value in response.headers.items():
+            self.send_header(name, value)
+        if body:
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _dispatch_project_api(self, method: str) -> None:
+        from cadscene.projects.http_api import ApiResponse, UploadRequest
+
+        api = getattr(self.server, "project_api", None)
+        if api is None:
+            self._project_response(ApiResponse(503, {"error": "project_api_unavailable"}))
+            return
+        parsed = urlsplit(self.path)
+        try:
+            if method == "GET":
+                response = api.handle(
+                    method, parsed.path, headers={name: value for name, value in self.headers.items()}
+                )
+            elif method == "POST" and "/uploads/" in parsed.path:
+                filename, stream = self._multipart_upload()
+                try:
+                    stream.seek(0, os.SEEK_END)
+                    size = stream.tell()
+                    stream.seek(0)
+                    query = parse_qs(parsed.query)
+                    raw_revision = (query.get("expectedRevision") or query.get("expected_revision") or [""])[0]
+                    use_current_revision = (
+                        (query.get("useCurrentRevision") or [""])[0] == "1"
+                    )
+                    if not use_current_revision and not str(raw_revision).isdigit():
+                        raise ValueError("expectedRevision query parameter is required")
+                    response = api.handle(
+                        method,
+                        parsed.path,
+                        json_body=(
+                            {"use_current_revision": True}
+                            if use_current_revision
+                            else {"expected_revision": int(raw_revision)}
+                        ),
+                        upload=UploadRequest(
+                            filename=filename,
+                            stream=stream,
+                            size_bytes=size,
+                            sha256=self.headers.get("X-Content-SHA256"),
+                        ),
+                    )
+                finally:
+                    stream.close()
+            else:
+                response = api.handle(
+                    method,
+                    parsed.path,
+                    headers={name: value for name, value in self.headers.items()},
+                    json_body=self._read_json_body(),
+                )
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            response = ApiResponse(400, {"error": str(exc)})
+        self._project_response(response)
+
+    def _send_project_render_video(self, path: str, *, send_body: bool) -> None:
+        match = re.fullmatch(
+            r"/api/projects/(?P<project>[A-Za-z0-9_.-]+)/clips/"
+            r"(?P<clip>[A-Za-z0-9_.-]+)/renders/"
+            r"(?P<revision>[A-Za-z0-9_.-]+)/video",
+            path,
+        )
+        if match is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "rendered video not found")
+            return
+        api = getattr(self.server, "project_api", None)
+        service = getattr(api, "service", None)
+        if service is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "project API unavailable")
+            return
+        try:
+            video = service.published_render_video_path(
+                match["project"], match["clip"], match["revision"]
+            )
+        except (FileNotFoundError, ValueError):
+            self.send_error(HTTPStatus.NOT_FOUND, "rendered video not found")
+            return
+        stream = self._send_file_head(Path(video))
+        if stream is None:
+            return
+        try:
+            if send_body:
+                self.copyfile(stream, self.wfile)
+        finally:
+            stream.close()
+
+    def _send_project_thumbnail(self, path: str) -> None:
+        match = re.fullmatch(
+            r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<cad>cad)|(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
+            path,
+        )
+        if match is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "thumbnail not found")
+            return
+        api = getattr(self.server, "project_api", None)
+        if api is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "project API unavailable")
+            return
+        project_id, clip_id = match["project"], match["clip"]
+        try:
+            project = api.repositories.project.load(project_id)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND, "project not found")
+            return
+        if match["cad"]:
+            asset = project.source_assets.get("cad")
+            if not isinstance(asset, dict) or not asset.get("path"):
+                self.send_error(HTTPStatus.NOT_FOUND, "CAD source not found")
+                return
+            source = Path(str(asset["path"]))
+            if source.suffix.lower() != ".dxf" or not source.is_file():
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "CAD thumbnail requires DXF")
+                return
+            cache_dir = Path(self.server.storage_root_dir) / "projects" / project_id / "thumbnails"
+            fingerprint = str(asset.get("sha256") or source.stat().st_mtime_ns)[:20]
+            cached = cache_dir / f"cad-{fingerprint}.svg"
+            if not cached.is_file():
+                from cadscene.cad.dxf_parser import parse_dxf
+
+                try:
+                    design, _statistics = parse_dxf(source)
+                    body = _cad_thumbnail_svg(design)
+                except (RuntimeError, ValueError, OSError) as exc:
+                    self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+                    return
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                temporary = cached.with_suffix(".tmp")
+                temporary.write_bytes(body)
+                os.replace(temporary, cached)
+            body = cached.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        asset = project.source_assets.get("video")
+        if not isinstance(asset, dict) or not asset.get("path"):
+            self.send_error(HTTPStatus.NOT_FOUND, "source video not found")
+            return
+        seek_sec = 0.0
+        if clip_id:
+            from fractions import Fraction
+
+            clips = api.repositories.clips.load(project_id)
+            clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+            if clip is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "clip not found")
+                return
+            time_base = clip.analysis.get("source_time_base")
+            if not isinstance(time_base, dict):
+                self.send_error(HTTPStatus.CONFLICT, "clip time base is unavailable")
+                return
+            seek_sec = float(
+                Fraction(int(clip.analysis["source_start_pts"]))
+                * Fraction(int(time_base["numerator"]), int(time_base["denominator"]))
+            )
+        cache_dir = Path(self.server.storage_root_dir) / "projects" / project_id / "thumbnails"
+        cached = cache_dir / ("source.jpg" if not clip_id else f"{clip_id}.jpg")
+        if not cached.is_file():
+            import cv2
+
+            capture = cv2.VideoCapture(str(asset["path"]))
+            try:
+                capture.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
+                ok, frame = capture.read()
+            finally:
+                capture.release()
+            if not ok:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, "thumbnail frame unavailable")
+                return
+            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if not ok:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "thumbnail encoding failed")
+                return
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            temporary = cached.with_suffix(".tmp")
+            temporary.write_bytes(encoded.tobytes())
+            os.replace(temporary, cached)
+        body = cached.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "private, max-age=86400")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -286,6 +597,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
+        if route == "/api/projects" or route.startswith("/api/projects/"):
+            self._dispatch_project_api("POST")
+            return
         upload_routes = {
             "/api/workflow/create-dataset",
             "/api/workflow/upload-video",
@@ -375,21 +689,16 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 raw_path = run_dir / "02_pure_rotation" / "camera_rotation_raw.json"
                 if not raw_path.exists():
                     raise FileNotFoundError("pure-rotation raw trajectory not found")
-                raw = json.loads(raw_path.read_text(encoding="utf-8-sig"))
                 placement = normalize_rotation_fields(
                     payload.get("placement") or {},
                     ("manual_rotation_cad_from_camera",),
                     allow_legacy_reflection=True,
                 )
-                base = apply_global_placement(raw, segment_id=int(placement["segment_id"]), anchor_decoded_frame_index=int(placement["anchor_decoded_frame_index"]), camera_center_web=placement["camera_center_web"], manual_rotation_cad_from_camera=placement["manual_rotation_cad_from_camera"], fov=float(placement["fov"]))
-                output = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
-                _atomic_json(run_dir / "03_pure_rotation_placement" / "global_camera_placement.json", placement)
-                _atomic_json(output, base)
+                output = _publish_pure_rotation_placement(
+                    run_dir, raw_path, placement
+                )
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/pure-rotation/corrections":
-                base_path = run_dir / "03_pure_rotation_placement" / "camera_track_cad_base.json"
-                if not base_path.exists():
-                    raise FileNotFoundError("pure-rotation segment is not calibrated")
                 corrections = [
                     normalize_rotation_fields(
                         item,
@@ -398,10 +707,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     )
                     for item in (payload.get("corrections") or [])
                 ]
-                corrected = apply_rotation_corrections(json.loads(base_path.read_text(encoding="utf-8-sig")), corrections)
-                output = run_dir / "04_pure_rotation_corrections" / "camera_track_corrected.json"
-                _atomic_json(run_dir / "04_pure_rotation_corrections" / "rotation_correction_keyframes.json", {"schema_version": 1, "corrections": corrections})
-                _atomic_json(output, corrected)
+                output = _publish_pure_rotation_corrections(run_dir, corrections)
                 result = {"ok": True, "path": str(output)}
             elif route == "/api/workflow/run-stage":
                 stage = str(payload.get("stage", ""))
@@ -469,8 +775,39 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
+    def do_PATCH(self) -> None:
+        route = urlsplit(self.path).path
+        if route.startswith("/api/projects/"):
+            self._dispatch_project_api("PATCH")
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "API not found")
+
+    def do_HEAD(self) -> None:
+        parsed = urlsplit(self.path)
+        if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
+            r"renders/[A-Za-z0-9_.-]+/video",
+            parsed.path,
+        ):
+            self._send_project_render_video(parsed.path, send_body=False)
+            return
+        super().do_HEAD()
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
+            r"renders/[A-Za-z0-9_.-]+/video",
+            parsed.path,
+        ):
+            self._send_project_render_video(parsed.path, send_body=True)
+            return
+        if parsed.path.startswith("/api/projects/") and "/thumbnails/" in parsed.path:
+            self._send_project_thumbnail(parsed.path)
+            return
+        if parsed.path.startswith("/api/projects/"):
+            self._dispatch_project_api("GET")
+            return
         if parsed.path == "/":
             self.send_response(HTTPStatus.FOUND)
             self.send_header("Location", "/apps/workflow_portal/index.html")
@@ -555,10 +892,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
-    def send_head(self):
-        path = Path(self.translate_path(self.path))
-        if path.is_dir():
-            path = path / "index.html"
+    def _send_file_head(self, path: Path):
         if not path.exists() or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
@@ -586,6 +920,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.range = None
         return f
+
+    def send_head(self):
+        path = Path(self.translate_path(self.path))
+        if path.is_dir():
+            path = path / "index.html"
+        return self._send_file_head(path)
 
     def copyfile(self, source, outputfile) -> None:
         byte_range = getattr(self, "range", None)
@@ -632,6 +972,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Store workflow data and runs under this root; defaults to --root.",
     )
     parser.add_argument("--extra-root", action="append", default=[], metavar="NAME=PATH", help="Mount an additional read-only root, for example legacy=D:\\data.")
+    parser.add_argument(
+        "--pure-rotation-backend-root",
+        default=os.environ.get("PURE_ROTATION_BACKEND_ROOT"),
+        help="Path to the pinned external OpenGV pure-rotation repository.",
+    )
+    parser.add_argument(
+        "--pure-rotation-python",
+        default=os.environ.get("PURE_ROTATION_PYTHON"),
+        help="Python executable for the external pure-rotation environment.",
+    )
+    parser.add_argument(
+        "--pure-rotation-calibration-root",
+        default=os.environ.get("PURE_ROTATION_CALIBRATION_ROOT"),
+        help="Read-only root containing COLMAP camera calibration candidates.",
+    )
     return parser
 
 
@@ -682,6 +1037,84 @@ def main(argv: list[str] | None = None) -> int:
     server.storage_root_dir = storage_root
     server.extra_roots = served_roots
     server.job_runner = JobRunner(storage_root)
+    from cadscene.projects.executor import LocalJobExecutor
+    from cadscene.projects.http_api import ProjectApi
+    from cadscene.projects.json_repositories import project_repositories
+    from cadscene.projects.queue import LocalResourceQueue
+    from cadscene.projects.service import ProjectService
+    from cadscene.projects.runtime import ProjectRuntime
+    from cadscene.projects.uploads import ValidatedUploadStore
+    from cadscene.projects.workbench_sessions import (
+        AtomicWorkbenchSessionStore,
+        ProjectWorkbenchService,
+    )
+    from cadscene.projects.workflow_adapters import default_workflow_adapters
+    from cadscene.projects.workbench_render_adapter import (
+        default_workbench_render_adapters,
+    )
+
+    projects_root = storage_root / "projects"
+    projects_root.mkdir(parents=True, exist_ok=True)
+    repositories = project_repositories(projects_root)
+    queue = LocalResourceQueue()
+    pure_rotation_root = (
+        Path(args.pure_rotation_backend_root).resolve()
+        if args.pure_rotation_backend_root
+        else None
+    )
+    pure_rotation_command = None
+    if pure_rotation_root is not None and args.pure_rotation_python:
+        pure_rotation_command = (
+            str(Path(args.pure_rotation_python).resolve()),
+            str(pure_rotation_root / "scripts" / "run_full_video_exploration.py"),
+        )
+    pure_rotation_calibration_root = (
+        Path(args.pure_rotation_calibration_root).resolve()
+        if args.pure_rotation_calibration_root
+        else None
+    )
+    project_service = ProjectService(
+        repositories,
+        queue,
+        default_workflow_adapters(
+            pure_rotation_backend_root=pure_rotation_root,
+            pure_rotation_backend_command=pure_rotation_command,
+            pure_rotation_calibration_root=pure_rotation_calibration_root,
+        ),
+        projects_root=projects_root,
+        now=lambda: datetime.now(timezone.utc).isoformat(),
+        render_adapters=default_workbench_render_adapters(
+            application_root=root
+        ),
+    )
+    project_runtime = ProjectRuntime(
+        projects_root=projects_root,
+        repositories=repositories,
+        service=project_service,
+        executor=LocalJobExecutor(project_service),
+        analysis=None,
+    )
+    try:
+        project_runtime.start()
+    except Exception as exc:
+        server.server_close()
+        print(f"unable to acquire or recover project root: {exc}", file=sys.stderr)
+        return 1
+    project_workbench = ProjectWorkbenchService(
+        repositories=repositories,
+        project_service=project_service,
+        session_store=AtomicWorkbenchSessionStore(projects_root),
+        projects_root=projects_root,
+        viewer_runs_root=storage_root / "runs",
+    )
+    server.project_api = ProjectApi(
+        repositories=repositories,
+        service=project_service,
+        uploads=ValidatedUploadStore(projects_root),
+        now=lambda: datetime.now(timezone.utc).isoformat(),
+        workbench=project_workbench,
+    )
+    server.project_runtime = project_runtime
     url = f"http://{args.bind}:{args.port}/apps/web_camera_viewer/?dataset=<dataset>&runId=<run_id>"
     print(f"Serving {root}")
     for name, path in served_roots.items():
@@ -692,7 +1125,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        server.server_close()
+        try:
+            project_runtime.close()
+        finally:
+            server.server_close()
     return 0
 
 

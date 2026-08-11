@@ -27,6 +27,7 @@ def test_help_runs_without_pycolmap() -> None:
 
 
 def test_missing_video_has_clear_error(tmp_path: Path) -> None:
+    output_root = tmp_path / "runs"
     result = subprocess.run(
         [
             sys.executable,
@@ -37,7 +38,7 @@ def test_missing_video_has_clear_error(tmp_path: Path) -> None:
             "--run-id",
             "missing",
             "--output-root",
-            str(tmp_path / "runs"),
+            str(output_root),
             "--video",
             str(tmp_path / "missing.mp4"),
             "--no-mask",
@@ -47,6 +48,13 @@ def test_missing_video_has_clear_error(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "video does not exist" in result.stderr
+    job_status = json.loads(
+        (output_root / "demo" / "missing" / "job_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert job_status["status"] == "failed"
+    assert job_status["stages"]["sfm"]["status"] == "failed"
 
 
 def test_workflow_cli_forces_utf8_output_even_when_parent_requests_gbk(tmp_path: Path) -> None:
@@ -139,3 +147,11 @@ def test_mock_export_generates_outputs_and_manifest(tmp_path: Path) -> None:
         assert (stage_dir / name).exists()
     manifest = json.loads((output_root / "demo" / "mock" / "manifest.json").read_text(encoding="utf-8"))
     assert any(stage["stage_name"] == "sfm" for stage in manifest["stages"])
+    job_status = json.loads(
+        (output_root / "demo" / "mock" / "job_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert job_status["status"] == "success"
+    assert job_status["stages"]["sfm"]["status"] == "success"
+    assert job_status["stages"]["sfm"]["progress"] == 1.0

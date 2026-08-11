@@ -77,6 +77,6 @@ def test_pure_rotation_render_uses_corrected_track_without_sfm(tmp_path: Path) -
     assert "cadscene.cli.render_pure_rotation" in command
     assert "cadscene.cli.run_pipeline" not in command
     assert command[command.index("--track") + 1].endswith("camera_track_corrected.json")
-    assert "--faded-overlay" in command
-    assert command[command.index("--fade-start-m") + 1] == "250"
+    assert "--faded-overlay" not in command
+    assert "--fade-start-m" not in command
     assert command[command.index("--max-distance-m") + 1] == "900"

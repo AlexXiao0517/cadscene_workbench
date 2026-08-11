@@ -4,6 +4,11 @@
   const params = new URLSearchParams(window.location.search);
   const dataset = params.get("dataset") || "";
   const runId = params.get("runId") || "";
+  const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
+  const projectWorkbenchProjectId = params.get("projectId") || dataset;
+  const requestedWorkflowStage = params.get("workflowStage") || "";
+  const THEME_STORAGE_KEY = "mediaflow-theme";
+  const PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000;
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
   const stageTitles = {
@@ -20,7 +25,6 @@
   const message = document.querySelector("#workflowMessage");
   const stateLabel = document.querySelector("#workflowJobState");
   const title = document.querySelector("#workflowTaskTitle");
-  const trajectoryModeLabel = document.querySelector("#workflowTrajectoryMode");
   let trajectoryWorkflow = null;
   let trajectoryWorkflowLoaded = !dataset;
   let viewerReadyForSfmCameraInit = false;
@@ -34,6 +38,8 @@
   let keyframePlan = null;
   let keyframeSaveInFlight = false;
   let renderProgressState = null;
+  let projectRenderVisibleProgress = 0;
+  let projectRenderOutputUrl = null;
   let pureRotationCorrections = [];
   let pureRotationTrajectory = null;
   let pureRotationTrajectoryKind = null;
@@ -45,11 +51,42 @@
   let pureRotationHasPlacement = false;
   let pureRotationSavedPlacement = null;
   let pureRotationEditModeReady = Promise.resolve(null);
+  let pureRotationEditModeTransitioning = false;
   let pureRotationCorrectionDraftBase = null;
+  let pureRotationCorrectionDraftDirty = false;
   let pureRotationWorldYawDeg = 0;
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+  let projectWorkbenchSession = null;
+  let projectWorkbenchBootstrapPromise = null;
+  let projectWorkbenchSaveInFlight = false;
+  let projectWorkbenchTrajectoryJobId = null;
+  let projectWorkbenchTrajectoryStatus = null;
+  let projectWorkbenchRenderJobId = null;
+  let projectWorkbenchRenderStatus = null;
+  let projectWorkbenchTrajectoryStartPromise = null;
+  let projectWorkbenchInternalNavigation = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
+
+  function applyWorkbenchTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    const toggle = document.querySelector("#workbenchThemeToggle");
+    if (!toggle) return;
+    const isLight = theme === "light";
+    const help = isLight ? "切换为深色模式" : "切换为浅色模式";
+    toggle.setAttribute("aria-pressed", String(isLight));
+    toggle.setAttribute("aria-label", help);
+    toggle.setAttribute("title", help);
+  }
+
+  function initializeWorkbenchTheme() {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    const preferred = window.matchMedia?.("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+    applyWorkbenchTheme(saved === "light" || saved === "dark" ? saved : preferred);
+  }
+
   function uploadTimestamp() {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -59,17 +96,6 @@
   function renderTrajectoryWorkflow(workflow) {
     const mode = String(workflow?.trajectory_mode || "sfm_only");
     const implementation = String(workflow?.implementation_status || "ready");
-    const copy = {
-      sfm_only: "轨迹模式：仅 SfM（可用）",
-      srt_sfm_fused: "轨迹模式：SRT + SfM（功能待启用）",
-      srt_full_pose: "轨迹模式：SRT 完整姿态（功能待启用）",
-      pure_rotation: "轨迹模式：悬停旋转（实验）",
-    };
-    if (trajectoryModeLabel) {
-      trajectoryModeLabel.hidden = false;
-      trajectoryModeLabel.textContent = copy[mode] || copy.sfm_only;
-      trajectoryModeLabel.classList.toggle("interface-only", implementation === "interface_only");
-    }
     document.querySelector("#sfmPanel")?.toggleAttribute("hidden", mode === "pure_rotation");
     applyPureRotationWorkflowLayout(mode);
     if (mode === "pure_rotation") {
@@ -83,7 +109,6 @@
       return;
     }
     const explanation = "当前 SRT 轨迹能力仅提供界面提示；融合或直接姿态驱动尚未实现，因此不会启动相关流程。";
-    if (trajectoryModeLabel) trajectoryModeLabel.title = explanation;
     document.querySelectorAll("[data-job-action], #workflowGenerateKeyframes, #workflowContinueKeyframes, #workflowFinishKeyframes, #workflowFinishQuality, #workflowReturnKeyframes").forEach((button) => {
       button.disabled = true;
       button.title = explanation;
@@ -104,7 +129,6 @@
   function updatePureRotationRecoveryActions({ ready = false, running = false } = {}) {
     const runButton = document.querySelector("#workflowStartPureRotation");
     const rerunButton = document.querySelector("#workflowRerunPureRotation");
-    const enterButton = document.querySelector("#workflowEnterPureCalibration");
     const blocked = trajectoryWorkflowActionsAreBlocked();
     if (runButton) {
       runButton.hidden = false;
@@ -114,7 +138,6 @@
       rerunButton.hidden = !ready;
       rerunButton.disabled = !ready || running || blocked;
     }
-    if (enterButton) enterButton.disabled = !ready || running;
   }
 
   function applyPureRotationWorkflowLayout(mode) {
@@ -142,8 +165,7 @@
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
     setPureVisible(
       "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
-        + "#workflowPreviewPureFitted, #workflowReturnPureCalibration, "
-        + "#pureRotationCorrectionActions",
+        + "#workflowReturnPureCalibration",
       pure,
     );
     document.querySelectorAll("#viewCurrentSuggestion, #ignoreCurrentSuggestion").forEach((node) => {
@@ -166,13 +188,16 @@
     });
     const keyframeStatus = document.querySelector("#workflowKeyframePlanStatus");
     if (pure && keyframeStatus) {
-      keyframeStatus.textContent = "先完成固定相机全局放置，再在需要的位置添加姿态关键帧；完成后直接进入渲染导出。";
+      keyframeStatus.textContent = "调整固定相机的位置与方向，确认后播放视频检查整段旋转效果；满意后进入渲染导出。";
     }
     const sfmStatus = document.querySelector("#workflowSfmStatus");
     if (pure && sfmStatus) sfmStatus.textContent = "等待 OpenGV 旋转轨迹任务；该任务只恢复旋转，不恢复平移。";
     if (pure) {
       setPureRotationEditMode("placement");
       updatePureRotationRecoveryActions();
+    }
+    if (selectedWorkflowStage) {
+      renderWorkflowPanel(selectedWorkflowStage);
     }
   }
 
@@ -195,23 +220,27 @@
       pureRotationHasPlacement = Boolean(placement);
       const candidate = status.summary?.candidate;
       const candidateFov = window.CadscenePureRotationMath.horizontalFovDeg(candidate?.width, candidate?.fx);
-      if (Number.isFinite(candidateFov)) {
-        pureRotationDisplayFov = candidateFov;
-        pureRotationFovSource = "unverified_candidate_intrinsics";
-      } else if (placement && Number.isFinite(Number(placement.fov))) {
+      if (placement && Number.isFinite(Number(placement.fov))) {
         pureRotationDisplayFov = Number(placement.fov);
         pureRotationFovSource = "saved_placement";
+      } else if (Number.isFinite(candidateFov)) {
+        pureRotationDisplayFov = candidateFov;
+        pureRotationFovSource = "unverified_candidate_intrinsics";
       }
     }
     pureRotationRawTrajectory = await loadPureRotationTrack("raw");
-    pureRotationTrajectory = await loadPureRotationTrack("raw");
-    pureRotationTrajectoryKind = "raw";
+    const initialTrajectoryKind = pureRotationHasPlacement ? "base" : "raw";
+    pureRotationTrajectory = initialTrajectoryKind === "raw"
+      ? pureRotationRawTrajectory
+      : await loadPureRotationTrack(initialTrajectoryKind);
+    pureRotationTrajectoryKind = initialTrajectoryKind;
     updatePureRotationFovSource();
     seedPureRotationDraftPlacement();
     applyPureRotationPose();
   }
 
   function seedPureRotationDraftPlacement() {
+    if (pureRotationHasPlacement) return null;
     if (pureRotationDraftPlacement || !pureRotationRawTrajectory) return pureRotationDraftPlacement;
     const video = document.querySelector("#sourceVideo");
     const rawPose = pureRotationPoseAtPts(pureRotationRawTrajectory, video?.currentTime || 0);
@@ -262,9 +291,38 @@
     return window.CadscenePureRotationMath.viewerEulerToMatrix(manual);
   }
 
+  function seedPureRotationCorrectionDraftFromManual(manual) {
+    const active = window.pureRotationViewer?.pose;
+    if (!active || !manual) return null;
+    const rotation = manualRotationMatrix(manual);
+    const center = [Number(manual.x), Number(manual.y), Number(manual.z)];
+    pureRotationCorrectionDraftBase = {
+      decoded_frame_index: Number(active.decoded_frame_index),
+      pts_time_sec: Number(active.pts_time_sec),
+      segment_id: Number(active.segment_id),
+      rotation_cad_from_camera: rotation,
+    };
+    pureRotationCorrectionDraftDirty = false;
+    pureRotationWorldYawDeg = 0;
+    pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+    setPureRotationWorldYawInputs(0);
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
+    window.cadsceneApplyPureRotationPose?.({
+      ...active,
+      rotation_cad_from_camera: rotation,
+      camera_center_web: center,
+      display_fov: Number(manual.fov),
+    });
+    return pureRotationCorrectionDraftBase;
+  }
+
   function refreshPureRotationCorrectionDraftBase() {
     const active = window.pureRotationViewer?.pose;
     if (!active || !window.CadscenePureRotationMath) return null;
+    const sameFrame = pureRotationCorrectionDraftBase
+      && Number(pureRotationCorrectionDraftBase.decoded_frame_index) === Number(active.decoded_frame_index)
+      && Number(pureRotationCorrectionDraftBase.segment_id) === Number(active.segment_id);
+    if (pureRotationCorrectionDraftDirty && sameFrame) return pureRotationCorrectionDraftBase;
     const rotation = active.rotation_cad_from_camera
       || window.CadscenePureRotationMath.localRotationToViewerMatrix(active.rotation_local_from_camera);
     if (!Array.isArray(rotation)) return null;
@@ -274,6 +332,7 @@
       segment_id: Number(active.segment_id),
       rotation_cad_from_camera: rotation.map((row) => row.map(Number)),
     };
+    pureRotationCorrectionDraftDirty = false;
     pureRotationWorldYawDeg = 0;
     pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
     setPureRotationWorldYawInputs(0);
@@ -296,10 +355,20 @@
   }
 
   async function previewPureRotationWorldYaw(value) {
-    await setPureRotationEditMode("correction");
+    await setPureRotationEditMode("placement");
+    const active = window.pureRotationViewer?.pose;
+    const sameFrame = pureRotationCorrectionDraftBase
+      && Number(pureRotationCorrectionDraftBase.decoded_frame_index) === Number(active?.decoded_frame_index)
+      && Number(pureRotationCorrectionDraftBase.segment_id) === Number(active?.segment_id);
+    if (!pureRotationCorrectionDraftDirty || !sameFrame) {
+      seedPureRotationCorrectionDraftFromManual(window.cadsceneGetCurrentCameraPose?.());
+    }
     pureRotationWorldYawDeg = Math.max(-180, Math.min(180, Number(value) || 0));
+    pureRotationCorrectionDraftDirty = true;
     setPureRotationWorldYawInputs(pureRotationWorldYawDeg);
     applyPureRotationCorrectionPreview();
+    capturePureRotationDraftPlacement();
+    message.textContent = "当前位置与方向草稿已自动保留；可继续切换平移或旋转，满意后点击确认。";
   }
 
   async function previewPureRotationLocalDelta(key, value) {
@@ -308,6 +377,7 @@
       ...pureRotationLocalDelta,
       [key]: Math.max(-180, Math.min(180, Number(value) || 0)),
     };
+    pureRotationCorrectionDraftDirty = true;
     setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
     applyPureRotationCorrectionPreview();
   }
@@ -373,12 +443,26 @@
     seedPureRotationDraftPlacement();
     applyPureRotationPose();
   });
+  window.addEventListener("cadsceneManualCameraChanged", () => {
+    if (!isPureRotationWorkflow() || pureRotationEditMode !== "placement") return;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
+    pureRotationWorldYawDeg = 0;
+    pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
+    setPureRotationWorldYawInputs(0);
+    setPureRotationLocalDeltaInputs(pureRotationLocalDelta);
+    capturePureRotationDraftPlacement();
+    message.textContent = "当前位置与方向草稿已自动保留；可继续切换平移或旋转，满意后点击确认。";
+  });
 
   function setPureRotationEditMode(mode) {
     const nextMode = mode === "correction" ? "correction" : "placement";
     const target = nextMode === "placement"
       ? (pureRotationHasPlacement ? "base" : "raw")
       : (pureRotationCorrections.length ? "corrected" : "base");
+    if (pureRotationEditModeTransitioning && pureRotationEditMode === nextMode) {
+      return pureRotationEditModeReady;
+    }
     if (
       pureRotationEditMode === nextMode
       && pureRotationTrajectory
@@ -387,7 +471,11 @@
       window.cadsceneSetPureRotationEditMode?.(nextMode);
       return pureRotationEditModeReady;
     }
+    const preservedManual = nextMode === "correction"
+      ? window.cadsceneGetCurrentCameraPose?.()
+      : null;
     pureRotationEditMode = nextMode;
+    pureRotationEditModeTransitioning = true;
     document.querySelector("#sourceVideo")?.pause();
     window.cadsceneSetPureRotationEditMode?.(pureRotationEditMode);
     if (pureRotationEditMode === "placement") {
@@ -399,6 +487,8 @@
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
         return null;
+      }).finally(() => {
+        pureRotationEditModeTransitioning = false;
       });
       window.cadsceneEnsureVirtualCameraNearCad?.();
       window.cadsceneFocusVirtualCamera?.();
@@ -409,10 +499,13 @@
         pureRotationTrajectory = trajectory;
         pureRotationTrajectoryKind = target;
         applyPureRotationPose();
+        if (preservedManual) seedPureRotationCorrectionDraftFromManual(preservedManual);
         return trajectory;
       }).catch((error) => {
         message.textContent = `旋转轨迹不可用：${error.message}`;
         return null;
+      }).finally(() => {
+        pureRotationEditModeTransitioning = false;
       });
       message.textContent = "姿态关键帧：位置和 FOV 已锁定，只调整 Yaw/Pitch/Roll。";
     }
@@ -437,15 +530,20 @@
     pureRotationHasPlacement = true;
     pureRotationSavedPlacement = placement;
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
     updatePureRotationFovSource();
     pureRotationTrajectory = await loadPureRotationTrack("base");
     pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
+    refreshPureRotationCorrectionDraftBase();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
   }
 
   async function restorePureRotationPlacement() {
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftBase = null;
+    pureRotationCorrectionDraftDirty = false;
     if (!pureRotationSavedPlacement) {
       seedPureRotationDraftPlacement();
       pureRotationFovSource = "unverified_candidate_intrinsics";
@@ -465,7 +563,7 @@
 
   async function refreshPureRotationFittedPreview() {
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
-    const target = pureRotationCorrections.length ? "corrected" : "base";
+    const target = "base";
     pureRotationTrajectory = await loadPureRotationTrack(target);
     pureRotationTrajectoryKind = target;
     pureRotationDraftPlacement = null;
@@ -482,6 +580,7 @@
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== correction.decoded_frame_index || item.segment_id !== correction.segment_id);
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
+    pureRotationCorrectionDraftDirty = false;
     await refreshPureRotationFittedPreview();
     message.textContent = `已保存姿态关键帧 ${correction.decoded_frame_index}。`;
   }
@@ -491,16 +590,22 @@
     if (!active) return;
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
+    pureRotationCorrectionDraftDirty = false;
     await refreshPureRotationFittedPreview();
     message.textContent = `已删除姿态关键帧 ${active.decoded_frame_index}。`;
   }
 
   async function finishPureRotationCalibration() {
+    await ensureProjectWorkbenchSession();
     if (pureRotationEditMode === "placement" || !pureRotationHasPlacement) {
       await savePureRotationPlacement();
     }
     if (!pureRotationHasPlacement) throw new Error("请先保存全局固定相机放置");
     await refreshPureRotationFittedPreview();
+    await finalizeProjectWorkbenchSave(
+      { ok: true, kind: "pure_rotation_calibration" },
+      { navigate: false },
+    );
     setWorkflowStage("render");
     message.textContent = "当前相机设置和关键帧拟合轨迹已保存，可以预览或开始渲染。";
   }
@@ -533,6 +638,7 @@
 
   function undoPureRotationDraft() {
     pureRotationDraftPlacement = null;
+    pureRotationCorrectionDraftDirty = false;
     applyPureRotationPose();
     refreshPureRotationCorrectionDraftBase();
     message.textContent = "已撤销当前未保存的姿态调整。";
@@ -548,6 +654,10 @@
 
   function refreshSupplementalWorkflowActionAvailability(isRunning = false) {
     const blocked = Boolean(isRunning) || trajectoryWorkflowActionsAreBlocked();
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = blocked;
+      if (!blocked) button.removeAttribute("title");
+    });
     const generate = document.querySelector("#workflowGenerateKeyframes");
     const finishQuality = document.querySelector("#workflowFinishQuality");
     const returnKeyframes = document.querySelector("#workflowReturnKeyframes");
@@ -599,15 +709,42 @@
 
   async function loadManifestBackedTrajectoryWorkflow() {
     if (!dataset) return;
+    let projectWorkbenchWorkflowMode = null;
+    if (projectWorkbenchToken) {
+      try {
+        await ensureProjectWorkbenchSession();
+        projectWorkbenchWorkflowMode = projectWorkbenchSession.workflow === "pure_rotation"
+          ? "pure_rotation"
+          : "sfm_only";
+      } catch (error) {
+        trajectoryWorkflowLoaded = false;
+        message.textContent = `项目会话不可用：${error.message}`;
+        return;
+      }
+    }
     try {
       const response = await fetch(`/api/workflow/dataset-manifest?dataset=${encodeURIComponent(dataset)}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       if (ensureManifestViewerPaths(payload?.manifest)) return;
-      trajectoryWorkflow = payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" };
+      const manifestWorkflow = payload?.manifest?.workflow || {};
+      trajectoryWorkflow = projectWorkbenchWorkflowMode
+        ? {
+            ...manifestWorkflow,
+            trajectory_mode: projectWorkbenchWorkflowMode,
+            implementation_status: "ready",
+          }
+        : (payload?.manifest?.workflow || { trajectory_mode: "sfm_only", implementation_status: "ready" });
     } catch (error) {
+      if (projectWorkbenchWorkflowMode) {
+        trajectoryWorkflow = {
+          trajectory_mode: projectWorkbenchWorkflowMode,
+          implementation_status: "ready",
+        };
+      } else {
       // Preserve legacy dataset/run URLs when a manifest is unavailable.
-      trajectoryWorkflow = { trajectory_mode: "sfm_only", implementation_status: "ready" };
+        trajectoryWorkflow = { trajectory_mode: "sfm_only", implementation_status: "ready" };
+      }
     }
     trajectoryWorkflowLoaded = true;
     renderTrajectoryWorkflow(trajectoryWorkflow);
@@ -709,7 +846,7 @@
       const rawReady = await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"));
       if (rawReady) {
         updatePureRotationRecoveryActions({ ready: true });
-        return "sfm";
+        return "keyframes";
       }
       const viewerPaths = window.resolveViewerPaths ? window.resolveViewerPaths() : {};
       const videoReady = await resourceExists(viewerPaths.video);
@@ -752,9 +889,20 @@
       ? "OpenGV 旋转轨迹恢复"
       : (latestJobStatus?.status === "running" && operation === "alignment" ? "路线拟合" : stageTitles[stage]);
     title.textContent = `当前任务：${taskTitle}`;
-    stateLabel.textContent = stageStatus?.status || "pending";
+    stateLabel.textContent = stageStatus?.status || "待启动";
     progress.value = Number(stageStatus?.progress || 0);
     message.textContent = stageStatus?.error || stageStatus?.message || "等待任务";
+    if (stage === "render" && projectWorkbenchRenderJobId) {
+      progress.value = projectRenderVisibleProgress;
+      stateLabel.textContent = projectRenderStatusCopy(
+        projectWorkbenchRenderStatus,
+        projectWorkbenchRenderStatus,
+      );
+      message.textContent = projectWorkbenchRenderStatus === "validating"
+        ? "正在封装并验证渲染结果"
+        : projectRenderStatusCopy(projectWorkbenchRenderStatus, projectWorkbenchRenderStatus);
+      return;
+    }
     if (stage === "render" && operation === "render" && latestJobStatus?.status === "running") {
       if (renderProgressState) progress.value = renderProgressState.completed / renderProgressState.total;
       message.textContent = "正在渲染";
@@ -787,10 +935,6 @@
     const calibrationPanel = document.querySelector("#pureRotationCalibrationPanel");
     if (calibrationPanel) {
       calibrationPanel.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
-    }
-    const correctionActions = document.querySelector("#pureRotationCorrectionActions");
-    if (correctionActions) {
-      correctionActions.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");
     }
     updateWorkflowStepActive(selectedWorkflowStage);
     renderWorkflowPanel(selectedWorkflowStage);
@@ -906,6 +1050,10 @@
   function maybeAutoApplySfmCameraInit() {
     if (!trajectoryWorkflowLoaded) return;
     if (!viewerReadyForSfmCameraInit || isPureRotationWorkflow()) return;
+    if (projectWorkbenchTrajectoryIsPending()) {
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      return;
+    }
     if (typeof window.cadsceneApplyCameraParameters !== "function") return;
     applySfmCameraInitializationOnce().catch((error) => {
       message.textContent = `SfM 相机参数初值不可用：${error.message}`;
@@ -928,6 +1076,13 @@
   }
 
   async function pollJobStatus() {
+    if (projectWorkbenchTrajectoryOwnsStatus()) return;
+    if (projectWorkbenchTrajectoryIsPending()) {
+      stateLabel.textContent = "待启动";
+      if (!selectedWorkflowStage) setWorkflowStage("sfm");
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      return;
+    }
     const path = runPath("job_status.json");
     if (!path) {
       stateLabel.textContent = "未指定 dataset/runId";
@@ -1111,6 +1266,10 @@
     if (!dataset || !runId) {
       throw new Error("请先通过 URL 指定 dataset 和 runId。");
     }
+    if (projectWorkbenchToken && stage === "sfm") {
+      await ensureProjectWorkbenchSession();
+      return runProjectWorkbenchTrajectory();
+    }
     const result = await apiPost("/api/workflow/run-stage", {
       dataset,
       runId,
@@ -1135,11 +1294,16 @@
     if (!dataset || !runId) {
       throw new Error("请先通过 URL 指定 dataset 和 runId。");
     }
+    if (projectWorkbenchToken) {
+      await ensureProjectWorkbenchSession();
+      return runProjectWorkbenchTrajectory();
+    }
     if (!force && await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"))) {
       await initializePureRotationViewer();
       updatePureRotationRecoveryActions({ ready: true });
-      setWorkflowStage("sfm");
-      message.textContent = "旋转轨迹恢复已完成，可以进入关键帧标定。";
+      sessionStorage.setItem(restoredWorkflowStageKey(), "keyframes");
+      setWorkflowStage("keyframes");
+      message.textContent = "旋转轨迹恢复已完成，已进入调试环节。";
       return { ok: true, reused: true };
     }
     const result = await apiPost("/api/pure-rotation/run", {
@@ -1170,6 +1334,336 @@
     await loadKeyframePlan();
     return result;
   }
+
+  async function bootstrapProjectWorkbenchSession() {
+    if (!projectWorkbenchToken || !projectWorkbenchProjectId) return null;
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`,
+      { cache: "no-store" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    projectWorkbenchSession = payload;
+    if (projectWorkbenchTrajectoryIsPending()) {
+      document.querySelector('#workflowSteps li[data-stage="upload"]')?.classList.add("is-success");
+      setWorkflowStage("sfm");
+      stateLabel.textContent = "待启动";
+      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+    } else {
+      maybeAutoApplySfmCameraInit();
+    }
+    return payload;
+  }
+
+  function projectWorkbenchTrajectoryIsPending() {
+    return Boolean(
+      projectWorkbenchToken
+      && (!projectWorkbenchSession || projectWorkbenchSession.launch_mode === "workflow_start")
+    );
+  }
+
+  function projectWorkbenchTrajectoryOwnsStatus() {
+    return Boolean(
+      projectWorkbenchToken
+      && (projectWorkbenchTrajectoryStatus || projectWorkbenchRenderStatus),
+    );
+  }
+
+  async function ensureProjectWorkbenchSession() {
+    if (!projectWorkbenchToken) return null;
+    if (projectWorkbenchSession) return projectWorkbenchSession;
+    if (!projectWorkbenchBootstrapPromise) {
+      projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
+    }
+    return projectWorkbenchBootstrapPromise;
+  }
+
+  async function projectWorkbenchRequest(path, body) {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}${path}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    }
+    return payload;
+  }
+
+  async function renewProjectWorkbenchSession(expectedRevision) {
+    const renewed = await projectWorkbenchRequest(
+      `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/heartbeat`,
+      { expected_revision: expectedRevision },
+    );
+    projectWorkbenchSession = { ...projectWorkbenchSession, ...renewed };
+    return renewed;
+  }
+
+  function projectTrajectoryStatusCopy(status, stage) {
+    const labels = {
+      queued: "已进入资源队列",
+      preparing: "正在准备轨迹解算输入",
+      running: "正在进行轨迹解算",
+      validating: "正在验证轨迹结果",
+      success: "轨迹解算完成",
+      failed: "轨迹解算失败",
+      interrupted: "轨迹解算已中断",
+      cancelled: "轨迹解算已取消",
+      stale_input: "输入已变化，本次结果未发布",
+      superseded: "本次结果已被新任务取代",
+    };
+    return labels[status] || stage || "等待轨迹任务";
+  }
+
+  async function waitForProjectWorkbenchTrajectory(jobId) {
+    const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    let lastHeartbeatAt = 0;
+    while (true) {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+      const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
+      if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
+      projectWorkbenchTrajectoryStatus = String(clip.status || clip.stage || "queued");
+      if (terminal.has(clip.status)) {
+        projectWorkbenchTrajectoryJobId = null;
+        document.querySelector("#workflowCancel").hidden = true;
+        refreshSupplementalWorkflowActionAvailability(false);
+        if (clip.status !== "success") {
+          throw new Error(projectTrajectoryStatusCopy(clip.status, clip.stage));
+        }
+        const renewed = await renewProjectWorkbenchSession(snapshot.component_revisions.clips);
+        const attached = await projectWorkbenchRequest(
+          `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/trajectory-ready`,
+          { expected_revision: renewed.clips_revision },
+        );
+        projectWorkbenchSession = { ...projectWorkbenchSession, ...attached };
+        progress.value = 1;
+        stateLabel.textContent = "已完成";
+        message.textContent = isPureRotationWorkflow()
+          ? "旋转轨迹已验证，正在进入调试环节"
+          : "轨迹结果已验证，正在载入关键帧标定工作台";
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.set("workflowStage", "keyframes");
+        projectWorkbenchInternalNavigation = true;
+        window.location.replace(nextUrl.toString());
+        return attached;
+      }
+      const now = Date.now();
+      if (now - lastHeartbeatAt >= PROJECT_WORKBENCH_HEARTBEAT_MS) {
+        await renewProjectWorkbenchSession(snapshot.component_revisions.clips);
+        lastHeartbeatAt = now;
+      }
+      let renderedRuntime = false;
+      try {
+        const runtimeResponse = await fetch(
+          `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
+          { cache: "no-store" },
+        );
+        if (runtimeResponse.ok) {
+          const runtime = await runtimeResponse.json();
+          if (runtime.workflow_status) {
+            await renderStatus(runtime.workflow_status);
+            renderedRuntime = true;
+          }
+          const content = document.querySelector("#workflowLogContent");
+          if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
+        }
+      } catch (error) {
+        // 实时详情读取失败时继续使用项目 snapshot，不能中断任务状态跟踪。
+      }
+      if (!renderedRuntime) {
+        const fraction = clip.progress?.fraction;
+        if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
+        stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+        message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+  }
+
+  async function runProjectWorkbenchTrajectory() {
+    if (projectWorkbenchTrajectoryStartPromise) {
+      return projectWorkbenchTrajectoryStartPromise;
+    }
+    projectWorkbenchTrajectoryStartPromise = runProjectWorkbenchTrajectoryOnce();
+    try {
+      return await projectWorkbenchTrajectoryStartPromise;
+    } finally {
+      projectWorkbenchTrajectoryStartPromise = null;
+      if (!projectWorkbenchTrajectoryJobId) {
+        refreshSupplementalWorkflowActionAvailability(false);
+      }
+    }
+  }
+
+  async function runProjectWorkbenchTrajectoryOnce() {
+    if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
+    if (projectWorkbenchSession.launch_mode === "trajectory_ready") {
+      throw new Error("当前片段已有可用轨迹；如需重算，请返回片段管理页面重试");
+    }
+    const clipId = projectWorkbenchSession.clip_id;
+    projectWorkbenchTrajectoryStatus = "checking";
+    stateLabel.textContent = "正在检查任务";
+    message.textContent = "正在确认当前片段的轨迹任务状态";
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = true;
+    });
+    const snapshotResponse = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+      { cache: "no-store" },
+    );
+    const snapshot = await snapshotResponse.json().catch(() => ({}));
+    if (!snapshotResponse.ok) throw new Error(snapshot.error || `HTTP ${snapshotResponse.status}`);
+    projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+    const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
+    if (!currentClip) throw new Error("项目中找不到当前片段");
+
+    const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
+    const retryStatuses = new Set(["failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    let jobId = null;
+    if (currentClip.job_id && activeStatuses.has(currentClip.status)) {
+      jobId = currentClip.job_id;
+    } else if (currentClip.job_id && retryStatuses.has(currentClip.status)) {
+      const retried = await projectWorkbenchRequest(
+        `/jobs/${encodeURIComponent(currentClip.job_id)}/retry`,
+        { expected_revision: snapshot.component_revisions.jobs },
+      );
+      jobId = retried.job_id;
+      projectWorkbenchSession.jobs_revision = retried.jobs_revision;
+    } else {
+      const preflight = await projectWorkbenchRequest("/trajectory-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        enqueue: false,
+      });
+      const confirmed = (preflight.needs_confirmation || []).includes(clipId) ? [clipId] : [];
+      const queued = await projectWorkbenchRequest("/trajectory-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        confirmed_clip_ids: confirmed,
+        enqueue: true,
+      });
+      jobId = queued.job_ids?.[0];
+      projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+    }
+    if (!jobId) throw new Error("轨迹任务未能进入队列");
+    projectWorkbenchTrajectoryJobId = jobId;
+    projectWorkbenchTrajectoryStatus = "queued";
+    runningStage = isPureRotationWorkflow() ? "pure_rotation" : "sfm";
+    progress.value = 0;
+    stateLabel.textContent = "排队中";
+    message.textContent = "已进入资源队列，算法将在获得资源后启动";
+    document.querySelector("#workflowCancel").hidden = false;
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = true;
+    });
+    return waitForProjectWorkbenchTrajectory(jobId);
+  }
+
+  async function finalizeProjectWorkbenchSave(result, { navigate = true } = {}) {
+    if (!projectWorkbenchToken) return null;
+    if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
+    if (projectWorkbenchSaveInFlight) return null;
+    if (projectWorkbenchSession.state !== "editing" && projectWorkbenchSession.state !== "pending_save") return null;
+    projectWorkbenchSaveInFlight = true;
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchSession.project_id)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/save`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: projectWorkbenchSession.clips_revision,
+            existing_save: result,
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
+      if (navigate) window.location.assign(projectWorkbenchSession.return_to);
+      return payload;
+    } finally {
+      projectWorkbenchSaveInFlight = false;
+    }
+  }
+
+  async function finishQualityStage() {
+    await ensureProjectWorkbenchSession();
+    const result = await saveCurrentCameraTrack();
+    await finalizeProjectWorkbenchSave(result, { navigate: false });
+    setWorkflowStage("render");
+  }
+
+  async function persistWorkbenchDraftForReturn() {
+    if (!projectWorkbenchToken || !projectWorkbenchSession) return null;
+    if (projectWorkbenchTrajectoryIsPending()) return null;
+    if (isPureRotationWorkflow()) {
+      if (
+        window.pureRotationViewer?.pose
+        && (pureRotationEditMode === "placement" || !pureRotationHasPlacement)
+      ) {
+        await savePureRotationPlacement();
+      }
+      if (pureRotationCorrections.length) {
+        await apiPost("/api/pure-rotation/corrections", {
+          dataset,
+          runId,
+          corrections: pureRotationCorrections,
+        });
+      }
+      return { ok: true, kind: "pure_rotation_draft" };
+    }
+    if (typeof window.cadsceneGetCameraTrack === "function") {
+      return saveCurrentCameraTrack();
+    }
+    return null;
+  }
+
+  async function returnToProjectWorkspace() {
+    await ensureProjectWorkbenchSession();
+    await persistWorkbenchDraftForReturn();
+    if (
+      projectWorkbenchSession.state === "editing"
+      || projectWorkbenchSession.state === "pending_save"
+    ) {
+      const closed = await projectWorkbenchRequest(
+        `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/close`,
+        { expected_revision: projectWorkbenchSession.clips_revision },
+      );
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...closed };
+    }
+    projectWorkbenchInternalNavigation = true;
+    window.location.assign(projectWorkbenchSession.return_to);
+  }
+
+  window.addEventListener("pagehide", () => {
+    if (
+      projectWorkbenchInternalNavigation
+      || projectWorkbenchSaveInFlight
+      || !projectWorkbenchSession
+      || projectWorkbenchSession.state !== "editing"
+    ) return;
+    fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchSession.project_id)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/close`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: projectWorkbenchSession.clips_revision }),
+        keepalive: true,
+      },
+    ).catch(() => {});
+  });
 
   function updateKeyframePlanUi() {
     const alignmentButton = document.querySelector("#workflowRunAlignment");
@@ -1325,13 +1819,185 @@
     }
   }
 
+  function projectRenderStatusCopy(status, stage) {
+    const labels = {
+      queued: "已进入渲染队列",
+      preparing: "正在准备渲染输入",
+      running: "正在渲染片段",
+      validating: "正在验证渲染结果",
+      success: "片段渲染完成",
+      failed: "片段渲染失败",
+      interrupted: "片段渲染已中断",
+      cancelled: "片段渲染已取消",
+      stale_input: "输入已变化，本次渲染未发布",
+      superseded: "本次渲染已被新任务取代",
+    };
+    return labels[status] || stage || "等待渲染任务";
+  }
+
+  function setProjectRenderVisibleProgress(candidate, { complete = false } = {}) {
+    const numeric = Number(candidate);
+    if (!Number.isFinite(numeric)) return projectRenderVisibleProgress;
+    const bounded = complete ? 1 : Math.min(0.99, Math.max(0, numeric));
+    projectRenderVisibleProgress = Math.max(projectRenderVisibleProgress, bounded);
+    progress.value = projectRenderVisibleProgress;
+    return projectRenderVisibleProgress;
+  }
+
+  function projectRenderPreflightCopy(reason) {
+    const value = String(reason || "");
+    if (value.includes("media specification")) return "项目视频规格尚未准备完成，请重新分析后再试";
+    if (value.includes("render adapter is unavailable")) return "当前工作流的渲染能力尚不可用";
+    if (value.includes("saved workbench output")) return "请先保存当前工作台调试结果";
+    if (value.includes("trajectory")) return "当前轨迹结果无效或已过期，请重新解算";
+    return value || "当前片段尚不满足渲染条件";
+  }
+
+  async function waitForProjectWorkbenchRender(jobId) {
+    const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
+    while (true) {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+      const clip = (snapshot.clips || []).find(
+        (item) => item.clip_id === projectWorkbenchSession.clip_id,
+      );
+      if (!clip || clip.render?.job_id !== jobId) {
+        throw new Error("无法读取当前片段的渲染任务状态");
+      }
+      const render = clip.render;
+      projectWorkbenchRenderStatus = String(render.status || render.stage || "queued");
+      if (terminal.has(render.status)) {
+        if (render.status === "success") {
+          setProjectRenderVisibleProgress(1, { complete: true });
+        }
+        projectWorkbenchRenderJobId = null;
+        runningStage = null;
+        if (render.status !== "success") {
+          projectWorkbenchRenderStatus = null;
+          throw new Error(projectRenderStatusCopy(render.status, render.stage));
+        }
+        projectWorkbenchRenderStatus = "success";
+        projectRenderOutputUrl = render.preview_url || null;
+        stateLabel.textContent = "已完成";
+        message.textContent = "片段渲染完成；可以预览视频，或返回项目管理继续处理其他片段。";
+        await refreshRenderOutputState();
+        return render;
+      }
+      const fraction = render.progress?.fraction;
+      if (typeof fraction === "number") setProjectRenderVisibleProgress(fraction);
+      stateLabel.textContent = projectRenderStatusCopy(render.status, render.stage);
+      if (render.status === "validating") {
+        message.textContent = "正在封装并验证渲染结果";
+      } else {
+        message.textContent = projectRenderStatusCopy(render.status, render.stage);
+      }
+      try {
+        const runtimeResponse = await fetch(
+          `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
+          { cache: "no-store" },
+        );
+        if (runtimeResponse.ok) {
+          const runtime = await runtimeResponse.json();
+          const content = document.querySelector("#workflowLogContent");
+          if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
+          updateRenderProgressFromLog("render", runtime.lines || []);
+        }
+      } catch (error) {
+        // 实时日志暂不可用时继续依赖项目 snapshot 跟踪后台任务。
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+  }
+
   async function startRenderStage() {
-    await saveCurrentCameraTrack();
+    const result = await saveCurrentCameraTrack();
+    if (projectWorkbenchToken) {
+      await ensureProjectWorkbenchSession();
+      await finalizeProjectWorkbenchSave(result, { navigate: false });
+      const clipId = projectWorkbenchSession.clip_id;
+      const snapshotResponse = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      const snapshot = await snapshotResponse.json().catch(() => ({}));
+      if (!snapshotResponse.ok) throw new Error(snapshot.error || `HTTP ${snapshotResponse.status}`);
+      projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+      projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+      const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
+      const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
+      if (currentClip?.render?.job_id && activeStatuses.has(currentClip.render.status)) {
+        renderProgressState = null;
+        projectRenderVisibleProgress = 0;
+        projectWorkbenchRenderJobId = currentClip.render.job_id;
+        projectWorkbenchRenderStatus = currentClip.render.status;
+        runningStage = "project_render";
+        message.textContent = "已恢复当前片段的后台渲染任务。";
+        return waitForProjectWorkbenchRender(currentClip.render.job_id);
+      }
+      const preflight = await projectWorkbenchRequest("/render-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        enqueue: false,
+      });
+      if (!(preflight.eligible || []).includes(clipId)) {
+        runningStage = null;
+        progress.value = 0;
+        stateLabel.textContent = "无法开始渲染";
+        throw new Error(projectRenderPreflightCopy(preflight.reasons?.[clipId]));
+      }
+      const queued = await projectWorkbenchRequest("/render-jobs", {
+        expected_revision: projectWorkbenchSession.jobs_revision,
+        clip_ids: [clipId],
+        confirmed_clip_ids: [],
+        enqueue: true,
+      });
+      const jobId = queued.job_ids?.[0];
+      if (!jobId) throw new Error("渲染任务未能进入项目队列");
+      projectWorkbenchSession.jobs_revision = queued.jobs_revision;
+      renderProgressState = null;
+      projectRenderVisibleProgress = 0;
+      projectWorkbenchRenderJobId = jobId;
+      projectWorkbenchRenderStatus = "queued";
+      runningStage = "project_render";
+      progress.value = 0;
+      stateLabel.textContent = "排队中";
+      message.textContent = "渲染任务已进入后台队列；返回项目管理不会中断任务。";
+      document.querySelector("#workflowCancel").hidden = true;
+      return waitForProjectWorkbenchRender(jobId);
+    }
     message.textContent = "正在用最新人工关键帧重新拟合路线并渲染。";
     return runStage("render");
   }
 
   async function cancelRunningJob() {
+    if (projectWorkbenchToken) {
+      if (!projectWorkbenchTrajectoryJobId) return null;
+      const jobId = projectWorkbenchTrajectoryJobId;
+      const previousStatus = projectWorkbenchTrajectoryStatus;
+      projectWorkbenchTrajectoryJobId = null;
+      projectWorkbenchTrajectoryStatus = "cancelled";
+      document.querySelector("#workflowCancel").hidden = true;
+      try {
+        const cancelled = await projectWorkbenchRequest(
+          `/jobs/${encodeURIComponent(jobId)}/cancel`,
+          { expected_revision: projectWorkbenchSession.jobs_revision },
+        );
+        projectWorkbenchSession.jobs_revision = cancelled.jobs_revision;
+        message.textContent = "已请求取消轨迹任务";
+        return cancelled;
+      } catch (error) {
+        projectWorkbenchTrajectoryJobId = jobId;
+        projectWorkbenchTrajectoryStatus = previousStatus;
+        document.querySelector("#workflowCancel").hidden = false;
+        throw error;
+      }
+    }
     await apiPost("/api/workflow/cancel", { dataset, runId });
     runningStage = null;
     sessionStorage.removeItem(`cadsceneJobReload:${dataset}:${runId}`);
@@ -1346,13 +2012,22 @@
       const completed = Number(match[1]);
       const total = Math.max(1, Number(match[2]));
       renderProgressState = { completed, total };
-      progress.value = Math.min(1, completed / total);
-      message.textContent = "正在渲染";
+      if (projectWorkbenchRenderJobId) {
+        setProjectRenderVisibleProgress(completed / total);
+        message.textContent = completed >= total
+          ? "正在封装并验证渲染结果"
+          : `正在渲染 ${completed}/${total}`;
+      } else {
+        progress.value = Math.min(1, completed / total);
+        message.textContent = "正在渲染";
+      }
       return;
     }
   }
 
   async function pollJobLog() {
+    if (projectWorkbenchTrajectoryOwnsStatus()) return;
+    if (projectWorkbenchTrajectoryIsPending()) return;
     const stage = runningStage || latestJobStatus?.current_stage || selectedWorkflowStage;
     if (!dataset || !runId || !["sfm", "alignment", "quality", "render"].includes(stage)) return;
     try {
@@ -1493,17 +2168,12 @@
   document.querySelector("#workflowStartSfm")?.addEventListener("click", () => runWithMessage(() => runStage("sfm")));
   document.querySelector("#workflowStartPureRotation")?.addEventListener("click", () => runWithMessage(() => runPureRotationStage()));
   document.querySelector("#workflowRerunPureRotation")?.addEventListener("click", () => runWithMessage(() => runPureRotationStage({ force: true })));
-  document.querySelector("#workflowEnterPureCalibration")?.addEventListener("click", () => {
-    setWorkflowStage("keyframes");
-    setPureRotationEditMode("placement");
-    document.querySelector("#cameraControls")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  });
   // 路线拟合放在关键帧标定阶段：先保存当前关键帧，再启动 alignment job。
   document.querySelector("#workflowRunAlignment")?.addEventListener("click", () => runWithMessage(startAlignmentStage));
   // 质量检测只启动 quality job（不再包含路线拟合）。
   document.querySelector("#workflowRunQuality")?.addEventListener("click", () => runWithMessage(startQualityStage));
   document.querySelector("#workflowRerunQuality")?.addEventListener("click", () => runWithMessage(startQualityStage));
-  document.querySelector("#workflowFinishQuality")?.addEventListener("click", () => setWorkflowStage("render"));
+  document.querySelector("#workflowFinishQuality")?.addEventListener("click", () => runWithMessage(finishQualityStage));
   document.querySelector("#workflowReturnKeyframes")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#workflowRender")?.addEventListener("click", () => runWithMessage(startRenderStage));
   document.querySelector("#workflowCancel")?.addEventListener("click", () => runWithMessage(cancelRunningJob));
@@ -1512,17 +2182,23 @@
     else runWithMessage(finishKeyframePlan);
   });
   document.querySelector("#workflowPureFinishKeyframes")?.addEventListener("click", () => runWithMessage(finishPureRotationCalibration));
-  document.querySelector("#workflowPreviewPureFitted")?.addEventListener("click", () => runWithMessage(previewPureRotationFittedTrack));
+  document.querySelector("#workbenchThemeToggle")?.addEventListener("click", () => {
+    const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyWorkbenchTheme(theme);
+  });
+  const workbenchReturnButton = document.querySelector("#workbenchReturnButton");
+  if (workbenchReturnButton) workbenchReturnButton.hidden = !projectWorkbenchToken;
+  workbenchReturnButton?.addEventListener("click", () => {
+    document.querySelector("#workbenchReturnDialog")?.showModal();
+  });
+  document.querySelector("#workbenchConfirmReturn")?.addEventListener("click", () => {
+    runWithMessage(returnToProjectWorkspace);
+  });
   document.querySelector("#workflowReturnPureCalibration")?.addEventListener("click", () => setWorkflowStage("keyframes"));
   document.querySelector("#pureRotationPlacementSection")?.addEventListener("focusin", () => setPureRotationEditMode("placement"));
-  document.querySelector("#pureRotationCorrectionSection")?.addEventListener("focusin", () => setPureRotationEditMode("correction"));
   document.querySelector("#pureRotationSavePlacement")?.addEventListener("click", () => runWithMessage(savePureRotationPlacement));
   document.querySelector("#pureRotationRestorePlacement")?.addEventListener("click", () => runWithMessage(restorePureRotationPlacement));
-  document.querySelector("#pureRotationAddCorrection")?.addEventListener("click", () => runWithMessage(addPureRotationCorrection));
-  document.querySelector("#pureRotationDeleteCorrection")?.addEventListener("click", () => runWithMessage(deletePureRotationCorrection));
-  document.querySelector("#pureRotationPreviousCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(-1));
-  document.querySelector("#pureRotationNextCorrection")?.addEventListener("click", () => jumpPureRotationCorrection(1));
-  document.querySelector("#pureRotationUndoDraft")?.addEventListener("click", undoPureRotationDraft);
   document.querySelector("#pureRotationWorldYaw")?.addEventListener("input", (event) => {
     previewPureRotationWorldYaw(event.target.value);
   });
@@ -1570,14 +2246,48 @@
   const previewDialog = document.querySelector("#workflowRenderPreviewDialog");
   const previewVideo = document.querySelector("#workflowRenderPreviewVideo");
 
+  function activeRenderPath() {
+    return projectRenderOutputUrl || renderPath;
+  }
+
   async function refreshRenderOutputState() {
-    if (!renderPath) return false;
+    if (projectWorkbenchToken && projectWorkbenchProjectId && projectWorkbenchSession?.clip_id) {
+      const snapshotResponse = await fetch(
+        `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+        { cache: "no-store" },
+      );
+      if (snapshotResponse.ok) {
+        const snapshot = await snapshotResponse.json();
+        const clip = (snapshot.clips || []).find(
+          (item) => item.clip_id === projectWorkbenchSession.clip_id,
+        );
+        if (clip?.render?.preview_url) {
+          projectRenderOutputUrl = clip.render.preview_url;
+          if (clip.render.status === "success") {
+            projectWorkbenchRenderStatus = "success";
+            setProjectRenderVisibleProgress(1, { complete: true });
+            if (selectedWorkflowStage === "render") {
+              stateLabel.textContent = "已完成";
+              message.textContent = "渲染视频已生成，可预览或下载。";
+            }
+          } else if (selectedWorkflowStage === "render") {
+            stateLabel.textContent = projectRenderStatusCopy(
+              clip.render.status,
+              clip.render.stage,
+            );
+            message.textContent = "当前输入已变化；仍可预览或下载上一次已验证的渲染结果。";
+          }
+        }
+      }
+    }
+    const candidate = activeRenderPath();
+    if (!candidate) return false;
     try {
-      const response = await fetch(renderPath, { method: "HEAD", cache: "no-store" });
+      const response = await fetch(candidate, { method: "HEAD", cache: "no-store" });
       const ready = response.ok;
       if (preview) preview.disabled = !ready;
       if (download) {
-        download.href = ready ? renderPath : "#";
+        download.href = ready ? candidate : "#";
         download.toggleAttribute("aria-disabled", !ready);
       }
       return ready;
@@ -1591,7 +2301,9 @@
   if (renderPath) {
     preview?.addEventListener("click", () => {
       if (!previewDialog || !previewVideo) return;
-      previewVideo.src = `${renderPath}${renderPath.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const candidate = activeRenderPath();
+      if (!candidate) return;
+      previewVideo.src = `${candidate}${candidate.includes("?") ? "&" : "?"}t=${Date.now()}`;
       if (typeof previewDialog.showModal === "function") previewDialog.showModal();
       else previewDialog.setAttribute("open", "");
     });
@@ -1609,13 +2321,22 @@
   if (debugEnabled) {
     document.querySelectorAll(".dev-only-control").forEach((node) => node.classList.add("is-debug-visible"));
   }
+  initializeWorkbenchTheme();
   loadWorkflowSuggestions();
+  if (projectWorkbenchToken) {
+    projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
+    projectWorkbenchBootstrapPromise.catch((error) => {
+      message.textContent = `项目会话不可用：${error.message}`;
+    });
+  }
   loadDatasetManifestForUpload();
   blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
   const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
-  if (stageOrder.includes(restoredWorkflowStage)) {
+  if (stageOrder.includes(requestedWorkflowStage)) {
+    setWorkflowStage(requestedWorkflowStage);
+  } else if (stageOrder.includes(restoredWorkflowStage)) {
     sessionStorage.removeItem(restoredWorkflowStageKey());
     setWorkflowStage(restoredWorkflowStage);
   } else {

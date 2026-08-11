@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import threading
 import unicodedata
 import zipfile
 from datetime import datetime, timezone
@@ -22,6 +24,7 @@ RAW_CAD_EXTENSIONS = {".dxf", ".dwg"}
 CAD_ARCHIVE_EXTENSIONS = {".zip"}
 PROMOTED_CAD_ASSETS = {"design.json", "road_center.json", "road_edge.json", "road_ref.json", "cad_meta.json"}
 COPY_CHUNK_SIZE = 1024 * 1024
+_ATOMIC_WRITE_LOCK = threading.RLock()
 
 
 def _now_iso() -> str:
@@ -55,17 +58,34 @@ def _manifest_path(root: str | Path, dataset: str) -> Path:
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    _atomic_text(
+        path,
+        json.dumps(dict(payload), ensure_ascii=False, indent=2),
+    )
 
 
 def _atomic_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8")
-    os.replace(temporary, path)
+    with _ATOMIC_WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _default_srt() -> dict[str, Any]:

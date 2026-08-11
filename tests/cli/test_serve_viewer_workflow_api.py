@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import socket
 import subprocess
 import sys
 import time
 from http.client import HTTPConnection
 from pathlib import Path
+
+import pytest
 
 
 def _free_port() -> int:
@@ -89,6 +92,106 @@ def test_pure_rotation_options_use_configured_source_root_as_readonly_input(tmp_
         {"source": source},
     )
     assert explicit["cadscene_readonly"] == "C:/explicit"
+
+
+def test_pure_rotation_corrections_endpoint_publishes_matching_lineage(
+    tmp_path: Path,
+) -> None:
+    base_path = (
+        tmp_path
+        / "runs/demo/r1/03_pure_rotation_placement/camera_track_cad_base.json"
+    )
+    base_path.parent.mkdir(parents=True)
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    base_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "trajectory_mode": "pure_rotation_manual_calibrated",
+                "poses": [
+                    {
+                        "decoded_frame_index": 0,
+                        "pts_time_sec": 0.0,
+                        "segment_id": 0,
+                        "rotation_cad_from_camera": identity,
+                        "camera_center_web": [1.0, 2.0, 3.0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    port = _free_port()
+    server = _start_server(tmp_path, port)
+    try:
+        status, payload = _post(
+            port,
+            "/api/pure-rotation/corrections",
+            {"dataset": "demo", "runId": "r1", "corrections": []},
+        )
+        corrected_path = (
+            tmp_path
+            / "runs/demo/r1/04_pure_rotation_corrections/camera_track_corrected.json"
+        )
+        lineage_path = corrected_path.with_name("correction_lineage.json")
+        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+
+        assert status == 200
+        assert payload["ok"] is True
+        assert lineage == {
+            "schema_version": 1,
+            "base_sha256": sha256(base_path.read_bytes()).hexdigest(),
+            "corrected_sha256": sha256(corrected_path.read_bytes()).hexdigest(),
+        }
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_pure_rotation_corrections_use_one_base_byte_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadscene.cli import serve_viewer
+
+    run_dir = tmp_path / "runs/demo/r1"
+    base_path = run_dir / "03_pure_rotation_placement/camera_track_cad_base.json"
+    base_path.parent.mkdir(parents=True)
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    original_payload = {
+        "schema_version": 1,
+        "trajectory_mode": "pure_rotation_manual_calibrated",
+        "poses": [{
+            "decoded_frame_index": 0,
+            "pts_time_sec": 0.0,
+            "segment_id": 0,
+            "rotation_cad_from_camera": identity,
+            "camera_center_web": [1.0, 2.0, 3.0],
+        }],
+    }
+    changed_payload = {
+        **original_payload,
+        "poses": [{**original_payload["poses"][0], "decoded_frame_index": 9}],
+    }
+    base_path.write_text(json.dumps(original_payload), encoding="utf-8")
+    original_bytes = base_path.read_bytes()
+    original_read_bytes = Path.read_bytes
+    changed = [False]
+
+    def replace_after_snapshot(path: Path) -> bytes:
+        snapshot = original_read_bytes(path)
+        if path.resolve() == base_path.resolve() and not changed[0]:
+            changed[0] = True
+            base_path.write_text(json.dumps(changed_payload), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    output = serve_viewer._publish_pure_rotation_corrections(run_dir, [])
+    lineage = json.loads(output.with_name("correction_lineage.json").read_text())
+    corrected = json.loads(output.read_text())
+
+    assert changed[0] is True
+    assert lineage["base_sha256"] == sha256(original_bytes).hexdigest()
+    assert corrected["poses"][0]["decoded_frame_index"] == 0
 
 
 def test_run_stage_api_rejects_non_whitelisted_stage(tmp_path: Path) -> None:

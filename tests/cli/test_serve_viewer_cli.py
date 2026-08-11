@@ -32,6 +32,23 @@ def test_build_parser_accepts_storage_root() -> None:
     assert args.storage_root == "storage"
 
 
+def test_build_parser_accepts_pure_rotation_backend_configuration() -> None:
+    args = serve_viewer.build_parser().parse_args(
+        [
+            "--pure-rotation-backend-root",
+            "D:/pure_rotation_camera_poc",
+            "--pure-rotation-python",
+            "D:/anaconda3/envs/pure_rotation_poc/python.exe",
+            "--pure-rotation-calibration-root",
+            "D:/cadscene/calibrations",
+        ]
+    )
+
+    assert args.pure_rotation_backend_root == "D:/pure_rotation_camera_poc"
+    assert args.pure_rotation_python.endswith("pure_rotation_poc/python.exe")
+    assert args.pure_rotation_calibration_root == "D:/cadscene/calibrations"
+
+
 def test_main_returns_one_for_missing_storage_root(tmp_path: Path) -> None:
     missing_storage_root = tmp_path / "missing-storage"
 
@@ -50,10 +67,10 @@ def test_viewer_server_exclusively_owns_its_port() -> None:
         first.server_close()
 
 
-def test_serve_viewer_serves_index_and_supports_range() -> None:
+def test_serve_viewer_serves_index_and_supports_range(tmp_path: Path) -> None:
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "cadscene.cli.serve_viewer", "--bind", "127.0.0.1", "--port", str(port)],
+        [sys.executable, "-m", "cadscene.cli.serve_viewer", "--bind", "127.0.0.1", "--port", str(port), "--storage-root", str(tmp_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -121,6 +138,8 @@ def test_serve_viewer_extra_root_serves_named_mount(tmp_path: Path) -> None:
             str(port),
             "--extra-root",
             f"legacy={legacy_root}",
+            "--storage-root",
+            str(tmp_path),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

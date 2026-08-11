@@ -60,7 +60,7 @@ def _child_process_environment(base: Mapping[str, str] | None = None) -> dict[st
     return environment
 
 
-def _read_log_text(path: str | Path) -> str:
+def read_workflow_log_text(path: str | Path) -> str:
     """读取新 UTF-8 日志，并兼容修复前由 Windows GBK 写出的日志。"""
     data = Path(path).read_bytes()
     for encoding in ("utf-8-sig", "gb18030"):
@@ -176,7 +176,7 @@ def _last_log_line(path: str | Path | None) -> str | None:
     if not path:
         return None
     try:
-        lines = _read_log_text(path).splitlines()
+        lines = read_workflow_log_text(path).splitlines()
     except OSError:
         return None
     return next((line.strip() for line in reversed(lines) if line.strip()), None)
@@ -476,9 +476,6 @@ def build_stage_command(
             str(resolved["origin_xy"][1]),
             "--track",
             str(track),
-            "--faded-overlay",
-            "--fade-start-m",
-            "250",
             "--max-distance-m",
             "900",
         ]
@@ -666,7 +663,7 @@ class JobRunner:
             log_handle = log_file.open("wb", buffering=0)
             process = subprocess.Popen(
                 [str(item) for item in command],
-                cwd=str(self.root_dir),
+                cwd=str(Path(__file__).resolve().parents[2]),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 env=_child_process_environment(),
@@ -823,7 +820,7 @@ class JobRunner:
         if stage not in ALLOWED_STAGES:
             raise ValueError(f"unsupported workflow stage: {stage}")
         path = self._run_dir(dataset, run_id) / "logs" / "workflow" / f"{stage}.log"
-        lines = _read_log_text(path).splitlines() if path.exists() else []
+        lines = read_workflow_log_text(path).splitlines() if path.exists() else []
         count = max(1, min(int(tail), 2000))
         return {"stage": stage, "log_file": str(path), "lines": lines[-count:]}
 

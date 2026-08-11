@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import ezdxf
+
+import cadscene.workflow.data_import as data_import
 
 from cadscene.workflow.data_import import (
     create_dataset,
@@ -262,6 +266,39 @@ def test_load_manifest_normalizes_legacy_srt_workflow_to_interface_only(tmp_path
     }.items()
     assert persisted["srt"] == manifest["srt"]
     assert persisted["workflow"] == manifest["workflow"]
+
+
+def test_concurrent_manifest_normalization_uses_distinct_atomic_temp_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "data/concurrent/dataset_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    original_replace = data_import.os.replace
+    start_barrier = threading.Barrier(2)
+    replace_sources: list[Path] = []
+    replace_sources_lock = threading.Lock()
+
+    def synchronized_replace(source: str | Path, destination: str | Path) -> None:
+        with replace_sources_lock:
+            replace_sources.append(Path(source))
+        original_replace(source, destination)
+
+    def write_manifest(index: int) -> None:
+        start_barrier.wait(timeout=5)
+        data_import._atomic_json(
+            manifest_path,
+            {"dataset": "concurrent", "writer": index},
+        )
+
+    monkeypatch.setattr(data_import.os, "replace", synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(write_manifest, range(2)))
+
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert persisted["writer"] in {0, 1}
+    assert len(set(replace_sources)) == 2
+    assert list(manifest_path.parent.glob(".dataset_manifest.json.*.tmp")) == []
 
 
 @pytest.mark.parametrize(

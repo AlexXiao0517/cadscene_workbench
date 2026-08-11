@@ -4,8 +4,9 @@ from pathlib import Path
 def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     script = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
-    for identifier in ("pureRotationCalibrationPanel", "pureRotationPlacementSection", "pureRotationCorrectionSection"):
+    for identifier in ("pureRotationCalibrationPanel", "pureRotationPlacementSection"):
         assert identifier in html
+    assert "pureRotationCorrectionSection" not in html
     assert "pureRotationTrack" not in html
     assert "pureRotationModePlacement" not in html
     assert "pureRotationModeCorrection" not in html
@@ -16,10 +17,13 @@ def test_viewer_has_isolated_pure_rotation_controls_and_no_sfm_path_contract() -
     assert "cadsceneApplyPureRotationPose" in legacy
     assert 'apiPost("/api/pure-rotation/placement"' in script
     assert 'apiPost("/api/pure-rotation/corrections"' in script
-    assert "pureRotationDeleteCorrection" in script
+    assert "deletePureRotationCorrection" in script
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
     assert "global_camera_placement.json" in server
     assert "rotation_correction_keyframes.json" in server
+    assert "correction_lineage.json" in server
+    assert '"base_sha256"' in server
+    assert '"corrected_sha256"' in server
 
 
 def test_pure_rotation_viewer_focus_is_automatic_not_a_debug_toolbar_action() -> None:
@@ -43,9 +47,8 @@ def test_pure_rotation_replaces_only_sfm_stage_and_skips_quality() -> None:
         "pureRotationKeyframeActions",
         "pureRotationCalibrationPanel",
         "pureRotationPlacementSection",
-        "pureRotationCorrectionSection",
         "pureRotationSavePlacement",
-        "pureRotationAddCorrection",
+        "pureRotationWorldYaw",
     ):
         assert f'id="{identifier}"' in html
     assert ">开始运行<" in html
@@ -168,10 +171,10 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     server = Path("cadscene/cli/serve_viewer.py").read_text(encoding="utf-8")
 
-    assert "style.css?v=20260729-local-camera-v8" in html
+    assert "style.css?v=20260810-background-ux" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
-    assert "viewer_legacy.js?v=20260729-local-camera-v8" in html
-    assert "workflow.js?v=20260805-sfm-fov-init-v1" in html
+    assert "viewer_legacy.js?v=20260811-project-pipeline-v1" in html
+    assert "workflow.js?v=20260811-project-pipeline-v1" in html
     assert '"Cache-Control", "no-store"' in server
 
 
@@ -180,7 +183,7 @@ def test_pure_rotation_job_status_occupies_sfm_workflow_slot() -> None:
     assert '"pure_rotation": "sfm"' in runner
 
 
-def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition() -> None:
+def test_pure_rotation_uses_four_product_stages_without_manual_recovery_transition() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
@@ -188,9 +191,9 @@ def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition
         "pureRotationRecoveryActions",
         "workflowStartPureRotation",
         "workflowRerunPureRotation",
-        "workflowEnterPureCalibration",
     ):
         assert f'id="{identifier}"' in html
+    assert 'id="workflowEnterPureCalibration"' not in html
     assert 'document.querySelector(\'#workflowSteps li[data-stage="quality"]\')' in workflow
     assert 'toggleAttribute("hidden", pure)' in workflow
     assert 'renderOrdinal.textContent = pure ? "4" : "5"' in workflow
@@ -198,8 +201,18 @@ def test_pure_rotation_uses_four_product_stages_and_explicit_recovery_transition
     assert 'sfm: "keyframes"' in pure_next
     assert 'keyframes: "render"' in pure_next
     assert "quality" not in pure_next
-    assert 'document.querySelector("#workflowEnterPureCalibration")' in workflow
+    assert 'document.querySelector("#workflowEnterPureCalibration")' not in workflow
     assert "updatePureRotationRecoveryActions" in workflow
+
+
+def test_reused_pure_rotation_result_auto_enters_debug() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    reused = workflow.split(
+        'if (!force && await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json")))', 1
+    )[1].split('const result = await apiPost("/api/pure-rotation/run"', 1)[0]
+
+    assert 'setWorkflowStage("keyframes")' in reused
+    assert "进入关键帧标定" not in reused
 
 
 def test_pure_rotation_workflow_uses_single_step_badge_and_auto_enters_debug() -> None:
@@ -221,11 +234,37 @@ def test_pure_rotation_workflow_uses_single_step_badge_and_auto_enters_debug() -
     assert 'setWorkflowStage("keyframes")' in status
 
 
+def test_loading_pure_rotation_refreshes_an_already_selected_stage_title() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
+        "function pureRotationPoseAtPts", 1
+    )[0]
+
+    assert "if (selectedWorkflowStage)" in layout
+    assert "renderWorkflowPanel(selectedWorkflowStage)" in layout
+
+
+def test_project_trajectory_transition_does_not_close_its_workbench_session() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    completion = workflow.split("async function waitForProjectWorkbenchTrajectory(jobId)", 1)[1].split(
+        "async function runProjectWorkbenchTrajectory()", 1
+    )[0]
+    pagehide = workflow.split('window.addEventListener("pagehide"', 1)[1].split(
+        "function updateKeyframePlanUi", 1
+    )[0]
+
+    assert "projectWorkbenchInternalNavigation = true" in completion
+    assert completion.index("projectWorkbenchInternalNavigation = true") < completion.index(
+        "window.location.replace"
+    )
+    assert "projectWorkbenchInternalNavigation" in pagehide
+
+
 def test_pure_rotation_debug_actions_are_compact_and_mode_stable() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "<legend>固定相机初始设置</legend>" in html
+    assert "<legend>固定相机位置与方向</legend>" in html
     assert 'id="pureRotationUseGizmo"' not in html
     strip = html.split('<div class="track-strip">', 1)[1].split(
         '<div id="cameraControls"', 1
@@ -237,11 +276,8 @@ def test_pure_rotation_debug_actions_are_compact_and_mode_stable() -> None:
         "pureRotationNextCorrection",
         "pureRotationUndoDraft",
     ):
-        assert f'id="{identifier}"' in strip
-    correction_section = html.split('id="pureRotationCorrectionSection"', 1)[1].split(
-        "</fieldset>", 1
-    )[0]
-    assert "pureRotationAddCorrection" not in correction_section
+        assert f'id="{identifier}"' not in strip
+    assert 'id="pureRotationCorrectionSection"' not in html
     layout = workflow.split("function applyPureRotationWorkflowLayout(mode)", 1)[1].split(
         "function pureRotationPoseAtPts", 1
     )[0]
@@ -283,14 +319,10 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
     assert calibration_panel_position > camera_controls_position
     for identifier in (
         "pureRotationPlacementSection",
-        "pureRotationCorrectionSection",
         "pureRotationSavePlacement",
         "pureRotationRestorePlacement",
-        "pureRotationAddCorrection",
-        "pureRotationDeleteCorrection",
-        "pureRotationPreviousCorrection",
-        "pureRotationNextCorrection",
-        "pureRotationUndoDraft",
+        "pureRotationWorldYaw",
+        "pureRotationWorldYawNumber",
         "translateMode",
         "rotateMode",
     ):
@@ -331,13 +363,13 @@ def test_entering_pure_rotation_calibration_defaults_to_translatable_global_plac
     assert 'button.disabled = correctionMode' in edit_mode
 
 
-def test_recovery_and_global_placement_do_not_auto_apply_saved_corrections() -> None:
+def test_global_placement_initializes_once_without_applying_saved_corrections() -> None:
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
     initialization = workflow.split(
         "async function initializePureRotationViewer()", 1
     )[1].split("function updatePureRotationFovSource", 1)[0]
-    assert 'pureRotationTrajectory = await loadPureRotationTrack("raw")' in initialization
+    assert 'pureRotationHasPlacement ? "base" : "raw"' in initialization
     assert '"corrected"' not in initialization
     edit_mode = workflow.split("function setPureRotationEditMode(mode)", 1)[1].split(
         "async function savePureRotationPlacement", 1
@@ -374,7 +406,98 @@ def test_world_vertical_slider_uses_an_immutable_frame_baseline() -> None:
     assert 'await setPureRotationEditMode("correction")' in preview_function
 
 
-def test_pose_corrections_use_camera_local_axes_and_keep_world_up_separate() -> None:
+def test_world_vertical_slider_preserves_camera_state_and_dirty_draft_until_save() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    assert "pureRotationCorrectionDraftDirty" in workflow
+    edit_mode = workflow.split("function setPureRotationEditMode(mode)", 1)[1].split(
+        "async function savePureRotationPlacement", 1
+    )[0]
+    assert 'nextMode === "correction"' in edit_mode
+    assert "cadsceneGetCurrentCameraPose" in edit_mode
+    assert "seedPureRotationCorrectionDraftFromManual" in edit_mode
+
+    seed = workflow.split(
+        "function seedPureRotationCorrectionDraftFromManual", 1
+    )[1].split("function refreshPureRotationCorrectionDraftBase", 1)[0]
+    assert "camera_center_web" in seed
+    assert "display_fov" in seed
+    assert "cadsceneApplyPureRotationPose" in seed
+
+    refresh = workflow.split(
+        "function refreshPureRotationCorrectionDraftBase", 1
+    )[1].split("function applyPureRotationCorrectionPreview", 1)[0]
+    assert "pureRotationCorrectionDraftDirty && sameFrame" in refresh
+
+    preview = workflow.split(
+        "async function previewPureRotationWorldYaw", 1
+    )[1].split("async function previewPureRotationLocalDelta", 1)[0]
+    assert "pureRotationCorrectionDraftDirty = true" in preview
+
+    save = workflow.split("async function addPureRotationCorrection()", 1)[1].split(
+        "async function deletePureRotationCorrection", 1
+    )[0]
+    assert save.index("await apiPost") < save.index("pureRotationCorrectionDraftDirty = false")
+
+
+def test_pure_rotation_frontend_uses_one_global_placement_draft() -> None:
+    html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+
+    placement = html.split('id="pureRotationPlacementSection"', 1)[1].split("</fieldset>", 1)[0]
+    for identifier in (
+        "pureRotationWorldYaw",
+        "pureRotationWorldYawNumber",
+        "pureRotationResetWorldYaw",
+        "pureRotationSavePlacement",
+        "pureRotationRestorePlacement",
+    ):
+        assert f'id="{identifier}"' in placement
+
+    assert 'id="pureRotationCorrectionSection"' not in html
+    assert 'id="pureRotationCorrectionActions"' not in html
+    for removed_identifier in (
+        "pureRotationAddCorrection",
+        "pureRotationDeleteCorrection",
+        "pureRotationPreviousCorrection",
+        "pureRotationNextCorrection",
+        "pureRotationUndoDraft",
+        "pureRotationLocalYaw",
+        "pureRotationLocalPitch",
+        "pureRotationLocalRoll",
+    ):
+        assert f'id="{removed_identifier}"' not in html
+
+    preview = workflow.split(
+        "async function previewPureRotationWorldYaw", 1
+    )[1].split("async function previewPureRotationLocalDelta", 1)[0]
+    assert 'await setPureRotationEditMode("placement")' in preview
+    assert 'setPureRotationEditMode("correction")' not in preview
+    assert "capturePureRotationDraftPlacement()" in preview
+    assert "草稿已自动保留" in preview
+    assert 'querySelector("#pureRotationCorrectionSection")' not in workflow
+    assert 'querySelector("#pureRotationCorrectionActions")' not in workflow
+    assert 'querySelector("#pureRotationAddCorrection")' not in workflow
+
+
+def test_gizmo_and_parameter_edits_rebase_the_global_yaw_draft() -> None:
+    workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
+    legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
+
+    assert 'cadsceneManualCameraChanged' in legacy
+    assert 'notifyManualCameraChanged("gizmo")' in legacy
+    assert 'notifyManualCameraChanged("parameter")' in legacy
+    listener = workflow.split(
+        'window.addEventListener("cadsceneManualCameraChanged"', 1
+    )[1].split("window.addEventListener", 1)[0]
+    assert "pureRotationCorrectionDraftBase = null" in listener
+    assert "pureRotationCorrectionDraftDirty = false" in listener
+    assert "setPureRotationWorldYawInputs(0)" in listener
+    assert "capturePureRotationDraftPlacement()" in listener
+    assert "草稿已自动保留" in listener
+
+
+def test_hidden_pose_correction_backend_math_remains_without_frontend_controls() -> None:
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     legacy = Path("apps/web_camera_viewer/viewer_legacy.js").read_text(encoding="utf-8")
@@ -384,7 +507,7 @@ def test_pose_corrections_use_camera_local_axes_and_keep_world_up_separate() -> 
         "pureRotationLocalPitch",
         "pureRotationLocalRoll",
     ):
-        assert f'id="{identifier}"' in html
+        assert f'id="{identifier}"' not in html
     assert "applyLocalCameraDelta" in workflow
     edit_mode = legacy.split(
         "window.cadsceneSetPureRotationEditMode = function (mode)", 1
@@ -423,17 +546,18 @@ def test_debug_entry_seeds_a_manual_anchor_instead_of_treating_raw_as_absolute()
     )[1].split("function updatePureRotationFovSource", 1)[0]
     assert "rotation_local_from_camera" in seed
     assert "cadsceneGetDefaultCameraPose" in seed
+    assert "pureRotationHasPlacement" in seed
     assert "window.cadsceneGetDefaultCameraPose = function ()" in legacy
 
 
-def test_default_debug_fov_prefers_candidate_intrinsics_over_saved_placement() -> None:
+def test_saved_global_placement_fov_is_not_reinitialized_from_candidate_intrinsics() -> None:
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
     initialization = workflow.split(
         "async function initializePureRotationViewer()", 1
     )[1].split("function seedPureRotationDraftPlacement", 1)[0]
 
-    assert initialization.index("candidateFov") < initialization.index("placement.fov")
-    assert 'pureRotationFovSource = "unverified_candidate_intrinsics"' in initialization
+    assert initialization.index("if (placement &&") < initialization.index("else if (Number.isFinite(candidateFov))")
+    assert 'pureRotationFovSource = "saved_placement"' in initialization
 
 
 def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> None:
@@ -449,7 +573,8 @@ def test_correction_mutations_refresh_fitted_preview_before_render_handoff() -> 
     )[0]
     assert "refreshPureRotationFittedPreview" in add_function
     assert "refreshPureRotationFittedPreview" in delete_function
-    assert 'id="workflowPreviewPureFitted"' in html
+    assert 'id="workflowPreviewPureFitted"' not in html
+    assert 'apiPost("/api/pure-rotation/corrections"' in workflow
     assert 'id="workflowReturnPureCalibration"' in html
     assert "finishPureRotationCalibration" in workflow
     finish_function = workflow.split("async function finishPureRotationCalibration()", 1)[1].split(
@@ -472,10 +597,10 @@ def test_pure_rotation_debug_labels_explain_confirmation_and_render_handoff() ->
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "确认当前相机位置与方向" in html
-    assert "撤销未确认的调整" in html
+    assert "确认当前位置与方向" in html
+    assert "恢复上次确认" in html
     assert "完成调试并进入渲染" in html
-    assert "调整立即预览，播放无需确认" in html
+    assert "自动保留在当前草稿中" in html
     restore_function = workflow.split(
         "async function restorePureRotationPlacement()", 1
     )[1].split("async function refreshPureRotationFittedPreview", 1)[0]
@@ -487,7 +612,7 @@ def test_completed_pure_rotation_job_is_not_reinitialized_on_every_status_poll()
     html = Path("apps/web_camera_viewer/index.html").read_text(encoding="utf-8")
     workflow = Path("apps/web_camera_viewer/workflow.js").read_text(encoding="utf-8")
 
-    assert "workflow.js?v=20260805-sfm-fov-init-v1" in html
+    assert "workflow.js?v=20260811-project-pipeline-v1" in html
     assert "let pureRotationHandledCompletion = null;" in workflow
     render_status = workflow.split("async function renderStatus(payload)", 1)[1].split(
         "async function refreshAlignmentArtifactState", 1

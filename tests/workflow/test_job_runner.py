@@ -532,3 +532,30 @@ def test_render_command_refits_latest_manual_track_before_rendering(tmp_path: Pa
     assert command[0:3] == [sys.executable, "-m", "cadscene.cli.run_pipeline"]
     assert command[command.index("--stages") + 1] == "alignment,render"
     assert Path(command[command.index("--web-camera-track") + 1]) == manual
+
+
+def test_job_runner_starts_module_commands_from_source_root(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr("cadscene.workflow.job_runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cadscene.workflow.job_runner.threading.Thread.start", lambda self: None)
+
+    runner = JobRunner(tmp_path)
+    runner.start("demo", "run-1", "render", ["python", "-m", "cadscene.cli.render_pure_rotation"])
+
+    expected_source_root = Path(__file__).resolve().parents[2]
+    assert Path(str(captured["cwd"])).resolve() == expected_source_root
