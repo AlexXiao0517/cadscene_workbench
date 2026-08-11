@@ -138,7 +138,11 @@ def default_workbench_render_adapters(
     root = Path(application_root).resolve()
     return RenderAdapterRegistry(
         tuple(
-            ExistingWorkbenchRenderAdapter(workflow=workflow, application_root=root)
+            ExistingWorkbenchRenderAdapter(
+                workflow=workflow,
+                application_root=root,
+                version="2" if workflow == "pure_rotation" else "1",
+            )
             for workflow in (
                 "sfm_only",
                 "srt_sfm_fused",

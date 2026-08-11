@@ -252,7 +252,9 @@ def test_default_workbench_render_adapters_cover_every_project_workflow(
 ) -> None:
     registry = default_workbench_render_adapters(application_root=tmp_path)
 
-    assert registry.for_workflow(workflow).workflow == workflow
+    adapter = registry.for_workflow(workflow)
+    assert adapter.workflow == workflow
+    assert adapter.version == ("2" if workflow == "pure_rotation" else "1")
 
 
 def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
@@ -276,6 +278,7 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
         application_root=tmp_path
     ).for_workflow("pure_rotation")
 
+    assert adapter.version == "2"
     plan = adapter.prepare(inputs)
     render_command, package_command = plan.commands
 
