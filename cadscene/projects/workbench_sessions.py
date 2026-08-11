@@ -194,6 +194,8 @@ class WorkbenchSessionStore(Protocol):
         self, project_id: str, token_hash: str
     ) -> WorkbenchSession: ...
 
+    def list_for_project(self, project_id: str) -> tuple[WorkbenchSession, ...]: ...
+
     def update(
         self,
         project_id: str,
@@ -252,6 +254,24 @@ class AtomicWorkbenchSessionStore:
                 raise ValueError("workbench session token hash mismatch")
             self._validate_identity(project_id, session.token, session)
             return session
+
+    def list_for_project(self, project_id: str) -> tuple[WorkbenchSession, ...]:
+        directory = self.root / validate_project_id(project_id) / "workbench_sessions"
+        if not directory.is_dir():
+            return ()
+        sessions: list[WorkbenchSession] = []
+        for path in directory.glob("*.json"):
+            try:
+                with _path_record_lock(path):
+                    with path.open("r", encoding="utf-8") as stream:
+                        session = WorkbenchSession.from_dict(json.load(stream))
+                    self._validate_identity(project_id, session.token, session)
+                    if self.path_for(project_id, session.token) != path:
+                        continue
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            sessions.append(session)
+        return tuple(sorted(sessions, key=lambda item: item.updated_at))
 
     def create(self, session: WorkbenchSession) -> WorkbenchSession:
         with self.lock_for(session.project_id, session.token):
@@ -952,6 +972,7 @@ class ProjectWorkbenchService:
                     )
             self._publish_workbench_inputs(project_id, clip)
             context = self.resolve_context(project_id, clip_id)
+            resume_baseline = self._saved_resume_baseline(context)
             if (
                 context.trajectory_job_id
                 and context.trajectory_run_id
@@ -961,12 +982,32 @@ class ProjectWorkbenchService:
                 # Batch trajectory jobs finish before a workbench session exists.
                 # Publish their validated, immutable attempt output into the
                 # viewer run tree before issuing a trajectory-ready session.
-                self._materialize_trajectory_run(
-                    project_id, clip, context.trajectory_job_id
-                )
+                if resume_baseline is None:
+                    self._materialize_trajectory_run(
+                        project_id, clip, context.trajectory_job_id
+                    )
+                else:
+                    self._restore_saved_output_to_run(
+                        resume_baseline, clip, context.trajectory_job_id
+                    )
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
+            if resume_baseline is not None:
+                session = self.coordinator.store.update(
+                    project_id,
+                    session.token,
+                    expected_revision=session.revision,
+                    mutate=lambda value: replace(
+                        value,
+                        workbench_output_revision=(
+                            resume_baseline.workbench_output_revision
+                        ),
+                        workbench_output_fingerprint=(
+                            resume_baseline.workbench_output_fingerprint
+                        ),
+                    ),
+                )
             self._publish_clip_state(
                 current,
                 session,
@@ -1228,6 +1269,21 @@ class ProjectWorkbenchService:
                     before, self.resolve_context(project_id, before.clip_id)
                 )
             session = self.coordinator.abandon(project_id, token)
+            if (
+                session.state == "ready"
+                and session.workbench_output_revision
+                and session.workbench_output_fingerprint
+            ):
+                session = self.coordinator.store.update(
+                    project_id,
+                    token,
+                    expected_revision=session.revision,
+                    mutate=lambda value: replace(
+                        value,
+                        state="saved",
+                        operation_id=uuid4().hex,
+                    ),
+                )
             state = (
                 session.state
                 if session.state in {"saved", "pending_save"}
@@ -1386,9 +1442,14 @@ class ProjectWorkbenchService:
                 "runId": session.trajectory_run_id,
                 "projectWorkbenchToken": session.token,
                 "workflowStage": (
-                    "keyframes"
-                    if session.launch_mode == "trajectory_ready"
-                    else "sfm"
+                    "render"
+                    if session.workbench_output_revision
+                    and session.workbench_output_fingerprint
+                    else (
+                        "keyframes"
+                        if session.launch_mode == "trajectory_ready"
+                        else "sfm"
+                    )
                 ),
                 "video": f"/data/{dataset}/video/{dataset}.mp4",
                 "cad": f"/data/{dataset}/cad/design.json",
@@ -1578,6 +1639,143 @@ class ProjectWorkbenchService:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+
+    def _saved_resume_baseline(
+        self, context: WorkbenchContext
+    ) -> WorkbenchSession | None:
+        candidates = reversed(
+            self.coordinator.store.list_for_project(context.project_id)
+        )
+        for candidate in candidates:
+            if candidate.state != "saved":
+                continue
+            try:
+                self.coordinator._validate_binding(candidate, context)
+                self._validated_saved_output(candidate)
+            except (WorkbenchSessionError, OSError, ValueError, KeyError, TypeError):
+                continue
+            return candidate
+        return None
+
+    def _validated_saved_output(
+        self, session: WorkbenchSession
+    ) -> tuple[Mapping[str, object], Path]:
+        revision = session.workbench_output_revision
+        fingerprint = session.workbench_output_fingerprint
+        if not revision or not fingerprint:
+            raise InvalidWorkbenchOutput("saved session has no immutable output")
+        target = (
+            self.projects_root
+            / validate_project_id(session.project_id)
+            / "workbench_outputs"
+            / revision
+        )
+        manifest_path = target / "workbench_output_manifest.json"
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InvalidWorkbenchOutput(
+                "saved workbench output manifest is unavailable"
+            ) from exc
+        stored = self.coordinator._validate_existing_output(
+            target,
+            session=session,
+            revision=revision,
+            operation_id=session.operation_id,
+            source_revision=payload.get("source_output_revision"),
+            source_fingerprint=payload.get("source_output_fingerprint"),
+            source_artifact_name=payload.get("source_artifact_name"),
+        )
+        if stored != fingerprint:
+            raise InvalidWorkbenchOutput(
+                "saved session output fingerprint does not match its manifest"
+            )
+        artifacts = payload.get("artifacts")
+        camera_track = (
+            artifacts.get("camera_track") if isinstance(artifacts, Mapping) else None
+        )
+        relative = camera_track.get("path") if isinstance(camera_track, Mapping) else None
+        if not isinstance(relative, str):
+            raise InvalidWorkbenchOutput("saved camera track path is unavailable")
+        artifact = (target / relative).resolve(strict=True)
+        try:
+            artifact.relative_to(target.resolve(strict=True))
+        except ValueError as exc:
+            raise InvalidWorkbenchOutput("saved camera track escaped its revision") from exc
+        return payload, artifact
+
+    def _restore_saved_output_to_run(
+        self,
+        session: WorkbenchSession,
+        clip: ClipDefinition,
+        trajectory_job_id: str,
+    ) -> None:
+        payload, artifact = self._validated_saved_output(session)
+        artifact_bytes = artifact.read_bytes()
+        dataset = self._workbench_dataset_id(session.project_id, session.clip_id)
+        run = self.viewer_runs_root / dataset / session.clip_id
+        source_name = str(payload.get("source_artifact_name") or "")
+        if session.workflow == "pure_rotation":
+            existing = (
+                run
+                / (
+                    "04_pure_rotation_corrections/camera_track_corrected.json"
+                    if source_name == "camera_track_corrected.json"
+                    else "03_pure_rotation_placement/camera_track_cad_base.json"
+                )
+            )
+            placement = run / "03_pure_rotation_placement/global_camera_placement.json"
+            if (
+                existing.is_file()
+                and sha256(existing.read_bytes()).digest()
+                == sha256(artifact_bytes).digest()
+                and placement.is_file()
+            ):
+                return
+            self._materialize_trajectory_run(
+                session.project_id, clip, trajectory_job_id
+            )
+            base = run / "03_pure_rotation_placement/camera_track_cad_base.json"
+            _atomic_write_bytes(base, artifact_bytes)
+            track = json.loads(artifact_bytes.decode("utf-8-sig"))
+            poses = track.get("poses") if isinstance(track, Mapping) else None
+            first = poses[0] if isinstance(poses, list) and poses else None
+            if not isinstance(first, Mapping):
+                raise InvalidWorkbenchOutput("saved camera track contains no poses")
+            placement_payload = {
+                "segment_id": int(first.get("segment_id", 0)),
+                "anchor_decoded_frame_index": int(
+                    first.get("decoded_frame_index", first.get("frame_index", 0))
+                ),
+                "anchor_pts_time_sec": float(first.get("pts_time_sec", 0.0)),
+                "camera_center_web": [
+                    float(value)
+                    for value in first.get("camera_center_web", [0.0, 0.0, 0.0])
+                ],
+                "manual_rotation_cad_from_camera": first.get(
+                    "rotation_cad_from_camera",
+                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                ),
+                "fov": float(track.get("display_fov", 50.0)),
+                "restored_from_workbench_output_revision": (
+                    session.workbench_output_revision
+                ),
+            }
+            _atomic_write_bytes(
+                placement,
+                (json.dumps(placement_payload, ensure_ascii=False, indent=2) + "\n").encode(
+                    "utf-8"
+                ),
+            )
+            return
+        manual = run / "01_keyframes/camera_track_manual.json"
+        if (
+            manual.is_file()
+            and sha256(manual.read_bytes()).digest() == sha256(artifact_bytes).digest()
+        ):
+            return
+        self._materialize_trajectory_run(session.project_id, clip, trajectory_job_id)
+        _atomic_write_bytes(manual, artifact_bytes)
 
     def _publish_clip_state(
         self,
@@ -1958,6 +2156,29 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}-",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _path_record_lock(path: Path) -> RLock:

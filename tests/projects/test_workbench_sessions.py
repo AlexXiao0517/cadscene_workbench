@@ -2094,6 +2094,98 @@ def test_pure_rotation_save_selects_and_validates_server_run_output(
     assert manifest["source_output_revision"].startswith("pure-track:")
 
 
+def test_reopen_restores_saved_pure_rotation_progress_and_resumes_render(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow="pure_rotation"
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    run = runs_root / "project-1-clip-1/clip-1"
+    saved_track = run / "03_pure_rotation_placement/camera_track_cad_base.json"
+    saved_track.parent.mkdir(parents=True, exist_ok=True)
+    saved_payload = {
+        "schema_version": 1,
+        "trajectory_mode": "pure_rotation_manual_calibrated",
+        "display_fov": 58.0,
+        "poses": [
+            {
+                "decoded_frame_index": 0,
+                "pts_time_sec": 0.0,
+                "segment_id": 0,
+                "rotation_cad_from_camera": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                "camera_center_web": [10, 20, 30],
+            }
+        ],
+    }
+    saved_track.write_text(json.dumps(saved_payload), encoding="utf-8")
+    saved_bytes = saved_track.read_bytes()
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "kind": "pure_rotation_calibration"},
+        },
+    )
+    assert saved.status == 200
+
+    reopened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert reopened.status == 201
+    assert (
+        reopened.body["workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+    assert parse_qs(urlsplit(reopened.body["workbench_url"]).query)[
+        "workflowStage"
+    ] == ["render"]
+    assert saved_track.read_bytes() == saved_bytes
+    placement = json.loads(
+        (run / "03_pure_rotation_placement/global_camera_placement.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert placement["camera_center_web"] == [10.0, 20.0, 30.0]
+    reference = repositories.clips.load("project-1").clips[0].references[-1]
+    assert reference.value["status"] == "editing"
+    assert (
+        reference.value["workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+
+    closed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{reopened.body['token']}/close",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+        },
+    )
+    assert closed.status == 200
+    assert closed.body["state"] == "saved"
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    workbench = snapshot.body["clips"][0]["workbench"]
+    assert workbench["state"] == "saved"
+    assert (
+        workbench["workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+
+
 def test_stale_pure_rotation_corrected_lineage_falls_back_to_current_base(
     tmp_path: Path,
 ) -> None:
