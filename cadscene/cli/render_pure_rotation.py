@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overlay-linewidth", type=int, default=3)
     parser.add_argument("--overlay-alpha", type=float, default=0.88)
     parser.add_argument("--faded-overlay", action="store_true")
-    parser.add_argument("--max-distance-m", type=float, default=900.0)
+    distance_group = parser.add_mutually_exclusive_group()
+    distance_group.add_argument("--max-distance-m", type=float, default=900.0)
+    distance_group.add_argument("--no-distance-limit", action="store_true")
     parser.add_argument("--fade-start-m", type=float, default=250.0)
     return parser
 
@@ -53,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
             overlay_linewidth=args.overlay_linewidth,
             overlay_alpha=args.overlay_alpha,
             faded_overlay=args.faded_overlay,
-            max_distance_m=args.max_distance_m,
+            max_distance_m=(
+                None if args.no_distance_limit else args.max_distance_m
+            ),
             fade_start_m=args.fade_start_m,
         )
         result = render_overlay_video(config)

@@ -64,3 +64,4 @@ def test_render_pure_rotation_cli_is_available() -> None:
     )
     assert completed.returncode == 0
     assert "--track" in completed.stdout
+    assert "--no-distance-limit" in completed.stdout

@@ -45,6 +45,22 @@ def test_max_distance_filters_far_lines() -> None:
     assert np.array_equal(out, image)
 
 
+def test_none_max_distance_keeps_far_lines_visible() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    cad = _bundle(
+        [
+            RoadLine(
+                points=np.asarray([[0.0, 1000.0], [10.0, 1000.0]]),
+                kind="center",
+            )
+        ]
+    )
+
+    out = render_frame_overlay(image, _camera(), cad, max_distance_m=None)
+
+    assert int(out.sum()) > 0
+
+
 def test_faded_overlay_alpha_decays_with_distance() -> None:
     near = style_alpha_for_distance(100, base_alpha=0.8, faded_overlay=True, fade_start_m=50, max_distance_m=300)
     far = style_alpha_for_distance(250, base_alpha=0.8, faded_overlay=True, fade_start_m=50, max_distance_m=300)
@@ -101,6 +117,7 @@ def test_render_overlay_video_stats_fields_complete(tmp_path: Path) -> None:
             cad_dir=cad_dir,
             sfm_camera_path=path,
             output_video=tmp_path / "out.mp4",
+            max_distance_m=None,
         )
     )
 
@@ -109,6 +126,7 @@ def test_render_overlay_video_stats_fields_complete(tmp_path: Path) -> None:
     assert result.stats["rendered_frame_count"] == 2
     assert result.stats["camera_path_frame_count"] == 1
     assert result.stats["cad_polyline_count"] == 1
+    assert result.stats["max_distance_m"] is None
     assert "warnings" in result.stats
 
 

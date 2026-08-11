@@ -27,7 +27,7 @@ class RenderOverlayConfig:
     overlay_linewidth: int = 3
     overlay_alpha: float = 0.88
     faded_overlay: bool = False
-    max_distance_m: float = 900.0
+    max_distance_m: float | None = 900.0
     fade_start_m: float = 250.0
     start_frame: int | None = None
     end_frame: int | None = None
@@ -99,7 +99,7 @@ def render_frame_overlay(
     overlay_linewidth: int = 3,
     overlay_alpha: float = 0.88,
     faded_overlay: bool = False,
-    max_distance_m: float = 900.0,
+    max_distance_m: float | None = 900.0,
     fade_start_m: float = 250.0,
     cad_scale: float = 1.0,
     near_plane_m: float = 0.05,
@@ -115,7 +115,11 @@ def render_frame_overlay(
     focal = float(width) / (2.0 * np.tan(np.radians(camera.fov_deg) / 2.0))
     max_jump = max(width, height) * 0.45
     # 旧版参数以原始 CAD 距离计，投影空间需按 cad_scale 折算。
-    max_depth = float(max_distance_m) * float(cad_scale)
+    max_depth = (
+        None
+        if max_distance_m is None
+        else float(max_distance_m) * float(cad_scale)
+    )
     fade_start_depth = float(fade_start_m) * float(cad_scale)
     projection_step = 20.0 * float(cad_scale)
 
@@ -128,11 +132,17 @@ def render_frame_overlay(
         world = np.column_stack([points, np.zeros(len(points), dtype=np.float64)])
         camera_points = (world - center) @ rotation
         depth = camera_points[:, 2]
-        valid = (depth > near_plane_m) & (depth <= max_depth)
+        valid = depth > near_plane_m
+        if max_depth is not None:
+            valid &= depth <= max_depth
         uv = np.empty((len(points), 2), dtype=np.float64)
         uv[:, 0] = width * 0.5 + camera_points[:, 0] * focal / np.maximum(depth, near_plane_m)
         uv[:, 1] = height * 0.5 + camera_points[:, 1] * focal / np.maximum(depth, near_plane_m)
-        if faded_overlay and max_depth > fade_start_depth:
+        if (
+            faded_overlay
+            and max_depth is not None
+            and max_depth > fade_start_depth
+        ):
             fade_weight = np.clip((max_depth - depth) / (max_depth - fade_start_depth), 0.0, 1.0)
         else:
             fade_weight = np.ones(len(points), dtype=np.float64)
@@ -268,7 +278,11 @@ def render_overlay_video(config: RenderOverlayConfig) -> RenderOverlayResult:
         "overlay_linewidth": int(config.overlay_linewidth),
         "overlay_alpha": float(config.overlay_alpha),
         "faded_overlay": bool(config.faded_overlay),
-        "max_distance_m": float(config.max_distance_m),
+        "max_distance_m": (
+            None
+            if config.max_distance_m is None
+            else float(config.max_distance_m)
+        ),
         "fade_start_m": float(config.fade_start_m),
         "camera_path_frame_count": int(len(path_rows)),
         "cad_polyline_count": int(len(lines)),

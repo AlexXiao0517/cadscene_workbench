@@ -70,8 +70,7 @@ class ExistingWorkbenchRenderAdapter:
                 str(origin_xy[1]),
                 "--track",
                 str(inputs.workbench_artifact_path),
-                "--max-distance-m",
-                "900",
+                "--no-distance-limit",
             )
         else:
             trajectory = _required_path(inputs.parameters, "trajectory_path")
