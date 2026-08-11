@@ -184,9 +184,18 @@ def test_final_workflow_selector_only_exposes_sfm_and_opengv() -> None:
 
 
 def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert "/analysis/start" in script
+    assert "/analysis/activate" in script
+    assert 'id="analysisCandidateDialog"' in html
+    assert 'id="confirmAnalysisCandidate"' in html
+    assert "candidate_analysis_revision" in script
+    assert "expected_clips_revision" in script
+    assert 'reanalyzeButton.textContent = "重新分析中…"' in script
+    assert 'reanalyzeButton.textContent = "应用新分析结果"' in script
+    assert "dismissedCandidateRevision" in script
     assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/retry`" in script
     assert "`/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(clip.job_id)}/cancel`" in script
     assert '#reanalyzeButton").addEventListener' in script

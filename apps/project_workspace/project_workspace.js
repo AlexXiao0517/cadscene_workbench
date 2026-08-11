@@ -13,6 +13,9 @@
     selectedClipIds: new Set(),
     pendingPreflight: null,
     projectNameEditing: false,
+    reanalysisSubmitting: false,
+    activatingAnalysis: false,
+    dismissedCandidateRevision: null,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -147,7 +150,19 @@
     $("#clipCount").textContent = snapshot.clips.length;
     $("#pendingCount").textContent = snapshot.clips.filter((clip) => ["ready", "queued"].includes(clip.status)).length;
     $("#runningCount").textContent = snapshot.clips.filter((clip) => ["preparing", "running", "validating"].includes(clip.status)).length;
-    $("#reanalyzeButton").disabled = !snapshot.capabilities.can_reanalyze;
+    const reanalyzeButton = $("#reanalyzeButton");
+    const analysisActive = ["queued", "preparing", "running", "validating"]
+      .includes(snapshot.analysis?.status);
+    if (snapshot.candidate_analysis_revision) {
+      reanalyzeButton.textContent = "应用新分析结果";
+      reanalyzeButton.disabled = state.activatingAnalysis;
+    } else if (analysisActive || state.reanalysisSubmitting) {
+      reanalyzeButton.textContent = "重新分析中…";
+      reanalyzeButton.disabled = true;
+    } else {
+      reanalyzeButton.textContent = "重新分析";
+      reanalyzeButton.disabled = !snapshot.capabilities.can_reanalyze;
+    }
     $("#batchTrajectoryButton").disabled = !snapshot.capabilities.can_start_trajectory;
     $("#batchRenderButton").disabled = !snapshot.capabilities.can_render;
     $("#mergeProjectButton").disabled = !snapshot.capabilities.can_merge;
@@ -167,6 +182,20 @@
       item.textContent = `${effectiveDisplayName(clip)} · ${clip.duration}`;
       return item;
     }));
+    offerAnalysisCandidate(snapshot);
+  }
+
+  function offerAnalysisCandidate(snapshot) {
+    const revision = snapshot.candidate_analysis_revision;
+    const dialog = $("#analysisCandidateDialog");
+    if (
+      !revision
+      || state.dismissedCandidateRevision === revision
+      || state.activatingAnalysis
+      || dialog.open
+    ) return;
+    $("#analysisCandidateRevision").textContent = `分析版本：${revision}`;
+    dialog.showModal();
   }
 
   function cancelProjectRename() {
@@ -351,6 +380,15 @@
   }
 
   async function reanalyzeProject() {
+    if (state.snapshot?.candidate_analysis_revision) {
+      state.dismissedCandidateRevision = null;
+      offerAnalysisCandidate(state.snapshot);
+      return;
+    }
+    const reanalyzeButton = $("#reanalyzeButton");
+    state.reanalysisSubmitting = true;
+    reanalyzeButton.textContent = "重新分析中…";
+    reanalyzeButton.disabled = true;
     try {
       const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/analysis/start`, {
         method: "POST",
@@ -359,9 +397,49 @@
       });
       state.snapshot.component_revisions.project = body.project_revision;
       state.etag = null;
-      setMessage("已提交重新分析");
+      setMessage("已提交视频分段重新分析，完成后将提示是否应用新结果");
       await pollSnapshot();
-    } catch (error) { setMessage(error.message, true); }
+    } catch (error) {
+      setMessage(error.message, true);
+    } finally {
+      state.reanalysisSubmitting = false;
+      if (state.snapshot) renderSnapshot(state.snapshot);
+    }
+  }
+
+  async function activateCandidateAnalysis(event) {
+    event.preventDefault();
+    const revision = state.snapshot?.candidate_analysis_revision;
+    if (!revision || state.activatingAnalysis) return;
+    state.activatingAnalysis = true;
+    $("#confirmAnalysisCandidate").disabled = true;
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/analysis/activate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.project,
+            expected_clips_revision: state.snapshot.component_revisions.clips,
+            candidate_analysis_revision: revision,
+          }),
+        },
+      );
+      state.snapshot.component_revisions.project = body.project_revision;
+      state.snapshot.component_revisions.clips = body.clips_revision;
+      state.dismissedCandidateRevision = null;
+      state.etag = null;
+      $("#analysisCandidateDialog").close();
+      setMessage("已应用新的视频分段分析结果");
+      await pollSnapshot();
+    } catch (error) {
+      setMessage(error.message, true);
+    } finally {
+      state.activatingAnalysis = false;
+      $("#confirmAnalysisCandidate").disabled = false;
+      if (state.snapshot) renderSnapshot(state.snapshot);
+    }
   }
 
   async function runJobAction(clip, action) {
@@ -466,6 +544,10 @@
   $("#batchTrajectoryButton").addEventListener("click", () => preflightBatch("trajectory"));
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
+  $("#confirmAnalysisCandidate").addEventListener("click", activateCandidateAnalysis);
+  $("#dismissAnalysisCandidate").addEventListener("click", () => {
+    state.dismissedCandidateRevision = state.snapshot?.candidate_analysis_revision || null;
+  });
   $("#confirmPreflight").addEventListener("click", enqueuePreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
   if (!projectId) setMessage("缺少项目标识，无法载入工作区。", true);

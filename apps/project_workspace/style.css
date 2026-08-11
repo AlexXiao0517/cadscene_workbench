@@ -108,6 +108,8 @@ tbody tr:hover { background: rgba(255,255,255,.025); }
 .dialog { width: min(620px,90vw); color: var(--text); border: 1px solid var(--line); border-radius: 12px; background: #111923; box-shadow: 0 26px 70px rgba(0,0,0,.55); }
 .dialog::backdrop { background: rgba(1,5,9,.7); backdrop-filter: blur(3px); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.analysis-candidate-dialog p { color: var(--muted); line-height: 1.7; }
+.analysis-candidate-dialog .candidate-revision { margin: 14px 0 0; color: #8fa6bf; font-size: 12px; word-break: break-all; }
 .preparation-dialog { text-align: center; }
 .preparation-visual { display: flex; justify-content: center; gap: 8px; margin: 8px 0 20px; }
 .preparation-visual span { width: 9px; height: 9px; border-radius: 50%; background: #6d9fff; animation: preparation-pulse 1.1s ease-in-out infinite; }
