@@ -1000,10 +1000,8 @@ def _render_preflight_payload(preflight: RenderPreflight) -> dict[str, object]:
 def _visible_job_progress(
     job: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
-    if job is None or not isinstance(job.get("progress"), Mapping):
+    if job is None:
         return None
-    progress = dict(job["progress"])
-    fraction = progress.get("fraction")
     status = str(job.get("status"))
     if job.get("job_type") == "clip_render" and status in {
         "queued",
@@ -1011,11 +1009,29 @@ def _visible_job_progress(
         "running",
         "validating",
     }:
-        if not isinstance(fraction, (int, float)) or isinstance(fraction, bool):
-            progress["fraction"] = 0.99 if status == "validating" else 0.0
-        else:
+        stored = job.get("progress")
+        progress = (
+            dict(stored)
+            if isinstance(stored, Mapping)
+            else {
+                "stage": job.get("stage") or status,
+                "message": "render job is queued" if status == "queued" else status,
+            }
+        )
+        fraction = progress.get("fraction")
+        if status in {"queued", "preparing"}:
+            progress["fraction"] = 0.0
+        elif status == "validating":
+            progress["fraction"] = 0.99
+        elif isinstance(fraction, (int, float)) and not isinstance(fraction, bool):
             progress["fraction"] = min(float(fraction), 0.99)
+        else:
+            progress["fraction"] = 0.0
         return progress
+    if not isinstance(job.get("progress"), Mapping):
+        return None
+    progress = dict(job["progress"])
+    fraction = progress.get("fraction")
     if (
         status in {"queued", "preparing", "running", "validating"}
         and isinstance(fraction, (int, float))
