@@ -1289,6 +1289,92 @@ def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
     assert payload["progress"]["fraction"] == 0.99
 
 
+def test_snapshot_exposes_user_facing_candidate_analysis_clip_preview(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    artifact = tmp_path / "candidate-analysis"
+    output = artifact / "02_video_analysis"
+    output.mkdir(parents=True)
+    (output / "clip_manifest.json").write_text(
+        json.dumps(
+            {
+                "analysis_revision": "analysis-2",
+                "clips": [
+                    {
+                        "clip_id": "clip-candidate-1",
+                        "analysis_revision": "analysis-2",
+                        "scene_index": 2,
+                        "segment_index": 1,
+                        "source_start_pts": 250,
+                        "source_end_pts_exclusive": 1500,
+                        "source_time_base": {
+                            "numerator": 1,
+                            "denominator": 25,
+                        },
+                        "interval_semantics": "half_open",
+                        "detected_motion_mode": "rotation_dominant",
+                        "confidence": 0.88,
+                        "recommended_workflow": "pure_rotation",
+                        "needs_review": False,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    project = repositories.project.load("project-1")
+    input_snapshot = {
+        "request_key": "analysis-request-2",
+        "video": {"path": str(tmp_path / "source.mp4"), "sha256": "v" * 64},
+        "cad": None,
+        "srt": None,
+        "analysis_artifact": {
+            "path": str(artifact),
+            "artifact_id": "candidate-analysis",
+        },
+    }
+    repositories.project.update(
+        "project-1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            register_analysis_revision(
+                value, "analysis-2", operation_id="candidate-operation"
+            ),
+            source_assets={
+                **value.source_assets,
+                "_analysis_revisions": {
+                    "analysis-2": {
+                        "input_snapshot": input_snapshot,
+                        "analysis_artifact_id": "candidate-analysis",
+                        "analysis_artifact_path": str(artifact),
+                    }
+                },
+            },
+            project_state="analysis_candidate_ready",
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+
+    assert snapshot.status == 200
+    assert snapshot.body["candidate_analysis_preview"] == {
+        "clip_count": 1,
+        "clips": [
+            {
+                "display_name": "场景 02 · 第 1 段",
+                "time_range": "00:10 – 01:00",
+                "duration": "00:50",
+                "detected_motion_mode": "rotation_dominant",
+                "confidence": 0.88,
+                "recommended_workflow": "pure_rotation",
+                "needs_review": False,
+            }
+        ],
+    }
+
+
 def test_workbench_heartbeat_extends_editing_session_lease(
     tmp_path: Path,
 ) -> None:

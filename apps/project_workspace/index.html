@@ -74,8 +74,9 @@
   <dialog id="analysisCandidateDialog" class="dialog analysis-candidate-dialog">
     <form method="dialog">
       <h2>新的视频分段分析已完成</h2>
-      <p>系统已生成新的场景边界、逻辑片段和推荐工作流。应用后将切换到新的分析版本，已有用户工作流选择会按项目规则保留。</p>
-      <p class="candidate-revision" id="analysisCandidateRevision"></p>
+      <p id="analysisCandidateSummary" class="candidate-summary"></p>
+      <div id="analysisCandidateClips" class="candidate-clips" aria-label="新分段预览"></div>
+      <p>确认后才会切换到这些新片段；已有用户工作流选择会按项目规则保留。</p>
       <div class="dialog-actions">
         <button id="dismissAnalysisCandidate" value="cancel" class="button secondary">暂不应用</button>
         <button id="confirmAnalysisCandidate" value="default" class="button primary">应用新分段</button>

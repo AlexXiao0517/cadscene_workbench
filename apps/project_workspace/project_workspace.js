@@ -33,6 +33,18 @@
     stale_input: "输入已过期",
     superseded: "结果已失效",
   };
+  const WORKFLOW_LABELS = {
+    sfm_only: "三维重建",
+    srt_sfm_fused: "SRT + 三维重建",
+    srt_full_pose: "SRT 全姿态",
+    pure_rotation: "旋转估计",
+  };
+  const MOTION_LABELS = {
+    general_motion: "一般运动",
+    rotation_dominant: "旋转为主",
+    static: "静止",
+    unknown: "待确认",
+  };
 
   function setMessage(message, isError = false) {
     const element = $("#liveMessage");
@@ -187,6 +199,7 @@
 
   function offerAnalysisCandidate(snapshot) {
     const revision = snapshot.candidate_analysis_revision;
+    const preview = snapshot.candidate_analysis_preview;
     const dialog = $("#analysisCandidateDialog");
     if (
       !revision
@@ -194,7 +207,47 @@
       || state.activatingAnalysis
       || dialog.open
     ) return;
-    $("#analysisCandidateRevision").textContent = `分析版本：${revision}`;
+    const currentCount = snapshot.clips?.length || 0;
+    const candidateCount = preview?.clip_count ?? 0;
+    $("#analysisCandidateSummary").textContent =
+      `当前 ${currentCount} 段 → 新分析 ${candidateCount} 段`;
+    const clipList = $("#analysisCandidateClips");
+    const candidateClips = preview?.clips || [];
+    clipList.replaceChildren(...(
+      candidateClips.length
+        ? preview.clips.map((clip) => {
+            const row = document.createElement("article");
+            row.className = "candidate-clip";
+            const name = document.createElement("strong");
+            name.textContent = clip.display_name;
+            const time = document.createElement("span");
+            time.className = "candidate-clip-time";
+            time.textContent = `${clip.time_range} · ${clip.duration}`;
+            const tags = document.createElement("span");
+            tags.className = "candidate-clip-tags";
+            const motion = document.createElement("span");
+            motion.className = "candidate-tag";
+            motion.textContent = MOTION_LABELS[clip.detected_motion_mode]
+              || clip.detected_motion_mode;
+            const workflow = document.createElement("span");
+            workflow.className = "candidate-tag";
+            workflow.textContent = WORKFLOW_LABELS[clip.recommended_workflow]
+              || "需人工确认";
+            tags.append(motion, workflow);
+            if (clip.needs_review) {
+              const review = document.createElement("span");
+              review.className = "candidate-tag review";
+              review.textContent = "需确认";
+              tags.append(review);
+            }
+            row.append(name, time, tags);
+            return row;
+          })
+        : [Object.assign(document.createElement("span"), {
+            className: "empty-state",
+            textContent: "候选片段预览暂不可用，请稍后刷新。",
+          })]
+    ));
     dialog.showModal();
   }
 

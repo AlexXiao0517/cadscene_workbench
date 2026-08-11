@@ -191,7 +191,13 @@ def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> Non
     assert "/analysis/activate" in script
     assert 'id="analysisCandidateDialog"' in html
     assert 'id="confirmAnalysisCandidate"' in html
+    assert 'id="analysisCandidateSummary"' in html
+    assert 'id="analysisCandidateClips"' in html
+    assert 'id="analysisCandidateRevision"' not in html
     assert "candidate_analysis_revision" in script
+    assert "candidate_analysis_preview" in script
+    assert "preview.clips.map" in script
+    assert "WORKFLOW_LABELS" in script
     assert "expected_clips_revision" in script
     assert 'reanalyzeButton.textContent = "重新分析中…"' in script
     assert 'reanalyzeButton.textContent = "应用新分析结果"' in script

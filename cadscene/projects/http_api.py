@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .json_repositories import ProjectRepositories
 from .identifiers import is_safe_stable_id, validate_project_id
-from .models import ClipDefinition
+from .models import ClipDefinition, ProjectManifest
 from .repositories import RevisionConflict
 from .service import ProjectService, RenderPreflight, TrajectoryPreflight
 from .uploads import UploadValidationError, ValidatedUploadStore
@@ -588,6 +588,7 @@ class ProjectApi:
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
             "candidate_analysis_revision": project.candidate_analysis_revision,
+            "candidate_analysis_preview": _candidate_analysis_preview(project),
             "analysis": {
                 "status": analysis_status,
                 "jobs": analysis_jobs,
@@ -1037,6 +1038,61 @@ def _friendly_range(clip: ClipDefinition) -> str:
 def _friendly_duration(clip: ClipDefinition) -> str:
     start, end = _clip_seconds(clip)
     return _clock(end - start)
+
+
+def _candidate_analysis_preview(
+    project: ProjectManifest,
+) -> dict[str, object] | None:
+    revision = project.candidate_analysis_revision
+    if revision is None:
+        return None
+    descriptors = project.source_assets.get("_analysis_revisions")
+    if not isinstance(descriptors, Mapping):
+        return None
+    descriptor = descriptors.get(revision)
+    if not isinstance(descriptor, Mapping):
+        return None
+    input_snapshot = descriptor.get("input_snapshot")
+    artifact_path = descriptor.get("analysis_artifact_path")
+    if not isinstance(input_snapshot, Mapping) or not isinstance(artifact_path, str):
+        return None
+    manifest_path = (
+        Path(artifact_path) / "02_video_analysis" / "clip_manifest.json"
+    )
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if payload.get("analysis_revision") != revision:
+            return None
+        clips = tuple(
+            ClipDefinition.from_analysis(
+                {**item, "input_snapshot": dict(input_snapshot)},
+                generated_display_name=(
+                    f"场景 {int(item.get('scene_index', 1)):02d} · "
+                    f"第 {int(item.get('segment_index', 1))} 段"
+                ),
+            )
+            for item in payload.get("clips", ())
+            if isinstance(item, Mapping)
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return {
+        "clip_count": len(clips),
+        "clips": [
+            {
+                "display_name": clip.generated_display_name,
+                "time_range": _friendly_range(clip),
+                "duration": _friendly_duration(clip),
+                "detected_motion_mode": clip.analysis.get(
+                    "detected_motion_mode", "unknown"
+                ),
+                "confidence": clip.analysis.get("confidence"),
+                "recommended_workflow": clip.recommended_workflow,
+                "needs_review": bool(clip.analysis.get("needs_review", False)),
+            }
+            for clip in clips
+        ],
+    }
 
 
 def _render_preview_url(
