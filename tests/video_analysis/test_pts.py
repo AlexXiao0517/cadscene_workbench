@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -115,6 +116,151 @@ def test_frame_index_probe_uses_exact_stream_time_base_not_rounded_tbn(
     )
 
     assert index.time_base == Fraction(1001, 30000)
+
+
+def test_declared_frame_count_probe_reads_selected_video_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_bytes(b"probe")
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"streams": [{"nb_frames": "3"}]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    count = pts.probe_declared_video_frame_count(
+        video, ffprobe_executable=ffprobe
+    )
+
+    assert count == 3
+    assert "-select_streams" in calls[0]
+    assert calls[0][calls[0].index("-select_streams") + 1] == "v:0"
+    assert "stream=nb_frames" in calls[0]
+    assert "-show_frames" not in calls[0]
+
+
+@pytest.mark.parametrize("declared", ["N/A", "0", "-1", None, "3.5"])
+def test_declared_frame_count_probe_rejects_unusable_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declared: object,
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_bytes(b"probe")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"streams": [{"nb_frames": declared}]}),
+            stderr="",
+        ),
+    )
+
+    assert (
+        pts.probe_declared_video_frame_count(video, ffprobe_executable=ffprobe)
+        is None
+    )
+
+
+def test_fast_frame_index_builds_from_one_packet_per_declared_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    packets = (
+        PacketTimestamp(pts=5000, pts_sec=5.0, duration_sec=0.04),
+        PacketTimestamp(pts=5040, pts_sec=5.04, duration_sec=0.04),
+        PacketTimestamp(pts=5080, pts_sec=5.08, duration_sec=0.04),
+    )
+    monkeypatch.setattr(
+        pts, "probe_declared_video_frame_count", lambda *_args, **_kwargs: 3
+    )
+    monkeypatch.setattr(
+        pts,
+        "probe_video_pts",
+        lambda *_args, **_kwargs: pts.VideoPtsIndex(
+            time_base=Fraction(1, 1000),
+            packets=packets,
+            source_start_pts_sec=5.0,
+            source_end_pts_sec=5.12,
+        ),
+    )
+
+    index = pts.probe_fast_frame_index(video)
+
+    assert index is not None
+    assert [frame.pts for frame in index.frames] == [5000, 5040, 5080]
+    assert [frame.duration_pts for frame in index.frames] == [40, 40, 40]
+    assert all(frame.timestamp_source == "packet_pts" for frame in index.frames)
+
+
+@pytest.mark.parametrize(
+    ("declared_count", "packets"),
+    [
+        (
+            2,
+            (
+                PacketTimestamp(5000, 5.0, 0.04),
+                PacketTimestamp(5040, 5.04, 0.04),
+                PacketTimestamp(5080, 5.08, 0.04),
+            ),
+        ),
+        (
+            3,
+            (
+                PacketTimestamp(5000, 5.0, 0.04),
+                PacketTimestamp(5000, 5.0, 0.04),
+                PacketTimestamp(5080, 5.08, 0.04),
+            ),
+        ),
+        (
+            3,
+            (
+                PacketTimestamp(5000, 5.0, 0.04),
+                PacketTimestamp(5040, 5.04, 0.0405),
+                PacketTimestamp(5080, 5.08, 0.04),
+            ),
+        ),
+    ],
+    ids=["count-mismatch", "duplicate-pts", "fractional-duration"],
+)
+def test_fast_frame_index_rejects_ambiguous_packet_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declared_count: int,
+    packets: tuple[PacketTimestamp, ...],
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(
+        pts,
+        "probe_declared_video_frame_count",
+        lambda *_args, **_kwargs: declared_count,
+    )
+    monkeypatch.setattr(
+        pts,
+        "probe_video_pts",
+        lambda *_args, **_kwargs: pts.VideoPtsIndex(
+            time_base=Fraction(1, 1000),
+            packets=packets,
+            source_start_pts_sec=packets[0].pts_sec,
+            source_end_pts_sec=packets[-1].pts_sec + packets[-1].duration_sec,
+        ),
+    )
+
+    assert pts.probe_fast_frame_index(video) is None
 
 
 def test_frame_index_probe_falls_back_to_decoded_ffmpeg_showinfo(

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -437,6 +438,122 @@ def probe_video_pts(
         source_start_pts_sec=packets[0].pts_sec,
         source_end_pts_sec=packet_end,
     )
+
+
+def probe_declared_video_frame_count(
+    video_path: Path,
+    *,
+    ffprobe_executable: str | Path | None = None,
+) -> int | None:
+    """Read a container-declared frame count without decoding the video."""
+
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"video not found: {source}")
+    try:
+        ffprobe = _resolve_ffprobe_executable(ffprobe_executable)
+        process = subprocess.run(
+            [
+                str(ffprobe),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_frames",
+                "-of",
+                "json",
+                str(source),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except (OSError, RuntimeError):
+        return None
+    if process.returncode != 0:
+        return None
+    try:
+        document = json.loads(process.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    streams = document.get("streams") if isinstance(document, Mapping) else None
+    if not isinstance(streams, list) or len(streams) != 1:
+        return None
+    stream = streams[0]
+    if not isinstance(stream, Mapping):
+        return None
+    value = stream.get("nb_frames")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        count = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value):
+        count = int(value)
+    else:
+        return None
+    return count if count > 0 else None
+
+
+def probe_fast_frame_index(
+    video_path: Path,
+    *,
+    ffprobe_executable: str | Path | None = None,
+    ffmpeg_executable: str | Path | None = None,
+) -> DecodedFrameIndex | None:
+    """Build a packet index only when metadata proves one packet per frame."""
+
+    try:
+        declared_count = probe_declared_video_frame_count(
+            video_path,
+            ffprobe_executable=ffprobe_executable,
+        )
+        if declared_count is None:
+            return None
+        packet_index = probe_video_pts(
+            video_path,
+            ffmpeg_executable=ffmpeg_executable,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(packet_index.packets) != declared_count or packet_index.time_base <= 0:
+        return None
+
+    frames: list[DecodedFrameTimestamp] = []
+    previous_pts: int | None = None
+    seconds_per_tick = float(packet_index.time_base)
+    for ordinal, packet in enumerate(packet_index.packets):
+        if previous_pts is not None and packet.pts <= previous_pts:
+            return None
+        duration_ticks = packet.duration_sec / seconds_per_tick
+        rounded_duration = round(duration_ticks)
+        if (
+            not math.isfinite(duration_ticks)
+            or rounded_duration <= 0
+            or not math.isclose(
+                duration_ticks,
+                rounded_duration,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+        ):
+            return None
+        frames.append(
+            DecodedFrameTimestamp(
+                ordinal=ordinal,
+                pts=packet.pts,
+                duration_pts=rounded_duration,
+                timestamp_source="packet_pts",
+            )
+        )
+        previous_pts = packet.pts
+    try:
+        return DecodedFrameIndex(packet_index.time_base, tuple(frames))
+    except ValueError:
+        return None
 
 
 _SHOWINFO_PTS_RE = re.compile(r"\bn:\s*\d+\s+pts:\s*(?P<pts>-?\d+)")
