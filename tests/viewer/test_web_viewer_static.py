@@ -129,6 +129,17 @@ def test_cad_text_rendering_is_lazy_bounded_and_throttled() -> None:
     assert "makeTextTexture" not in initial_loop
 
 
+def test_cad_text_uses_approved_twenty_percent_visual_scale() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+
+    assert "const CAD_TEXT_VISUAL_SCALE = 1.2" in text
+    assert "const base = cadHeight >= 18 ? 22 : 16" in text
+    assert "charHeight * lineCount * 1.2 * CAD_TEXT_VISUAL_SCALE" in text
+    assert "MAX_ACTIVE_CAD_TEXT_LABELS = 240" in text
+    assert "MAX_PROJECTED_CAD_TEXT_CANDIDATES = 5000" in text
+    assert "MAX_CAD_TEXT_TEXTURES = 384" in text
+
+
 def test_video_overlay_uses_bounded_cad_text_selection() -> None:
     text = _text(APP_DIR / "viewer_legacy.js")
     draw_overlay = text[

@@ -17,6 +17,7 @@
   const MAX_ACTIVE_CAD_TEXT_LABELS = 240;
   const MAX_CAD_TEXT_TEXTURES = 384;
   const MAX_PROJECTED_CAD_TEXT_CANDIDATES = 5000;
+  const CAD_TEXT_VISUAL_SCALE = 1.2;
   const MAX_CAD_TEXT_GRID_AXIS = 32;
   const CAD_TEXT_REFRESH_MS = 120;
   const CAD_GIZMO_OVERLAY_REFRESH_MS = 120;
@@ -354,7 +355,7 @@
 
   function fontSizeForText(entity, highQuality) {
     const cadHeight = Number(entity.cad_height || 0);
-    const base = cadHeight >= 18 ? 18 : 13;
+    const base = cadHeight >= 18 ? 22 : 16;
     return Math.max(10, Math.round(base * (highQuality ? 1 : 0.72)));
   }
 
@@ -1025,7 +1026,7 @@
       });
       const lineCount = Math.max(1, Number(entry.entity.text_lines) || String(entry.entity.text || "").split(/\r?\n/).length);
       const charHeight = Math.max(Number(entry.entity.cad_height) || 1, 1e-6);
-      const height = charHeight * lineCount * 1.2;
+      const height = charHeight * lineCount * 1.2 * CAD_TEXT_VISUAL_SCALE;
       const width = Math.max(height * textureData.aspect, charHeight * 1.5);
       const rotation = window.CadsceneCadText.cadRotationToSceneZ(
         entry.entity.cad_rotation,
