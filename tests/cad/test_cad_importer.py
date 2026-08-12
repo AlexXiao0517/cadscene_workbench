@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 
 import ezdxf
+import pytest
+from ezdxf.enums import TextEntityAlignment
 
 from cadscene.cad.dxf_parser import decode_legacy_dxf_text
 from cadscene.cad.importer import import_dxf
 from cadscene.cad.loader import detect_road_centerline, load_cad_bundle
+from cadscene.cad.text_entities import extract_text_entity, iter_text_entities
 
 
 def _write_sample_dxf(path: Path, *, units: int = 6) -> None:
@@ -27,6 +30,59 @@ def _write_sample_dxf(path: Path, *, units: int = 6) -> None:
     )
     model.add_point((105.0, 205.0), dxfattribs={"layer": "misc"})
     doc.saveas(path)
+
+
+def test_text_mtext_and_block_attributes_are_normalized() -> None:
+    doc = ezdxf.new("R2010")
+    doc.layers.add("labels", color=2)
+    model = doc.modelspace()
+    model.add_text(
+        "K12+340",
+        height=2.5,
+        dxfattribs={"layer": "labels", "rotation": 30},
+    ).set_placement((100, 200), align=TextEntityAlignment.MIDDLE_CENTER)
+    model.add_mtext(
+        "第一行\\P第二行",
+        dxfattribs={"layer": "labels", "char_height": 3, "rotation": 45},
+    ).set_location((110, 210), attachment_point=5)
+    block = doc.blocks.new("STATION_MARK")
+    block.add_attdef("STA", insert=(2, 0), height=1.5, dxfattribs={"layer": "0"})
+    insert = model.add_blockref(
+        "STATION_MARK", (120, 220), dxfattribs={"layer": "labels", "rotation": 90}
+    )
+    insert.add_auto_attribs({"STA": "ZK12+360"})
+
+    entities = list(iter_text_entities(model))
+    labels = [extract_text_entity(entity, parent) for entity, parent in entities]
+
+    assert all(label is not None for label in labels)
+    assert {label["entity_type"] for label in labels} == {"TEXT", "MTEXT", "ATTRIB"}
+    assert {label["text"] for label in labels} == {"K12+340", "第一行\n第二行", "ZK12+360"}
+    assert all(label["world_position"] == label["world_points"][0] for label in labels)
+    assert all(label["layer"] == "labels" for label in labels)
+    text = next(label for label in labels if label["entity_type"] == "TEXT")
+    assert text["cad_rotation"] == pytest.approx(30.0)
+    assert text["cad_height"] == pytest.approx(2.5)
+    assert (text["horizontal_align"], text["vertical_align"]) == ("center", "middle")
+    mtext = next(label for label in labels if label["entity_type"] == "MTEXT")
+    assert mtext["text_lines"] == 2
+    assert mtext["cad_rotation"] == pytest.approx(45.0)
+    assert (mtext["horizontal_align"], mtext["vertical_align"]) == ("center", "middle")
+    attrib = next(label for label in labels if label["entity_type"] == "ATTRIB")
+    assert attrib["attribute_tag"] == "STA"
+    assert attrib["block_name"] == "STATION_MARK"
+    assert attrib["text_role"] == "station"
+    assert attrib["world_position"] == pytest.approx([120.0, 222.0, 0.0])
+    assert attrib["cad_rotation"] == pytest.approx(90.0)
+
+
+def test_invisible_block_attribute_is_omitted() -> None:
+    doc = ezdxf.new("R2010")
+    block = doc.blocks.new("MARK")
+    block.add_attdef("SECRET", insert=(0, 0), dxfattribs={"flags": 1})
+    doc.modelspace().add_blockref("MARK", (0, 0)).add_auto_attribs({"SECRET": "hidden"})
+
+    assert list(iter_text_entities(doc.modelspace())) == []
 
 
 def test_import_dxf_generates_legacy_viewer_design_and_metadata(tmp_path: Path) -> None:
