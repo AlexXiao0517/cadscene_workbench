@@ -155,6 +155,38 @@ def test_block_attribute_inherits_insert_layer_and_byblock_color(tmp_path: Path)
     assert stats["text_entity_types"] == {"ATTRIB": 1}
 
 
+def test_block_attribute_layer_zero_bylayer_uses_insert_layer_color(tmp_path: Path) -> None:
+    source = tmp_path / "attribute-bylayer.dxf"
+    doc = ezdxf.new("R2010")
+    doc.layers.add("station_labels", color=2)
+    block = doc.blocks.new("STATION")
+    block.add_attdef(
+        "STA",
+        insert=(0, 0),
+        height=2,
+        dxfattribs={"layer": "0", "color": 256},
+    )
+    insert = doc.modelspace().add_blockref(
+        "STATION",
+        (50, 60),
+        dxfattribs={"layer": "station_labels", "color": 4},
+    )
+    insert.add_auto_attribs({"STA": "K2+020"})
+    doc.saveas(source)
+
+    design, _stats = parse_dxf(source)
+    label = next(
+        entity
+        for layer in design["layers"]
+        for entity in layer["entities"]
+        if entity.get("type") == "text"
+    )
+
+    assert label["layer"] == "station_labels"
+    assert label["aci_color"] == 2
+    assert label["color"] == "#ffff00"
+
+
 def test_import_dxf_generates_legacy_viewer_design_and_metadata(tmp_path: Path) -> None:
     source = tmp_path / "raw.dxf"
     _write_sample_dxf(source)

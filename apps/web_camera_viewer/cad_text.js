@@ -18,6 +18,95 @@
     return Number.isFinite(number) ? number : fallback;
   }
 
+  function cadRotationToSceneZ(degrees) {
+    return finiteOption(degrees, 0) * Math.PI / 180;
+  }
+
+  function labelPriority(entry) {
+    const entity = entry?.entity || entry || {};
+    return (isStationLabel(entity) ? 1_000_000 : 0)
+      + Math.max(0, Number(entity.cad_height) || 0) * 1_000;
+  }
+
+  function createSpatialLabelIndex(entries, options = {}) {
+    const maxCellsPerAxis = Math.max(
+      1,
+      Math.floor(finiteOption(options.maxCellsPerAxis, 32)),
+    );
+    const getPoint = typeof options.getPoint === "function"
+      ? options.getPoint
+      : (entry) => entry?.worldPoint || entry?.entity?.world_position;
+    const validEntries = [];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const entry of entries || []) {
+      const point = getPoint(entry);
+      const x = Number(point?.[0]);
+      const y = Number(point?.[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      validEntries.push({ entry, x, y });
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    if (validEntries.length === 0) {
+      return { cellCount: 0, collect: () => [] };
+    }
+
+    const cellWidth = Math.max((maxX - minX) / maxCellsPerAxis, 1e-9);
+    const cellHeight = Math.max((maxY - minY) / maxCellsPerAxis, 1e-9);
+    const cellMap = new Map();
+    for (const item of validEntries) {
+      const ix = Math.min(maxCellsPerAxis - 1, Math.floor((item.x - minX) / cellWidth));
+      const iy = Math.min(maxCellsPerAxis - 1, Math.floor((item.y - minY) / cellHeight));
+      const key = iy * maxCellsPerAxis + ix;
+      let cell = cellMap.get(key);
+      if (!cell) {
+        cell = {
+          center: [minX + (ix + 0.5) * cellWidth, minY + (iy + 0.5) * cellHeight],
+          items: [],
+        };
+        cellMap.set(key, cell);
+      }
+      cell.items.push(item.entry);
+    }
+    const cells = [...cellMap.values()];
+    for (const cell of cells) {
+      cell.items.sort((left, right) => labelPriority(right) - labelPriority(left));
+    }
+
+    function collect(cellSelector, maxItems = 5000) {
+      const limit = Math.max(0, Math.floor(finiteOption(maxItems, 5000)));
+      if (limit === 0 || typeof cellSelector !== "function") return [];
+      const selectedCells = [];
+      for (const cell of cells) {
+        const result = cellSelector(cell);
+        if (result === false || result === null || result === undefined) continue;
+        const score = result === true ? 0 : Number(result);
+        if (Number.isFinite(score)) selectedCells.push({ cell, score, index: 0 });
+      }
+      selectedCells.sort((left, right) => right.score - left.score);
+      const selectedItems = [];
+      let active = selectedCells;
+      while (active.length > 0 && selectedItems.length < limit) {
+        const next = [];
+        for (const state of active) {
+          selectedItems.push(state.cell.items[state.index]);
+          state.index += 1;
+          if (state.index < state.cell.items.length) next.push(state);
+          if (selectedItems.length >= limit) break;
+        }
+        active = next;
+      }
+      return selectedItems;
+    }
+
+    return { cellCount: cells.length, collect };
+  }
+
   function selectProjectedLabels(candidates, options = {}) {
     const width = Math.max(finiteOption(options.width, 1), 1);
     const height = Math.max(finiteOption(options.height, 1), 1);
@@ -106,5 +195,11 @@
     };
   }
 
-  return { isStationLabel, selectProjectedLabels, createLruCache };
+  return {
+    isStationLabel,
+    selectProjectedLabels,
+    createLruCache,
+    cadRotationToSceneZ,
+    createSpatialLabelIndex,
+  };
 });

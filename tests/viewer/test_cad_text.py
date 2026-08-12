@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 MODULE = Path("apps/web_camera_viewer/cad_text.js")
@@ -101,3 +104,29 @@ def test_lru_refreshes_recency_and_disposes_evictions_once() -> None:
     )
 
     assert result == {"disposed": [2, 1, 3], "size": 0}
+
+
+def test_cad_rotation_maps_positive_y_to_negative_scene_z() -> None:
+    result = _node(
+        "(()=>{const angle=m.cadRotationToSceneZ(30);"
+        "return {angle,x:Math.cos(angle),z:-Math.sin(angle)};})()"
+    )
+
+    assert result["angle"] == pytest.approx(math.pi / 6)
+    assert result["x"] == pytest.approx(math.sqrt(3) / 2)
+    assert result["z"] == pytest.approx(-0.5)
+
+
+def test_spatial_index_bounds_refresh_work_for_very_large_label_sets() -> None:
+    result = _node(
+        "(()=>{const entries=Array.from({length:100000},(_,i)=>({"
+        "worldPoint:[i%1000,Math.floor(i/1000),0],"
+        "entity:{text:i%997===0?'K1+000':'note',cad_height:i%7}}));"
+        "const index=m.createSpatialLabelIndex(entries,{maxCellsPerAxis:32});"
+        "let visited=0;const selected=index.collect(cell=>{visited+=1;return -cell.center[0];},5000);"
+        "return {cellCount:index.cellCount,visited,selected:selected.length};})()"
+    )
+
+    assert result["cellCount"] <= 32 * 32
+    assert result["visited"] == result["cellCount"]
+    assert result["selected"] == 5000

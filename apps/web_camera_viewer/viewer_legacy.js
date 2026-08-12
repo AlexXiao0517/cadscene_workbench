@@ -16,6 +16,8 @@
   const NEAR_PLANE = 0.1;
   const MAX_ACTIVE_CAD_TEXT_LABELS = 240;
   const MAX_CAD_TEXT_TEXTURES = 384;
+  const MAX_PROJECTED_CAD_TEXT_CANDIDATES = 5000;
+  const MAX_CAD_TEXT_GRID_AXIS = 32;
   const CAD_TEXT_REFRESH_MS = 120;
   const CAD_GIZMO_OVERLAY_REFRESH_MS = 120;
   const MAX_INTERACTIVE_OVERLAY_TEXT_CANDIDATES = 5000;
@@ -974,14 +976,16 @@
       MAX_CAD_TEXT_TEXTURES,
       (entry) => entry.texture.dispose(),
     );
-    const projectedCadTextCandidates = cadTextEntities.map((entry) => ({
-      x: 0,
-      y: 0,
-      depth: 0,
-      entity: entry.entity,
-      entry,
-    }));
+    const cadTextSpatialIndex = window.CadsceneCadText.createSpatialLabelIndex(
+      cadTextEntities,
+      { maxCellsPerAxis: MAX_CAD_TEXT_GRID_AXIS },
+    );
+    const projectedCadTextCandidatePool = Array.from(
+      { length: MAX_PROJECTED_CAD_TEXT_CANDIDATES },
+      () => ({ x: 0, y: 0, depth: Infinity, entity: null, entry: null }),
+    );
     const projectedCadTextPoint = new THREE.Vector3();
+    const projectedCadTextCell = new THREE.Vector3();
     let cadTextVisible = showCadText;
     let cadTextRefreshTimer = null;
     let lastCadTextRefreshAt = -Infinity;
@@ -1023,7 +1027,9 @@
       const charHeight = Math.max(Number(entry.entity.cad_height) || 1, 1e-6);
       const height = charHeight * lineCount * 1.2;
       const width = Math.max(height * textureData.aspect, charHeight * 1.5);
-      const rotation = degToRad(Number(entry.entity.cad_rotation || 0));
+      const rotation = window.CadsceneCadText.cadRotationToSceneZ(
+        entry.entity.cad_rotation,
+      );
       const offset = cadTextAnchorOffset(entry.entity, width, height);
       const offsetX = Math.cos(rotation) * offset.x - Math.sin(rotation) * offset.y;
       const offsetY = Math.sin(rotation) * offset.x + Math.cos(rotation) * offset.y;
@@ -1036,7 +1042,7 @@
       mesh.position.copy(position);
       mesh.scale.set(width, height, 1);
       mesh.rotation.x = -Math.PI / 2;
-      mesh.rotation.z = -rotation;
+      mesh.rotation.z = rotation;
       mesh.renderOrder = 11;
       mesh.userData.isCadText = true;
       mesh.userData.textureKey = textureData.textureKey;
@@ -1050,13 +1056,35 @@
       inspectCamera.updateMatrixWorld();
       const width = Math.max(1, renderer.domElement.clientWidth || sceneContainer.clientWidth);
       const height = Math.max(1, renderer.domElement.clientHeight || sceneContainer.clientHeight);
-      for (const candidate of projectedCadTextCandidates) {
-        const { entry } = candidate;
-        projectedCadTextPoint.copy(worldToScene(entry.worldPoint, origin)).project(inspectCamera);
+      const visibleEntries = cadTextSpatialIndex.collect((cell) => {
+        projectedCadTextCell.set(
+          cell.center[0] - origin.x,
+          cadVisualLift + 0.45,
+          -(cell.center[1] - origin.y),
+        ).project(inspectCamera);
+        const margin = 0.5;
+        if (projectedCadTextCell.z < -1 || projectedCadTextCell.z > 1
+          || projectedCadTextCell.x < -1 - margin || projectedCadTextCell.x > 1 + margin
+          || projectedCadTextCell.y < -1 - margin || projectedCadTextCell.y > 1 + margin) {
+          return null;
+        }
+        return -Math.hypot(projectedCadTextCell.x, projectedCadTextCell.y);
+      }, MAX_PROJECTED_CAD_TEXT_CANDIDATES);
+      for (let index = 0; index < visibleEntries.length; index += 1) {
+        const entry = visibleEntries[index];
+        const candidate = projectedCadTextCandidatePool[index];
+        candidate.entry = entry;
+        candidate.entity = entry.entity;
+        projectedCadTextPoint.set(
+          entry.worldPoint[0] - origin.x,
+          (entry.worldPoint[2] || 0) + cadVisualLift + 0.45,
+          -(entry.worldPoint[1] - origin.y),
+        ).project(inspectCamera);
         candidate.x = (projectedCadTextPoint.x + 1) * width / 2;
         candidate.y = (1 - projectedCadTextPoint.y) * height / 2;
         candidate.depth = projectedCadTextPoint.z;
       }
+      const projectedCadTextCandidates = projectedCadTextCandidatePool.slice(0, visibleEntries.length);
       const selected = window.CadsceneCadText.selectProjectedLabels(projectedCadTextCandidates, {
         width,
         height,

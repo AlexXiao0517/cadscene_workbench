@@ -109,13 +109,19 @@ def test_cad_text_rendering_is_lazy_bounded_and_throttled() -> None:
 
     assert "MAX_ACTIVE_CAD_TEXT_LABELS = 240" in text
     assert "MAX_CAD_TEXT_TEXTURES = 384" in text
+    assert "MAX_PROJECTED_CAD_TEXT_CANDIDATES = 5000" in text
+    assert "MAX_CAD_TEXT_GRID_AXIS = 32" in text
     assert "CAD_TEXT_REFRESH_MS = 120" in text
     assert "cadTextGeometry" in text
     assert re.search(r"createLruCache\(\s*MAX_CAD_TEXT_TEXTURES", text)
     assert "selectProjectedLabels" in text
     assert 'orbitControls.addEventListener("change"' in text
     assert "scheduleCadTextRefresh" in text
+    assert "createSpatialLabelIndex" in text
+    assert "cadTextSpatialIndex.collect" in text
     assert "maxLabels: MAX_ACTIVE_CAD_TEXT_LABELS" in text
+    assert "mesh.rotation.z = rotation" in text
+    assert "mesh.rotation.z = -rotation" not in text
     initial_loop = text[
         text.index("const cadLineBuckets = new Map()"):
         text.index("const cadTextGroup = new THREE.Group()")

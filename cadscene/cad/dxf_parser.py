@@ -226,13 +226,18 @@ def _entity_points(entity: Any) -> tuple[list[list[float]], bool] | None:
     return None
 
 
+def _resolve_layer_aci(layer_name: str, document: Any) -> int:
+    try:
+        aci = abs(int(document.layers.get(layer_name).dxf.color))
+    except Exception:
+        aci = 7
+    return aci if 1 <= aci <= 255 else 7
+
+
 def _resolve_aci(entity: Any, document: Any) -> int:
     aci = int(getattr(entity.dxf, "color", 256) or 256)
     if aci in (0, 256):
-        try:
-            aci = abs(int(document.layers.get(str(entity.dxf.layer)).dxf.color))
-        except Exception:
-            aci = 7
+        aci = _resolve_layer_aci(str(entity.dxf.layer), document)
     return aci if 1 <= aci <= 255 else 7
 
 
@@ -290,17 +295,22 @@ def parse_dxf(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
             continue
         if item is None:
             continue
-        layer_name = decode_legacy_dxf_text(item["layer"])
+        effective_layer_name = item["layer"]
+        layer_name = decode_legacy_dxf_text(effective_layer_name)
         item["text"] = decode_legacy_dxf_text(item["text"])
         item["layer"] = layer_name
         item["text_role"] = classify_text_role(item["text"], layer_name)
-        raw_aci = int(getattr(entity.dxf, "color", 256) or 256)
-        inherits_insert_style = parent_insert is not None and (
-            raw_aci == 0
-            or (raw_aci == 256 and str(getattr(entity.dxf, "layer", "0")) == "0")
-        )
+        raw_color = getattr(entity.dxf, "color", 256)
+        raw_aci = int(256 if raw_color is None else raw_color)
+        inherits_insert_style = parent_insert is not None and raw_aci == 0
         style_entity = parent_insert if inherits_insert_style else entity
-        aci = _resolve_aci(style_entity, document)
+        aci = (
+            _resolve_aci(parent_insert, document)
+            if inherits_insert_style
+            else _resolve_layer_aci(effective_layer_name, document)
+            if raw_aci == 256
+            else _resolve_aci(entity, document)
+        )
         color = _entity_color(style_entity, document, colors, aci)
         item.update(
             {
