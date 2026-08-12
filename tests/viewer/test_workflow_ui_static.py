@@ -213,6 +213,59 @@ def test_project_workbench_workflow_never_falls_back_to_sfm_on_manifest_read_err
     assert 'trajectory_mode: "sfm_only"' not in project_branch
 
 
+def test_project_workbench_applies_session_workflow_before_selecting_pending_stage() -> None:
+    script = _read("workflow.js")
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+
+    apply_workflow = bootstrap.index(
+        "applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession)"
+    )
+    select_stage = bootstrap.index("setWorkflowStage(\"sfm\")")
+    assert apply_workflow < select_stage
+    assert 'isPureRotationWorkflow()\n        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"' in bootstrap
+
+
+def test_saved_project_pure_rotation_stage_is_not_overwritten_by_artifact_detection() -> None:
+    script = _read("workflow.js")
+    workflow = script[
+        script.index("function renderTrajectoryWorkflow") :
+        script.index("function isPureRotationWorkflow")
+    ]
+
+    assert "projectWorkbenchToken" in workflow
+    assert "projectWorkbenchSession?.workbench_output_revision" in workflow
+    assert 'setWorkflowStage("render")' in workflow
+    assert workflow.index("projectWorkbenchSession?.workbench_output_revision") < workflow.index(
+        "detectWorkflowStageFromArtifacts()"
+    )
+
+
+def test_failed_project_workbench_bootstrap_does_not_fall_open_to_sfm() -> None:
+    script = _read("workflow.js")
+    startup = script[script.index("initializeWorkbenchTheme()") :]
+
+    assert "let projectWorkbenchBootstrapFailed = false;" in script
+    assert "projectWorkbenchBootstrapFailed = true;" in startup
+    assert "if (projectWorkbenchBootstrapFailed) return;" in startup
+
+
+def test_stale_project_workbench_session_can_return_without_closing_token() -> None:
+    script = _read("workflow.js")
+    return_flow = script[
+        script.index("async function returnToProjectWorkspace") :
+        script.index('window.addEventListener("pagehide"')
+    ]
+
+    assert "if (projectWorkbenchBootstrapFailed || !projectWorkbenchSession)" in return_flow
+    assert "projectWorkbenchFallbackReturnTo()" in return_flow
+    assert return_flow.index("projectWorkbenchFallbackReturnTo()") < return_flow.index(
+        "await ensureProjectWorkbenchSession()"
+    )
+
+
 def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() -> None:
     script = _read("workflow.js")
 
@@ -433,7 +486,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260811-project-pipeline-v1' in index
+    assert 'workflow.js?v=20260811-project-workflow-session-v2' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:

@@ -23,6 +23,16 @@ from .analysis_adapters import (
     validate_result_path,
 )
 from .analysis_publication import AnalysisArtifactPublisher
+from .concat import (
+    ConcatClip,
+    ConcatPreflight,
+    ConcatPreflightRequest,
+    RenderCandidate,
+    build_concat_plan,
+    preflight_concat,
+)
+from .concat_adapters import ConcatMediaAdapter, ConcatMediaInputs
+from .concat_executor import validate_concat_outputs
 from .executor import JobExecutionPlan
 from .json_repositories import ProjectRepositories
 from .models import (
@@ -38,6 +48,7 @@ from .models import (
 from .media import (
     ProbedMedia,
     ProjectMediaSpec,
+    VideoMediaInfo,
     media_compatibility,
     probe_media,
     probe_project_media_spec,
@@ -56,7 +67,7 @@ from .queue import (
     QueueJob,
     RestoreCleanupReservation,
 )
-from cadscene.video_analysis.pts import DecodedFrameTimestamp
+from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.workflow.job_runner import read_workflow_log_text
 
 
@@ -99,6 +110,12 @@ class EnqueueRenderResult:
     enqueued_clip_ids: tuple[str, ...]
     job_ids: tuple[str, ...]
     preflight: RenderPreflight
+
+
+@dataclass(frozen=True)
+class EnqueueMergeResult:
+    job_id: str
+    preflight: ConcatPreflight
 
 
 @dataclass(frozen=True)
@@ -170,6 +187,7 @@ class ProjectService:
         source_interval_render_adapter: SourceIntervalRenderAdapter | None = None,
         media_probe: Callable[[Path], ProbedMedia] | None = None,
         project_media_spec_probe: Callable[[Path], ProjectMediaSpec] | None = None,
+        concat_adapter: ConcatMediaAdapter | None = None,
     ) -> None:
         self.repositories = repositories
         self.queue = queue
@@ -185,6 +203,9 @@ class ProjectService:
         self.media_probe = media_probe or probe_media
         self.project_media_spec_probe = (
             project_media_spec_probe or probe_project_media_spec
+        )
+        self.concat_adapter = concat_adapter or ConcatMediaAdapter(
+            validator=self._validate_concat_execution
         )
         self.analysis_publisher = AnalysisArtifactPublisher(
             storage_root=self.storage_root,
@@ -977,6 +998,217 @@ class ProjectService:
             reasons=reasons,
         )
 
+    def preflight_project_merge(self, project_id: str) -> ConcatPreflight:
+        """Validate that every logical clip has one exact current render."""
+
+        return preflight_concat(self._project_concat_request(project_id))
+
+    def _project_concat_request(
+        self, project_id: str
+    ) -> ConcatPreflightRequest:
+        project = self.repositories.project.load(project_id)
+        clips_manifest = self.repositories.clips.load(project_id)
+        jobs_manifest = self.repositories.jobs.load(project_id)
+        media_binding = _project_media_binding(project)
+        video = project.source_assets.get("video")
+        if media_binding is None:
+            raise ValueError("project media specification is unavailable")
+        if not isinstance(video, Mapping):
+            raise ValueError("authoritative source video is unavailable")
+        source_path = Path(str(video.get("path") or ""))
+        source_sha256 = str(video.get("sha256") or "")
+        if not source_path.is_file() or len(source_sha256) != 64:
+            raise ValueError("authoritative source video identity is unavailable")
+
+        stored_jobs = tuple(QueueJob.from_dict(item) for item in jobs_manifest.jobs)
+        concat_clips: list[ConcatClip] = []
+        candidates: dict[str, RenderCandidate] = {}
+        source_frame_rows: list[tuple[int, int]] = []
+        ordered_clips = tuple(
+            sorted(
+                clips_manifest.clips,
+                key=lambda item: (
+                    int(item.analysis.get("render_order", 0)),
+                    int(item.analysis["source_start_pts"]),
+                ),
+            )
+        )
+        for expected_order, clip in enumerate(ordered_clips):
+            render_job = next(
+                (
+                    item
+                    for item in reversed(stored_jobs)
+                    if item.job_type == "clip_render"
+                    and item.clip_id == clip.clip_id
+                    and _has_exact_success_proof(item)
+                    and self._current_input_fingerprint(item) == item.input_fingerprint
+                    and self._exact_render_owner_record(item) is not None
+                ),
+                None,
+            )
+            if render_job is None:
+                continue
+            video_path = Path(str(render_job.published_outputs.get("video") or ""))
+            frame_map_path = Path(
+                str(render_job.published_outputs.get("frame_map") or "")
+            )
+            frame_map = json.loads(frame_map_path.read_text(encoding="utf-8"))
+            if not isinstance(frame_map, Mapping):
+                raise ValueError("render frame map must be an object")
+            frames = frame_map.get("frames")
+            if not isinstance(frames, list) or not frames:
+                raise ValueError("render frame map contains no source frames")
+            source_frame_rows.extend(
+                (
+                    int(item["source_decoded_frame_ordinal"]),
+                    int(item["source_pts"]),
+                )
+                for item in frames
+                if isinstance(item, Mapping)
+            )
+            time_base = _fraction_time_base(clip)
+            concat_clip = ConcatClip(
+                clip_id=clip.clip_id,
+                render_order=expected_order,
+                analysis_revision=clip.analysis_revision,
+                resolved_workflow=str(clip.resolved_workflow),
+                source_start_pts=int(clip.analysis["source_start_pts"]),
+                source_end_pts_exclusive=int(
+                    clip.analysis["source_end_pts_exclusive"]
+                ),
+                source_time_base=time_base,
+                authoritative_frame_map=frame_map,
+                current_render_input_fingerprint=render_job.input_fingerprint,
+            )
+            proof = dict(render_job.validation_proof or {})
+            output_pts = tuple(int(value) for value in proof.get("output_pts", ()))
+            media_spec_revision, media_spec = media_binding
+            candidate_media = ProbedMedia(
+                video=VideoMediaInfo(
+                    **{
+                        key: getattr(media_spec, key)
+                        for key in (
+                            "width", "height", "display_orientation_baked",
+                            "sample_aspect_ratio", "pixel_format", "codec_name",
+                            "profile", "time_base", "color_range", "color_space",
+                            "color_transfer", "color_primaries", "nominal_frame_rate",
+                        )
+                    },
+                    frame_pts=output_pts,
+                    frame_duration_pts=tuple(None for _ in output_pts),
+                ),
+                audio=None,
+                format_duration_sec=None,
+            )
+            concat_clips.append(concat_clip)
+            candidates[clip.clip_id] = RenderCandidate(
+                project_id=project_id,
+                clip_id=clip.clip_id,
+                workflow=str(clip.resolved_workflow),
+                exact_validated=True,
+                input_fingerprint=render_job.input_fingerprint,
+                output_revision=str(render_job.output_revision),
+                output_fingerprint=str(render_job.output_fingerprint),
+                proof_fingerprint=sha256(
+                    json.dumps(
+                        proof, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest(),
+                video_sha256=str(proof.get("video_sha256") or ""),
+                frame_map_sha256=str(proof.get("frame_map_sha256") or ""),
+                publication_operation_id=str(
+                    render_job.publication_operation_id or ""
+                ),
+                video_path=str(video_path),
+                frame_map_path=str(frame_map_path),
+                media=candidate_media,
+                render_frame_map=frame_map,
+            )
+
+        if not clips_manifest.clips:
+            raise ValueError("project contains no logical clips")
+        if not source_frame_rows:
+            # Build a syntactically valid request so preflight reports every clip as
+            # blocked without silently probing or regenerating source timestamps.
+            raise ValueError("project contains no exact current rendered frames")
+        if len(source_frame_rows) != len({ordinal for ordinal, _pts in source_frame_rows}):
+            raise ValueError("render frame maps contain duplicate source frames")
+        source_frame_rows.sort()
+        last_end = int(ordered_clips[-1].analysis["source_end_pts_exclusive"])
+        source_frames = tuple(
+            DecodedFrameTimestamp(
+                ordinal=ordinal,
+                pts=pts,
+                duration_pts=(
+                    source_frame_rows[index + 1][1] - pts
+                    if index + 1 < len(source_frame_rows)
+                    else last_end - pts
+                ),
+                timestamp_source="pts",
+            )
+            for index, (ordinal, pts) in enumerate(source_frame_rows)
+        )
+        source_index = DecodedFrameIndex(
+            _fraction_time_base(ordered_clips[0]), source_frames
+        )
+        return ConcatPreflightRequest(
+            project_id=project_id,
+            project_revision=project.revision,
+            clips_revision=clips_manifest.revision,
+            source_frame_index=source_index,
+            clips=tuple(concat_clips),
+            render_candidates=candidates,
+            fallback_confirmations={},
+            fallback_artifacts={},
+            source_asset_fingerprint=source_sha256,
+            project_media_spec_revision=media_spec_revision,
+            project_media_spec=media_spec,
+            original_video_path=str(source_path),
+        )
+
+    def _validate_concat_execution(self, inputs, execution) -> AdapterResult:
+        proof = dict(
+            validate_concat_outputs(
+                execution,
+                project_media_spec=inputs.project_media_spec,
+                media_probe=self.media_probe,
+                source_media_probe=self.media_probe,
+            )
+        )
+        source_media = self.media_probe(inputs.source_video_path)
+        proof.update(
+            {
+                "audio_policy": (
+                    "original_video" if source_media.audio is not None else "video_only"
+                ),
+                "source_asset_sha256": execution.source_asset_fingerprint,
+                "segment_video_sha256": {
+                    item.clip_id: item.source_video_sha256
+                    for item in execution.segments
+                },
+                "segment_frame_map_sha256": {
+                    item.clip_id: item.source_frame_map_sha256
+                    for item in execution.segments
+                },
+                "video_sha256": sha256(execution.final_output.read_bytes()).hexdigest(),
+                "frame_map_sha256": sha256(
+                    execution.final_frame_map_path.read_bytes()
+                ).hexdigest(),
+            }
+        )
+        fingerprint = sha256(
+            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return AdapterResult.success(
+            output_revision=f"concat-{fingerprint[:16]}",
+            output_fingerprint=fingerprint,
+            outputs={
+                "video": str(execution.final_output),
+                "frame_map": str(execution.final_frame_map_path),
+            },
+            validation_proof=proof,
+        )
+
     def published_render_video_path(
         self,
         project_id: str,
@@ -1017,6 +1249,99 @@ class ProjectService:
         if not expected.is_file():
             raise FileNotFoundError("published render video is unavailable")
         return expected
+
+    def enqueue_project_merge(
+        self,
+        project_id: str,
+        *,
+        expected_jobs_revision: int | None = None,
+    ) -> EnqueueMergeResult:
+        with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
+            request = self._project_concat_request(project_id)
+            preflight = preflight_concat(request)
+            plan = build_concat_plan(request)
+            dependencies = tuple(
+                candidate
+                for candidate in (
+                    next(
+                        (
+                            job
+                            for job in reversed(tuple(self.queue.jobs()))
+                            if job.project_id == project_id
+                            and job.job_type == "clip_render"
+                            and job.clip_id == entry.clip_id
+                            and job.status == "success"
+                            and job.output_revision == entry.input_output_revision
+                        ),
+                        None,
+                    )
+                    for entry in plan.entries
+                )
+                if candidate is not None
+            )
+            if len(dependencies) != len(plan.entries):
+                raise RuntimeError("merge render dependencies changed after preflight")
+            identity_payload = {
+                "plan": plan.to_dict(),
+                "render_job_ids": [job.job_id for job in dependencies],
+                "adapter_name": self.concat_adapter.name,
+                "adapter_version": self.concat_adapter.version,
+            }
+            fingerprint = _fingerprint(identity_payload)
+            job_id = self._identity()
+            attempt_dir = self._attempt_directory(project_id, job_id, 1)
+            job = QueueJob(
+                job_id=job_id,
+                project_id=project_id,
+                clip_id="project-output",
+                job_type="project_merge",
+                resource_class="media_io",
+                status="queued",
+                stage="queued",
+                priority=0,
+                depends_on_job_ids=tuple(job.job_id for job in dependencies),
+                exclusive_key=f"merge:{project_id}",
+                idempotency_key=_fingerprint(
+                    {**identity_payload, "purpose": "idempotency"}
+                ),
+                input_revision=f"{plan.project_revision}:{plan.clips_revision}",
+                input_fingerprint=fingerprint,
+                adapter_name=self.concat_adapter.name,
+                adapter_version=self.concat_adapter.version,
+                output_revision=None,
+                operation_id=self._identity(),
+                attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            )
+            submitted = self.queue.submit(job)
+            if submitted.job_id == job.job_id:
+                attempt_dir.mkdir(parents=True, exist_ok=False)
+            self._publish_queue_locked(project_id)
+            return EnqueueMergeResult(job_id=submitted.job_id, preflight=preflight)
+
+    def published_merge_video_path(self, project_id: str) -> Path:
+        jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(project_id).jobs
+        )
+        job = next(
+            (
+                item
+                for item in reversed(jobs)
+                if item.job_type == "project_merge"
+                and _has_exact_success_proof(item)
+                and self._current_input_fingerprint(item) == item.input_fingerprint
+            ),
+            None,
+        )
+        if job is None:
+            raise FileNotFoundError("current merged output is unavailable")
+        path = Path(str(job.published_outputs.get("video") or "")).resolve(strict=True)
+        attempt = Path(job.attempts[-1].directory).resolve(strict=True)
+        path.relative_to(attempt)
+        if not path.is_file():
+            raise FileNotFoundError("current merged output is unavailable")
+        return path
 
     def enqueue_render_jobs(
         self,
@@ -2568,6 +2893,8 @@ class ProjectService:
             return self._prepare_analysis(job)
         if job.job_type == "clip_render":
             return self._prepare_clip_render(job)
+        if job.job_type == "project_merge":
+            return self._prepare_project_merge(job)
         if job.job_type != "trajectory":
             raise ValueError(f"unsupported executable job type: {job.job_type}")
         clips_manifest = self.repositories.clips.load(project_id)
@@ -2687,6 +3014,61 @@ class ProjectService:
         )
         plan = adapter.prepare(inputs)
         return JobExecutionPlan(commands=plan.commands, validate=plan.validate)
+
+    def _prepare_project_merge(self, job: QueueJob) -> JobExecutionPlan:
+        if (
+            job.status != "running"
+            or job.resource_class != "media_io"
+            or job.exclusive_key != f"merge:{job.project_id}"
+            or not job.attempts
+        ):
+            raise RuntimeError("project merge scheduling contract is invalid")
+        request = self._project_concat_request(job.project_id)
+        plan = build_concat_plan(request)
+        identity_payload = {
+            "plan": plan.to_dict(),
+            "render_job_ids": list(job.depends_on_job_ids),
+            "adapter_name": self.concat_adapter.name,
+            "adapter_version": self.concat_adapter.version,
+        }
+        if _fingerprint(identity_payload) != job.input_fingerprint:
+            raise RuntimeError("project merge inputs changed before execution")
+        attempt = Path(job.attempts[-1].directory).resolve(strict=True)
+        _, media_spec = _project_media_binding(
+            self.repositories.project.load(job.project_id)
+        ) or (None, None)
+        if media_spec is None:
+            raise RuntimeError("project media specification is unavailable")
+        inputs = ConcatMediaInputs(
+            plan=plan,
+            source_frame_index=request.source_frame_index,
+            source_video_path=Path(request.original_video_path).resolve(strict=True),
+            attempt_directory=attempt,
+            project_media_spec=media_spec,
+        )
+        execution = self.concat_adapter.prepare(inputs)
+        execution_path = attempt / "concat_execution.json"
+        spec_path = attempt / "project_media_spec.json"
+        execution_path.write_text(
+            json.dumps(execution.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        spec_path.write_text(
+            json.dumps(media_spec.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        command = (
+            sys.executable,
+            "-m",
+            "cadscene.cli.concat_media",
+            "--execution-plan-json",
+            str(execution_path),
+            "--project-media-spec-json",
+            str(spec_path),
+            "--attempt-directory",
+            str(attempt),
+        )
+        return JobExecutionPlan(commands=(command,), validate=execution.validate)
 
     def prepare_source_interval_render(
         self, inputs: SourceIntervalRenderInputs
@@ -3780,6 +4162,19 @@ class ProjectService:
                     project_assets=project.source_assets,
                 )
             )
+        if job.job_type == "project_merge":
+            try:
+                plan = build_concat_plan(self._project_concat_request(job.project_id))
+                return _fingerprint(
+                    {
+                        "plan": plan.to_dict(),
+                        "render_job_ids": list(job.depends_on_job_ids),
+                        "adapter_name": self.concat_adapter.name,
+                        "adapter_version": self.concat_adapter.version,
+                    }
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
         clips_manifest = self.repositories.clips.load(job.project_id)
         if job.job_type == "clip_export":
             clip = next(
@@ -4342,10 +4737,13 @@ def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
 
 def _saved_workbench_reference(clip: ClipDefinition) -> StateReference | None:
     for reference in reversed(clip.references):
+        value = reference.value
         if (
             reference.owner == "clips"
             and reference.key == f"workbench:{clip.clip_id}"
-            and reference.value.get("status") == "saved"
+            and value.get("status") in {"saved", "editing", "pending_save"}
+            and isinstance(value.get("workbench_output_revision"), str)
+            and isinstance(value.get("workbench_output_fingerprint"), str)
         ):
             return reference
     return None

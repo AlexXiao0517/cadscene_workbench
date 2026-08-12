@@ -685,6 +685,48 @@ def test_render_identity_includes_saved_workbench_operation_id(tmp_path: Path) -
     assert payload["workbench"]["output_operation_id"] == "save-ready"
 
 
+def test_reopening_saved_workbench_does_not_stale_current_render_identity(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, adapter, trajectories = _system(tmp_path)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    clip = next(item for item in clips.clips if item.clip_id == "ready")
+    trajectory = next(item for item in trajectories if item.clip_id == "ready")
+    saved = clip.references[0]
+    render = service._new_render_job(
+        "p1",
+        clip,
+        trajectory=trajectory,
+        workbench=saved,
+        adapter_name=adapter.name,
+        adapter_version=adapter.version,
+        project_revision=project.revision,
+        clips_revision=clips.revision,
+        media_spec=ProjectMediaSpec.from_dict(project.media_spec),
+        media_spec_revision=str(project.media_spec_revision),
+        physical_video_path=Path(clip.analysis["physical_mp4_path"]),
+        physical_frame_map_path=Path(clip.analysis["frame_map_path"]),
+    )
+    editing = replace(saved, value={**saved.value, "status": "editing"})
+    current = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(item, references=(editing,))
+                if item.clip_id == "ready"
+                else item
+                for item in value.clips
+            ),
+        ),
+    )
+
+    assert service._current_input_fingerprint(render) == render.input_fingerprint
+
+
 def test_project_media_specs_survive_service_rebuild_and_remain_project_scoped(
     tmp_path: Path,
 ) -> None:

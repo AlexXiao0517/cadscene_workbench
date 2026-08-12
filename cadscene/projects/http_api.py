@@ -46,6 +46,7 @@ _TRAJECTORY = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
 )
 _RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
+_MERGE = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/merge-jobs$")
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -151,6 +152,9 @@ class ProjectApi:
             match = _RENDER.fullmatch(path)
             if method == "POST" and match:
                 return self._render_jobs(match["project"], payload)
+            match = _MERGE.fullmatch(path)
+            if method == "POST" and match:
+                return self._merge_job(match["project"], payload)
             match = _JOB_RUNTIME.fullmatch(path)
             if method == "GET" and match:
                 return ApiResponse(
@@ -583,6 +587,22 @@ class ProjectApi:
                     },
                 }
             )
+        can_merge = bool(clips.clips) and all(
+            _render_preview_is_current(
+                clip.clip_id,
+                render_job_by_clip.get(clip.clip_id),
+                render.clip_renders,
+            )
+            for clip in clips.clips
+        )
+        merge_job = next(
+            (
+                item
+                for item in reversed(jobs.jobs)
+                if item.get("job_type") == "project_merge"
+            ),
+            None,
+        )
         snapshot = {
             "project_id": project_id,
             "display_name": str(project.source_assets.get("display_name") or project_id),
@@ -599,10 +619,21 @@ class ProjectApi:
             "capabilities": {
                 "can_start_trajectory": can_start_any,
                 "can_render": can_render_any,
-                "can_merge": False,
+                "can_merge": can_merge,
                 "can_reanalyze": _analysis_request_key(project.source_assets)
                 is not None
                 and not analysis_busy,
+            },
+            "merge": {
+                "job_id": None if merge_job is None else merge_job.get("job_id"),
+                "status": "not_started" if merge_job is None else merge_job.get("status"),
+                "stage": None if merge_job is None else merge_job.get("stage"),
+                "progress": _visible_job_progress(merge_job),
+                "download_url": (
+                    f"/api/projects/{project_id}/merge-output/video"
+                    if merge_job is not None and merge_job.get("status") == "success"
+                    else None
+                ),
             },
             "clips": clip_payloads,
         }
@@ -926,6 +957,22 @@ class ProjectApi:
                 "enqueued_clip_ids": list(result.enqueued_clip_ids),
                 "job_ids": list(result.job_ids),
                 "jobs_revision": self.repositories.jobs.load(project_id).revision,
+            },
+        )
+
+    def _merge_job(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        expected_revision = _required_revision(payload)
+        result = self.service.enqueue_project_merge(
+            project_id, expected_jobs_revision=expected_revision
+        )
+        return ApiResponse(
+            202,
+            {
+                "job_id": result.job_id,
+                "jobs_revision": self.repositories.jobs.load(project_id).revision,
+                "preflight": result.preflight.to_dict(),
             },
         )
 

@@ -177,7 +177,13 @@
     }
     $("#batchTrajectoryButton").disabled = !snapshot.capabilities.can_start_trajectory;
     $("#batchRenderButton").disabled = !snapshot.capabilities.can_render;
-    $("#mergeProjectButton").disabled = !snapshot.capabilities.can_merge;
+    const mergeButton = $("#mergeProjectButton");
+    const mergeStatus = snapshot.merge?.status || "not_started";
+    const mergeActive = ["queued", "preparing", "running", "validating"].includes(mergeStatus);
+    mergeButton.disabled = mergeActive || !snapshot.capabilities.can_merge;
+    mergeButton.textContent = snapshot.merge?.download_url
+      ? "下载合并视频"
+      : (mergeActive ? "合并输出中…" : "合并并输出");
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
     if (focusClipId) {
@@ -512,6 +518,31 @@
     } catch (error) { setMessage(error.message, true); }
   }
 
+  async function mergeProject() {
+    if (state.snapshot?.merge?.download_url) {
+      window.location.assign(state.snapshot.merge.download_url);
+      return;
+    }
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/merge-jobs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.jobs,
+          }),
+        },
+      );
+      state.snapshot.component_revisions.jobs = body.jobs_revision;
+      state.etag = null;
+      setMessage("已加入合并输出队列，完成后可直接下载。");
+      await pollSnapshot();
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  }
+
   async function openWorkbench(clip, row) {
     const returnParams = new URLSearchParams({
       projectId,
@@ -596,6 +627,7 @@
   });
   $("#batchTrajectoryButton").addEventListener("click", () => preflightBatch("trajectory"));
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
+  $("#mergeProjectButton").addEventListener("click", mergeProject);
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#confirmAnalysisCandidate").addEventListener("click", activateCandidateAnalysis);
   $("#dismissAnalysisCandidate").addEventListener("click", () => {

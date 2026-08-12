@@ -7,6 +7,7 @@ import pytest
 
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import (
+    ClipDefinition,
     ClipsManifest,
     StateReference,
     activate_analysis_revision,
@@ -20,6 +21,56 @@ def _created_repositories(tmp_path):
     repositories = project_repositories(tmp_path)
     repositories.create_project("p1", updated_at="2026-08-03T00:00:00Z")
     return repositories
+
+
+def test_recovery_preserves_clip_owned_saved_workbench_reference(tmp_path):
+    repositories = _created_repositories(tmp_path)
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            register_analysis_revision(
+                value, "analysis-1", operation_id="analysis-operation"
+            ),
+            active_analysis_revision="analysis-1",
+            active_analysis_operation_id="analysis-operation",
+        ),
+    )
+    reference = StateReference(
+        "clips",
+        "workbench:clip-1",
+        "save-operation",
+        {
+            "status": "saved",
+            "workbench_output_revision": "workbench-1",
+            "workbench_output_fingerprint": "a" * 64,
+        },
+    )
+    clip = ClipDefinition.from_analysis(
+        {
+            "clip_id": "clip-1",
+            "analysis_revision": "analysis-1",
+            "source_start_pts": 0,
+            "source_end_pts_exclusive": 10,
+            "source_time_base": {"numerator": 1, "denominator": 1000},
+            "recommended_workflow": "sfm_only",
+        },
+        references=(reference,),
+    )
+    clips = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, analysis_revision="analysis-1", clips=(clip,)
+        ),
+    )
+
+    result = reconcile_project("p1", repositories=repositories)
+
+    assert result.rolled_back_references == 0
+    assert repositories.clips.load("p1").clips[0].references == (reference,)
 
 
 def test_recovery_completes_reference_from_authoritative_owner_state(tmp_path):

@@ -58,6 +58,7 @@
   let pureRotationLocalDelta = { yaw: 0, pitch: 0, roll: 0 };
   let projectWorkbenchSession = null;
   let projectWorkbenchBootstrapPromise = null;
+  let projectWorkbenchBootstrapFailed = false;
   let projectWorkbenchSaveInFlight = false;
   let projectWorkbenchTrajectoryJobId = null;
   let projectWorkbenchTrajectoryStatus = null;
@@ -101,6 +102,14 @@
     if (mode === "pure_rotation") {
       window.setTimeout(async () => {
         await initializePureRotationViewer();
+        if (
+          projectWorkbenchToken
+          && projectWorkbenchSession?.workbench_output_revision
+        ) {
+          setWorkflowStage("render");
+          await refreshRenderOutputState();
+          return;
+        }
         setWorkflowStage(await detectWorkflowStageFromArtifacts());
       }, 0);
     }
@@ -118,6 +127,17 @@
 
   function isPureRotationWorkflow() {
     return trajectoryWorkflow?.trajectory_mode === "pure_rotation";
+  }
+
+  function applyProjectWorkbenchSessionWorkflow(session) {
+    const mode = session?.workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";
+    trajectoryWorkflow = {
+      ...(trajectoryWorkflow || {}),
+      trajectory_mode: mode,
+      implementation_status: "ready",
+    };
+    trajectoryWorkflowLoaded = true;
+    renderTrajectoryWorkflow(trajectoryWorkflow);
   }
 
   function setPureVisible(selector, visible) {
@@ -1077,10 +1097,16 @@
 
   async function pollJobStatus() {
     if (projectWorkbenchTrajectoryOwnsStatus()) return;
+    if (projectWorkbenchToken && !projectWorkbenchSession) {
+      stateLabel.textContent = projectWorkbenchBootstrapFailed ? "会话不可用" : "正在载入项目会话";
+      return;
+    }
     if (projectWorkbenchTrajectoryIsPending()) {
       stateLabel.textContent = "待启动";
       if (!selectedWorkflowStage) setWorkflowStage("sfm");
-      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      message.textContent = isPureRotationWorkflow()
+        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
+        : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
       return;
     }
     const path = runPath("job_status.json");
@@ -1344,11 +1370,14 @@
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
     projectWorkbenchSession = payload;
+    applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession);
     if (projectWorkbenchTrajectoryIsPending()) {
       document.querySelector('#workflowSteps li[data-stage="upload"]')?.classList.add("is-success");
       setWorkflowStage("sfm");
       stateLabel.textContent = "待启动";
-      message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      message.textContent = isPureRotationWorkflow()
+        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
+        : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
     } else {
       maybeAutoApplySfmCameraInit();
     }
@@ -1358,7 +1387,7 @@
   function projectWorkbenchTrajectoryIsPending() {
     return Boolean(
       projectWorkbenchToken
-      && (!projectWorkbenchSession || projectWorkbenchSession.launch_mode === "workflow_start")
+      && projectWorkbenchSession?.launch_mode === "workflow_start"
     );
   }
 
@@ -1630,7 +1659,19 @@
     return null;
   }
 
+  function projectWorkbenchFallbackReturnTo() {
+    const target = new URL("/apps/project_workspace/", window.location.origin);
+    target.searchParams.set("projectId", projectWorkbenchProjectId);
+    if (runId) target.searchParams.set("focusClip", runId);
+    return `${target.pathname}${target.search}`;
+  }
+
   async function returnToProjectWorkspace() {
+    if (projectWorkbenchBootstrapFailed || !projectWorkbenchSession) {
+      projectWorkbenchInternalNavigation = true;
+      window.location.assign(projectWorkbenchFallbackReturnTo());
+      return;
+    }
     await ensureProjectWorkbenchSession();
     await persistWorkbenchDraftForReturn();
     if (
@@ -2323,27 +2364,36 @@
   }
   initializeWorkbenchTheme();
   loadWorkflowSuggestions();
+  function selectInitialWorkflowStage() {
+    if (projectWorkbenchBootstrapFailed) return;
+    const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
+    if (stageOrder.includes(requestedWorkflowStage)) {
+      setWorkflowStage(requestedWorkflowStage);
+    } else if (stageOrder.includes(restoredWorkflowStage)) {
+      sessionStorage.removeItem(restoredWorkflowStageKey());
+      setWorkflowStage(restoredWorkflowStage);
+    } else {
+      detectWorkflowStageFromArtifacts().then((stage) => {
+        if (!selectedWorkflowStage) setWorkflowStage(stage);
+      });
+    }
+  }
   if (projectWorkbenchToken) {
     projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
-    projectWorkbenchBootstrapPromise.catch((error) => {
-      message.textContent = `项目会话不可用：${error.message}`;
-    });
+    projectWorkbenchBootstrapPromise
+      .then(selectInitialWorkflowStage)
+      .catch((error) => {
+        projectWorkbenchBootstrapFailed = true;
+        stateLabel.textContent = "会话不可用";
+        message.textContent = `项目会话不可用：${error.message}。请返回项目管理页面后重新进入工作台。`;
+      });
+  } else {
+    selectInitialWorkflowStage();
   }
   loadDatasetManifestForUpload();
   blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
-  const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
-  if (stageOrder.includes(requestedWorkflowStage)) {
-    setWorkflowStage(requestedWorkflowStage);
-  } else if (stageOrder.includes(restoredWorkflowStage)) {
-    sessionStorage.removeItem(restoredWorkflowStageKey());
-    setWorkflowStage(restoredWorkflowStage);
-  } else {
-    detectWorkflowStageFromArtifacts().then((stage) => {
-      if (!selectedWorkflowStage) setWorkflowStage(stage);
-    });
-  }
   window.addEventListener("cadsceneViewerReady", () => {
     viewerReadyForSfmCameraInit = true;
     maybeAutoApplySfmCameraInit();

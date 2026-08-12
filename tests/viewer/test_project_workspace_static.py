@@ -217,6 +217,15 @@ def test_workspace_wires_batch_render_to_render_preflight_api() -> None:
     assert "snapshot.capabilities.can_render" in script
 
 
+def test_workspace_wires_merge_button_to_project_queue_and_download() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert '"/merge-jobs"' in script or "/merge-jobs`" in script
+    assert "snapshot.capabilities.can_merge" in script
+    assert "snapshot.merge?.download_url" in script
+    assert 'addEventListener("click", mergeProject)' in script
+
+
 def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 

@@ -64,6 +64,16 @@ def _owned_states(manifest: ManifestHeader) -> dict[str, str]:
             operation_id = clip.operation_id or manifest.operation_id
             if operation_id:
                 states[f"clip:{clip.clip_id}"] = operation_id
+            for reference in clip.references:
+                if (
+                    reference.owner == "clips"
+                    and reference.key == f"workbench:{clip.clip_id}"
+                    and reference.value.get("status")
+                    in {"editing", "pending_save", "saved"}
+                    and reference.value.get("workbench_output_revision")
+                    and reference.value.get("workbench_output_fingerprint")
+                ):
+                    states[reference.key] = reference.operation_id
     elif isinstance(manifest, JobsManifest):
         for job in manifest.jobs:
             if job.get("job_id") and job.get("operation_id"):

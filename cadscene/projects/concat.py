@@ -829,7 +829,22 @@ def _validate_frame_timing(
         Fraction(current.pts - previous.pts) * source_time_base
         for previous, current in zip(source_frames, source_frames[1:])
     )
-    if output_deltas != source_deltas:
+    if not output_deltas or len(output_deltas) != len(source_deltas):
+        raise ValueError("rendered frame timing differs from authoritative source")
+    # Project renders are zero-based encoded media; their timestamps no longer
+    # carry source PTS identity (the sidecar map does). Encoders may quantize a
+    # 24000/1001 cadence onto neighbouring ticks, so require monotonic timing and
+    # an end-to-end drift no larger than one frame instead of tick-for-tick PTS.
+    tolerance = max((*output_deltas, *source_deltas))
+    tick_tolerance = max(media.video.time_base, source_time_base)
+    if (
+        any(delta <= 0 for delta in output_deltas)
+        or any(
+            abs(output - source) > tick_tolerance
+            for output, source in zip(output_deltas, source_deltas)
+        )
+        or abs(sum(output_deltas) - sum(source_deltas)) > tolerance
+    ):
         raise ValueError("rendered frame timing differs from authoritative source")
 
 

@@ -314,6 +314,30 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         finally:
             stream.close()
 
+    def _send_project_merge_video(self, path: str, *, send_body: bool) -> None:
+        match = re.fullmatch(
+            r"/api/projects/(?P<project>[A-Za-z0-9_.-]+)/merge-output/video",
+            path,
+        )
+        if match is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "merged video not found")
+            return
+        api = getattr(self.server, "project_api", None)
+        service = getattr(api, "service", None)
+        try:
+            video = service.published_merge_video_path(match["project"])
+        except (AttributeError, FileNotFoundError, ValueError):
+            self.send_error(HTTPStatus.NOT_FOUND, "merged video not found")
+            return
+        stream = self._send_file_head(video)
+        if stream is None:
+            return
+        try:
+            if send_body:
+                self.copyfile(stream, self.wfile)
+        finally:
+            stream.close()
+
     def _send_project_thumbnail(self, path: str) -> None:
         match = re.fullmatch(
             r"/api/projects/(?P<project>[A-Za-z0-9_-]+)/thumbnails/(?:(?P<cad>cad)|(?P<source>source)|clips/(?P<clip>[A-Za-z0-9_-]+))",
@@ -785,6 +809,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     def do_HEAD(self) -> None:
         parsed = urlsplit(self.path)
         if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/merge-output/video", parsed.path
+        ):
+            self._send_project_merge_video(parsed.path, send_body=False)
+            return
+        if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
             r"renders/[A-Za-z0-9_.-]+/video",
             parsed.path,
@@ -795,6 +824,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if re.fullmatch(
+            r"/api/projects/[A-Za-z0-9_.-]+/merge-output/video", parsed.path
+        ):
+            self._send_project_merge_video(parsed.path, send_body=True)
+            return
         if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
             r"renders/[A-Za-z0-9_.-]+/video",

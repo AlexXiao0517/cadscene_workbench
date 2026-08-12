@@ -180,6 +180,28 @@ def _request(
     )
 
 
+def test_concat_accepts_zero_based_render_timing_within_one_frame_tolerance() -> None:
+    request = _request()
+    clip = request.clips[0]
+    candidate = _candidate(clip)
+    shifted = replace(
+        candidate,
+        media=replace(
+            candidate.media,
+            video=replace(candidate.media.video, frame_pts=(0, 39)),
+        ),
+    )
+
+    report = preflight_concat(
+        replace(
+            request,
+            render_candidates={**request.render_candidates, clip.clip_id: shifted},
+        )
+    )
+
+    assert clip.clip_id not in report.blockers
+
+
 def _confirmation(clip: ConcatClip, **changes: object) -> SourceFallbackConfirmation:
     values: dict[str, object] = {
         "project_id": "project-1",
