@@ -63,7 +63,7 @@ def _make_nonzero_pts_ffv1_video(tmp_path: Path) -> tuple[Path, Path]:
             "-i",
             "testsrc2=size=64x48:rate=10:duration=4",
             "-vf",
-            "setpts=PTS+10/TB",
+            "setpts=PTS+100/TB",
             "-copyts",
             "-c:v",
             "ffv1",
@@ -73,7 +73,7 @@ def _make_nonzero_pts_ffv1_video(tmp_path: Path) -> tuple[Path, Path]:
         check=True,
     )
     index = probe_video_pts(video, ffmpeg_executable=ffmpeg)
-    assert 9.9 < index.source_start_pts_sec < 10.1
+    assert 99.9 < index.source_start_pts_sec < 100.1
     return video, ffmpeg
 
 
@@ -259,19 +259,19 @@ def test_export_video_clips_seeks_absolute_nonzero_source_pts(tmp_path: Path) ->
         [
             {
                 "clip_id": "clip-0001",
-                "source_start_pts": 10000,
-                "source_end_pts_exclusive": 12000,
+                "source_start_pts": 100000,
+                "source_end_pts_exclusive": 102000,
                 "source_time_base": {"numerator": 1, "denominator": 1000},
-                "source_start_pts_sec": 10.0,
-                "source_end_pts_exclusive_sec": 12.0,
+                "source_start_pts_sec": 100.0,
+                "source_end_pts_exclusive_sec": 102.0,
             },
             {
                 "clip_id": "clip-0002",
-                "source_start_pts": 12000,
-                "source_end_pts_exclusive": 14000,
+                "source_start_pts": 102000,
+                "source_end_pts_exclusive": 104000,
                 "source_time_base": {"numerator": 1, "denominator": 1000},
-                "source_start_pts_sec": 12.0,
-                "source_end_pts_exclusive_sec": 14.0,
+                "source_start_pts_sec": 102.0,
+                "source_end_pts_exclusive_sec": 104.0,
             },
         ],
     )
@@ -519,6 +519,23 @@ def test_export_command_prerolls_ten_seconds_for_late_clip() -> None:
 
     assert command[command.index("-ss") + 1] == "105.44"
     assert "trim=start_pts=115440:end_pts=173160,setpts=PTS-STARTPTS" in command
+
+
+def test_export_command_makes_seek_relative_to_nonzero_source_start() -> None:
+    command = clip_export._build_ffmpeg_clip_command(
+        ffmpeg=Path("ffmpeg"),
+        source=Path("source.mp4"),
+        clip=clip_export.ExportClip(
+            "clip-0001", 115000, 117000, Fraction(1, 1000)
+        ),
+        clip_path=Path("clip-0001.mp4"),
+        preset="veryfast",
+        crf=18,
+        source_start_pts_sec=100.0,
+    )
+
+    assert command[command.index("-ss") + 1] == "5"
+    assert "trim=start_pts=115000:end_pts=117000,setpts=PTS-STARTPTS" in command
 
 
 def test_source_frame_index_prefers_safe_fast_probe(

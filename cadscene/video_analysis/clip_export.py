@@ -194,6 +194,7 @@ def export_video_clips(
                 clip_path=clip_path,
                 preset=preset,
                 crf=crf,
+                source_start_pts_sec=frame_index.source_start_pts_sec,
             )
             if progress_callback is None:
                 process = subprocess.run(
@@ -355,6 +356,7 @@ def _build_ffmpeg_clip_command(
     clip_path: Path,
     preset: str,
     crf: int,
+    source_start_pts_sec: float = 0.0,
 ) -> list[str]:
     return [
         str(ffmpeg),
@@ -364,7 +366,7 @@ def _build_ffmpeg_clip_command(
         "-n",
         "-nostdin",
         "-ss",
-        f"{max(0.0, clip.start_pts_sec - 10.0):.12g}",
+        f"{max(0.0, clip.start_pts_sec - source_start_pts_sec - 10.0):.12g}",
         "-copyts",
         "-i",
         str(source),
