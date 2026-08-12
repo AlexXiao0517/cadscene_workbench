@@ -26,8 +26,9 @@
     const margin = Math.max(0, finiteOption(options.margin, 0.08));
     if (maxLabels === 0) return [];
 
-    const ranked = (candidates || [])
-      .filter((candidate) => (
+    const occupiedCells = new Map();
+    for (const candidate of candidates || []) {
+      const visible = (
         Number.isFinite(candidate.x)
         && Number.isFinite(candidate.y)
         && Number.isFinite(candidate.depth)
@@ -37,26 +38,21 @@
         && candidate.x <= (1 + margin) * width
         && candidate.y >= -margin * height
         && candidate.y <= (1 + margin) * height
-      ))
-      .map((candidate) => ({
-        ...candidate,
-        _priority: (isStationLabel(candidate.entity) ? 1_000_000 : 0)
-          + Math.max(0, Number(candidate.entity?.cad_height) || 0) * 1_000
-          - Math.hypot(candidate.x - width / 2, candidate.y - height / 2),
-      }))
-      .sort((left, right) => right._priority - left._priority);
-
-    const occupiedCells = new Set();
-    const selected = [];
-    for (const candidate of ranked) {
+      );
+      if (!visible) continue;
+      const priority = (isStationLabel(candidate.entity) ? 1_000_000 : 0)
+        + Math.max(0, Number(candidate.entity?.cad_height) || 0) * 1_000
+        - Math.hypot(candidate.x - width / 2, candidate.y - height / 2);
       const cell = `${Math.floor(candidate.x / cellSize)}:${Math.floor(candidate.y / cellSize)}`;
-      if (occupiedCells.has(cell)) continue;
-      occupiedCells.add(cell);
-      const { _priority, ...publicCandidate } = candidate;
-      selected.push(publicCandidate);
-      if (selected.length >= maxLabels) break;
+      const previous = occupiedCells.get(cell);
+      if (!previous || priority > previous.priority) {
+        occupiedCells.set(cell, { candidate, priority });
+      }
     }
-    return selected;
+    return [...occupiedCells.values()]
+      .sort((left, right) => right.priority - left.priority)
+      .slice(0, maxLabels)
+      .map((entry) => entry.candidate);
   }
 
   function createLruCache(limit, dispose = () => {}) {

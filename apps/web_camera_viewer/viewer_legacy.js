@@ -14,6 +14,11 @@
   const REVIEW_PATH = VIEWER_PATHS.review;
   const DEFAULT_FPS = 23.976;
   const NEAR_PLANE = 0.1;
+  const MAX_ACTIVE_CAD_TEXT_LABELS = 240;
+  const MAX_CAD_TEXT_TEXTURES = 384;
+  const CAD_TEXT_REFRESH_MS = 120;
+  const CAD_GIZMO_OVERLAY_REFRESH_MS = 120;
+  const MAX_INTERACTIVE_OVERLAY_TEXT_CANDIDATES = 5000;
   const CAD_FOCUS_LAYER_GROUPS = [
     /中心线|道路|路面|标线|road|centerline|alignment/i,
     /建筑|总平|红线|building|site\s*plan|parcel/i,
@@ -87,6 +92,7 @@
   let lastOverlayDrawAt = 0;
   let videoRangeSupported = null;
   let showCadText = true;
+  let cadTextEntityCount = 0;
   const OVERLAY_INTERVAL_PLAYING_MS = 200;
   const controlInputs = new Map();
   const lockableCameraFields = new Set(["z", "yaw", "pitch", "roll", "fov"]);
@@ -558,8 +564,20 @@
 
     let projectedEntities = 0;
     let projectedSegments = 0;
+    const projectedText = [];
+    let textEntityIndex = 0;
+    const interactiveTextStride = highQuality
+      ? 1
+      : Math.max(1, Math.ceil(cadTextEntityCount / MAX_INTERACTIVE_OVERLAY_TEXT_CANDIDATES));
     for (const layer of cadData.layers || []) {
       for (const entity of layer.entities || []) {
+        if (entity.type === "text") {
+          const currentTextIndex = textEntityIndex;
+          textEntityIndex += 1;
+          if (!highQuality
+            && !window.CadsceneCadText.isStationLabel(entity)
+            && currentTextIndex % interactiveTextStride !== 0) continue;
+        }
         const points = getWorldPoints(entity);
         if (points.length === 0) continue;
         if (entity.type === "line" || entity.type === "polyline") {
@@ -582,26 +600,56 @@
         } else if (entity.type === "text") {
           if (!showCadText) continue;
           const screenPoint = projectPoint(points[0], camera, width, height);
-          if (screenPoint) {
-            const label = entity.text || "";
-            const angle = projectedTextAngle(entity, camera, width, height);
-            const fontSize = fontSizeForText(entity, highQuality);
-            overlayContext.save();
-            overlayContext.translate(screenPoint[0], screenPoint[1]);
-            overlayContext.rotate(angle);
-            overlayContext.font = `bold ${fontSize}px Arial, Microsoft YaHei, sans-serif`;
-            overlayContext.textAlign = "center";
-            overlayContext.textBaseline = "middle";
-            overlayContext.lineWidth = 4;
-            overlayContext.strokeStyle = "rgba(0, 0, 0, 0.82)";
-            overlayContext.strokeText(label, 0, 0);
-            overlayContext.fillStyle = colorFor(entity, layer);
-            overlayContext.fillText(label, 0, 0);
-            overlayContext.restore();
-            projectedEntities += 1;
-            projectedSegments += 1;
-          }
+          if (!screenPoint) continue;
+          projectedText.push({
+            x: screenPoint[0],
+            y: screenPoint[1],
+            depth: 0,
+            entity,
+            layerData: layer,
+          });
         }
+      }
+    }
+    if (showCadText && window.CadsceneCadText) {
+      const selectedText = window.CadsceneCadText.selectProjectedLabels(projectedText, {
+        width,
+        height,
+        cellSize: highQuality ? 84 : 60,
+        maxLabels: MAX_ACTIVE_CAD_TEXT_LABELS,
+        margin: 0.04,
+      });
+      for (const candidate of selectedText) {
+        const { entity, layerData } = candidate;
+        const lines = String(entity.text || "").split(/\r?\n/);
+        const angle = projectedTextAngle(entity, camera, width, height);
+        const fontSize = fontSizeForText(entity, highQuality);
+        const lineHeight = fontSize * 1.18;
+        const totalHeight = lineHeight * lines.length;
+        const vertical = entity.vertical_align || "baseline";
+        let firstLineY = 0;
+        if (vertical === "top") firstLineY = lineHeight * 0.5;
+        else if (vertical === "middle") firstLineY = -totalHeight * 0.5 + lineHeight * 0.5;
+        else if (vertical === "bottom") firstLineY = -totalHeight + lineHeight * 0.5;
+        overlayContext.save();
+        overlayContext.translate(candidate.x, candidate.y);
+        overlayContext.rotate(angle);
+        overlayContext.font = `bold ${fontSize}px Arial, Microsoft YaHei, sans-serif`;
+        overlayContext.textAlign = ["left", "center", "right"].includes(entity.horizontal_align)
+          ? entity.horizontal_align
+          : "center";
+        overlayContext.textBaseline = "middle";
+        overlayContext.lineWidth = 4;
+        overlayContext.strokeStyle = "rgba(0, 0, 0, 0.82)";
+        overlayContext.fillStyle = colorFor(entity, layerData);
+        lines.forEach((line, index) => {
+          const y = firstLineY + index * lineHeight;
+          overlayContext.strokeText(line, 0, y);
+          overlayContext.fillText(line, 0, y);
+        });
+        overlayContext.restore();
+        projectedEntities += 1;
+        projectedSegments += 1;
       }
     }
     overlayContext.globalAlpha = 1;
@@ -808,27 +856,40 @@
   }
 
   function makeTextTexture(text, color, isMajor) {
+    const lines = String(text || "").split(/\r?\n/);
+    const fontSize = isMajor ? 48 : 36;
+    const lineHeight = Math.ceil(fontSize * 1.2);
+    const padding = isMajor ? 18 : 14;
     const canvas = document.createElement("canvas");
-    canvas.width = isMajor ? 256 : 128;
-    canvas.height = isMajor ? 96 : 64;
+    const measure = canvas.getContext("2d");
+    measure.font = `bold ${fontSize}px Arial, Microsoft YaHei, sans-serif`;
+    const measuredWidth = Math.max(...lines.map((line) => measure.measureText(line).width), fontSize * 2);
+    const contentWidth = Math.ceil(measuredWidth + padding * 2);
+    const contentHeight = Math.ceil(lineHeight * lines.length + padding * 2);
+    canvas.width = Math.min(1024, THREE.MathUtils.ceilPowerOfTwo(contentWidth));
+    canvas.height = Math.min(1024, THREE.MathUtils.ceilPowerOfTwo(contentHeight));
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.font = `bold ${isMajor ? 42 : 30}px Arial, Microsoft YaHei, sans-serif`;
+    ctx.font = `bold ${fontSize}px Arial, Microsoft YaHei, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.lineWidth = isMajor ? 8 : 6;
     ctx.strokeStyle = "rgba(0, 0, 0, 0.9)";
     ctx.fillStyle = color || "#ffffff";
-    ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    const firstLineY = canvas.height / 2 - (lines.length - 1) * lineHeight / 2;
+    lines.forEach((line, index) => {
+      const y = firstLineY + index * lineHeight;
+      ctx.strokeText(line, canvas.width / 2, y);
+      ctx.fillText(line, canvas.width / 2, y);
+    });
     const texture = new THREE.CanvasTexture(canvas);
     texture.needsUpdate = true;
-    return texture;
+    return { texture, aspect: canvas.width / canvas.height };
   }
 
   function createThreeScene(data) {
-    if (!window.THREE || !THREE.OrbitControls || !THREE.TransformControls) {
-      throw new Error("THREE, OrbitControls, or TransformControls is not loaded");
+    if (!window.THREE || !THREE.OrbitControls || !THREE.TransformControls || !window.CadsceneCadText) {
+      throw new Error("THREE controls or CadsceneCadText is not loaded");
     }
 
     const bbox = data.meta.bbox;
@@ -880,32 +941,19 @@
 
     const cadGroup = new THREE.Group();
     const cadLineBuckets = new Map();
+    const cadTextEntities = [];
     for (const layer of data.layers || []) {
       for (const entity of layer.entities || []) {
         const points = getWorldPoints(entity);
         if (entity.type === "text") {
-          if (points.length < 1) continue;
-          const label = entity.text || "";
-          const isMajor = Number(entity.cad_height || 0) >= 18 || /^K/i.test(label);
-          const texture = makeTextTexture(label, colorFor(entity, layer), isMajor);
-          const material = new THREE.MeshBasicMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: false,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-          });
-          const height = Math.max(Number(entity.cad_height || 9), isMajor ? 24 : 9);
-          const width = Math.max(height * Math.max(label.length, 1) * 1.2, height * 2.2);
-          const geometry = new THREE.PlaneGeometry(width, height * 1.15);
-          const mesh = new THREE.Mesh(geometry, material);
-          const pos = worldToScene(points[0], origin);
-          mesh.position.set(pos.x, 0.45, pos.z);
-          mesh.rotation.x = -Math.PI / 2;
-          mesh.rotation.z = -degToRad(Number(entity.cad_rotation || 0));
-          mesh.renderOrder = 10;
-          mesh.userData.isCadText = true;
-          cadGroup.add(mesh);
+          if (points.length >= 1 && String(entity.text || "").trim()) {
+            cadTextEntities.push({
+              key: `${entity.entity_id || entity.entity_type || "text"}:${cadTextEntities.length}`,
+              entity,
+              layerData: layer,
+              worldPoint: points[0],
+            });
+          }
         } else {
           if (points.length < 2) continue;
           const color = colorFor(entity, layer);
@@ -917,6 +965,132 @@
         }
       }
     }
+    const cadTextGroup = new THREE.Group();
+    cadTextGroup.position.y = 0.45;
+    cadGroup.add(cadTextGroup);
+    const cadTextGeometry = new THREE.PlaneGeometry(1, 1);
+    const activeCadText = new Map();
+    const cadTextTextureCache = window.CadsceneCadText.createLruCache(
+      MAX_CAD_TEXT_TEXTURES,
+      (entry) => entry.texture.dispose(),
+    );
+    const projectedCadTextCandidates = cadTextEntities.map((entry) => ({
+      x: 0,
+      y: 0,
+      depth: 0,
+      entity: entry.entity,
+      entry,
+    }));
+    const projectedCadTextPoint = new THREE.Vector3();
+    let cadTextVisible = showCadText;
+    let cadTextRefreshTimer = null;
+    let lastCadTextRefreshAt = -Infinity;
+
+    function textureForCadText(entry) {
+      const label = String(entry.entity.text || "");
+      const color = colorFor(entry.entity, entry.layerData);
+      const isMajor = window.CadsceneCadText.isStationLabel(entry.entity)
+        || Number(entry.entity.cad_height || 0) >= 18;
+      const textureKey = `${label}\u0000${color}\u0000${isMajor ? 1 : 0}`;
+      let cached = cadTextTextureCache.get(textureKey);
+      if (!cached) {
+        cached = makeTextTexture(label, color, isMajor);
+        cadTextTextureCache.set(textureKey, cached);
+      }
+      return { ...cached, textureKey };
+    }
+
+    function cadTextAnchorOffset(entity, width, height) {
+      const horizontal = entity.horizontal_align || "center";
+      const vertical = entity.vertical_align || "middle";
+      const x = horizontal === "left" ? width / 2 : horizontal === "right" ? -width / 2 : 0;
+      const y = vertical === "top" ? -height / 2
+        : vertical === "bottom" ? height / 2
+          : vertical === "baseline" ? height * 0.4 : 0;
+      return { x, y };
+    }
+
+    function createCadTextMesh(entry) {
+      const textureData = textureForCadText(entry);
+      const material = new THREE.MeshBasicMaterial({
+        map: textureData.texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const lineCount = Math.max(1, Number(entry.entity.text_lines) || String(entry.entity.text || "").split(/\r?\n/).length);
+      const charHeight = Math.max(Number(entry.entity.cad_height) || 1, 1e-6);
+      const height = charHeight * lineCount * 1.2;
+      const width = Math.max(height * textureData.aspect, charHeight * 1.5);
+      const rotation = degToRad(Number(entry.entity.cad_rotation || 0));
+      const offset = cadTextAnchorOffset(entry.entity, width, height);
+      const offsetX = Math.cos(rotation) * offset.x - Math.sin(rotation) * offset.y;
+      const offsetY = Math.sin(rotation) * offset.x + Math.cos(rotation) * offset.y;
+      const position = worldToScene([
+        entry.worldPoint[0] + offsetX,
+        entry.worldPoint[1] + offsetY,
+        entry.worldPoint[2] || 0,
+      ], origin);
+      const mesh = new THREE.Mesh(cadTextGeometry, material);
+      mesh.position.copy(position);
+      mesh.scale.set(width, height, 1);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.rotation.z = -rotation;
+      mesh.renderOrder = 11;
+      mesh.userData.isCadText = true;
+      mesh.userData.textureKey = textureData.textureKey;
+      return mesh;
+    }
+
+    function refreshCadTextLabels() {
+      cadTextRefreshTimer = null;
+      lastCadTextRefreshAt = performance.now();
+      if (!cadTextVisible || cadTextEntities.length === 0) return;
+      inspectCamera.updateMatrixWorld();
+      const width = Math.max(1, renderer.domElement.clientWidth || sceneContainer.clientWidth);
+      const height = Math.max(1, renderer.domElement.clientHeight || sceneContainer.clientHeight);
+      for (const candidate of projectedCadTextCandidates) {
+        const { entry } = candidate;
+        projectedCadTextPoint.copy(worldToScene(entry.worldPoint, origin)).project(inspectCamera);
+        candidate.x = (projectedCadTextPoint.x + 1) * width / 2;
+        candidate.y = (1 - projectedCadTextPoint.y) * height / 2;
+        candidate.depth = projectedCadTextPoint.z;
+      }
+      const selected = window.CadsceneCadText.selectProjectedLabels(projectedCadTextCandidates, {
+        width,
+        height,
+        cellSize: 84,
+        maxLabels: MAX_ACTIVE_CAD_TEXT_LABELS,
+        margin: 0.08,
+      });
+      const selectedKeys = new Set(selected.map((candidate) => candidate.entry.key));
+      for (const [key, mesh] of activeCadText.entries()) {
+        if (selectedKeys.has(key)) {
+          cadTextTextureCache.get(mesh.userData.textureKey);
+          continue;
+        }
+        cadTextGroup.remove(mesh);
+        mesh.material.dispose();
+        activeCadText.delete(key);
+      }
+      for (const candidate of selected) {
+        const { entry } = candidate;
+        if (activeCadText.has(entry.key)) continue;
+        const mesh = createCadTextMesh(entry);
+        activeCadText.set(entry.key, mesh);
+        cadTextGroup.add(mesh);
+      }
+    }
+
+    function scheduleCadTextRefresh(immediate = false) {
+      if (!cadTextVisible || cadTextRefreshTimer !== null) return;
+      const elapsed = performance.now() - lastCadTextRefreshAt;
+      const delay = immediate ? 0 : Math.max(0, CAD_TEXT_REFRESH_MS - elapsed);
+      cadTextRefreshTimer = window.setTimeout(refreshCadTextLabels, delay);
+    }
+
+    orbitControls.addEventListener("change", () => scheduleCadTextRefresh(false));
     for (const [color, vertices] of cadLineBuckets.entries()) {
       if (vertices.length === 0) continue;
       const geometry = new THREE.BufferGeometry().setFromPoints(vertices);
@@ -935,11 +1109,9 @@
     scene.add(cadGroup);
 
     function setCadTextVisible(visible) {
-      cadGroup.traverse((object) => {
-        if (object.userData && object.userData.isCadText) {
-          object.visible = visible;
-        }
-      });
+      cadTextVisible = !!visible;
+      cadTextGroup.visible = cadTextVisible;
+      if (cadTextVisible) scheduleCadTextRefresh(true);
     }
 
     // 把第三人称观察相机聚焦到“虚拟无人机所在路段”，而不是 19km 整图的几何中心，
@@ -1134,9 +1306,31 @@
       ];
     }
 
+    let gizmoOverlayTimer = null;
+    let lastGizmoOverlayAt = -Infinity;
+
+    function scheduleGizmoOverlay() {
+      if (gizmoOverlayTimer !== null) return;
+      const elapsed = performance.now() - lastGizmoOverlayAt;
+      const delay = Math.max(0, CAD_GIZMO_OVERLAY_REFRESH_MS - elapsed);
+      gizmoOverlayTimer = window.setTimeout(() => {
+        gizmoOverlayTimer = null;
+        lastGizmoOverlayAt = performance.now();
+        drawOverlay({ highQuality: false });
+      }, delay);
+    }
+
     transformControls.addEventListener("dragging-changed", (event) => {
       orbitControls.enabled = !event.value;
       if (event.value) video.pause();
+      else {
+        if (gizmoOverlayTimer !== null) {
+          window.clearTimeout(gizmoOverlayTimer);
+          gizmoOverlayTimer = null;
+        }
+        lastGizmoOverlayAt = performance.now();
+        drawOverlay({ highQuality: true });
+      }
     });
     transformControls.addEventListener("objectChange", () => {
       if (updatingRig) return;
@@ -1148,7 +1342,7 @@
       }
       setRigFromCamera(camera);
       syncControls();
-      drawOverlay();
+      scheduleGizmoOverlay();
       updateTrackStatus();
       notifyManualCameraChanged("gizmo");
     });
@@ -1437,6 +1631,7 @@
       renderer.setSize(width, height, false);
       inspectCamera.aspect = width / height;
       inspectCamera.updateProjectionMatrix();
+      scheduleCadTextRefresh(true);
     }
 
     function animate() {
@@ -2635,6 +2830,10 @@
 
     setStatus("正在加载 CAD…");
     cadData = await fetchJsonWithFallback([CAD_PATH, ...CAD_FALLBACKS], "CAD JSON");
+    cadTextEntityCount = (cadData.layers || []).reduce(
+      (count, layer) => count + (layer.entities || []).filter((entity) => entity.type === "text").length,
+      0,
+    );
     configureControlRanges(cadData);
     defaultCamera = await loadInitialCamera(cadData);
     camera = Object.assign({}, defaultCamera);

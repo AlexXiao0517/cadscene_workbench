@@ -104,6 +104,71 @@ def test_flat_cad_lines_are_not_hidden_by_the_ground_plane() -> None:
     assert "cadLine.renderOrder" in text
 
 
+def test_cad_text_rendering_is_lazy_bounded_and_throttled() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+
+    assert "MAX_ACTIVE_CAD_TEXT_LABELS = 240" in text
+    assert "MAX_CAD_TEXT_TEXTURES = 384" in text
+    assert "CAD_TEXT_REFRESH_MS = 120" in text
+    assert "cadTextGeometry" in text
+    assert re.search(r"createLruCache\(\s*MAX_CAD_TEXT_TEXTURES", text)
+    assert "selectProjectedLabels" in text
+    assert 'orbitControls.addEventListener("change"' in text
+    assert "scheduleCadTextRefresh" in text
+    assert "maxLabels: MAX_ACTIVE_CAD_TEXT_LABELS" in text
+    initial_loop = text[
+        text.index("const cadLineBuckets = new Map()"):
+        text.index("const cadTextGroup = new THREE.Group()")
+    ]
+    assert "makeTextTexture" not in initial_loop
+
+
+def test_video_overlay_uses_bounded_cad_text_selection() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+    draw_overlay = text[
+        text.index("function drawOverlay"):
+        text.index("function bboxCenter")
+    ]
+
+    assert "selectProjectedLabels" in draw_overlay
+    assert "MAX_ACTIVE_CAD_TEXT_LABELS" in draw_overlay
+
+
+def test_camera_drag_reuses_projected_text_candidates() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+    refresh = text[
+        text.index("function refreshCadTextLabels"):
+        text.index("function scheduleCadTextRefresh")
+    ]
+
+    assert "projectedCadTextCandidates" in text
+    assert "cadTextEntities.map" not in refresh
+
+
+def test_virtual_camera_gizmo_throttles_overlay_redraws() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+    object_change = text[
+        text.index('transformControls.addEventListener("objectChange"'):
+        text.index("function setMode")
+    ]
+
+    assert "CAD_GIZMO_OVERLAY_REFRESH_MS = 120" in text
+    assert "scheduleGizmoOverlay" in object_change
+    assert "drawOverlay();" not in object_change
+
+
+def test_interactive_overlay_caps_non_station_projection_work() -> None:
+    text = _text(APP_DIR / "viewer_legacy.js")
+    draw_overlay = text[
+        text.index("function drawOverlay"):
+        text.index("function bboxCenter")
+    ]
+
+    assert "MAX_INTERACTIVE_OVERLAY_TEXT_CANDIDATES = 5000" in text
+    assert "interactiveTextStride" in draw_overlay
+    assert "isStationLabel(entity)" in draw_overlay
+
+
 def test_viewer_focuses_the_primary_design_cluster_in_multi_sheet_cad() -> None:
     text = _text(APP_DIR / "viewer_legacy.js")
 
