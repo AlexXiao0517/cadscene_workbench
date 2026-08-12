@@ -17,6 +17,7 @@ def test_web_viewer_static_files_exist() -> None:
     assert (APP_DIR / "paths.js").exists()
     assert (APP_DIR / "viewer_legacy.js").exists()
     assert (APP_DIR / "fallback.js").exists()
+    assert (APP_DIR / "cad_text.js").exists()
     assert (APP_DIR / "vendor").is_dir()
 
 
@@ -136,6 +137,14 @@ def test_three_scripts_load_before_viewer_legacy() -> None:
     fallback_index = next(i for i, src in enumerate(normalized) if src.endswith("fallback.js"))
 
     assert three_index < fallback_index < viewer_index
+
+
+def test_cad_text_module_loads_before_viewer_legacy() -> None:
+    normalized = [src.split("?", 1)[0] for src in _script_sources()]
+    cad_text_index = normalized.index("./cad_text.js")
+    viewer_index = normalized.index("./viewer_legacy.js")
+
+    assert cad_text_index < viewer_index
 
 
 def test_three_controls_compatibility_and_debug_logs_exist() -> None:
