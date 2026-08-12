@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cadscene.cad.text_entities import (
+    classify_text_role,
+    extract_text_entity,
+    iter_text_entities,
+)
+
 
 SUPPORTED_ENTITY_TYPES = {"LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC", "CIRCLE"}
 _POINT_MERGE_TOL = 1e-3
@@ -271,11 +277,53 @@ def parse_dxf(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
     document = ezdxf.readfile(source)
     layers: dict[str, dict[str, Any]] = defaultdict(lambda: {"entities": []})
     unsupported: Counter[str] = Counter()
+    text_type_counts: Counter[str] = Counter()
     aci_colors: set[int] = set()
     all_points: list[list[float]] = []
     focus_points: list[list[float]] = []
 
+    for entity, parent_insert in iter_text_entities(document.modelspace()):
+        try:
+            item = extract_text_entity(entity, parent_insert)
+        except Exception:
+            unsupported[entity.dxftype()] += 1
+            continue
+        if item is None:
+            continue
+        layer_name = decode_legacy_dxf_text(item["layer"])
+        item["text"] = decode_legacy_dxf_text(item["text"])
+        item["layer"] = layer_name
+        item["text_role"] = classify_text_role(item["text"], layer_name)
+        raw_aci = int(getattr(entity.dxf, "color", 256) or 256)
+        inherits_insert_style = parent_insert is not None and (
+            raw_aci == 0
+            or (raw_aci == 256 and str(getattr(entity.dxf, "layer", "0")) == "0")
+        )
+        style_entity = parent_insert if inherits_insert_style else entity
+        aci = _resolve_aci(style_entity, document)
+        color = _entity_color(style_entity, document, colors, aci)
+        item.update(
+            {
+                "aci_color": aci,
+                "color": color,
+                "bbox": _bbox(item["world_points"]),
+            }
+        )
+        layer = layers[layer_name]
+        layer.setdefault("name", layer_name)
+        layer.setdefault("kind", _layer_kind(layer_name))
+        layer.setdefault("aci_color", aci)
+        layer.setdefault("color", color)
+        layer["entities"].append(item)
+        text_type_counts[item["entity_type"]] += 1
+        aci_colors.add(aci)
+        all_points.extend(item["world_points"])
+        if _is_road_focus_layer(layer_name):
+            focus_points.extend(item["world_points"])
+
     for entity in document.modelspace():
+        if entity.dxftype() in {"TEXT", "MTEXT"}:
+            continue
         try:
             extracted = _entity_points(entity)
         except Exception:
@@ -354,10 +402,17 @@ def parse_dxf(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
             for entity in layer["entities"]
         ),
         "segment_count": sum(
-            max(0, len(entity["world_points"]) - 1 + int(bool(entity["closed"])))
+            max(
+                0,
+                len(entity["world_points"])
+                - 1
+                + int(bool(entity.get("closed", False))),
+            )
             for layer in layers.values()
             for entity in layer["entities"]
         ),
+        "text_count": sum(text_type_counts.values()),
+        "text_entity_types": dict(sorted(text_type_counts.items())),
         "layer_count": len(layers),
         "aci_colors": sorted(aci_colors),
         "unsupported_entities": dict(sorted(unsupported.items())),

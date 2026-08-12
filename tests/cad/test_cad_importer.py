@@ -7,7 +7,7 @@ import ezdxf
 import pytest
 from ezdxf.enums import TextEntityAlignment
 
-from cadscene.cad.dxf_parser import decode_legacy_dxf_text
+from cadscene.cad.dxf_parser import decode_legacy_dxf_text, parse_dxf
 from cadscene.cad.importer import import_dxf
 from cadscene.cad.loader import detect_road_centerline, load_cad_bundle
 from cadscene.cad.text_entities import extract_text_entity, iter_text_entities
@@ -83,6 +83,76 @@ def test_invisible_block_attribute_is_omitted() -> None:
     doc.modelspace().add_blockref("MARK", (0, 0)).add_auto_attribs({"SECRET": "hidden"})
 
     assert list(iter_text_entities(doc.modelspace())) == []
+
+
+def test_parse_dxf_integrates_text_entities_and_statistics(tmp_path: Path) -> None:
+    source = tmp_path / "labels.dxf"
+    doc = ezdxf.new("R2010")
+    doc.layers.add("labels", color=2)
+    doc.modelspace().add_text(
+        "K1+020",
+        height=2,
+        dxfattribs={"layer": "labels"},
+    ).set_placement((10, 20))
+    doc.modelspace().add_mtext(
+        "说明\\P第二行",
+        dxfattribs={"layer": "labels", "char_height": 3},
+    ).set_location((30, 40))
+    doc.saveas(source)
+
+    design, stats = parse_dxf(source)
+    labels = [entity for layer in design["layers"] for entity in layer["entities"]]
+
+    assert {label["entity_type"] for label in labels} == {"TEXT", "MTEXT"}
+    assert stats["text_count"] == 2
+    assert stats["text_entity_types"] == {"MTEXT": 1, "TEXT": 1}
+    assert stats["segment_count"] == 0
+
+
+def test_text_only_dxf_completes_import(tmp_path: Path) -> None:
+    source = tmp_path / "text-only.dxf"
+    doc = ezdxf.new("R2010")
+    doc.modelspace().add_text("K0+000", height=2).set_placement((10, 20))
+    doc.saveas(source)
+
+    result = import_dxf(source, tmp_path / "dataset")
+
+    assert result.stats["text_count"] == 1
+    assert result.stats["bbox"] == [10.0, 20.0, 10.0, 20.0]
+    assert "文字标注数量" in result.report.read_text(encoding="utf-8")
+
+
+def test_block_attribute_inherits_insert_layer_and_byblock_color(tmp_path: Path) -> None:
+    source = tmp_path / "attribute.dxf"
+    doc = ezdxf.new("R2010")
+    doc.layers.add("station_labels", color=2)
+    block = doc.blocks.new("STATION")
+    block.add_attdef(
+        "STA",
+        insert=(0, 0),
+        height=2,
+        dxfattribs={"layer": "0", "color": 0},
+    )
+    insert = doc.modelspace().add_blockref(
+        "STATION",
+        (50, 60),
+        dxfattribs={"layer": "station_labels", "color": 4},
+    )
+    insert.add_auto_attribs({"STA": "K2+000"})
+    doc.saveas(source)
+
+    design, stats = parse_dxf(source)
+    label = next(
+        entity
+        for layer in design["layers"]
+        for entity in layer["entities"]
+        if entity.get("type") == "text"
+    )
+
+    assert label["layer"] == "station_labels"
+    assert label["aci_color"] == 4
+    assert label["color"] == "#00ffff"
+    assert stats["text_entity_types"] == {"ATTRIB": 1}
 
 
 def test_import_dxf_generates_legacy_viewer_design_and_metadata(tmp_path: Path) -> None:
@@ -255,6 +325,38 @@ def test_gbk_mojibake_layer_names_are_recovered() -> None:
     assert decode_legacy_dxf_text("ÖÐÐÄÏß") == "中心线"
     assert decode_legacy_dxf_text("µØÐÎÍ¼") == "地形图"
     assert decode_legacy_dxf_text("road_center") == "road_center"
+
+
+def test_gbk_mojibake_text_content_is_recovered(tmp_path: Path) -> None:
+    source = tmp_path / "legacy-text.dxf"
+    legacy_text = "中心线".encode("gbk").decode("latin1")
+    doc = ezdxf.new("R2010")
+    doc.modelspace().add_text(legacy_text, height=2).set_placement((10, 20))
+    doc.saveas(source)
+
+    design, _stats = parse_dxf(source)
+    label = design["layers"][0]["entities"][0]
+
+    assert label["text"] == "中心线"
+
+
+def test_gbk_mojibake_station_layer_keeps_station_priority(tmp_path: Path) -> None:
+    source = tmp_path / "legacy-station-layer.dxf"
+    legacy_layer = "桩号".encode("gbk").decode("latin1")
+    doc = ezdxf.new("R2010")
+    doc.layers.add(legacy_layer, color=2)
+    doc.modelspace().add_text(
+        "STA-20",
+        height=2,
+        dxfattribs={"layer": legacy_layer},
+    ).set_placement((10, 20))
+    doc.saveas(source)
+
+    design, _stats = parse_dxf(source)
+    label = design["layers"][0]["entities"][0]
+
+    assert label["layer"] == "桩号"
+    assert label["text_role"] == "station"
 
 
 def test_road_focus_bbox_ignores_separate_local_terrain_cluster(tmp_path: Path) -> None:

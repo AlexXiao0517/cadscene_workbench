@@ -75,6 +75,8 @@ def _build_report(source: Path, stats: dict[str, Any], warnings: list[str]) -> s
             f"- 实体数量：{stats['entity_count']}",
             f"- 采样点数量：{stats['point_count']}",
             f"- 线段数量：{stats['segment_count']}",
+            f"- 文字标注数量：{stats.get('text_count', 0)}",
+            f"- 文字实体类型：{stats.get('text_entity_types', {})}",
             f"- 图层数量：{stats['layer_count']}",
             f"- ACI 颜色：{stats['aci_colors']}",
             f"- CAD bbox：{stats['bbox']}",

@@ -63,10 +63,11 @@ def _effective_layer(entity: Any, parent_insert: Any | None) -> str:
     return layer
 
 
-def _is_station(text: str, layer: str) -> bool:
-    return bool(_STATION_PATTERN.search(text)) or any(
+def classify_text_role(text: str, layer: str) -> str:
+    is_station = bool(_STATION_PATTERN.search(text)) or any(
         token in layer.lower() for token in _STATION_LAYER_TOKENS
     )
+    return "station" if is_station else "annotation"
 
 
 def extract_text_entity(
@@ -119,7 +120,7 @@ def extract_text_entity(
         "text_lines": len(text.splitlines()) or 1,
         "horizontal_align": horizontal,
         "vertical_align": vertical,
-        "text_role": "station" if _is_station(text, layer) else "annotation",
+        "text_role": classify_text_role(text, layer),
     }
     if entity_type == "ATTRIB":
         item["attribute_tag"] = str(entity.dxf.tag)
