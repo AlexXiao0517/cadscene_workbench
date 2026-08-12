@@ -488,7 +488,7 @@ def test_ffmpeg_clip_command_disables_overwrite_and_stdin() -> None:
     assert command[-1] == "clip-0001.mp4"
 
 
-def test_export_command_uses_absolute_pts_trim_and_passthrough() -> None:
+def test_export_command_seeks_before_input_and_keeps_absolute_pts_trim() -> None:
     command = clip_export._build_ffmpeg_clip_command(
         ffmpeg=Path("ffmpeg"),
         source=Path("source.mp4"),
@@ -500,7 +500,119 @@ def test_export_command_uses_absolute_pts_trim_and_passthrough() -> None:
 
     assert "trim=start_pts=5000:end_pts=9000,setpts=PTS-STARTPTS" in command
     assert "-fps_mode" in command and "passthrough" in command
-    assert "-ss" not in command and "-t" not in command
+    assert command.index("-ss") < command.index("-copyts") < command.index("-i")
+    assert command[command.index("-ss") + 1] == "0"
+    assert "-t" not in command
+
+
+def test_export_command_prerolls_ten_seconds_for_late_clip() -> None:
+    command = clip_export._build_ffmpeg_clip_command(
+        ffmpeg=Path("ffmpeg"),
+        source=Path("source.mp4"),
+        clip=clip_export.ExportClip(
+            "clip-0003", 115440, 173160, Fraction(1, 1000)
+        ),
+        clip_path=Path("clip-0003.mp4"),
+        preset="veryfast",
+        crf=18,
+    )
+
+    assert command[command.index("-ss") + 1] == "105.44"
+    assert "trim=start_pts=115440:end_pts=173160,setpts=PTS-STARTPTS" in command
+
+
+def test_source_frame_index_prefers_safe_fast_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        (DecodedFrameTimestamp(0, 0, 40, "packet_pts"),),
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_fast_frame_index",
+        lambda *_args, **_kwargs: frame_index,
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_decoded_frame_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("decoded fallback must not run")
+        ),
+    )
+
+    assert (
+        clip_export._probe_source_frame_index(Path("source.mp4"), Path("ffmpeg"))
+        is frame_index
+    )
+
+
+def test_source_frame_index_falls_back_when_fast_probe_is_unsafe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        (DecodedFrameTimestamp(0, 0, 40, "pts"),),
+    )
+    monkeypatch.setattr(
+        clip_export, "probe_fast_frame_index", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_decoded_frame_index",
+        lambda *_args, **_kwargs: frame_index,
+    )
+
+    assert (
+        clip_export._probe_source_frame_index(Path("source.mp4"), Path("ffmpeg"))
+        is frame_index
+    )
+
+
+def test_output_frame_count_prefers_declared_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clip_export,
+        "probe_declared_video_frame_count",
+        lambda *_args, **_kwargs: 1443,
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_decoded_frame_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("decoded fallback must not run")
+        ),
+    )
+
+    assert (
+        clip_export._probe_output_frame_count(Path("clip.mp4"), Path("ffmpeg"))
+        == 1443
+    )
+
+
+def test_output_frame_count_falls_back_when_declaration_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1000),
+        tuple(
+            DecodedFrameTimestamp(ordinal, ordinal * 40, 40, "pts")
+            for ordinal in range(3)
+        ),
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_declared_video_frame_count",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_decoded_frame_index",
+        lambda *_args, **_kwargs: frame_index,
+    )
+
+    assert clip_export._probe_output_frame_count(Path("clip.mp4"), Path("ffmpeg")) == 3
 
 
 def test_adjacent_export_maps_partition_source_frames_once() -> None:

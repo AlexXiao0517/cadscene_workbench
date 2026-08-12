@@ -412,6 +412,7 @@ def test_service_builds_existing_clip_export_cli_plan_inside_attempt(
     manifest_path = Path(command[command.index("--manifest") + 1])
     output_dir = Path(command[command.index("--output-dir") + 1])
     progress_path = Path(command[command.index("--progress-file") + 1])
+    assert command[command.index("--preset") + 1] == "veryfast"
     assert manifest_path.parent == Path(queue.get(export_id).attempts[-1].directory)
     assert output_dir.parent == manifest_path.parent
     assert progress_path == manifest_path.parent / "adapter_progress.json"

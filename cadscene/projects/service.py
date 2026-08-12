@@ -4326,6 +4326,8 @@ class ProjectService:
             str(output_dir),
             "--progress-file",
             str(attempt / "adapter_progress.json"),
+            "--preset",
+            "veryfast",
             "--allow-subset",
         )
         return JobExecutionPlan(

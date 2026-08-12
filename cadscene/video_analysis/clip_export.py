@@ -16,7 +16,9 @@ from typing import Any, Callable
 
 from cadscene.video_analysis.pts import (
     DecodedFrameIndex,
+    probe_declared_video_frame_count,
     probe_decoded_frame_index,
+    probe_fast_frame_index,
     resolve_ffmpeg_executable,
 )
 
@@ -161,10 +163,7 @@ def export_video_clips(
     strategy = _publication_strategy()
     clips = load_export_clips(manifest)
     ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
-    frame_index = probe_decoded_frame_index(
-        source,
-        ffmpeg_executable=ffmpeg,
-    )
+    frame_index = _probe_source_frame_index(source, ffmpeg)
     frame_map = build_clip_frame_map(
         frame_index,
         clips,
@@ -221,15 +220,12 @@ def export_video_clips(
                 raise RuntimeError(
                     f"FFmpeg clip export produced an empty output for {clip.clip_id}"
                 )
-            output_index = probe_decoded_frame_index(
-                clip_path,
-                ffmpeg_executable=ffmpeg,
-            )
-            if len(output_index.frames) != expected_count:
+            actual_count = _probe_output_frame_count(clip_path, ffmpeg)
+            if actual_count != expected_count:
                 raise RuntimeError(
                     f"exported frame count disagrees with clip_frame_map.json for "
                     f"{clip.clip_id}: expected {expected_count}, got "
-                    f"{len(output_index.frames)}"
+                    f"{actual_count}"
                 )
             completed_frames += expected_count
             report(
@@ -315,6 +311,25 @@ def _run_ffmpeg_with_progress(
     )
 
 
+def _probe_source_frame_index(source: Path, ffmpeg: str | Path) -> DecodedFrameIndex:
+    fast_index = probe_fast_frame_index(source, ffmpeg_executable=ffmpeg)
+    if fast_index is not None:
+        return fast_index
+    return probe_decoded_frame_index(source, ffmpeg_executable=ffmpeg)
+
+
+def _probe_output_frame_count(clip_path: Path, ffmpeg: str | Path) -> int:
+    declared_count = probe_declared_video_frame_count(clip_path)
+    if declared_count is not None:
+        return declared_count
+    return len(
+        probe_decoded_frame_index(
+            clip_path,
+            ffmpeg_executable=ffmpeg,
+        ).frames
+    )
+
+
 def _reserve_output_directory(output: Path) -> Path:
     reservation = output.with_name(f".{output.name}.lock")
     try:
@@ -348,6 +363,8 @@ def _build_ffmpeg_clip_command(
         "error",
         "-n",
         "-nostdin",
+        "-ss",
+        f"{max(0.0, clip.start_pts_sec - 10.0):.12g}",
         "-copyts",
         "-i",
         str(source),
