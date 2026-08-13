@@ -396,3 +396,83 @@ class AnnotationService:
                 render_revision=render_result.revision,
                 operation_id=publication.operation_id,
             )
+
+    def activate_tracking_revision(
+        self,
+        project_id: str,
+        annotation_id: str,
+        tracking_revision: str,
+        *,
+        expected_revision: int,
+        expected_annotation_revision: int,
+    ) -> AnnotationMutationResult:
+        with self.publication_lock:
+            current = self.repositories.annotations.load(project_id)
+            render = self.repositories.render.load(project_id)
+            existing = next(
+                (item for item in current.annotations if item.annotation_id == annotation_id),
+                None,
+            )
+            if existing is None:
+                raise FileNotFoundError(f"annotation not found: {annotation_id}")
+            if existing.anchor_type != "video_track":
+                raise ValueError("only video_track annotations own tracking revisions")
+            if existing.annotation_revision != expected_annotation_revision:
+                raise AnnotationRevisionConflict(
+                    expected_annotation_revision, existing.annotation_revision
+                )
+
+            def mutate_annotations(
+                manifest: AnnotationsManifest, operation_id: str
+            ) -> AnnotationsManifest:
+                updated = replace(
+                    existing,
+                    active_tracking_revision=tracking_revision,
+                    annotation_revision=existing.annotation_revision + 1,
+                    updated_at=self.now(),
+                    updated_operation_id=operation_id,
+                )
+                return replace(
+                    manifest,
+                    annotations=tuple(
+                        updated if item.annotation_id == annotation_id else item
+                        for item in manifest.annotations
+                    ),
+                    updated_at=self.now(),
+                )
+
+            publication = publish_manifests(
+                (
+                    ManifestMutation(
+                        self.repositories.render,
+                        project_id,
+                        render.revision,
+                        lambda value, _operation_id: _stale_clip_render(
+                            value, clip_id=existing.clip_id
+                        ),
+                    ),
+                    ManifestMutation(
+                        self.repositories.annotations,
+                        project_id,
+                        expected_revision,
+                        mutate_annotations,
+                    ),
+                )
+            )
+            annotations_result = next(
+                item for item in publication.manifests if item.owner == "annotations"
+            )
+            render_result = next(
+                item for item in publication.manifests if item.owner == "render"
+            )
+            stored = next(
+                item
+                for item in getattr(annotations_result, "annotations")
+                if item.annotation_id == annotation_id
+            )
+            return AnnotationMutationResult(
+                annotation=stored,
+                manifest_revision=annotations_result.revision,
+                render_revision=render_result.revision,
+                operation_id=publication.operation_id,
+            )
