@@ -3108,16 +3108,35 @@ class ProjectService:
         if attempt != expected_attempt or not attempt.is_dir():
             raise RuntimeError("clip render attempt directory identity is invalid")
         _, media_spec = media_binding
+        authoritative_frames = _load_authoritative_source_frames(clip, frame_map)
+        source_time_base = _fraction_time_base(clip)
+        annotation_bundle = self._write_annotation_render_bundle(
+            job.project_id,
+            clip,
+            frames=authoritative_frames,
+            time_base=source_time_base,
+            media_spec=media_spec,
+            attempt=attempt,
+        )
+        render_parameters = {
+            **dict(clip.manual_definition),
+            **_workbench_render_parameters(
+                self.storage_root, job.project_id, clip
+            ),
+            "trajectory_path": dependency.published_outputs["trajectory"],
+        }
+        if annotation_bundle is not None:
+            render_parameters["annotation_render_bundle_path"] = str(
+                annotation_bundle
+            )
         inputs = RenderInputs(
             project_id=job.project_id,
             clip_id=clip.clip_id,
             workflow=str(clip.resolved_workflow),
             physical_video_path=physical_video.resolve(strict=True),
             authoritative_frame_map_path=frame_map.resolve(strict=True),
-            authoritative_source_frames=_load_authoritative_source_frames(
-                clip, frame_map
-            ),
-            source_time_base=_fraction_time_base(clip),
+            authoritative_source_frames=authoritative_frames,
+            source_time_base=source_time_base,
             workbench_artifact_path=_workbench_artifact_path(
                 self.projects_root, job.project_id, workbench
             ),
@@ -3129,13 +3148,7 @@ class ProjectService:
             ),
             attempt_directory=attempt,
             project_media_spec=media_spec,
-            parameters={
-                **dict(clip.manual_definition),
-                **_workbench_render_parameters(
-                    self.storage_root, job.project_id, clip
-                ),
-                "trajectory_path": dependency.published_outputs["trajectory"],
-            },
+            parameters=render_parameters,
         )
         plan = adapter.prepare(inputs)
         return JobExecutionPlan(commands=plan.commands, validate=plan.validate)
@@ -4222,6 +4235,7 @@ class ProjectService:
         physical_video_path: Path | None = None,
         physical_frame_map_path: Path | None = None,
     ) -> QueueJob:
+        annotation_identity = self._annotation_render_identity(project_id, clip)
         identity_payload = _render_identity_payload(
             clip=clip,
             project_revision=project_revision,
@@ -4234,6 +4248,7 @@ class ProjectService:
             adapter_version=adapter_version,
             physical_video_path=physical_video_path,
             physical_frame_map_path=physical_frame_map_path,
+            annotation_identity=annotation_identity,
         )
         input_fingerprint = _fingerprint(identity_payload)
         revision_fingerprint = _fingerprint(
@@ -4243,6 +4258,7 @@ class ProjectService:
                     workbench.value["workbench_output_revision"]
                 ),
                 "media_spec_revision": media_spec_revision,
+                "annotation_dependencies": annotation_identity,
             }
         )
         job_id = self._identity()
@@ -4269,6 +4285,137 @@ class ProjectService:
             operation_id=self._identity(),
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
         )
+
+    def _annotation_render_identity(
+        self, project_id: str, clip: ClipDefinition
+    ) -> Mapping[str, object]:
+        manifest = self.repositories.annotations.load(project_id)
+        annotations = tuple(
+            sorted(
+                (
+                    item
+                    for item in manifest.annotations
+                    if item.clip_id == clip.clip_id
+                ),
+                key=lambda item: item.annotation_id,
+            )
+        )
+        tracking_dependencies = []
+        has_cad_anchor = False
+        for annotation in annotations:
+            if annotation.anchor_type == "cad_anchor":
+                has_cad_anchor = True
+                continue
+            revision_id = annotation.active_tracking_revision
+            if revision_id is None:
+                raise ValueError(
+                    f"video annotation has no active tracking revision: {annotation.annotation_id}"
+                )
+            revision = self.tracking_revision_repository.load(
+                project_id,
+                annotation.clip_id,
+                annotation.annotation_id,
+                revision_id,
+            )
+            tracking_dependencies.append(
+                {
+                    "annotation_id": annotation.annotation_id,
+                    "tracking_revision": revision.tracking_revision,
+                    "source_video_fingerprint": revision.source_video_fingerprint,
+                    "clip_revision": revision.clip_revision,
+                    "tracker_name": revision.tracker_name,
+                    "tracker_version": revision.tracker_version,
+                    "initialization": revision.initialization.to_dict(),
+                    "corrections": [
+                        item.to_dict() for item in revision.corrections
+                    ],
+                }
+            )
+        cad_revision = None
+        if has_cad_anchor:
+            cad = self.repositories.project.load(project_id).source_assets.get("cad")
+            cad_revision = (
+                {
+                    key: cad.get(key)
+                    for key in (
+                        "sha256",
+                        "dataset_id",
+                        "dataset_path",
+                        "artifact_id",
+                    )
+                    if cad.get(key) is not None
+                }
+                if isinstance(cad, Mapping)
+                else cad
+            )
+        return {
+            "annotations": [item.to_dict() for item in annotations],
+            "tracking_dependencies": tracking_dependencies,
+            "cad_revision": cad_revision,
+        }
+
+    def _write_annotation_render_bundle(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        *,
+        frames: Sequence[DecodedFrameTimestamp],
+        time_base: Fraction,
+        media_spec: ProjectMediaSpec,
+        attempt: Path,
+    ) -> Path | None:
+        identity = self._annotation_render_identity(project_id, clip)
+        raw_annotations = identity["annotations"]
+        if not raw_annotations:
+            return None
+        tracking_revisions: dict[str, object] = {}
+        for annotation in self.repositories.annotations.load(project_id).annotations:
+            if annotation.clip_id != clip.clip_id:
+                continue
+            revision_id = annotation.active_tracking_revision
+            if revision_id is None:
+                continue
+            revision = self.tracking_revision_repository.load(
+                project_id,
+                clip.clip_id,
+                annotation.annotation_id,
+                revision_id,
+            )
+            tracking_revisions[revision_id] = revision.to_dict()
+        bundle = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "clip_id": clip.clip_id,
+            "video_width": media_spec.width,
+            "video_height": media_spec.height,
+            "source_time_base": {
+                "numerator": time_base.numerator,
+                "denominator": time_base.denominator,
+            },
+            "source_frames": [
+                {
+                    "source_decoded_frame_ordinal": frame.ordinal,
+                    "source_pts": frame.pts,
+                    "duration_pts": frame.duration_pts,
+                }
+                for frame in frames
+            ],
+            "annotations": raw_annotations,
+            "tracking_revisions": tracking_revisions,
+            "dependencies": identity,
+        }
+        path = attempt / "annotation_render_bundle.json"
+        temporary = path.with_suffix(".json.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                json.dump(bundle, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return path
 
     def _current_input_fingerprint(self, job: QueueJob) -> str | None:
         project = self.repositories.project.load(job.project_id)
@@ -4383,6 +4530,9 @@ class ProjectService:
                         adapter_version=render_adapter.version,
                         physical_video_path=physical_video,
                         physical_frame_map_path=physical_map,
+                        annotation_identity=self._annotation_render_identity(
+                            job.project_id, clip
+                        ),
                     )
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -4987,6 +5137,7 @@ def _render_identity_payload(
     adapter_version: str,
     physical_video_path: Path | None = None,
     physical_frame_map_path: Path | None = None,
+    annotation_identity: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     return {
         "job_type": "clip_render",
@@ -5021,6 +5172,7 @@ def _render_identity_payload(
         "project_media_spec": media_spec.to_dict(),
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
+        "annotation_dependencies": dict(annotation_identity or {}),
     }
 
 

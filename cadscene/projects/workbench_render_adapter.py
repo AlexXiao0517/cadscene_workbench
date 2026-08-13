@@ -118,12 +118,46 @@ class ExistingWorkbenchRenderAdapter:
                 "--progress-file",
                 str(progress_path),
             )
+        annotation_bundle_value = inputs.parameters.get(
+            "annotation_render_bundle_path"
+        )
+        package_input = legacy_output
+        annotation_command: tuple[str, ...] | None = None
+        if annotation_bundle_value is not None:
+            annotation_bundle = _required_path(
+                inputs.parameters, "annotation_render_bundle_path"
+            )
+            annotated_output = inputs.attempt_directory / "annotated_overlay.mp4"
+            camera_path = (
+                output_root
+                / inputs.project_id
+                / inputs.clip_id
+                / (
+                    "08_render/pure_rotation_camera_path.csv"
+                    if self.workflow == "pure_rotation"
+                    else "03_alignment/sfm_camera_path.csv"
+                )
+            )
+            annotation_command = (
+                sys.executable,
+                "-m",
+                "cadscene.cli.render_annotations",
+                "--input",
+                str(legacy_output),
+                "--output",
+                str(annotated_output),
+                "--bundle",
+                str(annotation_bundle),
+                "--camera-path",
+                str(camera_path),
+            )
+            package_input = annotated_output
         package_command = (
             sys.executable,
             "-m",
             "cadscene.cli.package_project_render",
             "--input",
-            str(legacy_output),
+            str(package_input),
             "--source-frame-map",
             str(inputs.authoritative_frame_map_path),
             "--media-spec",
@@ -132,7 +166,11 @@ class ExistingWorkbenchRenderAdapter:
             str(inputs.attempt_directory),
         )
         return RenderExecutionPlan(
-            commands=(render_command, package_command),
+            commands=(
+                (render_command, package_command)
+                if annotation_command is None
+                else (render_command, annotation_command, package_command)
+            ),
             validate=lambda: _validate_packaged_render(inputs),
         )
 
@@ -146,7 +184,7 @@ def default_workbench_render_adapters(
             ExistingWorkbenchRenderAdapter(
                 workflow=workflow,
                 application_root=root,
-                version="3" if workflow == "pure_rotation" else "2",
+                version="4",
             )
             for workflow in (
                 "sfm_only",

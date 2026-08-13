@@ -685,6 +685,42 @@ def test_render_identity_includes_saved_workbench_operation_id(tmp_path: Path) -
     assert payload["workbench"]["output_operation_id"] == "save-ready"
 
 
+def test_render_identity_includes_only_the_target_clip_annotations(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, adapter, trajectories = _system(tmp_path)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    clip = next(item for item in clips.clips if item.clip_id == "ready")
+    trajectory = next(item for item in trajectories if item.clip_id == "ready")
+    common = {
+        "clip": clip,
+        "project_revision": project.revision,
+        "clips_revision": clips.revision,
+        "trajectory": trajectory,
+        "workbench": clip.references[0],
+        "media_spec": ProjectMediaSpec.from_dict(project.media_spec),
+        "media_spec_revision": str(project.media_spec_revision),
+        "adapter_name": adapter.name,
+        "adapter_version": adapter.version,
+    }
+
+    before = _render_identity_payload(
+        **common, annotation_identity={"annotations": []}
+    )
+    after = _render_identity_payload(
+        **common,
+        annotation_identity={
+            "annotations": [
+                {"annotation_id": "label-1", "text": "K12+340"}
+            ]
+        },
+    )
+
+    assert before["annotation_dependencies"] == {"annotations": []}
+    assert before != after
+
+
 def test_reopening_saved_workbench_does_not_stale_current_render_identity(
     tmp_path: Path,
 ) -> None:
