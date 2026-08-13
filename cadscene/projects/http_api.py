@@ -47,6 +47,12 @@ _TRAJECTORY = re.compile(
 )
 _RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
 _MERGE = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/merge-jobs$")
+_ANNOTATIONS = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations$"
+)
+_ANNOTATION = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})$"
+)
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -155,6 +161,18 @@ class ProjectApi:
             match = _MERGE.fullmatch(path)
             if method == "POST" and match:
                 return self._merge_job(match["project"], payload)
+            match = _ANNOTATIONS.fullmatch(path)
+            if method == "POST" and match:
+                return self._create_annotation(match["project"], payload)
+            match = _ANNOTATION.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_annotation(
+                    match["project"], match["annotation"], payload
+                )
+            if method == "DELETE" and match:
+                return self._delete_annotation(
+                    match["project"], match["annotation"], payload
+                )
             match = _JOB_RUNTIME.fullmatch(path)
             if method == "GET" and match:
                 return ApiResponse(
@@ -378,6 +396,97 @@ class ProjectApi:
             return ApiResponse(304, None, response_headers)
         return ApiResponse(200, snapshot, response_headers)
 
+    def _create_annotation(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        from cadscene.annotations.models import (
+            AnnotationStyle,
+            SourcePtsRange,
+            VisibilityPolicy,
+        )
+
+        result = self.service.annotation_service.create(
+            project_id,
+            expected_revision=int(payload["expected_revision"]),
+            annotation_id=(
+                None
+                if payload.get("annotation_id") is None
+                else str(payload["annotation_id"])
+            ),
+            clip_id=str(payload["clip_id"]),
+            anchor_type=str(payload["anchor_type"]),
+            text=str(payload.get("text", "")),
+            anchor=dict(payload.get("anchor") or {}),
+            source_pts_range=SourcePtsRange.from_dict(payload["source_pts_range"]),
+            screen_offset=tuple(payload.get("screen_offset", (0.0, 0.0))),
+            style=AnnotationStyle.from_dict(payload.get("style")),
+            visibility_policy=VisibilityPolicy.from_dict(
+                payload.get("visibility_policy")
+            ),
+            user_visible=bool(payload.get("user_visible", True)),
+        )
+        return ApiResponse(
+            201,
+            {
+                "annotation": result.annotation.to_dict(),
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
+    def _update_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        changes = payload.get("changes")
+        if not isinstance(changes, Mapping):
+            raise TypeError("annotation changes must be an object")
+        result = self.service.annotation_service.update(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(
+                payload["expected_annotation_revision"]
+            ),
+            changes=changes,
+        )
+        return ApiResponse(
+            200,
+            {
+                "annotation": result.annotation.to_dict(),
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
+    def _delete_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        result = self.service.annotation_service.delete(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(
+                payload["expected_annotation_revision"]
+            ),
+        )
+        return ApiResponse(
+            200,
+            {
+                "annotation_id": result.annotation_id,
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
     def _build_snapshot(self, project_id: str) -> dict[str, object]:
         with ExitStack() as stack:
             for repository in self.repositories.in_lock_order():
@@ -389,6 +498,7 @@ class ProjectApi:
         clips = self.repositories.clips.load(project_id)
         jobs = self.repositories.jobs.load(project_id)
         render = self.repositories.render.load(project_id)
+        annotations = self.repositories.annotations.load(project_id)
         analysis_state = project.source_assets.get("_analysis")
         analysis_status = (
             str(analysis_state.get("status"))
@@ -435,6 +545,7 @@ class ProjectApi:
             "clips": clips.revision,
             "jobs": jobs.revision,
             "render": render.revision,
+            "annotations": annotations.revision,
         }
         job_by_clip: dict[str, Mapping[str, object]] = {}
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
@@ -636,6 +747,9 @@ class ProjectApi:
                 ),
             },
             "clips": clip_payloads,
+            "annotations": [
+                annotation.to_dict() for annotation in annotations.annotations
+            ],
         }
         revision_payload = json.dumps(
             snapshot,

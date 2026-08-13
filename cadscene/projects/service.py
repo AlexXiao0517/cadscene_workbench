@@ -213,6 +213,14 @@ class ProjectService:
             identity=self._identity,
         )
         self._publication_lock = threading.RLock()
+        from cadscene.annotations.service import AnnotationService
+
+        self.annotation_service = AnnotationService(
+            repositories,
+            now=now,
+            identity=self._identity,
+            publication_lock=self._publication_lock,
+        )
         self.queue.enable_publication_gate()
 
     def set_project_media_spec(

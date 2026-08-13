@@ -185,6 +185,60 @@ def test_snapshot_etag_returns_304_with_an_empty_body(tmp_path: Path) -> None:
     assert lowercase.encoded_body == b""
 
 
+def test_annotation_crud_api_and_snapshot_use_independent_revisions(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    payload = {
+        "expected_revision": 0,
+        "annotation_id": "label-1",
+        "clip_id": "clip-1",
+        "anchor_type": "cad_anchor",
+        "text": "K12+340",
+        "anchor": {"cad_world_xyz": [1.0, 2.0, 3.0]},
+        "source_pts_range": {
+            "start_pts": 2250,
+            "end_pts_exclusive": 3750,
+            "time_base": {"numerator": 1, "denominator": 25},
+            "semantics": "half_open",
+        },
+    }
+
+    created = api.handle(
+        "POST", "/api/projects/p1/annotations", json_body=payload
+    )
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+    updated = api.handle(
+        "PATCH",
+        "/api/projects/p1/annotations/label-1",
+        json_body={
+            "expected_revision": 1,
+            "expected_annotation_revision": 0,
+            "changes": {"text": "K12+360", "screen_offset": [14.0, -9.0]},
+        },
+    )
+    deleted = api.handle(
+        "DELETE",
+        "/api/projects/p1/annotations/label-1",
+        json_body={
+            "expected_revision": 2,
+            "expected_annotation_revision": 1,
+        },
+    )
+
+    assert created.status == 201
+    assert created.body["annotation"]["annotation_id"] == "label-1"
+    assert created.body["annotations_revision"] == 1
+    assert snapshot.body["component_revisions"]["annotations"] == 1
+    assert snapshot.body["annotations"][0]["text"] == "K12+340"
+    assert updated.status == 200
+    assert updated.body["annotation"]["annotation_revision"] == 1
+    assert updated.body["annotation"]["text"] == "K12+360"
+    assert deleted.status == 200
+    assert deleted.body["annotations_revision"] == 3
+    assert repositories.annotations.load("p1").annotations == ()
+
+
 def test_snapshot_etag_changes_when_media_loss_changes_server_capabilities(
     tmp_path: Path,
 ) -> None:

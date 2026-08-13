@@ -806,6 +806,13 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "API not found")
 
+    def do_DELETE(self) -> None:
+        route = urlsplit(self.path).path
+        if route.startswith("/api/projects/"):
+            self._dispatch_project_api("DELETE")
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "API not found")
+
     def do_HEAD(self) -> None:
         parsed = urlsplit(self.path)
         if re.fullmatch(

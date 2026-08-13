@@ -175,7 +175,7 @@ def test_recovery_completes_partial_project_creation(tmp_path, monkeypatch):
     result = reconcile_project("p1", repositories=repositories)
 
     manifests = tuple(repository.load("p1") for repository in repositories.in_lock_order())
-    assert result.changed_owners == ("clips", "jobs", "render")
+    assert result.changed_owners == ("clips", "jobs", "render", "annotations")
     assert len({manifest.operation_id for manifest in manifests}) == 1
 
 
@@ -304,8 +304,9 @@ def test_recovery_completes_every_partial_ordered_operation_prefix(
         repositories.render.load("p1").published_outputs[0]["output_id"]
         == "output-arbitrary"
     )
+    participants = repository_order[:4]
     assert {
-        repository.load("p1").operation_id for repository in repository_order
+        repository.load("p1").operation_id for repository in participants
     } == {expected_operation_id}
     assert second.changed_owners == ()
     assert tuple(
