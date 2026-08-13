@@ -438,6 +438,7 @@
         { headers: {} },
       );
       state.clipId = session.clip_id;
+      await window.CadsceneAnnotationPts?.configure?.(projectId, state.clipId);
       await refreshSnapshot();
       setStatus("暂停视频后可创建 CAD 或视频目标标签");
       scheduleRender();

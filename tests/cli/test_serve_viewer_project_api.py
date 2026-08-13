@@ -310,6 +310,49 @@ def test_video_annotation_tracking_route_delegates_exact_revision_contract(
     assert calls[0][1]["correction"].source_pts == 2300
 
 
+def test_annotation_preview_timing_uses_authoritative_clip_frame_map(
+    tmp_path: Path,
+) -> None:
+    frame_map = tmp_path / "clip_frame_map.json"
+    frame_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 25},
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "frames": [
+                            {"ordinal": 20, "pts": 2250},
+                            {"ordinal": 21, "pts": 2251},
+                            {"ordinal": 22, "pts": 2254},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    clip = _clip("clip-1")
+    clip = replace(
+        clip,
+        analysis={**clip.analysis, "clip_frame_map_path": str(frame_map)},
+    )
+    api, _repositories, _queue = _api(tmp_path, (clip,))
+
+    response = api.handle(
+        "GET", "/api/projects/p1/clips/clip-1/annotation-preview"
+    )
+
+    assert response.status == 200
+    assert response.body["timestamp_authority"] == "source_decoded_frame_integer_pts"
+    assert response.body["time_base"] == {"numerator": 1, "denominator": 25}
+    assert response.body["frames"] == [
+        {"source_pts": 2250, "clip_time_sec": 0.0},
+        {"source_pts": 2251, "clip_time_sec": 0.04},
+        {"source_pts": 2254, "clip_time_sec": 0.16},
+    ]
+
+
 def test_snapshot_etag_changes_when_media_loss_changes_server_capabilities(
     tmp_path: Path,
 ) -> None:

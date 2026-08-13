@@ -2040,6 +2040,26 @@
     return threeScene?.pickCadWorld(event) || null;
   };
 
+  window.cadsceneProjectCadWorldPoint = function (point) {
+    if (!camera || !Array.isArray(point) || !video.videoWidth || !video.videoHeight) {
+      return { visible: false, reason: "projection_unavailable" };
+    }
+    const projected = projectPoint(point, camera, video.videoWidth, video.videoHeight);
+    if (!projected) return { visible: false, reason: "behind_camera" };
+    if (
+      projected[0] < 0 || projected[0] >= video.videoWidth
+      || projected[1] < 0 || projected[1] >= video.videoHeight
+    ) return { visible: false, reason: "outside_viewport" };
+    const axes = getCameraAxes(camera);
+    const cameraPoint = worldToCamera(point, camera, axes);
+    return {
+      visible: true,
+      reason: "visible",
+      source_xy: projected,
+      depth_m: Number(cameraPoint[2]),
+    };
+  };
+
   window.cadsceneGetDefaultCameraPose = function () {
     if (!defaultCamera || !window.CadscenePureRotationMath) return null;
     const pose = cloneCameraPose(defaultCamera);

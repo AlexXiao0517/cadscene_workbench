@@ -306,6 +306,40 @@ class ProjectService:
             correction=correction,
         )
 
+    def annotation_preview_timing(
+        self, project_id: str, clip_id: str
+    ) -> dict[str, object]:
+        clips = self.repositories.clips.load(project_id)
+        clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+        if clip is None:
+            raise FileNotFoundError(f"clip not found: {clip_id}")
+        frame_map_path = _clip_frame_map_path(clip)
+        if frame_map_path is None:
+            stored_jobs = tuple(
+                QueueJob.from_dict(item)
+                for item in self.repositories.jobs.load(project_id).jobs
+            )
+            _video_path, frame_map_path = _render_physical_inputs(clip, stored_jobs)
+        frames = _load_authoritative_source_frames(clip, frame_map_path)
+        time_base = _fraction_time_base(clip)
+        first_pts = frames[0].pts
+        return {
+            "project_id": project_id,
+            "clip_id": clip_id,
+            "timestamp_authority": "source_decoded_frame_integer_pts",
+            "time_base": {
+                "numerator": time_base.numerator,
+                "denominator": time_base.denominator,
+            },
+            "frames": [
+                {
+                    "source_pts": frame.pts,
+                    "clip_time_sec": float((frame.pts - first_pts) * time_base),
+                }
+                for frame in frames
+            ],
+        }
+
     def set_project_media_spec(
         self,
         project_id: str,

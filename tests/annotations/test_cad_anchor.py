@@ -87,3 +87,17 @@ def test_user_hidden_cad_anchor_never_projects() -> None:
     assert result.visible is False
     assert result.reason == "user_hidden"
     assert result.anchor_xy is None
+
+
+def test_base_and_corrected_camera_selection_changes_cad_visibility() -> None:
+    annotation = _annotation(world=(0.0, 10.0, 1.0))
+
+    base = project_cad_anchor(
+        annotation, _camera(yaw_deg=0.0), source_pts=120, width=200, height=100
+    )
+    corrected = project_cad_anchor(
+        annotation, _camera(yaw_deg=180.0), source_pts=120, width=200, height=100
+    )
+
+    assert (base.visible, base.anchor_xy) == (True, (100.0, 50.0))
+    assert (corrected.visible, corrected.reason) == (False, "behind_camera")

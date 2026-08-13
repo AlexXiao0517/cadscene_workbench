@@ -1,0 +1,166 @@
+(function (root, factory) {
+  const exports = factory();
+  if (typeof module === "object" && module.exports) module.exports = exports;
+  if (root?.document) root.CadsceneAnnotationPts = exports.createBrowserAuthority(root);
+})(typeof window !== "undefined" ? window : globalThis, function () {
+  "use strict";
+
+  function sourcePtsAtTime(frames, clipTimeSec) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const target = Number(clipTimeSec);
+    let low = 0;
+    let high = frames.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(frames[middle].clip_time_sec) < target) low = middle + 1;
+      else high = middle;
+    }
+    const after = frames[low];
+    const before = low > 0 ? frames[low - 1] : after;
+    const selected = Math.abs(Number(before.clip_time_sec) - target)
+      <= Math.abs(Number(after.clip_time_sec) - target) ? before : after;
+    return Number.isInteger(selected.source_pts) ? selected.source_pts : null;
+  }
+
+  function hidden(reason, extra = {}) {
+    return { visible: false, reason, ...extra };
+  }
+
+  function videoTrackVisual(annotation, results, sourcePts, sourceToDisplay, screenOffset = null) {
+    const result = Array.isArray(results)
+      ? results.find((item) => item.source_pts === sourcePts) : null;
+    if (!result) return hidden("no_exact_tracking_pts");
+    const confidence = Number(result.confidence || 0);
+    const trackingStatus = String(result.tracking_status || "lost");
+    const minimum = Number(annotation.visibility_policy?.min_tracking_confidence ?? 0.5);
+    if (!result.visibility || !result.anchor_xy || confidence < minimum) {
+      return hidden("tracking_lost", {
+        tracking_status: trackingStatus,
+        confidence,
+      });
+    }
+    const offset = screenOffset || annotation.screen_offset || [0, 0];
+    const anchorSource = { x: Number(result.anchor_xy[0]), y: Number(result.anchor_xy[1]) };
+    const labelSource = {
+      x: anchorSource.x + Number(offset[0]),
+      y: anchorSource.y + Number(offset[1]),
+    };
+    const anchor = sourceToDisplay(anchorSource);
+    const label = sourceToDisplay(labelSource);
+    if (!anchor || !label) return hidden("outside_viewport");
+    return {
+      visible: true,
+      reason: "visible",
+      anchor_xy: [anchor.x, anchor.y],
+      label_xy: [label.x, label.y],
+      tracking_status: trackingStatus,
+      confidence,
+    };
+  }
+
+  function createBrowserAuthority(browser) {
+    const video = browser.document.querySelector("#sourceVideo");
+    let projectId = "";
+    let clipId = "";
+    let frames = [];
+    const tracking = new Map();
+
+    function sourceToDisplay(point) {
+      return browser.cadsceneVideoDisplayTransform?.sourceToDisplay?.(point) || null;
+    }
+
+    function inPtsRange(annotation, sourcePts) {
+      const range = annotation.source_pts_range;
+      return Number.isInteger(sourcePts)
+        && sourcePts >= Number(range?.start_pts)
+        && sourcePts < Number(range?.end_pts_exclusive);
+    }
+
+    return {
+      async configure(nextProjectId, nextClipId) {
+        projectId = String(nextProjectId || "");
+        clipId = String(nextClipId || "");
+        const response = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clipId)}/annotation-preview`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) throw new Error("无法加载标签的权威 PTS 映射");
+        const payload = await response.json();
+        if (payload.timestamp_authority !== "source_decoded_frame_integer_pts") {
+          throw new Error("标签 PTS 映射不是权威解码帧数据");
+        }
+        frames = payload.frames || [];
+        return payload;
+      },
+
+      currentSourcePts() {
+        return sourcePtsAtTime(frames, Number(video?.currentTime || 0));
+      },
+
+      async loadTrackingRevisions(annotations) {
+        for (const annotation of annotations || []) {
+          const revision = annotation.active_tracking_revision;
+          if (!revision || tracking.has(revision)) continue;
+          const response = await fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/annotations/${encodeURIComponent(annotation.annotation_id)}/tracking`,
+            { cache: "no-store" },
+          );
+          if (!response.ok) continue;
+          const payload = await response.json();
+          if (payload.tracking_revision === revision) {
+            tracking.set(revision, payload.results || []);
+          }
+        }
+      },
+
+      visualFor(annotation, options = {}) {
+        const sourcePts = this.currentSourcePts();
+        if (!annotation.user_visible) return hidden("user_hidden");
+        if (!inPtsRange(annotation, sourcePts)) return hidden("outside_pts_range");
+        if (annotation.anchor_type === "video_track") {
+          return videoTrackVisual(
+            annotation,
+            tracking.get(annotation.active_tracking_revision) || [],
+            sourcePts,
+            sourceToDisplay,
+            options.screenOffset,
+          );
+        }
+        const projected = browser.cadsceneProjectCadWorldPoint?.(
+          annotation.anchor?.cad_world_xyz,
+        );
+        if (!projected?.visible || !projected.source_xy) {
+          return hidden(projected?.reason || "projection_invalid");
+        }
+        const offset = options.screenOffset || annotation.screen_offset || [0, 0];
+        const anchorSource = {
+          x: Number(projected.source_xy[0]),
+          y: Number(projected.source_xy[1]),
+        };
+        const anchor = sourceToDisplay(anchorSource);
+        const label = sourceToDisplay({
+          x: anchorSource.x + Number(offset[0]),
+          y: anchorSource.y + Number(offset[1]),
+        });
+        if (!anchor || !label) return hidden("outside_viewport");
+        return {
+          visible: true,
+          reason: "visible",
+          anchor_xy: [anchor.x, anchor.y],
+          label_xy: [label.x, label.y],
+          depth_m: projected.depth_m,
+        };
+      },
+
+      displayDeltaToSource(dx, dy) {
+        const origin = sourceToDisplay({ x: 0, y: 0 });
+        const unit = sourceToDisplay({ x: 1, y: 1 });
+        const scaleX = unit && origin ? unit.x - origin.x : 1;
+        const scaleY = unit && origin ? unit.y - origin.y : 1;
+        return { x: Number(dx) / scaleX, y: Number(dy) / scaleY };
+      },
+    };
+  }
+
+  return { sourcePtsAtTime, videoTrackVisual, createBrowserAuthority };
+});

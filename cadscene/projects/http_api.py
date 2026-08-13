@@ -56,6 +56,9 @@ _ANNOTATION = re.compile(
 _ANNOTATION_TRACKING = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})/(?P<action>track|tracking)$"
 )
+_ANNOTATION_PREVIEW = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/annotation-preview$"
+)
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -134,6 +137,15 @@ class ProjectApi:
             match = _SNAPSHOT.fullmatch(path)
             if method == "GET" and match:
                 return self._snapshot(match["project"], headers)
+            match = _ANNOTATION_PREVIEW.fullmatch(path)
+            if method == "GET" and match:
+                return ApiResponse(
+                    200,
+                    self.service.annotation_preview_timing(
+                        match["project"], match["clip"]
+                    ),
+                    {"Cache-Control": "no-store"},
+                )
             match = _UPLOAD.fullmatch(path)
             if method == "POST" and match:
                 if upload is None:
