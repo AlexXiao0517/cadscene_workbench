@@ -2367,11 +2367,11 @@
   function selectInitialWorkflowStage() {
     if (projectWorkbenchBootstrapFailed) return;
     const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
-    if (stageOrder.includes(requestedWorkflowStage)) {
-      setWorkflowStage(requestedWorkflowStage);
-    } else if (stageOrder.includes(restoredWorkflowStage)) {
+    if (stageOrder.includes(restoredWorkflowStage)) {
       sessionStorage.removeItem(restoredWorkflowStageKey());
       setWorkflowStage(restoredWorkflowStage);
+    } else if (stageOrder.includes(requestedWorkflowStage)) {
+      setWorkflowStage(requestedWorkflowStage);
     } else {
       detectWorkflowStageFromArtifacts().then((stage) => {
         if (!selectedWorkflowStage) setWorkflowStage(stage);

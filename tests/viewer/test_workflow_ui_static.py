@@ -194,6 +194,17 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "button.disabled = blocked" in availability
 
 
+def test_completed_action_restores_next_stage_before_stale_url_stage() -> None:
+    script = _read("workflow.js")
+    start = script.index("function selectInitialWorkflowStage()")
+    end = script.index("if (projectWorkbenchToken)", start)
+    select_initial = script[start:end]
+
+    assert select_initial.index("stageOrder.includes(restoredWorkflowStage)") < select_initial.index(
+        "stageOrder.includes(requestedWorkflowStage)"
+    )
+
+
 def test_project_workbench_workflow_never_falls_back_to_sfm_on_manifest_read_error() -> None:
     script = _read("workflow.js")
     loader = script[
