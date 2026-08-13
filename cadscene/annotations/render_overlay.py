@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -350,16 +351,16 @@ def build_drawtext_filter(
     command_path: Path,
     text_paths: Mapping[str, Path],
     targets: Mapping[str, str],
+    font_paths: Mapping[str, Path] | None = None,
 ) -> str:
     """Build one runtime-updated drawtext filter per annotation."""
 
     first_events: dict[str, AnnotationRenderEvent] = {}
     for event in events:
         first_events.setdefault(event.annotation_id, event)
-    filters = [
-        "[0:v]setpts=PTS-STARTPTS",
-        f"sendcmd=filename='{_filter_path(command_path)}'",
-    ]
+    # Preserve the input PTS and final-frame duration. Resetting PTS here causes
+    # the MP4 muxer to mark the final filtered frame as discard on FFmpeg 7.x.
+    filters = [f"[0:v]sendcmd=filename='{_filter_path(command_path)}'"]
     for annotation_id in sorted(first_events):
         event = first_events[annotation_id]
         style = event.style
@@ -367,9 +368,15 @@ def build_drawtext_filter(
         target = targets.get(annotation_id)
         if text_path is None or target is None:
             raise ValueError(f"drawtext resources are missing for {annotation_id}")
+        font_path = (font_paths or {}).get(annotation_id)
+        font_option = (
+            f"fontfile='{_filter_path(font_path)}'"
+            if font_path is not None
+            else f"font='{_filter_value(style.get('font_family') or 'sans-serif')}'"
+        )
         filters.append(
             f"drawtext@{target}="
-            f"font='{_filter_value(style.get('font_family') or 'sans-serif')}'"
+            f"{font_option}"
             f":textfile='{_filter_path(text_path)}'"
             f":fontsize={int(style.get('font_size_px') or 28)}"
             f":fontcolor={_filter_value(style.get('text_color') or '#FFFFFF')}"
@@ -379,6 +386,26 @@ def build_drawtext_filter(
             f":x=0:y=0:alpha=0:fix_bounds=1"
         )
     return ",".join(filters) + "[annotated]\n"
+
+
+def resolve_font_file(font_family: object) -> Path | None:
+    """Resolve a deterministic local font, preferring a CJK-capable fallback."""
+
+    family = str(font_family or "").casefold().replace(" ", "")
+    windows_root = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    preferred = []
+    if "yahei" in family or "msyh" in family or "微软雅黑" in family:
+        preferred.extend((windows_root / "msyh.ttc", windows_root / "msyhbd.ttc"))
+    preferred.extend(
+        (
+            windows_root / "msyh.ttc",
+            windows_root / "arial.ttf",
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        )
+    )
+    return next((path for path in preferred if path.is_file()), None)
 
 
 def load_camera_rows(path: Path | None) -> tuple[tuple[int, CameraState], ...]:

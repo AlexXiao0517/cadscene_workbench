@@ -13,6 +13,7 @@ from cadscene.annotations.render_overlay import (
     build_drawtext_filter,
     build_sendcmd_document,
     load_camera_rows,
+    resolve_font_file,
 )
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             command_path.write_text(command_text, encoding="utf-8", newline="\n")
             resources.append(command_path)
             text_paths: dict[str, Path] = {}
+            font_paths: dict[str, Path] = {}
             for index, annotation_id in enumerate(sorted(targets)):
                 event = next(
                     item for item in events if item.annotation_id == annotation_id
@@ -93,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
                 text_path.write_text(event.text, encoding="utf-8", newline="\n")
                 resources.append(text_path)
                 text_paths[annotation_id] = text_path
+                font_path = resolve_font_file(event.style.get("font_family"))
+                if font_path is not None:
+                    font_paths[annotation_id] = font_path
             filter_path = output.with_name(f".{output.stem}.annotations.ffscript")
             filter_path.write_text(
                 build_drawtext_filter(
@@ -100,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                     command_path=command_path,
                     text_paths=text_paths,
                     targets=targets,
+                    font_paths=font_paths,
                 ),
                 encoding="utf-8",
                 newline="\n",

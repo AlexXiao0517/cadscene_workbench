@@ -253,9 +253,12 @@ def test_drawtext_filter_uses_one_runtime_updated_label_per_annotation() -> None
         command_path=Path("C:/tmp/commands.txt"),
         text_paths={"cad-label": Path("C:/tmp/label.txt")},
         targets=targets,
+        font_paths={"cad-label": Path("C:/Windows/Fonts/msyh.ttc")},
     )
 
     assert graph.count("drawtext@Label0") == 1
     assert "sendcmd=filename='C\\:/tmp/commands.txt'" in graph
     assert "textfile='C\\:/tmp/label.txt'" in graph
+    assert "fontfile='C\\:/Windows/Fonts/msyh.ttc'" in graph
     assert "alpha=0" in graph
+    assert "setpts" not in graph
