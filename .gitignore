@@ -12,6 +12,7 @@
 
 # User datasets and generated runs
 /data/
+/projects/
 /runs/
 /out/
 /outputs/
