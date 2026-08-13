@@ -640,6 +640,15 @@ h2 {
   pointer-events: none;
 }
 
+#annotationRoiSelection {
+  position: absolute;
+  z-index: 7;
+  border: 2px solid var(--accent);
+  background: rgba(86, 194, 255, .14);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .18);
+  pointer-events: none;
+}
+
 .annotation-label {
   position: absolute;
   max-width: 320px;
@@ -680,23 +689,67 @@ h2 {
   pointer-events: none;
 }
 
-.annotation-toolbar {
+.annotation-panel {
   display: grid;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 9px;
-  border: 1px solid var(--line);
-  background: var(--strip);
+  gap: 12px;
+  padding: 14px;
 }
 
-.annotation-tool-actions,
+.annotation-panel[hidden] { display: none; }
+
+.annotation-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.annotation-panel-heading p {
+  max-width: 720px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.annotation-toolbar {
+  display: flex;
+  gap: 10px;
+}
+
+.annotation-toolbar button {
+  display: grid;
+  gap: 3px;
+  min-width: 190px;
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.annotation-toolbar button strong { font-size: 14px; }
+.annotation-toolbar button span { color: var(--muted); font-size: 11px; }
+.annotation-toolbar button.is-active {
+  border-color: var(--accent);
+  background: var(--active-bg);
+}
+
+.annotation-toolbar button.is-active span { color: var(--text); }
+
+.annotation-editor-panel,
 .annotation-editor,
 .annotation-status-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: end;
+  align-items: center;
   gap: 8px;
 }
+
+.annotation-editor-panel {
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--strip);
+}
+
+.annotation-editor { align-items: end; }
 
 .annotation-editor label {
   display: grid;
@@ -713,11 +766,37 @@ h2 {
   padding: 4px 6px;
 }
 
-.annotation-editor #annotationText { width: min(260px, 38vw); }
+.annotation-editor .annotation-text-field { flex: 1 1 340px; }
+.annotation-editor #annotationText { width: min(420px, 44vw); }
 .annotation-editor input[type="number"] { width: 112px; }
 .annotation-editor input[type="color"] { width: 48px; padding: 2px; }
 .annotation-editor .annotation-visible { display: flex; align-items: center; min-height: 30px; }
 .annotation-status-row { justify-content: space-between; color: var(--muted); font-size: 11px; }
+
+.annotation-selection-actions { display: flex; align-items: center; gap: 8px; }
+.danger-button { color: #ff9b9b; }
+
+.camera-settings-details { overflow: hidden; }
+.camera-settings-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+.camera-settings-summary small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.camera-settings-details[open] .camera-settings-summary { border-bottom: 1px solid var(--line); }
+.camera-settings-content { display: block; }
+
+@media (max-width: 1050px) {
+  .annotation-panel-heading { align-items: stretch; flex-direction: column; }
+  .annotation-toolbar { flex-wrap: wrap; }
+  .annotation-toolbar button { flex: 1 1 220px; }
+  .annotation-editor #annotationText { width: min(100%, 520px); }
+}
 
 .scene-stage canvas {
   display: block;

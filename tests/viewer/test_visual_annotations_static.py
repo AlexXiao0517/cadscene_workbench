@@ -51,3 +51,45 @@ def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes
     assert "THREE.Sprite" not in script
     assert ".annotation-label" in css
     assert "pointer-events: none" in css
+
+
+def test_render_stage_uses_full_label_editor_and_collapses_camera_settings() -> None:
+    html = (VIEWER / "index.html").read_text(encoding="utf-8")
+    workflow = (VIEWER / "workflow.js").read_text(encoding="utf-8")
+
+    assert 'id="annotationPanel"' in html
+    assert 'id="cameraSettingsDetails"' in html
+    assert 'id="annotationEditorPanel"' in html
+    assert "在右侧 CAD 添加" in html
+    assert "在左侧视频添加" in html
+    assert 'document.querySelector("#annotationPanel")' in workflow
+    assert 'document.querySelector("#cameraSettingsDetails")' in workflow
+    assert 'annotationPanel.hidden = selectedWorkflowStage !== "render"' in workflow
+    assert 'cameraSettings.open = selectedWorkflowStage !== "render"' in workflow
+
+
+def test_new_label_is_selected_for_immediate_text_editing() -> None:
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+
+    assert "function focusSelectedAnnotationEditor" in script
+    assert 'editor.text?.addEventListener("keydown"' in script
+    assert "await saveSelectedAnnotation()" in script
+    assert script.count("focusSelectedAnnotationEditor();") >= 2
+    video_create = script[script.index('createAnnotation("video_track"') :]
+    video_create = video_create[:video_create.index("function beginLabelDrag")]
+    assert "state.pendingInitialTrackingId = annotation.annotation_id;" in video_create
+    assert "await runTracking(annotation);" not in video_create
+    save = script[script.index("async function saveSelectedAnnotation()") :]
+    assert "state.pendingInitialTrackingId === updated.annotation_id" in save
+    assert "await runTracking(updated);" in save
+    assert save.index("await runTracking(updated);") < save.index("state.pendingInitialTrackingId = null;")
+
+
+def test_video_target_supports_click_roi_and_visible_drag_selection() -> None:
+    html = (VIEWER / "index.html").read_text(encoding="utf-8")
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+
+    assert 'id="annotationRoiSelection"' in html
+    assert "DEFAULT_VIDEO_ROI_SIZE" in script
+    assert 'videoLayer.addEventListener("pointermove"' in script
+    assert "updateRoiSelection" in script

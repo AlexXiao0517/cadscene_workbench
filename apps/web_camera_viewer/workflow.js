@@ -952,6 +952,10 @@
   function setWorkflowStage(stage) {
     const requested = isPureRotationWorkflow() && stage === "quality" ? "render" : stage;
     selectedWorkflowStage = stageOrder.includes(requested) ? requested : "upload";
+    const annotationPanel = document.querySelector("#annotationPanel");
+    const cameraSettings = document.querySelector("#cameraSettingsDetails");
+    if (annotationPanel) annotationPanel.hidden = selectedWorkflowStage !== "render";
+    if (cameraSettings) cameraSettings.open = selectedWorkflowStage !== "render";
     const calibrationPanel = document.querySelector("#pureRotationCalibrationPanel");
     if (calibrationPanel) {
       calibrationPanel.hidden = !(isPureRotationWorkflow() && selectedWorkflowStage === "keyframes");

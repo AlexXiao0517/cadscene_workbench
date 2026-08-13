@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD航拍视频叠加工作台</title>
     <link rel="icon" href="/apps/workflow_portal/assets/mediaflow-cad-video-logo.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./style.css?v=20260810-background-ux" />
+    <link rel="stylesheet" href="./style.css?v=20260813-stage9-label-editor-v1" />
   </head>
   <body>
     <main class="app-shell">
@@ -131,31 +131,11 @@
           <div class="workflow-stage-panel" data-stage="render">
             <div class="workflow-actions">
               <button id="workflowReturnPureCalibration" class="workflow-hidden-control" type="button">返回相机调整</button>
-              <button id="workflowRender" data-job-action type="button">渲染视频</button>
+              <button id="workflowRender" data-job-action type="button">渲染带标签视频</button>
               <button id="workflowPreviewRender" type="button" disabled>预览视频</button>
               <a id="workflowDownloadRender" class="workflow-link" href="#" download>下载结果</a>
             </div>
-            <div id="annotationToolbar" class="annotation-toolbar" aria-label="视频文字标签工具">
-              <div class="annotation-tool-actions">
-                <button type="button" data-annotation-mode="cad_anchor">CAD 锚定标签</button>
-                <button type="button" data-annotation-mode="video_track">视频目标标签</button>
-                <button id="annotationReanchor" type="button" disabled>重新锚定</button>
-                <button id="annotationDelete" type="button" disabled>删除</button>
-              </div>
-              <div class="annotation-editor">
-                <label>文字<input id="annotationText" type="text" maxlength="500" placeholder="输入标签文字" /></label>
-                <label>字号<input id="annotationFontSize" type="number" min="8" max="128" value="28" /></label>
-                <label>颜色<input id="annotationTextColor" type="color" value="#ffffff" /></label>
-                <label>开始 PTS<input id="annotationStartPts" type="number" step="1" /></label>
-                <label>结束 PTS<input id="annotationEndPts" type="number" step="1" /></label>
-                <label class="annotation-visible"><input id="annotationVisible" type="checkbox" checked />显示</label>
-                <button id="annotationSave" type="button" disabled>保存修改</button>
-              </div>
-              <div class="annotation-status-row">
-                <span id="annotationToolStatus">暂停视频后选择标签类型</span>
-                <span id="annotationTrackingState">跟踪状态：—</span>
-              </div>
-            </div>
+            <span class="workflow-stage-note">先在下方标签编辑器中添加和调整标签，再渲染视频。</span>
           </div>
         </div>
       </section>
@@ -192,6 +172,7 @@
               <video id="sourceVideo" controls muted playsinline></video>
               <canvas id="overlayCanvas"></canvas>
               <div id="annotationOverlay" aria-label="文字标签预览"></div>
+              <div id="annotationRoiSelection" aria-hidden="true" hidden></div>
             </div>
           </div>
           <div class="quality-timeline" id="qualityTimelineWrap">
@@ -254,9 +235,52 @@
         </section>
       </section>
 
-      <section class="control-panel">
+      <section id="annotationPanel" class="control-panel annotation-panel" hidden>
+        <div class="annotation-panel-heading">
+          <div>
+            <h2>自定义文字标签</h2>
+            <p>暂停视频，选择一种工具后在对应画面点选；创建后可直接输入文字，并在左侧视频上拖动标签位置。</p>
+          </div>
+          <div id="annotationToolbar" class="annotation-toolbar" aria-label="视频文字标签工具">
+            <button type="button" data-annotation-mode="cad_anchor">
+              <strong>在右侧 CAD 添加</strong>
+              <span>标签跟随相机投影</span>
+            </button>
+            <button type="button" data-annotation-mode="video_track">
+              <strong>在左侧视频添加</strong>
+              <span>单击目标或拖框跟踪</span>
+            </button>
+          </div>
+        </div>
+        <div id="annotationEditorPanel" class="annotation-editor-panel">
+          <div class="annotation-editor">
+            <label class="annotation-text-field">标签文字<input id="annotationText" type="text" maxlength="500" placeholder="点选画面创建标签后输入文字，按 Enter 保存" /></label>
+            <label>字号<input id="annotationFontSize" type="number" min="8" max="128" value="28" /></label>
+            <label>颜色<input id="annotationTextColor" type="color" value="#ffffff" /></label>
+            <label>开始 PTS<input id="annotationStartPts" type="number" step="1" /></label>
+            <label>结束 PTS<input id="annotationEndPts" type="number" step="1" /></label>
+            <label class="annotation-visible"><input id="annotationVisible" type="checkbox" checked />显示</label>
+          </div>
+          <div class="annotation-selection-actions">
+            <button id="annotationSave" type="button" disabled>保存修改</button>
+            <button id="annotationReanchor" type="button" disabled>重新框选目标</button>
+            <button id="annotationDelete" class="danger-button" type="button" disabled>删除标签</button>
+          </div>
+        </div>
+        <div class="annotation-status-row">
+          <span id="annotationToolStatus">暂停视频后，选择上方工具开始添加标签</span>
+          <span id="annotationTrackingState">尚未选中标签</span>
+        </div>
+      </section>
+
+      <details id="cameraSettingsDetails" class="control-panel camera-settings-details" open>
+        <summary class="camera-settings-summary">
+          <span>虚拟相机参数设置</span>
+          <small>渲染导出阶段默认收起，需要时可展开</small>
+        </summary>
+        <div class="camera-settings-content">
         <div class="panel-title">
-          <h2>虚拟相机参数设置</h2>
+          <h2>相机与关键帧工具</h2>
           <div class="button-row" id="cameraToolbar">
             <button id="resetCamera" type="button">重置相机</button>
             <button id="addKeyframe" type="button">添加/更新关键帧</button>
@@ -317,7 +341,8 @@
             </div>
           </fieldset>
         </section>
-      </section>
+        </div>
+      </details>
     </main>
 
     <script src="./paths.js?v=20260708-data-fallback-fix3"></script>
@@ -331,8 +356,8 @@
     <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
     <script src="./viewer_legacy.js?v=20260811-project-pipeline-v1"></script>
     <script src="./annotation_pts.js?v=20260813-stage9-v1"></script>
-    <script src="./annotations.js?v=20260813-stage9-v1"></script>
-    <script src="./workflow.js?v=20260811-project-workflow-session-v2"></script>
+    <script src="./annotations.js?v=20260813-stage9-label-editor-v1"></script>
+    <script src="./workflow.js?v=20260813-stage9-label-editor-v1"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

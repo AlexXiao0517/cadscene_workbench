@@ -497,7 +497,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260811-project-workflow-session-v2' in index
+    assert 'workflow.js?v=20260813-stage9-label-editor-v1' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
@@ -839,7 +839,7 @@ def test_render_log_updates_visible_frame_progress() -> None:
 def test_suggestion_actions_live_in_bottom_uav_controls() -> None:
     html = _read("index.html")
     workflow_end = html.index('<section class="workspace">')
-    controls = html[html.index('<section class="control-panel">') :]
+    controls = html[html.index('id="cameraSettingsDetails"') :]
 
     assert "查看当前建议帧" not in html[:workflow_end]
     assert 'id="viewCurrentSuggestion"' in controls

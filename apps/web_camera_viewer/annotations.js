@@ -8,6 +8,7 @@
   const videoLayer = video?.closest(".video-layer");
   const sceneContainer = document.querySelector("#sceneContainer");
   const overlay = document.querySelector("#annotationOverlay");
+  const roiSelection = document.querySelector("#annotationRoiSelection");
   const status = document.querySelector("#annotationToolStatus");
   const trackingState = document.querySelector("#annotationTrackingState");
   const editor = {
@@ -35,8 +36,10 @@
     nodes: new Map(),
     drag: null,
     renderQueued: false,
+    pendingInitialTrackingId: null,
   };
   const MAX_DOM_LABELS = 250;
+  const DEFAULT_VIDEO_ROI_SIZE = 64;
 
   function setStatus(message) {
     if (status) status.textContent = message;
@@ -104,6 +107,12 @@
       entry.label.classList.toggle("is-selected", identity === annotationId);
     }
     syncEditor();
+  }
+
+  function focusSelectedAnnotationEditor() {
+    if (!editor.text || !selectedAnnotation()) return;
+    editor.text.focus();
+    editor.text.select();
   }
 
   function removeNode(annotationId) {
@@ -252,7 +261,9 @@
     try {
       await createAnnotation("cad_anchor", picked);
       state.mode = null;
-      setStatus("CAD 锚定标签已创建");
+      document.querySelectorAll("[data-annotation-mode]").forEach((button) => button.classList.remove("is-active"));
+      focusSelectedAnnotationEditor();
+      setStatus("CAD 标签已创建：输入文字后按 Enter 保存，也可在左侧视频拖动标签位置");
     } catch (error) {
       setStatus(error.message);
     }
@@ -262,13 +273,35 @@
     if (!new Set(["video_track", "video_track_reanchor"]).has(state.mode)) return;
     const rect = videoLayer.getBoundingClientRect();
     state.selectionStart = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    updateRoiSelection(state.selectionStart, state.selectionStart);
     event.preventDefault();
+  });
+
+  function updateRoiSelection(start, finish) {
+    if (!roiSelection) return;
+    const left = Math.min(start.x, finish.x);
+    const top = Math.min(start.y, finish.y);
+    roiSelection.style.left = `${left}px`;
+    roiSelection.style.top = `${top}px`;
+    roiSelection.style.width = `${Math.max(1, Math.abs(finish.x - start.x))}px`;
+    roiSelection.style.height = `${Math.max(1, Math.abs(finish.y - start.y))}px`;
+    roiSelection.hidden = false;
+  }
+
+  videoLayer.addEventListener("pointermove", (event) => {
+    if (!state.selectionStart) return;
+    const rect = videoLayer.getBoundingClientRect();
+    updateRoiSelection(state.selectionStart, {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    });
   });
 
   videoLayer.addEventListener("pointerup", async (event) => {
     if (!state.selectionStart || !new Set(["video_track", "video_track_reanchor"]).has(state.mode)) return;
     const start = state.selectionStart;
     state.selectionStart = null;
+    if (roiSelection) roiSelection.hidden = true;
     const rect = videoLayer.getBoundingClientRect();
     const finish = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     const transform = window.cadsceneVideoDisplayTransform;
@@ -277,11 +310,12 @@
     if (!a || !b) return setStatus("请在实际视频画面内选择目标");
     const pts = currentSourcePts();
     if (!Number.isInteger(pts)) return setStatus("当前帧还没有权威 source PTS");
-    const width = Math.max(24, Math.abs(b.x - a.x));
-    const height = Math.max(24, Math.abs(b.y - a.y));
+    const isClick = Math.abs(b.x - a.x) < 4 && Math.abs(b.y - a.y) < 4;
+    const width = isClick ? DEFAULT_VIDEO_ROI_SIZE : Math.max(24, Math.abs(b.x - a.x));
+    const height = isClick ? DEFAULT_VIDEO_ROI_SIZE : Math.max(24, Math.abs(b.y - a.y));
     const bbox = [
-      Math.min(a.x, b.x) - (Math.abs(b.x - a.x) < 4 ? 12 : 0),
-      Math.min(a.y, b.y) - (Math.abs(b.y - a.y) < 4 ? 12 : 0),
+      isClick ? a.x - width / 2 : Math.min(a.x, b.x),
+      isClick ? a.y - height / 2 : Math.min(a.y, b.y),
       width,
       height,
     ];
@@ -294,9 +328,12 @@
         const annotation = await createAnnotation("video_track", {
           initialization: { source_pts: pts, bbox },
         });
-        await runTracking(annotation);
+        state.pendingInitialTrackingId = annotation.annotation_id;
+        focusSelectedAnnotationEditor();
+        setStatus("视频标签已创建：输入文字并按 Enter 保存后开始跟踪");
       }
       state.mode = null;
+      document.querySelectorAll("[data-annotation-mode]").forEach((button) => button.classList.remove("is-active"));
     } catch (error) {
       setStatus(error.message);
     }
@@ -406,11 +443,11 @@
       setStatus(error.message);
     }
   });
-  editor.save?.addEventListener("click", async () => {
+  async function saveSelectedAnnotation() {
     const annotation = selectedAnnotation();
     if (!annotation) return;
     try {
-      await updateAnnotation(annotation, {
+      const updated = await updateAnnotation(annotation, {
         text: editor.text.value,
         style: makeStyle(),
         source_pts_range: {
@@ -420,10 +457,22 @@
         },
         user_visible: editor.visible.checked,
       });
-      setStatus("文字与样式已保存；不会重新跟踪");
+      if (state.pendingInitialTrackingId === updated.annotation_id) {
+        await runTracking(updated);
+        state.pendingInitialTrackingId = null;
+      } else {
+        setStatus("文字与样式已保存；不会重新跟踪");
+      }
     } catch (error) {
       setStatus(error.message);
     }
+  }
+
+  editor.save?.addEventListener("click", saveSelectedAnnotation);
+  editor.text?.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    await saveSelectedAnnotation();
   });
 
   async function initialize() {
