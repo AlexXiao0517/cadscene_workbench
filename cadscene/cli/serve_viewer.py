@@ -1077,7 +1077,7 @@ def main(argv: list[str] | None = None) -> int:
     server.root_dir = root
     server.storage_root_dir = storage_root
     server.extra_roots = served_roots
-    server.job_runner = JobRunner(storage_root)
+    server.job_runner = JobRunner(storage_root, application_root=root)
     from cadscene.projects.executor import LocalJobExecutor
     from cadscene.projects.http_api import ProjectApi
     from cadscene.projects.json_repositories import project_repositories

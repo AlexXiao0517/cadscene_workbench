@@ -419,6 +419,8 @@ def build_stage_command(
     run_id: str,
     stage: str,
     options: Mapping[str, Any] | None = None,
+    *,
+    application_root: str | Path | None = None,
 ) -> list[str]:
     if stage not in ALLOWED_STAGES:
         raise ValueError(f"unsupported workflow stage: {stage}")
@@ -428,6 +430,11 @@ def build_stage_command(
         run_id,
         options,
         require_alignment_inputs=stage not in {"sfm", "pure_rotation"},
+    )
+    config_root = (
+        Path(application_root).resolve()
+        if application_root is not None
+        else resolved["root"]
     )
     if stage == "pure_rotation":
         opts = dict(options or {})
@@ -561,7 +568,7 @@ def build_stage_command(
             "cadscene.cli.run_pipeline",
             *common,
             "--config",
-            str(resolved["root"] / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
+            str(config_root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
             "--stages",
             selected_stages,
             "--trajectory",
@@ -596,7 +603,7 @@ def build_stage_command(
         "cadscene.cli.run_pipeline",
         *common,
         "--config",
-        str(resolved["root"] / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
+        str(config_root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
         "--stages",
         "alignment,render",
         "--trajectory",
@@ -618,8 +625,18 @@ def build_stage_command(
 
 
 class JobRunner:
-    def __init__(self, root_dir: str | Path) -> None:
+    def __init__(
+        self,
+        root_dir: str | Path,
+        *,
+        application_root: str | Path | None = None,
+    ) -> None:
         self.root_dir = Path(root_dir).resolve()
+        self.application_root = (
+            Path(application_root).resolve()
+            if application_root is not None
+            else self.root_dir
+        )
         self._lock = threading.RLock()
         self._processes: dict[tuple[str, str], subprocess.Popen] = {}
         self._cancelled: set[tuple[str, str]] = set()
@@ -707,7 +724,14 @@ class JobRunner:
         stage: str,
         options: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command = build_stage_command(self.root_dir, dataset, run_id, stage, options)
+        command = build_stage_command(
+            self.root_dir,
+            dataset,
+            run_id,
+            stage,
+            options,
+            application_root=self.application_root,
+        )
         return self.start(dataset, run_id, stage, command)
 
     def _monitor(self, key: tuple[str, str], stage: str, process: subprocess.Popen, log_handle) -> None:
