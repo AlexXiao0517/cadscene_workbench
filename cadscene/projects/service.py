@@ -221,7 +221,90 @@ class ProjectService:
             identity=self._identity,
             publication_lock=self._publication_lock,
         )
+        from cadscene.annotations.tracking import (
+            OpenCvLkVideoAnchorTracker,
+            TrackingRevisionRepository,
+            VideoTrackingService,
+        )
+
+        self.tracking_revision_repository = TrackingRevisionRepository(
+            self.projects_root
+        )
+        self.video_tracking_service = VideoTrackingService(
+            repositories=repositories,
+            annotations=self.annotation_service,
+            revisions=self.tracking_revision_repository,
+            tracker=OpenCvLkVideoAnchorTracker(),
+            now=now,
+            identity=self._identity,
+        )
         self.queue.enable_publication_gate()
+
+    def track_video_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        *,
+        expected_revision: int,
+        expected_annotation_revision: int,
+        correction=None,
+    ):
+        from cadscene.annotations.tracking import decode_tracking_frames
+
+        project = self.repositories.project.load(project_id)
+        annotations = self.repositories.annotations.load(project_id)
+        annotation = next(
+            (item for item in annotations.annotations if item.annotation_id == annotation_id),
+            None,
+        )
+        if annotation is None:
+            raise FileNotFoundError(f"annotation not found: {annotation_id}")
+        clips = self.repositories.clips.load(project_id)
+        clip = next(
+            (item for item in clips.clips if item.clip_id == annotation.clip_id), None
+        )
+        if clip is None:
+            raise ValueError(f"annotation clip is unavailable: {annotation.clip_id}")
+        descriptor = project.source_assets.get("video")
+        if isinstance(descriptor, Mapping):
+            path_value = descriptor.get("path")
+            fingerprint_value = descriptor.get("sha256")
+        else:
+            path_value = project.source_assets.get("video_path")
+            fingerprint_value = None
+        source = Path(str(path_value or ""))
+        if not source.is_file():
+            raise FileNotFoundError("project source video is unavailable for tracking")
+        if isinstance(fingerprint_value, str) and fingerprint_value:
+            source_fingerprint = fingerprint_value
+        else:
+            digest = sha256()
+            with source.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            source_fingerprint = digest.hexdigest()
+        time_base_payload = clip.analysis.get("source_time_base")
+        if not isinstance(time_base_payload, Mapping):
+            raise ValueError("tracking clip is missing exact source time_base")
+        time_base = Fraction(
+            int(time_base_payload["numerator"]),
+            int(time_base_payload["denominator"]),
+        )
+        frames = decode_tracking_frames(
+            source,
+            source_start_pts=int(clip.analysis["source_start_pts"]),
+            source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
+            expected_time_base=time_base,
+        )
+        return self.video_tracking_service.create_revision(
+            project_id,
+            annotation_id,
+            expected_revision=expected_revision,
+            expected_annotation_revision=expected_annotation_revision,
+            source_video_fingerprint=source_fingerprint,
+            frames=frames,
+            correction=correction,
+        )
 
     def set_project_media_spec(
         self,

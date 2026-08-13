@@ -239,6 +239,77 @@ def test_annotation_crud_api_and_snapshot_use_independent_revisions(
     assert repositories.annotations.load("p1").annotations == ()
 
 
+def test_video_annotation_tracking_route_delegates_exact_revision_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    created = api.handle(
+        "POST",
+        "/api/projects/p1/annotations",
+        json_body={
+            "expected_revision": 0,
+            "annotation_id": "label-1",
+            "clip_id": "clip-1",
+            "anchor_type": "video_track",
+            "text": "vehicle",
+            "anchor": {
+                "initialization": {
+                    "source_pts": 2250,
+                    "bbox": [10.0, 20.0, 40.0, 30.0],
+                }
+            },
+            "source_pts_range": {
+                "start_pts": 2250,
+                "end_pts_exclusive": 3750,
+                "time_base": {"numerator": 1, "denominator": 25},
+                "semantics": "half_open",
+            },
+        },
+    )
+    calls = []
+    fake = SimpleNamespace(
+        revision=SimpleNamespace(
+            tracking_revision="tracking-1",
+            results=(
+                SimpleNamespace(visible=True, confidence=1.0),
+                SimpleNamespace(visible=False, confidence=0.0),
+            ),
+        ),
+        annotation_result=SimpleNamespace(
+            manifest_revision=2,
+            render_revision=2,
+            annotation=SimpleNamespace(annotation_revision=1),
+            operation_id="operation-track",
+        ),
+    )
+
+    def track(*args, **kwargs):
+        calls.append((args, kwargs))
+        return fake
+
+    monkeypatch.setattr(api.service, "track_video_annotation", track, raising=False)
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/annotations/label-1/track",
+        json_body={
+            "expected_revision": created.body["annotations_revision"],
+            "expected_annotation_revision": 0,
+            "correction": {
+                "source_pts": 2300,
+                "bbox": [12.0, 20.0, 40.0, 30.0],
+            },
+        },
+    )
+
+    assert response.status == 201
+    assert response.body["tracking_revision"] == "tracking-1"
+    assert response.body["visible_frame_count"] == 1
+    assert response.body["lost_frame_count"] == 1
+    assert response.body["annotations_revision"] == 2
+    assert calls[0][0][:2] == ("p1", "label-1")
+    assert calls[0][1]["correction"].source_pts == 2300
+
+
 def test_snapshot_etag_changes_when_media_loss_changes_server_capabilities(
     tmp_path: Path,
 ) -> None:

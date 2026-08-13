@@ -53,6 +53,9 @@ _ANNOTATIONS = re.compile(
 _ANNOTATION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})$"
 )
+_ANNOTATION_TRACKING = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})/(?P<action>track|tracking)$"
+)
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -164,6 +167,15 @@ class ProjectApi:
             match = _ANNOTATIONS.fullmatch(path)
             if method == "POST" and match:
                 return self._create_annotation(match["project"], payload)
+            match = _ANNOTATION_TRACKING.fullmatch(path)
+            if method == "POST" and match and match["action"] == "track":
+                return self._track_annotation(
+                    match["project"], match["annotation"], payload
+                )
+            if method == "GET" and match and match["action"] == "tracking":
+                return self._annotation_tracking(
+                    match["project"], match["annotation"]
+                )
             match = _ANNOTATION.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_annotation(
@@ -486,6 +498,68 @@ class ProjectApi:
                 "operation_id": result.operation_id,
             },
         )
+
+    def _track_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        from cadscene.annotations.tracking import VideoTrackingInitialization
+
+        correction_payload = payload.get("correction")
+        if correction_payload is not None and not isinstance(
+            correction_payload, Mapping
+        ):
+            raise TypeError("tracking correction must be an object")
+        correction = (
+            None
+            if correction_payload is None
+            else VideoTrackingInitialization.from_dict(correction_payload)
+        )
+        result = self.service.track_video_annotation(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(
+                payload["expected_annotation_revision"]
+            ),
+            correction=correction,
+        )
+        visible = sum(1 for item in result.revision.results if item.visible)
+        lost = len(result.revision.results) - visible
+        return ApiResponse(
+            201,
+            {
+                "tracking_revision": result.revision.tracking_revision,
+                "visible_frame_count": visible,
+                "lost_frame_count": lost,
+                "annotations_revision": result.annotation_result.manifest_revision,
+                "annotation_revision": result.annotation_result.annotation.annotation_revision,
+                "render_revision": result.annotation_result.render_revision,
+                "operation_id": result.annotation_result.operation_id,
+            },
+        )
+
+    def _annotation_tracking(
+        self, project_id: str, annotation_id: str
+    ) -> ApiResponse:
+        annotations = self.repositories.annotations.load(project_id)
+        annotation = next(
+            (item for item in annotations.annotations if item.annotation_id == annotation_id),
+            None,
+        )
+        if annotation is None:
+            raise FileNotFoundError(f"annotation not found: {annotation_id}")
+        if annotation.active_tracking_revision is None:
+            raise FileNotFoundError("annotation has no active tracking revision")
+        revision = self.service.tracking_revision_repository.load(
+            project_id,
+            annotation.clip_id,
+            annotation.annotation_id,
+            annotation.active_tracking_revision,
+        )
+        return ApiResponse(200, revision.to_dict(), {"Cache-Control": "no-store"})
 
     def _build_snapshot(self, project_id: str) -> dict[str, object]:
         with ExitStack() as stack:

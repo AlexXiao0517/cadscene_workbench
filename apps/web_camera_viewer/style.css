@@ -632,6 +632,93 @@ h2 {
   pointer-events: none;
 }
 
+#annotationOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.annotation-label {
+  position: absolute;
+  max-width: 320px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, .8);
+  border-radius: 4px;
+  color: #fff;
+  background: rgba(0, 0, 0, .7);
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  transform: translate(0, -50%);
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+}
+
+.annotation-label.is-selected { outline: 2px solid var(--accent); }
+.annotation-label.is-dragging { cursor: grabbing; }
+
+.annotation-connector {
+  position: absolute;
+  height: 1px;
+  background: rgba(255, 255, 255, .75);
+  transform-origin: 0 50%;
+  pointer-events: none;
+}
+
+.annotation-anchor-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.annotation-toolbar {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: var(--strip);
+}
+
+.annotation-tool-actions,
+.annotation-editor,
+.annotation-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+
+.annotation-editor label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.annotation-editor input {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+  padding: 4px 6px;
+}
+
+.annotation-editor #annotationText { width: min(260px, 38vw); }
+.annotation-editor input[type="number"] { width: 112px; }
+.annotation-editor input[type="color"] { width: 48px; padding: 2px; }
+.annotation-editor .annotation-visible { display: flex; align-items: center; min-height: 30px; }
+.annotation-status-row { justify-content: space-between; color: var(--muted); font-size: 11px; }
+
 .scene-stage canvas {
   display: block;
   width: 100%;

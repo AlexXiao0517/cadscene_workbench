@@ -1626,6 +1626,28 @@
       return suggestionMarkers.find((m) => m.mesh === hits[0].object) || null;
     }
 
+    const cadPickRaycaster = new THREE.Raycaster();
+    const cadPickPointer = new THREE.Vector2();
+    cadPickRaycaster.params.Line.threshold = Math.max(0.5, maxSize * 0.0005);
+
+    function pickCadWorld(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      cadPickPointer.x = ((Number(event.clientX) - rect.left) / rect.width) * 2 - 1;
+      cadPickPointer.y = -((Number(event.clientY) - rect.top) / rect.height) * 2 + 1;
+      cadPickRaycaster.setFromCamera(cadPickPointer, inspectCamera);
+      const cadHits = cadPickRaycaster.intersectObjects(cadGroup.children, true)
+        .filter((hit) => !hit.object.userData?.isCadText);
+      const hit = cadHits[0] || cadPickRaycaster.intersectObject(ground, false)[0];
+      if (!hit) return null;
+      const scenePoint = hit.point.clone();
+      if (cadHits.length > 0) scenePoint.y -= cadVisualLift;
+      const world = sceneToWorld(scenePoint, origin);
+      return {
+        cad_world_xyz: [world.x, world.y, world.z],
+        cad_entity_reference: hit.object.userData?.entityReference || null,
+      };
+    }
+
     renderer.domElement.addEventListener("click", (event) => {
       const hit = pickSuggestion(event);
       if (!hit) return;
@@ -1683,6 +1705,7 @@
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
       setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
+      pickCadWorld,
     };
   }
 
@@ -2011,6 +2034,10 @@
       pose.rotation_cad_from_camera = pureRotationAuthoritativeMatrix.map((row) => row.slice());
     }
     return pose;
+  };
+
+  window.cadscenePickCadWorld = function (event) {
+    return threeScene?.pickCadWorld(event) || null;
   };
 
   window.cadsceneGetDefaultCameraPose = function () {

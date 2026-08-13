@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from fractions import Fraction
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import numpy as np
 
 from cadscene.projects.identifiers import validate_project_id
 from cadscene.projects.json_repositories import ProjectRepositories
+from cadscene.video_analysis.pts import DecodedFrameIndex, probe_decoded_frame_index
 
 from .service import AnnotationMutationResult, AnnotationService
 
@@ -400,6 +402,52 @@ class OpenCvLkVideoAnchorTracker(VideoAnchorTracker):
         return tuple(by_pts[source_pts] for source_pts in pts)
 
 
+def decode_tracking_frames(
+    video_path: Path,
+    *,
+    source_start_pts: int,
+    source_end_pts_exclusive: int,
+    expected_time_base: Fraction,
+    frame_index: DecodedFrameIndex | None = None,
+) -> tuple[TrackingFrame, ...]:
+    """Decode pixels in presentation order and bind them to probed integer PTS."""
+
+    source = Path(video_path)
+    index = frame_index or probe_decoded_frame_index(source)
+    if index.time_base != expected_time_base:
+        raise ValueError("tracking source time_base differs from its clip contract")
+    selected = tuple(
+        frame
+        for frame in index.frames
+        if source_start_pts <= frame.pts < source_end_pts_exclusive
+    )
+    if not selected:
+        raise ValueError("tracking clip contains no decoded source frames")
+    selected_by_ordinal = {frame.ordinal: frame.pts for frame in selected}
+    last_ordinal = selected[-1].ordinal
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise RuntimeError(f"tracking video cannot be decoded: {source}")
+    decoded: list[TrackingFrame] = []
+    ordinal = 0
+    try:
+        while ordinal <= last_ordinal:
+            ok, image = capture.read()
+            if not ok or image is None:
+                break
+            source_pts = selected_by_ordinal.get(ordinal)
+            if source_pts is not None:
+                decoded.append(TrackingFrame(source_pts, image))
+            ordinal += 1
+    finally:
+        capture.release()
+    if len(decoded) != len(selected):
+        raise RuntimeError(
+            "decoded tracking pixels do not match the authoritative frame index"
+        )
+    return tuple(decoded)
+
+
 @dataclass(frozen=True)
 class TrackingRevision:
     tracking_revision: str
@@ -668,6 +716,8 @@ class VideoTrackingService:
             )
             tracker_initialization = correction
         tracked = self.tracker.track(tracking_frames, tracker_initialization)
+        if self.repositories.clips.load(project_id).revision != clips.revision:
+            raise ValueError("clip revision changed while video tracking was running")
         results = tuple(sorted((*previous_results, *tracked), key=lambda item: item.source_pts))
         tracking_revision = f"tracking-{self.identity()}"
         operation_id = f"tracking-operation-{self.identity()}"
