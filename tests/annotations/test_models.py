@@ -101,4 +101,3 @@ def test_pts_range_is_half_open_and_uses_exact_time_base() -> None:
         "time_base": {"numerator": 1, "denominator": 25},
         "semantics": "half_open",
     }
-

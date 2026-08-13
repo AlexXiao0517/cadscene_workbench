@@ -1,7 +1,7 @@
 # Stage 9 Visual Labels — Implementation Plan
 
-**Base:** `origin/main` at `4305107022fdfc1a138b40f364e91e2366ab2170`  
-**Branch:** `feature/stage9-visual-labels`  
+**Base:** `origin/main` at `4305107022fdfc1a138b40f364e91e2366ab2170`
+**Branch:** `feature/stage9-visual-labels`
 **Worktree:** `D:\zjic2026\cadscene_workbench\.worktrees\stage9-visual-labels`
 
 ## Architecture contracts
@@ -60,4 +60,3 @@
    - Verify all workflow types, project lifecycle, workbench recovery,
      no-label rendering, exact render-frame-map equality, concat coverage, and
      the full pytest suite. Request independent code review before handoff.
-

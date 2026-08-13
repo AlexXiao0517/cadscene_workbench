@@ -84,7 +84,6 @@ class SourcePtsRange:
             ),
         )
 
-
 @dataclass(frozen=True)
 class AnnotationStyle:
     font_size_px: int = 28
@@ -391,4 +390,3 @@ class AnnotationsManifest(ManifestHeader):
                 StateReference.from_dict(item) for item in value.get("references", ())
             ),
         )
-
