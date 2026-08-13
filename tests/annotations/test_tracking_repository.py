@@ -75,6 +75,21 @@ def test_tracking_revision_repository_is_immutable_and_keeps_old_revisions(
         repository.publish("p1", _revision("tracking-1"))
 
 
+def test_tracking_revision_rejects_out_of_order_correction_keyframes() -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        replace(
+            _revision(),
+            corrections=(
+                VideoTrackingInitialization(
+                    source_pts=160, bbox=(40.0, 30.0, 40.0, 20.0)
+                ),
+                VideoTrackingInitialization(
+                    source_pts=140, bbox=(50.0, 30.0, 40.0, 20.0)
+                ),
+            ),
+        )
+
+
 def _frame(source_pts: int, x: int | None) -> TrackingFrame:
     image = np.zeros((80, 120, 3), dtype=np.uint8)
     if x is not None:

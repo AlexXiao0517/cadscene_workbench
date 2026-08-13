@@ -23,6 +23,33 @@ def _created_repositories(tmp_path):
     return repositories
 
 
+def test_recovery_bootstraps_annotations_manifest_for_existing_stage8_project(
+    tmp_path,
+):
+    repositories = _created_repositories(tmp_path)
+    jobs = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: value,
+    )
+    existing_before = tuple(
+        repository.load("p1")
+        for repository in repositories.in_lock_order()[:-1]
+    )
+    repositories.annotations.path_for("p1").unlink()
+
+    result = reconcile_project("p1", repositories=repositories)
+
+    assert result.changed_owners == ("annotations",)
+    assert repositories.annotations.load("p1").annotations == ()
+    assert repositories.annotations.load("p1").revision == 0
+    assert tuple(
+        repository.load("p1")
+        for repository in repositories.in_lock_order()[:-1]
+    ) == existing_before
+
+
 def test_recovery_preserves_clip_owned_saved_workbench_reference(tmp_path):
     repositories = _created_repositories(tmp_path)
     project = repositories.project.load("p1")

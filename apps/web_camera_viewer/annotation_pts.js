@@ -27,8 +27,10 @@
   }
 
   function videoTrackVisual(annotation, results, sourcePts, sourceToDisplay, screenOffset = null) {
-    const result = Array.isArray(results)
-      ? results.find((item) => item.source_pts === sourcePts) : null;
+    const result = results instanceof Map
+      ? results.get(sourcePts)
+      : (Array.isArray(results)
+        ? results.find((item) => item.source_pts === sourcePts) : null);
     if (!result) return hidden("no_exact_tracking_pts");
     const confidence = Number(result.confidence || 0);
     const trackingStatus = String(result.tracking_status || "lost");
@@ -108,7 +110,10 @@
           if (!response.ok) continue;
           const payload = await response.json();
           if (payload.tracking_revision === revision) {
-            tracking.set(revision, payload.results || []);
+            tracking.set(
+              revision,
+              new Map((payload.results || []).map((item) => [Number(item.source_pts), item])),
+            );
           }
         }
       },

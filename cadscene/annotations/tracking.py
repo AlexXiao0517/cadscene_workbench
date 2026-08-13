@@ -482,6 +482,17 @@ class TrackingRevision:
                 raise ValueError("tracking revision metadata must not be empty")
         if self.source_end_pts_exclusive <= self.source_start_pts:
             raise ValueError("tracking revision clip range must be non-empty")
+        anchor_pts = (
+            self.initialization.source_pts,
+            *(item.source_pts for item in self.corrections),
+        )
+        if any(
+            pts < self.source_start_pts or pts >= self.source_end_pts_exclusive
+            for pts in anchor_pts
+        ):
+            raise ValueError("tracking anchor escaped clip source PTS range")
+        if any(after <= before for before, after in zip(anchor_pts, anchor_pts[1:])):
+            raise ValueError("tracking correction PTS must be strictly increasing")
         result_pts = tuple(item.source_pts for item in self.results)
         if len(result_pts) != len(set(result_pts)):
             raise ValueError("tracking results require unique source_pts")
@@ -705,8 +716,15 @@ class VideoTrackingService:
                 or previous.clip_revision != clips.revision
             ):
                 raise ValueError("active tracking revision dependencies are stale")
-            if correction.source_pts <= initialization.source_pts:
-                raise ValueError("correction PTS must follow the initial anchor PTS")
+            last_anchor_pts = (
+                previous.corrections[-1].source_pts
+                if previous.corrections
+                else initialization.source_pts
+            )
+            if correction.source_pts <= last_anchor_pts:
+                raise ValueError(
+                    "correction PTS must follow the latest anchor PTS"
+                )
             corrections = (*previous.corrections, correction)
             previous_results = tuple(
                 item for item in previous.results if item.source_pts < correction.source_pts

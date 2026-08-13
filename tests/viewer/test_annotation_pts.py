@@ -71,3 +71,26 @@ def test_video_tracking_visual_never_freezes_or_interpolates_across_lost() -> No
     assert visible["label_xy"] == [100, 50]
     assert lost == {"visible": False, "reason": "tracking_lost", "tracking_status": "lost", "confidence": 0}
     assert missing_after_lost == {"visible": False, "reason": "no_exact_tracking_pts"}
+
+
+def test_video_tracking_visual_uses_constant_time_pts_index() -> None:
+    result = {
+        "source_pts": 104,
+        "anchor_xy": [40, 30],
+        "confidence": 0.9,
+        "visibility": True,
+        "tracking_status": "tracked",
+    }
+    annotation = {
+        "screen_offset": [0, 0],
+        "visibility_policy": {"min_tracking_confidence": 0.5},
+    }
+
+    visual = _node(
+        "m.videoTrackVisual("
+        f"{json.dumps(annotation)}, new Map([[104, {json.dumps(result)}]]), 104, "
+        "(point) => point)"
+    )
+
+    assert visual["visible"] is True
+    assert visual["anchor_xy"] == [40, 30]

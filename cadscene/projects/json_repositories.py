@@ -375,6 +375,29 @@ class ProjectRepositories:
                 for repository in repositories[:published_count]
             )
             operation_ids = {manifest.operation_id for manifest in existing}
+            is_interrupted_current_creation = (
+                None not in operation_ids
+                and len(operation_ids) == 1
+                and all(manifest.revision == 0 for manifest in existing)
+            )
+            if (
+                published_count == len(repositories) - 1
+                and not is_interrupted_current_creation
+            ):
+                # Stage 8 projects predate the independent annotations manifest.
+                # Bootstrap only the new owner; never restamp or rewrite the four
+                # established manifests during this schema migration.
+                operation_id = new_operation_id()
+                value = replace(
+                    AnnotationsManifest.new(
+                        project_id, updated_at=existing[0].updated_at
+                    ),
+                    operation_id=operation_id,
+                )
+                repositories[-1].create(
+                    project_id, expected_revision=-1, value=value
+                )
+                return (repositories[-1].owner,), operation_id
             if None in operation_ids or len(operation_ids) != 1:
                 raise ValueError("partial project creation has inconsistent operation IDs")
             if any(manifest.revision != 0 for manifest in existing):
