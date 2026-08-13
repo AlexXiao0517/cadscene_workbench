@@ -1632,10 +1632,16 @@
   }
 
   async function finishQualityStage() {
+    sessionStorage.setItem(restoredWorkflowStageKey(), "render");
+    setWorkflowStage("render");
+    message.textContent = "已进入渲染导出；可以添加标签后渲染视频。";
+    await persistQualityCompletion();
+  }
+
+  async function persistQualityCompletion() {
     await ensureProjectWorkbenchSession();
     const result = await saveCurrentCameraTrack();
     await finalizeProjectWorkbenchSave(result, { navigate: false });
-    setWorkflowStage("render");
   }
 
   async function persistWorkbenchDraftForReturn() {

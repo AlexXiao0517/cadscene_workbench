@@ -93,3 +93,18 @@ def test_video_target_supports_click_roi_and_visible_drag_selection() -> None:
     assert "DEFAULT_VIDEO_ROI_SIZE" in script
     assert 'videoLayer.addEventListener("pointermove"' in script
     assert "updateRoiSelection" in script
+
+
+def test_video_target_selection_suppresses_native_video_click_playback() -> None:
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+
+    assert 'video.addEventListener("click", suppressVideoPlaybackWhileSelecting, true)' in script
+    assert "suppressNextVideoClick: false" in script
+    assert "state.suppressNextVideoClick = true;" in script
+    suppress = script[
+        script.index("function suppressVideoPlaybackWhileSelecting") :
+        script.index('video.addEventListener("click"', script.index("function suppressVideoPlaybackWhileSelecting"))
+    ]
+    assert "event.preventDefault()" in suppress
+    assert "event.stopImmediatePropagation()" in suppress
+    assert "state.suppressNextVideoClick = false;" in suppress

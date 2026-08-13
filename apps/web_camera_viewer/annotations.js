@@ -37,6 +37,7 @@
     drag: null,
     renderQueued: false,
     pendingInitialTrackingId: null,
+    suppressNextVideoClick: false,
   };
   const MAX_DOM_LABELS = 250;
   const DEFAULT_VIDEO_ROI_SIZE = 64;
@@ -250,6 +251,15 @@
       : "请在左侧视频拖框；单击会创建小范围 ROI");
   }
 
+  function suppressVideoPlaybackWhileSelecting(event) {
+    if (!new Set(["video_track", "video_track_reanchor"]).has(state.mode) && !state.suppressNextVideoClick) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    state.suppressNextVideoClick = false;
+  }
+
+  video.addEventListener("click", suppressVideoPlaybackWhileSelecting, true);
+
   sceneContainer.addEventListener("click", async (event) => {
     if (state.mode !== "cad_anchor") return;
     event.preventDefault();
@@ -272,6 +282,7 @@
   videoLayer.addEventListener("pointerdown", (event) => {
     if (!new Set(["video_track", "video_track_reanchor"]).has(state.mode)) return;
     const rect = videoLayer.getBoundingClientRect();
+    state.suppressNextVideoClick = true;
     state.selectionStart = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     updateRoiSelection(state.selectionStart, state.selectionStart);
     event.preventDefault();

@@ -175,7 +175,7 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "finalizeProjectWorkbenchSave" not in save_track
     assert "async function finishQualityStage" in script
     quality_start = script.index("async function finishQualityStage")
-    quality_finish = script[quality_start:script.index("async function", quality_start + 20)]
+    quality_finish = script[quality_start:script.index("async function persistWorkbenchDraftForReturn", quality_start)]
     assert "await ensureProjectWorkbenchSession()" in quality_finish
     assert "await saveCurrentCameraTrack()" in quality_finish
     assert "await finalizeProjectWorkbenchSave" in quality_finish
@@ -453,8 +453,11 @@ def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None
     end = script.index("async function persistWorkbenchDraftForReturn", start)
     finish = script[start:end]
 
-    assert "await finalizeProjectWorkbenchSave(result, { navigate: false })" in finish
-    assert 'setWorkflowStage("render")' in finish
+    assert 'sessionStorage.setItem(restoredWorkflowStageKey(), "render")' in finish
+    assert finish.index('setWorkflowStage("render")') < finish.index("await persistQualityCompletion()")
+    assert "async function persistQualityCompletion" in finish
+    assert "await saveCurrentCameraTrack()" in finish
+    assert "await finalizeProjectWorkbenchSave" in finish
 
 
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
