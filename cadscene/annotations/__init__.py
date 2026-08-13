@@ -13,6 +13,7 @@ from .service import (
     AnnotationRevisionConflict,
     AnnotationService,
 )
+from .cad_anchor import CadAnchorProjection, project_cad_anchor
 
 __all__ = [
     "Annotation",
@@ -24,4 +25,6 @@ __all__ = [
     "AnnotationMutationResult",
     "AnnotationRevisionConflict",
     "AnnotationService",
+    "CadAnchorProjection",
+    "project_cad_anchor",
 ]
