@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import RLock
 
-from cadscene.annotations.models import SourcePtsRange
+from cadscene.annotations.models import AnnotationContent, SourcePtsRange
 from cadscene.annotations.service import AnnotationService
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition
@@ -118,3 +118,42 @@ def test_edit_and_delete_use_manifest_and_item_expected_revisions(tmp_path) -> N
     assert updated.annotation.annotation_revision == 1
     assert deleted.annotation_id == "label-1"
     assert repositories.annotations.load("p1").annotations == ()
+
+
+def test_editing_callout_content_and_offset_does_not_create_tracking_revision(tmp_path) -> None:
+    service, repositories = _service(tmp_path)
+    created = service.create(
+        "p1",
+        expected_revision=0,
+        annotation_id="label-1",
+        clip_id="clip-1",
+        anchor_type="video_track",
+        text="vehicle",
+        anchor={
+            "initialization": {
+                "source_pts": 2250,
+                "bbox": [10.0, 20.0, 40.0, 30.0],
+            }
+        },
+        source_pts_range=SourcePtsRange(2250, 3750, 1, 25),
+    )
+
+    updated = service.update(
+        "p1",
+        "label-1",
+        expected_revision=created.manifest_revision,
+        expected_annotation_revision=0,
+        changes={
+            "content": {"title": "车辆", "body": "跟踪目标"},
+            "screen_offset": [80.0, -40.0],
+            "panel": {"width_px": 300},
+            "leader": {"anchor_radius_px": 8},
+        },
+    )
+
+    assert updated.annotation.content == AnnotationContent(title="车辆", body="跟踪目标")
+    assert updated.annotation.text == "跟踪目标"
+    assert updated.annotation.active_tracking_revision is None
+    assert updated.annotation.screen_offset == (80.0, -40.0)
+    assert not (tmp_path / "projects" / "p1" / "annotations").exists()
+    assert repositories.render.load("p1").clip_renders[0]["status"] == "stale_input"

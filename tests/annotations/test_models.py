@@ -6,6 +6,9 @@ import pytest
 
 from cadscene.annotations.models import (
     Annotation,
+    AnnotationContent,
+    AnnotationLeader,
+    AnnotationPanel,
     AnnotationStyle,
     AnnotationsManifest,
     SourcePtsRange,
@@ -48,6 +51,63 @@ def test_cad_annotation_round_trips_all_user_and_provenance_state() -> None:
     assert restored.active_tracking_revision is None
     assert restored.created_operation_id == "operation-create"
     assert restored.updated_operation_id == "operation-create"
+
+
+def test_engineering_callout_round_trips_title_body_panel_and_leader() -> None:
+    annotation = Annotation.new(
+        annotation_id="callout-1",
+        clip_id="clip-1",
+        anchor_type="cad_anchor",
+        text="",
+        content=AnnotationContent(title="K12+340", body="桥墩施工区域\n注意净空"),
+        panel=AnnotationPanel(width_px=320, padding_px=16, safe_margin_px=24),
+        leader=AnnotationLeader(line_width_px=2, anchor_radius_px=7),
+        anchor={"cad_world_xyz": [12.5, 40.0, 3.2]},
+        source_pts_range=_pts_range(),
+        style=AnnotationStyle(
+            font_size_px=26,
+            title_color="#69D2FFFF",
+            background_opacity=0.72,
+        ),
+        created_at="2026-08-13T02:00:00Z",
+        operation_id="operation-create",
+    )
+
+    payload = annotation.to_dict()
+    restored = Annotation.from_dict(payload)
+
+    assert restored == annotation
+    assert payload["content"] == {
+        "title": "K12+340",
+        "body": "桥墩施工区域\n注意净空",
+    }
+    assert payload["panel"]["width_px"] == 320
+    assert payload["leader"]["anchor_radius_px"] == 7
+    assert payload["style"]["title_color"] == "#69D2FFFF"
+    assert payload["style"]["background_opacity"] == 0.72
+    assert restored.text == "桥墩施工区域\n注意净空"
+
+
+def test_legacy_text_migrates_to_callout_body_without_losing_compatibility() -> None:
+    legacy = Annotation.new(
+        annotation_id="legacy-1",
+        clip_id="clip-1",
+        anchor_type="cad_anchor",
+        text="旧桩号 K12+340",
+        anchor={"cad_world_xyz": [1.0, 2.0, 3.0]},
+        source_pts_range=_pts_range(),
+        created_at="now",
+        operation_id="operation-create",
+    ).to_dict()
+    legacy.pop("content", None)
+    legacy.pop("panel", None)
+    legacy.pop("leader", None)
+
+    restored = Annotation.from_dict(legacy)
+
+    assert restored.content.title == ""
+    assert restored.content.body == "旧桩号 K12+340"
+    assert restored.to_dict()["text"] == "旧桩号 K12+340"
 
 
 def test_video_annotation_requires_pts_bound_initialization() -> None:

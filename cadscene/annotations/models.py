@@ -88,7 +88,9 @@ class SourcePtsRange:
 class AnnotationStyle:
     font_size_px: int = 28
     text_color: str = "#FFFFFF"
+    title_color: str = "#69D2FFFF"
     background_color: str = "#000000B3"
+    background_opacity: float = 0.7
     border_color: str = "#FFFFFFCC"
     font_family: str = "sans-serif"
     font_weight: int = 600
@@ -98,9 +100,17 @@ class AnnotationStyle:
             raise TypeError("font_size_px must be an integer")
         if not 8 <= self.font_size_px <= 128:
             raise ValueError("font_size_px must be between 8 and 128")
-        for name in ("text_color", "background_color", "border_color"):
+        for name in (
+            "text_color",
+            "title_color",
+            "background_color",
+            "border_color",
+        ):
             if not _COLOR.fullmatch(getattr(self, name)):
                 raise ValueError(f"{name} must be a #RRGGBB or #RRGGBBAA color")
+        opacity = _finite(self.background_opacity, "background_opacity")
+        if not 0.0 <= opacity <= 1.0:
+            raise ValueError("background_opacity must be between 0 and 1")
         if not self.font_family.strip() or len(self.font_family) > 80:
             raise ValueError("font_family must be explicit and bounded")
         if self.font_weight not in {400, 500, 600, 700}:
@@ -110,7 +120,9 @@ class AnnotationStyle:
         return {
             "font_size_px": self.font_size_px,
             "text_color": self.text_color,
+            "title_color": self.title_color,
             "background_color": self.background_color,
+            "background_opacity": self.background_opacity,
             "border_color": self.border_color,
             "font_family": self.font_family,
             "font_weight": self.font_weight,
@@ -122,10 +134,115 @@ class AnnotationStyle:
         return cls(
             font_size_px=int(values.get("font_size_px", 28)),
             text_color=str(values.get("text_color", "#FFFFFF")),
+            title_color=str(values.get("title_color", "#69D2FFFF")),
             background_color=str(values.get("background_color", "#000000B3")),
+            background_opacity=float(values.get("background_opacity", 0.7)),
             border_color=str(values.get("border_color", "#FFFFFFCC")),
             font_family=str(values.get("font_family", "sans-serif")),
             font_weight=int(values.get("font_weight", 600)),
+        )
+
+
+@dataclass(frozen=True)
+class AnnotationContent:
+    title: str = ""
+    body: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.title, str) or len(self.title) > 160:
+            raise ValueError("annotation title must be a string of at most 160 characters")
+        if not isinstance(self.body, str) or len(self.body) > 2000:
+            raise ValueError("annotation body must be a string of at most 2000 characters")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"title": self.title, "body": self.body}
+
+    @classmethod
+    def from_dict(
+        cls, value: Mapping[str, object] | None, *, legacy_text: str = ""
+    ) -> AnnotationContent:
+        if value is None:
+            return cls(body=legacy_text)
+        return cls(
+            title=str(value.get("title", "")),
+            body=str(value.get("body", legacy_text)),
+        )
+
+
+@dataclass(frozen=True)
+class AnnotationPanel:
+    width_px: int = 320
+    padding_px: int = 16
+    safe_margin_px: int = 20
+    border_radius_px: int = 6
+    shadow: bool = True
+
+    def __post_init__(self) -> None:
+        if not 160 <= _integer(self.width_px, "panel width_px") <= 720:
+            raise ValueError("panel width_px must be between 160 and 720")
+        if not 4 <= _integer(self.padding_px, "panel padding_px") <= 64:
+            raise ValueError("panel padding_px must be between 4 and 64")
+        if not 0 <= _integer(self.safe_margin_px, "panel safe_margin_px") <= 160:
+            raise ValueError("panel safe_margin_px must be between 0 and 160")
+        if not 0 <= _integer(self.border_radius_px, "panel border_radius_px") <= 48:
+            raise ValueError("panel border_radius_px must be between 0 and 48")
+        if not isinstance(self.shadow, bool):
+            raise TypeError("panel shadow must be boolean")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "width_px": self.width_px,
+            "padding_px": self.padding_px,
+            "safe_margin_px": self.safe_margin_px,
+            "border_radius_px": self.border_radius_px,
+            "shadow": self.shadow,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object] | None) -> AnnotationPanel:
+        values = dict(value or {})
+        return cls(
+            width_px=int(values.get("width_px", 320)),
+            padding_px=int(values.get("padding_px", 16)),
+            safe_margin_px=int(values.get("safe_margin_px", 20)),
+            border_radius_px=int(values.get("border_radius_px", 6)),
+            shadow=bool(values.get("shadow", True)),
+        )
+
+
+@dataclass(frozen=True)
+class AnnotationLeader:
+    line_width_px: int = 2
+    anchor_radius_px: int = 6
+    elbow_length_px: int = 24
+    anchor_shape: str = "circle"
+
+    def __post_init__(self) -> None:
+        if not 1 <= _integer(self.line_width_px, "leader line_width_px") <= 12:
+            raise ValueError("leader line_width_px must be between 1 and 12")
+        if not 2 <= _integer(self.anchor_radius_px, "leader anchor_radius_px") <= 32:
+            raise ValueError("leader anchor_radius_px must be between 2 and 32")
+        if not 0 <= _integer(self.elbow_length_px, "leader elbow_length_px") <= 160:
+            raise ValueError("leader elbow_length_px must be between 0 and 160")
+        if self.anchor_shape not in {"circle", "crosshair"}:
+            raise ValueError("leader anchor_shape must be circle or crosshair")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "line_width_px": self.line_width_px,
+            "anchor_radius_px": self.anchor_radius_px,
+            "elbow_length_px": self.elbow_length_px,
+            "anchor_shape": self.anchor_shape,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object] | None) -> AnnotationLeader:
+        values = dict(value or {})
+        return cls(
+            line_width_px=int(values.get("line_width_px", 2)),
+            anchor_radius_px=int(values.get("anchor_radius_px", 6)),
+            elbow_length_px=int(values.get("elbow_length_px", 24)),
+            anchor_shape=str(values.get("anchor_shape", "circle")),
         )
 
 
@@ -220,6 +337,9 @@ class Annotation:
     updated_at: str
     created_operation_id: str
     updated_operation_id: str
+    content: AnnotationContent = field(default_factory=AnnotationContent)
+    panel: AnnotationPanel = field(default_factory=AnnotationPanel)
+    leader: AnnotationLeader = field(default_factory=AnnotationLeader)
 
     def __post_init__(self) -> None:
         if not is_safe_stable_id(self.annotation_id):
@@ -228,8 +348,16 @@ class Annotation:
             raise ValueError("clip_id must be a safe stable ID")
         if self.anchor_type not in _ANCHOR_TYPES:
             raise ValueError("anchor_type must be cad_anchor or video_track")
-        if not isinstance(self.text, str) or len(self.text) > 500:
-            raise ValueError("annotation text must be a string of at most 500 characters")
+        if not isinstance(self.text, str) or len(self.text) > 2000:
+            raise ValueError("annotation text must be a string of at most 2000 characters")
+        if not isinstance(self.content, AnnotationContent):
+            raise TypeError("annotation content must be AnnotationContent")
+        # content.body 是新结构的权威值；text 仅作为旧 Stage 9 兼容别名保留。
+        if self.content.body != self.text:
+            if self.content == AnnotationContent() and self.text:
+                object.__setattr__(self, "content", AnnotationContent(body=self.text))
+            else:
+                object.__setattr__(self, "text", self.content.body)
         if not isinstance(self.anchor, Mapping):
             raise TypeError("annotation anchor must be an object")
         _validate_anchor(self.anchor_type, self.anchor, self.source_pts_range)
@@ -264,6 +392,9 @@ class Annotation:
         clip_id: str,
         anchor_type: str,
         text: str,
+        content: AnnotationContent | None = None,
+        panel: AnnotationPanel | None = None,
+        leader: AnnotationLeader | None = None,
         anchor: Mapping[str, Any],
         source_pts_range: SourcePtsRange,
         created_at: str,
@@ -277,7 +408,7 @@ class Annotation:
             annotation_id=annotation_id,
             clip_id=clip_id,
             anchor_type=anchor_type,
-            text=text,
+            text=(content.body if content is not None else text),
             anchor=dict(anchor),
             style=style or AnnotationStyle(),
             source_pts_range=source_pts_range,
@@ -290,6 +421,9 @@ class Annotation:
             updated_at=created_at,
             created_operation_id=operation_id,
             updated_operation_id=operation_id,
+            content=content or AnnotationContent(body=text),
+            panel=panel or AnnotationPanel(),
+            leader=leader or AnnotationLeader(),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -298,6 +432,9 @@ class Annotation:
             "clip_id": self.clip_id,
             "anchor_type": self.anchor_type,
             "text": self.text,
+            "content": self.content.to_dict(),
+            "panel": self.panel.to_dict(),
+            "leader": self.leader.to_dict(),
             "anchor": dict(self.anchor),
             "style": self.style.to_dict(),
             "source_pts_range": self.source_pts_range.to_dict(),
@@ -317,11 +454,16 @@ class Annotation:
         offset = value.get("screen_offset", (0.0, 0.0))
         if not isinstance(offset, (list, tuple)) or len(offset) != 2:
             raise ValueError("screen_offset must contain x and y")
+        legacy_text = str(value.get("text", ""))
+        content = AnnotationContent.from_dict(
+            value.get("content") if isinstance(value.get("content"), Mapping) else None,
+            legacy_text=legacy_text,
+        )
         return cls(
             annotation_id=str(value["annotation_id"]),
             clip_id=str(value["clip_id"]),
             anchor_type=str(value["anchor_type"]),
-            text=str(value.get("text", "")),
+            text=content.body,
             anchor=dict(value.get("anchor") or {}),
             style=AnnotationStyle.from_dict(value.get("style")),
             source_pts_range=SourcePtsRange.from_dict(value["source_pts_range"]),
@@ -340,6 +482,13 @@ class Annotation:
             updated_at=str(value["updated_at"]),
             created_operation_id=str(value["created_operation_id"]),
             updated_operation_id=str(value["updated_operation_id"]),
+            content=content,
+            panel=AnnotationPanel.from_dict(
+                value.get("panel") if isinstance(value.get("panel"), Mapping) else None
+            ),
+            leader=AnnotationLeader.from_dict(
+                value.get("leader") if isinstance(value.get("leader"), Mapping) else None
+            ),
         )
 
 

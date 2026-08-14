@@ -14,6 +14,9 @@ from cadscene.projects.repositories import (
 
 from .models import (
     Annotation,
+    AnnotationContent,
+    AnnotationLeader,
+    AnnotationPanel,
     AnnotationStyle,
     AnnotationsManifest,
     SourcePtsRange,
@@ -133,6 +136,9 @@ class AnnotationService:
         clip_id: str,
         anchor_type: str,
         text: str,
+        content: AnnotationContent | None = None,
+        panel: AnnotationPanel | None = None,
+        leader: AnnotationLeader | None = None,
         anchor: Mapping[str, object],
         source_pts_range: SourcePtsRange,
         screen_offset: tuple[float, float] = (0.0, 0.0),
@@ -159,6 +165,9 @@ class AnnotationService:
                     clip_id=clip_id,
                     anchor_type=anchor_type,
                     text=text,
+                    content=content,
+                    panel=panel,
+                    leader=leader,
                     anchor=anchor,
                     source_pts_range=source_pts_range,
                     screen_offset=screen_offset,
@@ -222,6 +231,9 @@ class AnnotationService:
     ) -> AnnotationMutationResult:
         allowed = {
             "text",
+            "content",
+            "panel",
+            "leader",
             "style",
             "source_pts_range",
             "screen_offset",
@@ -259,9 +271,32 @@ class AnnotationService:
             offset_value = changes.get("screen_offset", existing.screen_offset)
             if not isinstance(offset_value, (tuple, list)) or len(offset_value) != 2:
                 raise ValueError("screen_offset must contain x and y")
+            content = (
+                AnnotationContent.from_dict(changes["content"])
+                if "content" in changes
+                else (
+                    AnnotationContent(
+                        title=existing.content.title,
+                        body=str(changes["text"]),
+                    )
+                    if "text" in changes
+                    else existing.content
+                )
+            )
             updated = replace(
                 existing,
-                text=str(changes.get("text", existing.text)),
+                text=content.body,
+                content=content,
+                panel=(
+                    AnnotationPanel.from_dict(changes["panel"])
+                    if "panel" in changes
+                    else existing.panel
+                ),
+                leader=(
+                    AnnotationLeader.from_dict(changes["leader"])
+                    if "leader" in changes
+                    else existing.leader
+                ),
                 style=(
                     AnnotationStyle.from_dict(changes["style"])
                     if "style" in changes

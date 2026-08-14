@@ -424,6 +424,9 @@ class ProjectApi:
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         from cadscene.annotations.models import (
+            AnnotationContent,
+            AnnotationLeader,
+            AnnotationPanel,
             AnnotationStyle,
             SourcePtsRange,
             VisibilityPolicy,
@@ -440,6 +443,21 @@ class ProjectApi:
             clip_id=str(payload["clip_id"]),
             anchor_type=str(payload["anchor_type"]),
             text=str(payload.get("text", "")),
+            content=(
+                AnnotationContent.from_dict(payload["content"])
+                if isinstance(payload.get("content"), Mapping)
+                else None
+            ),
+            panel=(
+                AnnotationPanel.from_dict(payload["panel"])
+                if isinstance(payload.get("panel"), Mapping)
+                else None
+            ),
+            leader=(
+                AnnotationLeader.from_dict(payload["leader"])
+                if isinstance(payload.get("leader"), Mapping)
+                else None
+            ),
             anchor=dict(payload.get("anchor") or {}),
             source_pts_range=SourcePtsRange.from_dict(payload["source_pts_range"]),
             screen_offset=tuple(payload.get("screen_offset", (0.0, 0.0))),
