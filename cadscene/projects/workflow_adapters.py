@@ -138,6 +138,8 @@ class ExistingWorkflowAdapter:
             str(inputs.attempt_directory),
             "--video",
             str(inputs.video_path),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
             "--start-frame",
             "0",
             "--frame-step",

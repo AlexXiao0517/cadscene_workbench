@@ -1238,7 +1238,7 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["stage"] == "running"
 
 
-def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
+def test_snapshot_uses_indeterminate_progress_until_parent_reports_measurement(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(
@@ -1348,7 +1348,8 @@ def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
 
     assert payload["status"] == "running"
     assert payload["progress"]["stage"] == "running"
-    assert payload["progress"]["fraction"] == 0.99
+    assert payload["progress"]["message"] == "trajectory adapter is running"
+    assert "fraction" not in payload["progress"]
 
 
 def test_snapshot_exposes_user_facing_candidate_analysis_clip_preview(

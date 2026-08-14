@@ -5,7 +5,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from cadscene.cli import run_sfm as run_sfm_module
 from cadscene.cli.run_sfm import build_parser
 
 
@@ -155,3 +159,45 @@ def test_mock_export_generates_outputs_and_manifest(tmp_path: Path) -> None:
     assert job_status["status"] == "success"
     assert job_status["stages"]["sfm"]["status"] == "success"
     assert job_status["stages"]["sfm"]["progress"] == 1.0
+
+
+def test_sfm_cli_publishes_authoritative_stage_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    progress_path = tmp_path / "adapter_progress.json"
+
+    def fake_reconstruction(**kwargs):
+        kwargs["progress_callback"](
+            "feature_matching", 0.52, "正在进行顺序匹配"
+        )
+        return SimpleNamespace(stats={})
+
+    monkeypatch.setattr(run_sfm_module, "run_reconstruction", fake_reconstruction)
+    monkeypatch.setattr(
+        run_sfm_module, "write_reconstruction_outputs", lambda *_args, **_kwargs: {}
+    )
+
+    result = run_sfm_module.main(
+        [
+            "--dataset",
+            "demo",
+            "--run-id",
+            "progress",
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--video",
+            str(video),
+            "--progress-file",
+            str(progress_path),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "schema_version": "1.0",
+        "stage": "feature_matching",
+        "message": "正在进行顺序匹配",
+        "fraction": 0.52,
+    }

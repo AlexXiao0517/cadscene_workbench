@@ -53,6 +53,9 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
 
     assert command[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert str(video) in command
+    assert command[command.index("--progress-file") + 1] == str(
+        attempt / "adapter_progress.json"
+    )
     output = attempt / "02_sfm/camera_trajectory.json"
     output.parent.mkdir(parents=True)
     output.write_text(json.dumps({"poses": [{}]}), encoding="utf-8")

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import time
 from pathlib import Path
+from uuid import uuid4
 
 from cadscene.core.artifacts import ArtifactManager
 from cadscene.sfm.reconstruction import (
@@ -31,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-root", default="runs")
+    parser.add_argument("--progress-file", type=Path)
     parser.add_argument("--video")
     parser.add_argument("--seg-dir")
     parser.add_argument("--start-frame", type=int, default=0)
@@ -81,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             message=message,
             operation="sfm",
         )
+        if args.progress_file is not None:
+            _write_progress(args.progress_file, substage, message, progress)
     config = ReconstructionConfig(
         start_frame=args.start_frame,
         num_frames=args.num_frames,
@@ -182,6 +188,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _write_progress(
+    path: Path, stage: str, message: str, fraction: float
+) -> None:
+    payload = {
+        "schema_version": "1.0",
+        "stage": stage,
+        "message": message,
+        "fraction": max(0.0, min(1.0, float(fraction))),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(0.005 * (2**attempt), 0.05))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

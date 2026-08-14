@@ -664,35 +664,6 @@ class ProjectApi:
                     job,
                 )
             display_progress = _visible_job_progress(display_job)
-            completed_dependencies = (
-                job is not None
-                and bool(job.get("depends_on_job_ids"))
-                and all(
-                    (dependency := analysis_jobs_by_id.get(str(dependency_id)))
-                    is not None
-                    and dependency.get("status") == "success"
-                    for dependency_id in job.get("depends_on_job_ids", ())
-                )
-            )
-            if (
-                display_job is job
-                and job is not None
-                and job.get("job_type") != "clip_render"
-                and completed_dependencies
-                and job.get("status")
-                in {"queued", "preparing", "running", "validating"}
-            ):
-                display_progress = dict(
-                    display_progress
-                    or {
-                        "stage": job.get("stage") or job.get("status"),
-                        "message": "final adapter stage is running",
-                    }
-                )
-                # The prerequisite already supplied the visible 0..99% ramp.
-                # Hold that value through an unquantified final adapter stage;
-                # terminal success remains the sole source of 100%.
-                display_progress["fraction"] = 0.99
             capability = self._clip_capability(
                 project_id,
                 clip,
