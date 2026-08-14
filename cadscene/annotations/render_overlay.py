@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from PIL import Image, ImageDraw, ImageFont
+
+from cadscene.annotations.callout_layout import layout_callout
 from cadscene.cad.projection import project_point
 from cadscene.core.camera import CameraState
 from cadscene.rendering.overlay import load_camera_path_csv
@@ -19,7 +22,12 @@ class AnnotationRenderEvent:
     end_sec: float
     x: float
     y: float
+    anchor_x: float
+    anchor_y: float
     text: str
+    content: Mapping[str, str]
+    panel: Mapping[str, object]
+    leader: Mapping[str, object]
     style: Mapping[str, object]
 
 
@@ -123,6 +131,8 @@ def build_annotation_events(
             anchor_type = annotation.get("anchor_type")
             x: float | None = None
             y: float | None = None
+            anchor_x: float | None = None
+            anchor_y: float | None = None
             if anchor_type == "video_track":
                 revision = str(annotation.get("active_tracking_revision") or "")
                 if revision not in tracking_cache:
@@ -142,8 +152,10 @@ def build_annotation_events(
                 ):
                     continue
                 anchor_xy = result["anchor_xy"]
-                x = float(anchor_xy[0]) + float(offset[0])
-                y = float(anchor_xy[1]) + float(offset[1])
+                anchor_x = float(anchor_xy[0])
+                anchor_y = float(anchor_xy[1])
+                x = anchor_x + float(offset[0])
+                y = anchor_y + float(offset[1])
             elif anchor_type == "cad_anchor":
                 camera = _nearest_camera(frame_index, cameras)
                 anchor = annotation.get("anchor")
@@ -155,10 +167,21 @@ def build_annotation_events(
                     0.0 <= projected.u < width and 0.0 <= projected.v < height
                 ):
                     continue
-                x = projected.u + float(offset[0])
-                y = projected.v + float(offset[1])
-            if x is None or y is None:
+                anchor_x = projected.u
+                anchor_y = projected.v
+                x = anchor_x + float(offset[0])
+                y = anchor_y + float(offset[1])
+            if x is None or y is None or anchor_x is None or anchor_y is None:
                 continue
+            raw_content = annotation.get("content")
+            content = (
+                {
+                    "title": str(raw_content.get("title", "")),
+                    "body": str(raw_content.get("body", annotation.get("text", ""))),
+                }
+                if isinstance(raw_content, Mapping)
+                else {"title": "", "body": str(annotation.get("text", ""))}
+            )
             events.append(
                 AnnotationRenderEvent(
                     annotation_id=str(annotation["annotation_id"]),
@@ -167,7 +190,20 @@ def build_annotation_events(
                     end_sec=end_sec,
                     x=x,
                     y=y,
-                    text=str(annotation.get("text", "")),
+                    anchor_x=anchor_x,
+                    anchor_y=anchor_y,
+                    text=content["body"],
+                    content=content,
+                    panel=(
+                        annotation["panel"]
+                        if isinstance(annotation.get("panel"), Mapping)
+                        else {}
+                    ),
+                    leader=(
+                        annotation["leader"]
+                        if isinstance(annotation.get("leader"), Mapping)
+                        else {}
+                    ),
                     style=(
                         annotation["style"]
                         if isinstance(annotation.get("style"), Mapping)
@@ -176,6 +212,166 @@ def build_annotation_events(
                 )
             )
     return tuple(events)
+
+
+def _rgba(value: object, default: str, *, opacity: float = 1.0) -> tuple[int, int, int, int]:
+    text = str(value or default).lstrip("#")
+    if len(text) == 6:
+        text += "FF"
+    if len(text) != 8:
+        text = default.lstrip("#")
+        if len(text) == 6:
+            text += "FF"
+    alpha = round(int(text[6:8], 16) * max(0.0, min(1.0, float(opacity))))
+    return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16), alpha
+
+
+def _font(style: Mapping[str, object], size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    path = resolve_font_file(style.get("font_family"))
+    if path is not None:
+        try:
+            return ImageFont.truetype(str(path), size=size)
+        except OSError:
+            pass
+    return ImageFont.load_default(size=size)
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    value: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    width: float,
+) -> list[str]:
+    lines: list[str] = []
+    for logical in value.replace("\r\n", "\n").split("\n"):
+        if not logical:
+            lines.append("")
+            continue
+        current = ""
+        for character in logical:
+            candidate = current + character
+            if current and draw.textlength(candidate, font=font) > width:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
+        lines.append(current)
+    return lines or [""]
+
+
+def render_callout_overlay(
+    events: Sequence[AnnotationRenderEvent], *, width: int, height: int
+) -> Image.Image:
+    """按与浏览器一致的布局语义绘制透明 RGBA 工程标牌图层。"""
+
+    image = Image.new("RGBA", (int(width), int(height)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image, "RGBA")
+    for event in events:
+        style = event.style
+        panel = event.panel
+        leader = event.leader
+        body_size = int(style.get("font_size_px") or 28)
+        title_font = _font(style, min(128, body_size + 2))
+        body_font = _font(style, body_size)
+        panel_width = float(panel.get("width_px") or 320)
+        padding = float(panel.get("padding_px") or 16)
+        text_width = max(1.0, panel_width - 2.0 * padding)
+        title = str(event.content.get("title", ""))
+        body = str(event.content.get("body", event.text))
+        title_lines = _wrap_text(draw, title, title_font, text_width) if title else []
+        body_lines = _wrap_text(draw, body, body_font, text_width)
+        title_height = body_size + 6
+        body_height = body_size + 5
+        gap = 8 if title_lines and body_lines else 0
+        panel_height = (
+            2.0 * padding
+            + len(title_lines) * title_height
+            + gap
+            + len(body_lines) * body_height
+        )
+        layout = layout_callout(
+            anchor_xy=(event.anchor_x, event.anchor_y),
+            screen_offset=(event.x - event.anchor_x, event.y - event.anchor_y),
+            panel_size=(panel_width, panel_height),
+            viewport_size=(float(width), float(height)),
+            safe_margin=float(panel.get("safe_margin_px") or 20),
+            elbow_length=float(leader.get("elbow_length_px") or 24),
+        )
+        border = _rgba(style.get("border_color"), "#FFFFFFCC")
+        line_width = int(leader.get("line_width_px") or 2)
+        draw.line(layout.leader_points, fill=border, width=line_width, joint="curve")
+        radius = float(leader.get("anchor_radius_px") or 6)
+        anchor_box = (
+            event.anchor_x - radius,
+            event.anchor_y - radius,
+            event.anchor_x + radius,
+            event.anchor_y + radius,
+        )
+        if leader.get("anchor_shape") == "crosshair":
+            draw.line(
+                ((event.anchor_x - radius, event.anchor_y), (event.anchor_x + radius, event.anchor_y)),
+                fill=border,
+                width=line_width,
+            )
+            draw.line(
+                ((event.anchor_x, event.anchor_y - radius), (event.anchor_x, event.anchor_y + radius)),
+                fill=border,
+                width=line_width,
+            )
+        else:
+            draw.ellipse(anchor_box, outline=border, width=line_width)
+
+        left, top, panel_width, panel_height = layout.panel_rect
+        rectangle = (left, top, left + panel_width, top + panel_height)
+        corner = int(panel.get("border_radius_px") or 6)
+        if panel.get("shadow", True):
+            shadow = (left + 5, top + 6, left + panel_width + 5, top + panel_height + 6)
+            draw.rounded_rectangle(shadow, radius=corner, fill=(0, 0, 0, 90))
+        background = _rgba(
+            style.get("background_color"),
+            "#000000B3",
+            opacity=float(style.get("background_opacity", 0.7)),
+        )
+        draw.rounded_rectangle(
+            rectangle,
+            radius=corner,
+            fill=background,
+            outline=border,
+            width=max(1, line_width),
+        )
+        cursor_y = top + padding
+        title_color = _rgba(style.get("title_color"), "#69D2FFFF")
+        text_color = _rgba(style.get("text_color"), "#FFFFFFFF")
+        for line in title_lines:
+            draw.text((left + padding, cursor_y), line, font=title_font, fill=title_color)
+            cursor_y += title_height
+        if title_lines and body_lines:
+            cursor_y += gap
+        for line in body_lines:
+            draw.text((left + padding, cursor_y), line, font=body_font, fill=text_color)
+            cursor_y += body_height
+    return image
+
+
+def build_overlay_concat_document(
+    paths: Sequence[Path],
+    *,
+    source_frames: Sequence[Mapping[str, object]],
+    time_base_numerator: int,
+    time_base_denominator: int,
+) -> str:
+    if len(paths) != len(source_frames):
+        raise ValueError("overlay images must match authoritative source frames")
+    time_base = Fraction(int(time_base_numerator), int(time_base_denominator))
+    lines = ["ffconcat version 1.0"]
+    for path, frame in zip(paths, source_frames):
+        escaped = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+        duration_pts = int(frame.get("duration_pts") or 0)
+        if duration_pts <= 0:
+            raise ValueError("every annotation overlay frame requires duration_pts")
+        lines.append(f"file '{escaped}'")
+        lines.append(f"duration {float(duration_pts * time_base):.12f}")
+    return "\n".join(lines) + "\n"
 
 
 def _ass_time(seconds: float) -> str:

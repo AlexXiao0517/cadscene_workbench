@@ -7,13 +7,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from cadscene.annotations.render_overlay import (
     build_annotation_events,
-    build_drawtext_filter,
-    build_sendcmd_document,
+    build_overlay_concat_document,
     load_camera_rows,
-    resolve_font_file,
+    render_callout_overlay,
 )
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _ffmpeg_command(
-    *, ffmpeg: str, source: Path, target: Path, filter_path: Path
+    *, ffmpeg: str, source: Path, target: Path, overlay_concat: Path
 ) -> tuple[str, ...]:
     return (
         ffmpeg,
@@ -41,8 +41,14 @@ def _ffmpeg_command(
         "-y",
         "-i",
         str(source),
-        "-filter_complex_script",
-        str(filter_path),
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(overlay_concat),
+        "-filter_complex",
+        "[0:v][1:v]overlay=0:0:format=auto:shortest=1[annotated]",
         "-map",
         "[annotated]",
         "-fps_mode",
@@ -61,7 +67,6 @@ def _ffmpeg_command(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     temporary: Path | None = None
-    resources: list[Path] = []
     try:
         source = args.input.resolve(strict=True)
         bundle = json.loads(args.bundle.read_text(encoding="utf-8"))
@@ -79,47 +84,47 @@ def main(argv: list[str] | None = None) -> int:
         if not events:
             shutil.copy2(source, temporary)
         else:
-            command_text, targets = build_sendcmd_document(events)
-            command_path = output.with_name(f".{output.stem}.annotations.cmd")
-            command_path.write_text(command_text, encoding="utf-8", newline="\n")
-            resources.append(command_path)
-            text_paths: dict[str, Path] = {}
-            font_paths: dict[str, Path] = {}
-            for index, annotation_id in enumerate(sorted(targets)):
-                event = next(
-                    item for item in events if item.annotation_id == annotation_id
+            frames = bundle.get("source_frames")
+            time_base = bundle.get("source_time_base")
+            if not isinstance(frames, list) or not isinstance(time_base, dict):
+                raise ValueError("annotation render bundle requires authoritative frames")
+            events_by_pts: dict[int, list[object]] = {}
+            for event in events:
+                events_by_pts.setdefault(event.source_pts, []).append(event)
+            with tempfile.TemporaryDirectory(
+                prefix=f".{output.stem}.callout-", dir=output.parent
+            ) as directory:
+                overlay_directory = Path(directory)
+                overlay_paths: list[Path] = []
+                for ordinal, frame in enumerate(frames):
+                    source_pts = int(frame["source_pts"])
+                    path = overlay_directory / f"overlay-{ordinal:08d}.png"
+                    render_callout_overlay(
+                        events_by_pts.get(source_pts, ()),
+                        width=int(bundle["video_width"]),
+                        height=int(bundle["video_height"]),
+                    ).save(path, format="PNG", optimize=False)
+                    overlay_paths.append(path)
+                concat_path = overlay_directory / "overlay.ffconcat"
+                concat_path.write_text(
+                    build_overlay_concat_document(
+                        overlay_paths,
+                        source_frames=frames,
+                        time_base_numerator=int(time_base["numerator"]),
+                        time_base_denominator=int(time_base["denominator"]),
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
                 )
-                text_path = output.with_name(
-                    f".{output.stem}.annotation-{index:03d}.txt"
+                command = _ffmpeg_command(
+                    ffmpeg=str(resolve_ffmpeg_executable(args.ffmpeg)),
+                    source=source,
+                    target=temporary,
+                    overlay_concat=concat_path,
                 )
-                text_path.write_text(event.text, encoding="utf-8", newline="\n")
-                resources.append(text_path)
-                text_paths[annotation_id] = text_path
-                font_path = resolve_font_file(event.style.get("font_family"))
-                if font_path is not None:
-                    font_paths[annotation_id] = font_path
-            filter_path = output.with_name(f".{output.stem}.annotations.ffscript")
-            filter_path.write_text(
-                build_drawtext_filter(
-                    events,
-                    command_path=command_path,
-                    text_paths=text_paths,
-                    targets=targets,
-                    font_paths=font_paths,
-                ),
-                encoding="utf-8",
-                newline="\n",
-            )
-            resources.append(filter_path)
-            command = _ffmpeg_command(
-                ffmpeg=str(resolve_ffmpeg_executable(args.ffmpeg)),
-                source=source,
-                target=temporary,
-                filter_path=filter_path,
-            )
-            completed = subprocess.run(command, check=False)
-            if completed.returncode != 0:
-                return int(completed.returncode)
+                completed = subprocess.run(command, check=False)
+                if completed.returncode != 0:
+                    return int(completed.returncode)
         os.replace(temporary, output)
         temporary = None
         print(output)
@@ -130,8 +135,6 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-        for resource in resources:
-            resource.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

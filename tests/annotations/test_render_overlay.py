@@ -5,7 +5,9 @@ from pathlib import Path
 from cadscene.annotations.render_overlay import (
     build_annotation_events,
     build_drawtext_filter,
+    build_overlay_concat_document,
     build_sendcmd_document,
+    render_callout_overlay,
 )
 
 
@@ -85,6 +87,86 @@ def test_render_events_use_exact_source_pts_and_skip_lost_video_frames() -> None
     assert events[0].end_sec == 0.16
     assert events[1].start_sec == 0.4
     assert events[1].end_sec == 0.56
+
+
+def test_rgba_overlay_draws_card_polyline_anchor_title_and_multiline_body() -> None:
+    bundle = {
+        "video_width": 640,
+        "video_height": 360,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+        "source_frames": [{"source_pts": 100, "duration_pts": 1}],
+        "annotations": [
+            {
+                "annotation_id": "cad-callout",
+                "anchor_type": "cad_anchor",
+                "text": "旧正文",
+                "content": {"title": "K12+340", "body": "桥墩施工区域\n注意净空"},
+                "anchor": {"cad_world_xyz": [0, 10, 1]},
+                "style": {
+                    "font_size_px": 24,
+                    "text_color": "#FFFFFFFF",
+                    "title_color": "#69D2FFFF",
+                    "background_color": "#101820FF",
+                    "background_opacity": 0.72,
+                    "border_color": "#69D2FFFF",
+                    "font_family": "sans-serif",
+                    "font_weight": 600,
+                },
+                "panel": {"width_px": 260, "padding_px": 14, "safe_margin_px": 20},
+                "leader": {"line_width_px": 2, "anchor_radius_px": 7, "elbow_length_px": 24},
+                "source_pts_range": {"start_pts": 100, "end_pts_exclusive": 101},
+                "screen_offset": [210, -100],
+                "visibility_policy": {},
+                "user_visible": True,
+            }
+        ],
+        "tracking_revisions": {},
+    }
+    events = build_annotation_events(
+        bundle,
+        camera_rows=(
+            {
+                "frame_index": 0,
+                "camera_x": 0,
+                "camera_y": 0,
+                "camera_z": 1,
+                "yaw": 0,
+                "pitch": 0,
+                "roll": 0,
+                "fov": 90,
+            },
+        ),
+    )
+
+    overlay = render_callout_overlay(events, width=640, height=360)
+    alpha = overlay.getchannel("A")
+
+    assert events[0].content == {"title": "K12+340", "body": "桥墩施工区域\n注意净空"}
+    assert events[0].anchor_x == 320.0
+    assert events[0].anchor_y == 180.0
+    assert overlay.mode == "RGBA"
+    assert alpha.getbbox() is not None
+    assert alpha.getpixel((320, 180)) > 0
+    assert alpha.getpixel((520, 80)) > 0
+
+
+def test_overlay_concat_uses_authoritative_per_frame_durations(tmp_path: Path) -> None:
+    document = build_overlay_concat_document(
+        [tmp_path / "000.png", tmp_path / "001.png", tmp_path / "002.png"],
+        source_frames=[
+            {"source_pts": 100, "duration_pts": 4},
+            {"source_pts": 104, "duration_pts": 6},
+            {"source_pts": 110, "duration_pts": 5},
+        ],
+        time_base_numerator=1,
+        time_base_denominator=100,
+    )
+
+    assert document.startswith("ffconcat version 1.0\n")
+    assert document.count("file '") == 3
+    assert "duration 0.040000000000" in document
+    assert "duration 0.060000000000" in document
+    assert "duration 0.050000000000" in document
 
 
 def test_render_events_project_cad_through_shared_camera_math() -> None:
