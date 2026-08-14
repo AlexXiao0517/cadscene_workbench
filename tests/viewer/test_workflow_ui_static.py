@@ -194,6 +194,29 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "button.disabled = blocked" in availability
 
 
+def test_stale_workbench_url_reopens_current_project_clip_on_refresh() -> None:
+    script = _read("workflow.js")
+
+    recovery = script[
+        script.index("async function recoverStaleProjectWorkbenchSession") :
+        script.index("async function bootstrapProjectWorkbenchSession")
+    ]
+    assert "/snapshot`" in recovery
+    assert "snapshot.clips.find((item) => item.clip_id === runId)" in recovery
+    assert "clip.capabilities?.can_open_workbench" in recovery
+    assert "/clips/${encodeURIComponent(runId)}/workbench-sessions`" in recovery
+    assert "expected_revision: snapshot.component_revisions.clips" in recovery
+    assert "expected_jobs_revision: snapshot.component_revisions.jobs" in recovery
+    assert "window.location.replace(payload.workbench_url)" in recovery
+
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+    assert 'payload.error === "stale_workbench_session"' in bootstrap
+    assert "return recoverStaleProjectWorkbenchSession()" in bootstrap
+
+
 def test_completed_action_restores_next_stage_before_stale_url_stage() -> None:
     script = _read("workflow.js")
     start = script.index("function selectInitialWorkflowStage()")

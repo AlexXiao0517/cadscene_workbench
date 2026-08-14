@@ -1367,6 +1367,48 @@
     return result;
   }
 
+  async function recoverStaleProjectWorkbenchSession() {
+    if (!projectWorkbenchProjectId || !runId) {
+      throw new Error("旧工作台会话无法确定所属项目或片段");
+    }
+    const snapshotResponse = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+      { cache: "no-store" },
+    );
+    const snapshot = await snapshotResponse.json().catch(() => ({}));
+    if (!snapshotResponse.ok) {
+      throw new Error(snapshot.message || snapshot.error || `HTTP ${snapshotResponse.status}`);
+    }
+    const clip = snapshot.clips.find((item) => item.clip_id === runId);
+    if (!clip) throw new Error("项目中已找不到当前片段");
+    if (!clip.capabilities?.can_open_workbench) {
+      throw new Error("当前片段暂时不能恢复工作台，请返回项目管理页面后重试");
+    }
+    const returnParams = new URLSearchParams({
+      projectId: projectWorkbenchProjectId,
+      focusClip: runId,
+    });
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/clips/${encodeURIComponent(runId)}/workbench-sessions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: snapshot.component_revisions.clips,
+          expected_jobs_revision: snapshot.component_revisions.jobs,
+          return_to: `/apps/project_workspace/?${returnParams.toString()}`,
+        }),
+      },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (response.status !== 201 || !payload.workbench_url) {
+      throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    }
+    projectWorkbenchInternalNavigation = true;
+    window.location.replace(payload.workbench_url);
+    return new Promise(() => {});
+  }
+
   async function bootstrapProjectWorkbenchSession() {
     if (!projectWorkbenchToken || !projectWorkbenchProjectId) return null;
     const response = await fetch(
@@ -1374,7 +1416,12 @@
       { cache: "no-store" },
     );
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+      if (response.status === 409 && payload.error === "stale_workbench_session") {
+        return recoverStaleProjectWorkbenchSession();
+      }
+      throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    }
     if (!new Set(["editing", "pending_save"]).has(payload.state)) {
       throw new Error("项目工作台会话已失效");
     }
