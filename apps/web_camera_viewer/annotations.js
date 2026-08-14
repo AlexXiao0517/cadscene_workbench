@@ -12,7 +12,11 @@
   const status = document.querySelector("#annotationToolStatus");
   const trackingState = document.querySelector("#annotationTrackingState");
   const editor = {
-    text: document.querySelector("#annotationText"),
+    title: document.querySelector("#annotationTitle"),
+    body: document.querySelector("#annotationBody"),
+    panelWidth: document.querySelector("#annotationPanelWidth"),
+    backgroundOpacity: document.querySelector("#annotationBackgroundOpacity"),
+    titleColor: document.querySelector("#annotationTitleColor"),
     fontSize: document.querySelector("#annotationFontSize"),
     color: document.querySelector("#annotationTextColor"),
     startPts: document.querySelector("#annotationStartPts"),
@@ -44,6 +48,16 @@
 
   function setStatus(message) {
     if (status) status.textContent = message;
+  }
+
+  function colorWithOpacity(value, opacity) {
+    const text = String(value || "#000000").replace("#", "");
+    const normalized = text.length === 8 ? text : `${text.slice(0, 6)}FF`;
+    const red = Number.parseInt(normalized.slice(0, 2), 16) || 0;
+    const green = Number.parseInt(normalized.slice(2, 4), 16) || 0;
+    const blue = Number.parseInt(normalized.slice(4, 6), 16) || 0;
+    const encodedAlpha = (Number.parseInt(normalized.slice(6, 8), 16) || 0) / 255;
+    return `rgba(${red}, ${green}, ${blue}, ${encodedAlpha * Number(opacity ?? 1)})`;
   }
 
   async function request(path, options = {}) {
@@ -87,14 +101,18 @@
   function syncEditor() {
     const annotation = selectedAnnotation();
     const enabled = Boolean(annotation);
-    for (const control of [editor.text, editor.fontSize, editor.color, editor.startPts, editor.endPts, editor.visible]) {
+    for (const control of [editor.title, editor.body, editor.panelWidth, editor.backgroundOpacity, editor.titleColor, editor.fontSize, editor.color, editor.startPts, editor.endPts, editor.visible]) {
       if (control) control.disabled = !enabled;
     }
     if (editor.save) editor.save.disabled = !enabled;
     if (editor.remove) editor.remove.disabled = !enabled;
     if (editor.reanchor) editor.reanchor.disabled = !annotation || annotation.anchor_type !== "video_track";
     if (!annotation) return;
-    editor.text.value = annotation.text || "";
+    editor.title.value = annotation.content?.title || "";
+    editor.body.value = annotation.content?.body ?? annotation.text ?? "";
+    editor.panelWidth.value = String(annotation.panel?.width_px || 320);
+    editor.backgroundOpacity.value = String(annotation.style?.background_opacity ?? 0.7);
+    editor.titleColor.value = String(annotation.style?.title_color || "#69D2FF").slice(0, 7);
     editor.fontSize.value = String(annotation.style?.font_size_px || 28);
     editor.color.value = String(annotation.style?.text_color || "#FFFFFF").slice(0, 7);
     editor.startPts.value = String(annotation.source_pts_range.start_pts);
@@ -111,9 +129,9 @@
   }
 
   function focusSelectedAnnotationEditor() {
-    if (!editor.text || !selectedAnnotation()) return;
-    editor.text.focus();
-    editor.text.select();
+    if (!editor.title || !selectedAnnotation()) return;
+    editor.title.focus();
+    editor.title.select();
   }
 
   function removeNode(annotationId) {
@@ -128,12 +146,19 @@
   function ensureNode(annotation) {
     let entry = state.nodes.get(annotation.annotation_id);
     if (entry) return entry;
-    const line = document.createElement("div");
-    line.className = "annotation-connector";
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    line.classList.add("engineering-callout-leader");
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    line.append(polyline);
     const dot = document.createElement("div");
     dot.className = "annotation-anchor-dot";
     const label = document.createElement("div");
-    label.className = "annotation-label";
+    label.className = "annotation-label engineering-callout";
+    const title = document.createElement("div");
+    title.className = "engineering-callout-title";
+    const body = document.createElement("div");
+    body.className = "engineering-callout-body";
+    label.append(title, body);
     label.dataset.annotationId = annotation.annotation_id;
     label.addEventListener("pointerdown", beginLabelDrag);
     label.addEventListener("click", (event) => {
@@ -141,7 +166,7 @@
       selectAnnotation(annotation.annotation_id);
     });
     overlay.append(line, dot, label);
-    entry = { line, dot, label };
+    entry = { line, polyline, dot, label, title, body };
     state.nodes.set(annotation.annotation_id, entry);
     return entry;
   }
@@ -178,7 +203,9 @@
     return {
       font_size_px: Number(editor.fontSize.value || 28),
       text_color: String(editor.color.value || "#ffffff").toUpperCase(),
+      title_color: String(editor.titleColor.value || "#69d2ff").toUpperCase(),
       background_color: "#000000B3",
+      background_opacity: Number(editor.backgroundOpacity.value || 0.7),
       border_color: "#FFFFFFCC",
       font_family: "sans-serif",
       font_weight: 600,
@@ -194,10 +221,13 @@
         expected_revision: state.annotationsRevision,
         clip_id: state.clipId,
         anchor_type: anchorType,
-        text: editor.text.value.trim() || "新标签",
+        text: "点击编辑工程说明",
+        content: { title: "工程标牌", body: "点击编辑工程说明" },
+        panel: { width_px: 320, padding_px: 16, safe_margin_px: 20, border_radius_px: 6, shadow: true },
+        leader: { line_width_px: 2, anchor_radius_px: 6, elbow_length_px: 24, anchor_shape: "circle" },
         anchor,
         source_pts_range: range,
-        screen_offset: [18, -18],
+        screen_offset: [190, -100],
         style: makeStyle(),
         user_visible: true,
       }),
@@ -409,19 +439,41 @@
       if (!visible) continue;
       const anchor = visual.anchor_xy;
       const label = visual.label_xy;
-      entry.label.textContent = annotation.text;
-      entry.label.style.left = `${label[0]}px`;
-      entry.label.style.top = `${label[1]}px`;
+      entry.title.textContent = annotation.content?.title || "";
+      entry.body.textContent = annotation.content?.body ?? annotation.text ?? "";
+      const scale = provider?.sourceDeltaToDisplay?.(1, 1) || { x: 1, y: 1 };
+      entry.label.style.width = `${Math.max(160, Number(annotation.panel?.width_px || 320) * Math.abs(scale.x || 1))}px`;
       entry.label.style.fontSize = `${annotation.style?.font_size_px || 28}px`;
       entry.label.style.color = annotation.style?.text_color || "#FFFFFF";
+      entry.title.style.color = annotation.style?.title_color || "#69D2FF";
+      entry.label.style.backgroundColor = colorWithOpacity(
+        annotation.style?.background_color || "#000000B3",
+        annotation.style?.background_opacity ?? 0.7,
+      );
+      entry.label.style.borderColor = annotation.style?.border_color || "#FFFFFFCC";
+      entry.label.style.padding = `${annotation.panel?.padding_px || 16}px`;
+      entry.label.style.borderRadius = `${annotation.panel?.border_radius_px || 6}px`;
+      entry.label.classList.toggle("has-shadow", annotation.panel?.shadow !== false);
+      const layout = window.CadsceneCalloutLayout.layoutCallout({
+        anchor_xy: anchor,
+        screen_offset: [label[0] - anchor[0], label[1] - anchor[1]],
+        panel_size: [entry.label.offsetWidth, entry.label.offsetHeight],
+        viewport_size: [overlay.clientWidth, overlay.clientHeight],
+        safe_margin: Number(annotation.panel?.safe_margin_px || 20) * Math.abs(scale.x || 1),
+        elbow_length: Number(annotation.leader?.elbow_length_px || 24) * Math.abs(scale.x || 1),
+      });
+      entry.label.style.left = `${layout.panel_rect[0]}px`;
+      entry.label.style.top = `${layout.panel_rect[1]}px`;
       entry.dot.style.left = `${anchor[0]}px`;
       entry.dot.style.top = `${anchor[1]}px`;
-      const dx = label[0] - anchor[0];
-      const dy = label[1] - anchor[1];
-      entry.line.style.left = `${anchor[0]}px`;
-      entry.line.style.top = `${anchor[1]}px`;
-      entry.line.style.width = `${Math.hypot(dx, dy)}px`;
-      entry.line.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+      entry.polyline.setAttribute("points", layout.leader_points.map((point) => point.join(",")).join(" "));
+      entry.polyline.setAttribute("stroke", annotation.style?.border_color || "#FFFFFFCC");
+      entry.polyline.setAttribute("stroke-width", String(annotation.leader?.line_width_px || 2));
+      const radius = Number(annotation.leader?.anchor_radius_px || 6);
+      entry.dot.style.width = `${2 * radius}px`;
+      entry.dot.style.height = `${2 * radius}px`;
+      entry.dot.style.margin = `${-radius}px 0 0 ${-radius}px`;
+      entry.dot.classList.toggle("is-crosshair", annotation.leader?.anchor_shape === "crosshair");
       if (annotation.annotation_id === state.selectedId && trackingState) {
         trackingState.textContent = annotation.anchor_type === "video_track"
           ? `跟踪状态：${visual.tracking_status || "—"} · 置信度 ${Number(visual.confidence || 0).toFixed(2)}`
@@ -459,7 +511,8 @@
     if (!annotation) return;
     try {
       const updated = await updateAnnotation(annotation, {
-        text: editor.text.value,
+        content: { title: editor.title.value, body: editor.body.value },
+        panel: { ...annotation.panel, width_px: Number(editor.panelWidth.value || 320) },
         style: makeStyle(),
         source_pts_range: {
           ...annotation.source_pts_range,
@@ -480,8 +533,13 @@
   }
 
   editor.save?.addEventListener("click", saveSelectedAnnotation);
-  editor.text?.addEventListener("keydown", async (event) => {
+  editor.title?.addEventListener("keydown", async (event) => {
     if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    await saveSelectedAnnotation();
+  });
+  editor.body?.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" || !event.ctrlKey || event.isComposing) return;
     event.preventDefault();
     await saveSelectedAnnotation();
   });

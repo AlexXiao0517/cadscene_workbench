@@ -651,8 +651,8 @@ h2 {
 
 .annotation-label {
   position: absolute;
-  max-width: 320px;
-  padding: 5px 9px;
+  box-sizing: border-box;
+  padding: 16px;
   border: 1px solid rgba(255, 255, 255, .8);
   border-radius: 4px;
   color: #fff;
@@ -661,21 +661,50 @@ h2 {
   line-height: 1.25;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  transform: translate(0, -50%);
   pointer-events: auto;
   cursor: grab;
   user-select: none;
 }
 
+.engineering-callout {
+  min-width: 160px;
+  max-width: min(720px, calc(100% - 40px));
+  backdrop-filter: blur(3px);
+}
+
+.engineering-callout.has-shadow {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .38), 0 0 12px rgba(86, 194, 255, .14);
+}
+
+.engineering-callout-title {
+  margin-bottom: .45em;
+  font-size: 1.08em;
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+.engineering-callout-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
 .annotation-label.is-selected { outline: 2px solid var(--accent); }
 .annotation-label.is-dragging { cursor: grabbing; }
 
-.annotation-connector {
+.engineering-callout-leader {
   position: absolute;
-  height: 1px;
-  background: rgba(255, 255, 255, .75);
-  transform-origin: 0 50%;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
+}
+
+.engineering-callout-leader polyline {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .annotation-anchor-dot {
@@ -687,6 +716,12 @@ h2 {
   border-radius: 50%;
   background: var(--accent);
   pointer-events: none;
+}
+
+.annotation-anchor-dot.is-crosshair {
+  border-radius: 0;
+  background: transparent;
+  transform: rotate(45deg);
 }
 
 .annotation-panel {
@@ -765,6 +800,20 @@ h2 {
   color: var(--text);
   padding: 4px 6px;
 }
+
+.annotation-editor textarea {
+  min-height: 72px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.annotation-editor .annotation-title-field { flex: 1 1 240px; }
+.annotation-editor .annotation-body-field { flex: 2 1 420px; }
+.annotation-editor #annotationTitle,
+.annotation-editor #annotationBody { width: min(100%, 520px); }
 
 .annotation-editor .annotation-text-field { flex: 1 1 340px; }
 .annotation-editor #annotationText { width: min(420px, 44vw); }

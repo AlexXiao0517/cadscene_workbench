@@ -13,7 +13,10 @@ def test_render_stage_contains_visual_label_toolbar_editor_and_overlay() -> None
     assert 'id="annotationToolbar"' in html
     assert 'data-annotation-mode="cad_anchor"' in html
     assert 'data-annotation-mode="video_track"' in html
-    assert 'id="annotationText"' in html
+    assert 'id="annotationTitle"' in html
+    assert 'id="annotationBody"' in html
+    assert 'id="annotationPanelWidth"' in html
+    assert 'id="annotationBackgroundOpacity"' in html
     assert 'id="annotationFontSize"' in html
     assert 'id="annotationStartPts"' in html
     assert 'id="annotationEndPts"' in html
@@ -23,6 +26,7 @@ def test_render_stage_contains_visual_label_toolbar_editor_and_overlay() -> None
     assert 'id="annotationTrackingState"' in html
     assert 'id="annotationOverlay"' in html
     assert '<script src="./annotations.js?' in html
+    assert '<script src="./callout_layout.js?' in html
 
 
 def test_annotation_ui_uses_revisioned_api_drag_offsets_and_raycast() -> None:
@@ -50,7 +54,23 @@ def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes
     assert "replaceChildren" not in script
     assert "THREE.Sprite" not in script
     assert ".annotation-label" in css
+    assert ".engineering-callout" in css
+    assert ".engineering-callout-title" in css
+    assert ".engineering-callout-body" in css
+    assert ".engineering-callout-leader" in css
     assert "pointer-events: none" in css
+
+
+def test_engineering_callout_uses_shared_layout_and_structured_content() -> None:
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+
+    assert "CadsceneCalloutLayout.layoutCallout" in script
+    assert "annotation.content?.title" in script
+    assert "annotation.content?.body" in script
+    assert 'createElementNS("http://www.w3.org/2000/svg", "polyline")' in script
+    assert "panel_rect" in script
+    assert "leader_points" in script
+    assert "entry.label.textContent = annotation.text" not in script
 
 
 def test_render_stage_uses_full_label_editor_and_collapses_camera_settings() -> None:
@@ -72,7 +92,8 @@ def test_new_label_is_selected_for_immediate_text_editing() -> None:
     script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
 
     assert "function focusSelectedAnnotationEditor" in script
-    assert 'editor.text?.addEventListener("keydown"' in script
+    assert 'editor.title?.addEventListener("keydown"' in script
+    assert 'editor.body?.addEventListener("keydown"' in script
     assert "await saveSelectedAnnotation()" in script
     assert script.count("focusSelectedAnnotationEditor();") >= 2
     video_create = script[script.index('createAnnotation("video_track"') :]

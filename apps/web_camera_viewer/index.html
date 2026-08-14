@@ -238,8 +238,8 @@
       <section id="annotationPanel" class="control-panel annotation-panel" hidden>
         <div class="annotation-panel-heading">
           <div>
-            <h2>自定义文字标签</h2>
-            <p>暂停视频，选择一种工具后在对应画面点选；创建后可直接输入文字，并在左侧视频上拖动标签位置。</p>
+            <h2>工程信息标牌</h2>
+            <p>暂停视频后在 CAD 或视频中选取锚点；编辑标题和多行正文，拖动卡片只调整相对锚点的屏幕偏移。</p>
           </div>
           <div id="annotationToolbar" class="annotation-toolbar" aria-label="视频文字标签工具">
             <button type="button" data-annotation-mode="cad_anchor">
@@ -254,7 +254,11 @@
         </div>
         <div id="annotationEditorPanel" class="annotation-editor-panel">
           <div class="annotation-editor">
-            <label class="annotation-text-field">标签文字<input id="annotationText" type="text" maxlength="500" placeholder="点选画面创建标签后输入文字，按 Enter 保存" /></label>
+            <label class="annotation-title-field">标题<input id="annotationTitle" type="text" maxlength="160" placeholder="例如：K12+340 桩号" /></label>
+            <label class="annotation-body-field">正文<textarea id="annotationBody" maxlength="2000" rows="3" placeholder="输入多行工程说明；Ctrl+Enter 保存"></textarea></label>
+            <label>卡片宽度<input id="annotationPanelWidth" type="number" min="160" max="720" value="320" /></label>
+            <label>背景透明度<input id="annotationBackgroundOpacity" type="range" min="0" max="1" step="0.05" value="0.7" /></label>
+            <label>标题颜色<input id="annotationTitleColor" type="color" value="#69d2ff" /></label>
             <label>字号<input id="annotationFontSize" type="number" min="8" max="128" value="28" /></label>
             <label>颜色<input id="annotationTextColor" type="color" value="#ffffff" /></label>
             <label>开始 PTS<input id="annotationStartPts" type="number" step="1" /></label>
@@ -355,8 +359,9 @@
     <script src="./cad_text.js?v=20260812-dxf-text-v1"></script>
     <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
     <script src="./viewer_legacy.js?v=20260811-project-pipeline-v1"></script>
-    <script src="./annotation_pts.js?v=20260813-stage9-v1"></script>
-    <script src="./annotations.js?v=20260813-stage9-label-editor-v1"></script>
+    <script src="./annotation_pts.js?v=20260814-engineering-callout-v1"></script>
+    <script src="./callout_layout.js?v=20260814-engineering-callout-v1"></script>
+    <script src="./annotations.js?v=20260814-engineering-callout-v1"></script>
     <script src="./workflow.js?v=20260813-stage9-label-editor-v1"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>

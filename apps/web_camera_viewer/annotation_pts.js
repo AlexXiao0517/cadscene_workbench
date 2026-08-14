@@ -31,7 +31,34 @@
       ? results.get(sourcePts)
       : (Array.isArray(results)
         ? results.find((item) => item.source_pts === sourcePts) : null);
-    if (!result) return hidden("no_exact_tracking_pts");
+    if (!result) {
+      const initialization = annotation.anchor?.initialization;
+      if (!annotation.active_tracking_revision && Number(initialization?.source_pts) === sourcePts) {
+        const bbox = initialization?.bbox;
+        const initial = initialization?.anchor_xy || (
+          Array.isArray(bbox) ? [Number(bbox[0]) + Number(bbox[2]) / 2, Number(bbox[1]) + Number(bbox[3]) / 2] : null
+        );
+        if (initial) {
+          const offset = screenOffset || annotation.screen_offset || [0, 0];
+          const anchor = sourceToDisplay({ x: Number(initial[0]), y: Number(initial[1]) });
+          const label = sourceToDisplay({
+            x: Number(initial[0]) + Number(offset[0]),
+            y: Number(initial[1]) + Number(offset[1]),
+          });
+          if (anchor && label) {
+            return {
+              visible: true,
+              reason: "initialization_preview",
+              anchor_xy: [anchor.x, anchor.y],
+              label_xy: [label.x, label.y],
+              tracking_status: "untracked",
+              confidence: 1,
+            };
+          }
+        }
+      }
+      return hidden("no_exact_tracking_pts");
+    }
     const confidence = Number(result.confidence || 0);
     const trackingStatus = String(result.tracking_status || "lost");
     const minimum = Number(annotation.visibility_policy?.min_tracking_confidence ?? 0.5);
@@ -163,6 +190,15 @@
         const scaleX = unit && origin ? unit.x - origin.x : 1;
         const scaleY = unit && origin ? unit.y - origin.y : 1;
         return { x: Number(dx) / scaleX, y: Number(dy) / scaleY };
+      },
+
+      sourceDeltaToDisplay(dx, dy) {
+        const origin = sourceToDisplay({ x: 0, y: 0 });
+        const unit = sourceToDisplay({ x: Number(dx), y: Number(dy) });
+        return {
+          x: unit && origin ? unit.x - origin.x : Number(dx),
+          y: unit && origin ? unit.y - origin.y : Number(dy),
+        };
       },
     };
   }

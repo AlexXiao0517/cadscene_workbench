@@ -73,6 +73,34 @@ def test_video_tracking_visual_never_freezes_or_interpolates_across_lost() -> No
     assert missing_after_lost == {"visible": False, "reason": "no_exact_tracking_pts"}
 
 
+def test_untracked_video_callout_is_visible_only_on_its_initialization_pts() -> None:
+    annotation = {
+        "active_tracking_revision": None,
+        "screen_offset": [80, -40],
+        "anchor": {
+            "initialization": {
+                "source_pts": 100,
+                "bbox": [20, 30, 40, 20],
+            }
+        },
+        "visibility_policy": {"min_tracking_confidence": 0.5},
+    }
+    transform = "(point) => ({x:point.x,y:point.y})"
+
+    draft = _node(
+        f"m.videoTrackVisual({json.dumps(annotation)}, [], 100, {transform})"
+    )
+    other_frame = _node(
+        f"m.videoTrackVisual({json.dumps(annotation)}, [], 104, {transform})"
+    )
+
+    assert draft["visible"] is True
+    assert draft["anchor_xy"] == [40, 40]
+    assert draft["label_xy"] == [120, 0]
+    assert draft["tracking_status"] == "untracked"
+    assert other_frame == {"visible": False, "reason": "no_exact_tracking_pts"}
+
+
 def test_video_tracking_visual_uses_constant_time_pts_index() -> None:
     result = {
         "source_pts": 104,
