@@ -50,14 +50,19 @@ def layout_callout(
     offset_x, offset_y = _finite_pair(screen_offset, "screen_offset")
     panel_width, panel_height = _finite_pair(panel_size, "panel_size")
     viewport_width, viewport_height = _finite_pair(viewport_size, "viewport_size")
-    margin = float(safe_margin)
+    requested_margin = float(safe_margin)
     elbow = float(elbow_length)
     if panel_width <= 0 or panel_height <= 0:
         raise ValueError("panel_size must be positive")
     if viewport_width <= 0 or viewport_height <= 0:
         raise ValueError("viewport_size must be positive")
-    if margin < 0 or elbow < 0:
+    if requested_margin < 0 or elbow < 0:
         raise ValueError("safe_margin and elbow_length must be non-negative")
+    margin = min(
+        requested_margin,
+        max(0.0, (viewport_width - 1.0) / 2.0),
+        max(0.0, (viewport_height - 1.0) / 2.0),
+    )
 
     usable_width = max(1.0, viewport_width - 2.0 * margin)
     usable_height = max(1.0, viewport_height - 2.0 * margin)

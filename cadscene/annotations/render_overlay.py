@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from functools import lru_cache
+import math
 import os
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -147,6 +149,8 @@ def build_annotation_events(
                 if (
                     result is None
                     or result.get("visibility") is not True
+                    or str(result.get("tracking_status", "lost"))
+                    not in {"initialized", "tracked"}
                     or float(result.get("confidence", 0.0)) < threshold
                     or not isinstance(result.get("anchor_xy"), (list, tuple))
                 ):
@@ -154,12 +158,32 @@ def build_annotation_events(
                 anchor_xy = result["anchor_xy"]
                 anchor_x = float(anchor_xy[0])
                 anchor_y = float(anchor_xy[1])
+                if not (
+                    math.isfinite(anchor_x)
+                    and math.isfinite(anchor_y)
+                    and 0.0 <= anchor_x < width
+                    and 0.0 <= anchor_y < height
+                ):
+                    continue
+                bbox = result.get("bbox")
+                if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                    bbox_values = tuple(float(value) for value in bbox)
+                    if not (
+                        all(math.isfinite(value) for value in bbox_values)
+                        and bbox_values[0] >= 0.0
+                        and bbox_values[1] >= 0.0
+                        and bbox_values[0] + bbox_values[2] <= width
+                        and bbox_values[1] + bbox_values[3] <= height
+                    ):
+                        continue
                 x = anchor_x + float(offset[0])
                 y = anchor_y + float(offset[1])
             elif anchor_type == "cad_anchor":
                 camera = _nearest_camera(frame_index, cameras)
                 anchor = annotation.get("anchor")
-                world = anchor.get("cad_world_xyz") if isinstance(anchor, Mapping) else None
+                world = (
+                    anchor.get("cad_world_xyz") if isinstance(anchor, Mapping) else None
+                )
                 if camera is None or not isinstance(world, (list, tuple)):
                     continue
                 projected = project_point(world, camera, width=width, height=height)
@@ -214,7 +238,9 @@ def build_annotation_events(
     return tuple(events)
 
 
-def _rgba(value: object, default: str, *, opacity: float = 1.0) -> tuple[int, int, int, int]:
+def _rgba(
+    value: object, default: str, *, opacity: float = 1.0
+) -> tuple[int, int, int, int]:
     text = str(value or default).lstrip("#")
     if len(text) == 6:
         text += "FF"
@@ -226,8 +252,9 @@ def _rgba(value: object, default: str, *, opacity: float = 1.0) -> tuple[int, in
     return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16), alpha
 
 
-def _font(style: Mapping[str, object], size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    path = resolve_font_file(style.get("font_family"))
+@lru_cache(maxsize=128)
+def _font(font_family: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    path = resolve_font_file(font_family)
     if path is not None:
         try:
             return ImageFont.truetype(str(path), size=size)
@@ -259,6 +286,11 @@ def _wrap_text(
     return lines or [""]
 
 
+def _setting(values: Mapping[str, object], key: str, default: object) -> object:
+    value = values.get(key)
+    return default if value is None else value
+
+
 def render_callout_overlay(
     events: Sequence[AnnotationRenderEvent], *, width: int, height: int
 ) -> Image.Image:
@@ -271,10 +303,11 @@ def render_callout_overlay(
         panel = event.panel
         leader = event.leader
         body_size = int(style.get("font_size_px") or 28)
-        title_font = _font(style, min(128, body_size + 2))
-        body_font = _font(style, body_size)
-        panel_width = float(panel.get("width_px") or 320)
-        padding = float(panel.get("padding_px") or 16)
+        font_family = str(style.get("font_family") or "sans-serif")
+        title_font = _font(font_family, min(128, body_size + 2))
+        body_font = _font(font_family, body_size)
+        panel_width = float(_setting(panel, "width_px", 320))
+        padding = float(_setting(panel, "padding_px", 16))
         text_width = max(1.0, panel_width - 2.0 * padding)
         title = str(event.content.get("title", ""))
         body = str(event.content.get("body", event.text))
@@ -294,13 +327,13 @@ def render_callout_overlay(
             screen_offset=(event.x - event.anchor_x, event.y - event.anchor_y),
             panel_size=(panel_width, panel_height),
             viewport_size=(float(width), float(height)),
-            safe_margin=float(panel.get("safe_margin_px") or 20),
-            elbow_length=float(leader.get("elbow_length_px") or 24),
+            safe_margin=float(_setting(panel, "safe_margin_px", 20)),
+            elbow_length=float(_setting(leader, "elbow_length_px", 24)),
         )
         border = _rgba(style.get("border_color"), "#FFFFFFCC")
-        line_width = int(leader.get("line_width_px") or 2)
+        line_width = int(_setting(leader, "line_width_px", 2))
         draw.line(layout.leader_points, fill=border, width=line_width, joint="curve")
-        radius = float(leader.get("anchor_radius_px") or 6)
+        radius = float(_setting(leader, "anchor_radius_px", 6))
         anchor_box = (
             event.anchor_x - radius,
             event.anchor_y - radius,
@@ -309,12 +342,18 @@ def render_callout_overlay(
         )
         if leader.get("anchor_shape") == "crosshair":
             draw.line(
-                ((event.anchor_x - radius, event.anchor_y), (event.anchor_x + radius, event.anchor_y)),
+                (
+                    (event.anchor_x - radius, event.anchor_y),
+                    (event.anchor_x + radius, event.anchor_y),
+                ),
                 fill=border,
                 width=line_width,
             )
             draw.line(
-                ((event.anchor_x, event.anchor_y - radius), (event.anchor_x, event.anchor_y + radius)),
+                (
+                    (event.anchor_x, event.anchor_y - radius),
+                    (event.anchor_x, event.anchor_y + radius),
+                ),
                 fill=border,
                 width=line_width,
             )
@@ -323,7 +362,7 @@ def render_callout_overlay(
 
         left, top, panel_width, panel_height = layout.panel_rect
         rectangle = (left, top, left + panel_width, top + panel_height)
-        corner = int(panel.get("border_radius_px") or 6)
+        corner = int(_setting(panel, "border_radius_px", 6))
         if panel.get("shadow", True):
             shadow = (left + 5, top + 6, left + panel_width + 5, top + panel_height + 6)
             draw.rounded_rectangle(shadow, radius=corner, fill=(0, 0, 0, 90))
@@ -343,7 +382,9 @@ def render_callout_overlay(
         title_color = _rgba(style.get("title_color"), "#69D2FFFF")
         text_color = _rgba(style.get("text_color"), "#FFFFFFFF")
         for line in title_lines:
-            draw.text((left + padding, cursor_y), line, font=title_font, fill=title_color)
+            draw.text(
+                (left + padding, cursor_y), line, font=title_font, fill=title_color
+            )
             cursor_y += title_height
         if title_lines and body_lines:
             cursor_y += gap
@@ -363,6 +404,12 @@ def build_overlay_concat_document(
     if len(paths) != len(source_frames):
         raise ValueError("overlay images must match authoritative source frames")
     time_base = Fraction(int(time_base_numerator), int(time_base_denominator))
+    frame_rate = Fraction(time_base.denominator, time_base.numerator)
+    frame_rate_text = (
+        str(frame_rate.numerator)
+        if frame_rate.denominator == 1
+        else f"{frame_rate.numerator}/{frame_rate.denominator}"
+    )
     lines = ["ffconcat version 1.0"]
     for path, frame in zip(paths, source_frames):
         escaped = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
@@ -370,7 +417,13 @@ def build_overlay_concat_document(
         if duration_pts <= 0:
             raise ValueError("every annotation overlay frame requires duration_pts")
         lines.append(f"file '{escaped}'")
+        lines.append(f"option framerate {frame_rate_text}")
         lines.append(f"duration {float(duration_pts * time_base):.12f}")
+    if paths:
+        # concat demuxer 只有看到下一项时才会兑现最后一帧的 duration。
+        escaped = str(paths[-1].resolve()).replace("\\", "/").replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+        lines.append(f"option framerate {frame_rate_text}")
     return "\n".join(lines) + "\n"
 
 
@@ -436,7 +489,21 @@ def build_ass_document(
                     _ass_color(style.get("border_color"), "#FFFFFFCC"),
                     _ass_color(style.get("background_color"), "#000000B3"),
                     "-1" if int(style.get("font_weight") or 600) >= 600 else "0",
-                    "0", "0", "0", "100", "100", "0", "0", "3", "1", "0", "5", "0", "0", "0", "1",
+                    "0",
+                    "0",
+                    "0",
+                    "100",
+                    "100",
+                    "0",
+                    "0",
+                    "3",
+                    "1",
+                    "0",
+                    "5",
+                    "0",
+                    "0",
+                    "0",
+                    "1",
                 )
             )
         )
@@ -506,9 +573,7 @@ def build_sendcmd_document(
                 if index + 1 < len(annotation_events)
                 else None
             )
-            if next_event is None or abs(
-                next_event.start_sec - event.end_sec
-            ) > 1e-12:
+            if next_event is None or abs(next_event.start_sec - event.end_sec) > 1e-12:
                 commands.append(
                     (
                         event.end_sec,

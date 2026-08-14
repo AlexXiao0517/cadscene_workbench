@@ -73,3 +73,27 @@ def test_browser_and_renderer_share_callout_layout_semantics() -> None:
     ).to_dict()
 
     assert _browser_layout(payload) == python_layout
+
+
+def test_oversized_safe_margin_never_inverts_viewport_bounds() -> None:
+    payload = {
+        "anchor_xy": [100.0, 50.0],
+        "screen_offset": [0.0, 0.0],
+        "panel_size": [160.0, 80.0],
+        "viewport_size": [200.0, 100.0],
+        "safe_margin": 160.0,
+        "elbow_length": 0.0,
+    }
+    layout = layout_callout(
+        anchor_xy=(100.0, 50.0),
+        screen_offset=(0.0, 0.0),
+        panel_size=(160.0, 80.0),
+        viewport_size=(200.0, 100.0),
+        safe_margin=160.0,
+        elbow_length=0.0,
+    )
+
+    left, top, width, height = layout.panel_rect
+    assert 0 <= left <= left + width <= 200
+    assert 0 <= top <= top + height <= 100
+    assert _browser_layout(payload) == layout.to_dict()

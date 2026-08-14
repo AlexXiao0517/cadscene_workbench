@@ -73,6 +73,41 @@ def test_video_tracking_visual_never_freezes_or_interpolates_across_lost() -> No
     assert missing_after_lost == {"visible": False, "reason": "no_exact_tracking_pts"}
 
 
+def test_video_tracking_visual_rejects_inconsistent_lost_and_out_of_frame_results() -> None:
+    annotation = {
+        "screen_offset": [10, -5],
+        "visibility_policy": {"min_tracking_confidence": 0.5},
+    }
+    transform = "(point) => ({x:point.x,y:point.y})"
+    inconsistent_lost = [{
+        "source_pts": 100,
+        "anchor_xy": [40, 30],
+        "bbox": [20, 20, 40, 20],
+        "confidence": 0.9,
+        "visibility": True,
+        "tracking_status": "lost",
+    }]
+    outside = [{
+        "source_pts": 100,
+        "anchor_xy": [205, 30],
+        "bbox": [190, 20, 30, 20],
+        "confidence": 0.9,
+        "visibility": True,
+        "tracking_status": "tracked",
+    }]
+
+    lost = _node(
+        f"m.videoTrackVisual({json.dumps(annotation)}, {json.dumps(inconsistent_lost)}, 100, {transform}, null, [200, 100])"
+    )
+    offscreen = _node(
+        f"m.videoTrackVisual({json.dumps(annotation)}, {json.dumps(outside)}, 100, {transform}, null, [200, 100])"
+    )
+
+    assert lost["visible"] is False
+    assert lost["reason"] == "tracking_lost"
+    assert offscreen == {"visible": False, "reason": "outside_viewport"}
+
+
 def test_untracked_video_callout_is_visible_only_on_its_initialization_pts() -> None:
     annotation = {
         "active_tracking_revision": None,

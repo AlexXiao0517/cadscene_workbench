@@ -120,7 +120,9 @@ def test_edit_and_delete_use_manifest_and_item_expected_revisions(tmp_path) -> N
     assert repositories.annotations.load("p1").annotations == ()
 
 
-def test_editing_callout_content_and_offset_does_not_create_tracking_revision(tmp_path) -> None:
+def test_editing_callout_content_and_offset_does_not_create_tracking_revision(
+    tmp_path,
+) -> None:
     service, repositories = _service(tmp_path)
     created = service.create(
         "p1",

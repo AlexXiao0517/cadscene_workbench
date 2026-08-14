@@ -2,12 +2,27 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from cadscene.annotations.tracking import (
     OpenCvLkVideoAnchorTracker,
+    TrackingResult,
     TrackingFrame,
     VideoTrackingInitialization,
 )
+
+
+def test_lost_tracking_result_cannot_claim_visibility() -> None:
+    with pytest.raises(ValueError, match="lost tracking results must be hidden"):
+        TrackingResult(
+            source_pts=100,
+            bbox=(10.0, 10.0, 20.0, 20.0),
+            anchor_xy=(20.0, 20.0),
+            confidence=0.8,
+            visible=True,
+            tracking_status="lost",
+            diagnostic="inconsistent payload",
+        )
 
 
 def _target_frame(x: int | None) -> np.ndarray:

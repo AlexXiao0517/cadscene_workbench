@@ -38,7 +38,9 @@ def _source_frame(index: int) -> np.ndarray:
     return image
 
 
-def _encode_source(path: Path, frames: list[np.ndarray], ffmpeg: str) -> None:
+def _encode_source(
+    path: Path, frames: list[np.ndarray], ffmpeg: str, *, frame_rate: int = 25
+) -> None:
     raw_path = path.with_suffix(".bgr")
     raw_path.write_bytes(b"".join(frame.tobytes() for frame in frames))
     subprocess.run(
@@ -55,7 +57,7 @@ def _encode_source(path: Path, frames: list[np.ndarray], ffmpeg: str) -> None:
             "-video_size",
             "200x120",
             "-framerate",
-            "25",
+            str(frame_rate),
             "-i",
             str(raw_path),
             "-vf",
@@ -213,12 +215,16 @@ def test_real_cad_and_video_labels_preserve_frame_partition(tmp_path: Path) -> N
         for index in range(6)
     )
     events = build_annotation_events(bundle, camera_rows=camera_rows)
-    assert {item.source_pts for item in events if item.annotation_id == "cad-anchor"} == {
+    assert {
+        item.source_pts for item in events if item.annotation_id == "cad-anchor"
+    } == {
         1000,
         1040,
         1080,
     }
-    assert {item.source_pts for item in events if item.annotation_id == "video-target"} == {
+    assert {
+        item.source_pts for item in events if item.annotation_id == "video-target"
+    } == {
         1000,
         1040,
         1080,
@@ -234,8 +240,7 @@ def test_real_cad_and_video_labels_preserve_frame_partition(tmp_path: Path) -> N
     camera_path.write_text(
         "\ufeffframe_index,camera_x,camera_y,camera_z,yaw,pitch,roll,fov\n"
         + "\n".join(
-            f"{row['frame_index']},0,0,1,{row['yaw']},0,0,90"
-            for row in camera_rows
+            f"{row['frame_index']},0,0,1,{row['yaw']},0,0,90" for row in camera_rows
         )
         + "\n",
         encoding="utf-8",
@@ -333,3 +338,170 @@ def test_real_cad_and_video_labels_preserve_frame_partition(tmp_path: Path) -> N
     assert [item["output_frame_ordinal"] for item in render_map["frames"]] == list(
         range(6)
     )
+
+
+@pytest.mark.parametrize("frame_rate", (30, 60))
+def test_rgba_overlay_preserves_final_frame_at_common_frame_rates(
+    tmp_path: Path, frame_rate: int
+) -> None:
+    try:
+        ffmpeg = str(resolve_ffmpeg_executable())
+    except (FileNotFoundError, RuntimeError):
+        pytest.skip("an H.264-capable FFmpeg is unavailable")
+    frames = [_source_frame(index) for index in range(6)]
+    source = tmp_path / f"source-{frame_rate}.mp4"
+    _encode_source(source, frames, ffmpeg, frame_rate=frame_rate)
+    tracking_results = [
+        {
+            "source_pts": index,
+            "anchor_xy": [40 + index * 4, 60],
+            "bbox": [25 + index * 4, 50, 30, 20],
+            "confidence": 0.9,
+            "visibility": True,
+            "tracking_status": "tracked",
+        }
+        for index in range(6)
+    ]
+    annotation = _video_annotation(tracking_results)
+    annotation["source_pts_range"] = {
+        "start_pts": 0,
+        "end_pts_exclusive": 6,
+        "time_base": {"numerator": 1, "denominator": frame_rate},
+        "semantics": "half_open",
+    }
+    bundle = {
+        "video_width": 200,
+        "video_height": 120,
+        "source_time_base": {"numerator": 1, "denominator": frame_rate},
+        "source_frames": [
+            {"source_pts": index, "duration_pts": 1} for index in range(6)
+        ],
+        "annotations": [annotation],
+        "tracking_revisions": {"tracking-2": {"results": tracking_results}},
+    }
+    bundle_path = tmp_path / f"bundle-{frame_rate}.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    output = tmp_path / f"annotated-{frame_rate}.mp4"
+
+    assert (
+        render_annotations_main(
+            [
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+                "--bundle",
+                str(bundle_path),
+                "--ffmpeg",
+                ffmpeg,
+            ]
+        )
+        == 0
+    )
+    assert len(_decoded_frames(output)) == len(frames)
+
+
+def test_rgba_overlay_preserves_irregular_authoritative_frame_durations(
+    tmp_path: Path,
+) -> None:
+    try:
+        ffmpeg = str(resolve_ffmpeg_executable())
+    except (FileNotFoundError, RuntimeError):
+        pytest.skip("an H.264-capable FFmpeg is unavailable")
+    frames = [_source_frame(index) for index in range(6)]
+    durations = [8, 9, 8, 10, 7, 9]
+    source_pts = [1000]
+    for duration in durations[:-1]:
+        source_pts.append(source_pts[-1] + duration)
+    png_paths = []
+    for index, frame in enumerate(frames):
+        path = tmp_path / f"vfr-{index}.png"
+        assert cv2.imwrite(str(path), frame)
+        png_paths.append(path)
+    concat_lines = ["ffconcat version 1.0"]
+    for path, duration in zip(png_paths, durations):
+        concat_lines.extend(
+            (
+                f"file '{path.as_posix()}'",
+                "option framerate 1000",
+                f"duration {duration / 1000:.12f}",
+            )
+        )
+    concat_lines.extend((f"file '{png_paths[-1].as_posix()}'", "option framerate 1000"))
+    concat_path = tmp_path / "source.ffconcat"
+    concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+    source = tmp_path / "source-vfr.mp4"
+    subprocess.run(
+        (
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_path),
+            "-frames:v",
+            str(len(frames)),
+            "-fps_mode",
+            "passthrough",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ),
+        check=True,
+    )
+    tracking_results = [
+        {
+            "source_pts": pts,
+            "anchor_xy": [40 + index * 4, 60],
+            "bbox": [25 + index * 4, 50, 30, 20],
+            "confidence": 0.9,
+            "visibility": True,
+            "tracking_status": "tracked",
+        }
+        for index, pts in enumerate(source_pts)
+    ]
+    annotation = _video_annotation(tracking_results)
+    annotation["source_pts_range"] = {
+        "start_pts": source_pts[0],
+        "end_pts_exclusive": source_pts[-1] + durations[-1],
+        "time_base": {"numerator": 1, "denominator": 1000},
+        "semantics": "half_open",
+    }
+    bundle = {
+        "video_width": 200,
+        "video_height": 120,
+        "source_time_base": {"numerator": 1, "denominator": 1000},
+        "source_frames": [
+            {"source_pts": pts, "duration_pts": duration}
+            for pts, duration in zip(source_pts, durations)
+        ],
+        "annotations": [annotation],
+        "tracking_revisions": {"tracking-2": {"results": tracking_results}},
+    }
+    bundle_path = tmp_path / "bundle-vfr.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    output = tmp_path / "annotated-vfr.mp4"
+
+    assert (
+        render_annotations_main(
+            [
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+                "--bundle",
+                str(bundle_path),
+                "--ffmpeg",
+                ffmpeg,
+            ]
+        )
+        == 0
+    )
+    assert len(_decoded_frames(output)) == len(frames)

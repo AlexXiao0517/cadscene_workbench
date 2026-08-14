@@ -12,7 +12,12 @@
     const [offsetX, offsetY] = payload.screen_offset.map(Number);
     const [requestedWidth, requestedHeight] = payload.panel_size.map(Number);
     const [viewportWidth, viewportHeight] = payload.viewport_size.map(Number);
-    const margin = Number(payload.safe_margin);
+    const requestedMargin = Number(payload.safe_margin);
+    const margin = Math.min(
+      requestedMargin,
+      Math.max(0, (viewportWidth - 1) / 2),
+      Math.max(0, (viewportHeight - 1) / 2),
+    );
     const elbow = Number(payload.elbow_length);
     const usableWidth = Math.max(1, viewportWidth - 2 * margin);
     const usableHeight = Math.max(1, viewportHeight - 2 * margin);

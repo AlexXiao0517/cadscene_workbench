@@ -3,12 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 
 from cadscene.annotations.render_overlay import (
+    _font,
     build_annotation_events,
     build_drawtext_filter,
     build_overlay_concat_document,
     build_sendcmd_document,
     render_callout_overlay,
 )
+
+
+def test_callout_font_resolution_is_cached_across_frames() -> None:
+    _font.cache_clear()
+
+    first = _font("sans-serif", 28)
+    second = _font("sans-serif", 28)
+
+    assert first is second
+    assert _font.cache_info().hits == 1
 
 
 def test_render_events_use_exact_source_pts_and_skip_lost_video_frames() -> None:
@@ -89,6 +100,54 @@ def test_render_events_use_exact_source_pts_and_skip_lost_video_frames() -> None
     assert events[1].end_sec == 0.56
 
 
+def test_render_events_reject_inconsistent_lost_and_out_of_frame_tracking() -> None:
+    bundle = {
+        "video_width": 200,
+        "video_height": 100,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+        "source_frames": [
+            {"source_pts": 100, "duration_pts": 1},
+            {"source_pts": 101, "duration_pts": 1},
+        ],
+        "annotations": [
+            {
+                "annotation_id": "target",
+                "anchor_type": "video_track",
+                "text": "target",
+                "source_pts_range": {"start_pts": 100, "end_pts_exclusive": 102},
+                "screen_offset": [0, 0],
+                "visibility_policy": {"min_tracking_confidence": 0.5},
+                "user_visible": True,
+                "active_tracking_revision": "tracking-1",
+            }
+        ],
+        "tracking_revisions": {
+            "tracking-1": {
+                "results": [
+                    {
+                        "source_pts": 100,
+                        "anchor_xy": [40, 30],
+                        "bbox": [20, 20, 40, 20],
+                        "confidence": 0.9,
+                        "visibility": True,
+                        "tracking_status": "lost",
+                    },
+                    {
+                        "source_pts": 101,
+                        "anchor_xy": [205, 30],
+                        "bbox": [190, 20, 30, 20],
+                        "confidence": 0.9,
+                        "visibility": True,
+                        "tracking_status": "tracked",
+                    },
+                ]
+            }
+        },
+    }
+
+    assert build_annotation_events(bundle, camera_rows=()) == ()
+
+
 def test_rgba_overlay_draws_card_polyline_anchor_title_and_multiline_body() -> None:
     bundle = {
         "video_width": 640,
@@ -113,7 +172,11 @@ def test_rgba_overlay_draws_card_polyline_anchor_title_and_multiline_body() -> N
                     "font_weight": 600,
                 },
                 "panel": {"width_px": 260, "padding_px": 14, "safe_margin_px": 20},
-                "leader": {"line_width_px": 2, "anchor_radius_px": 7, "elbow_length_px": 24},
+                "leader": {
+                    "line_width_px": 2,
+                    "anchor_radius_px": 7,
+                    "elbow_length_px": 24,
+                },
                 "source_pts_range": {"start_pts": 100, "end_pts_exclusive": 101},
                 "screen_offset": [210, -100],
                 "visibility_policy": {},
@@ -150,6 +213,59 @@ def test_rgba_overlay_draws_card_polyline_anchor_title_and_multiline_body() -> N
     assert alpha.getpixel((520, 80)) > 0
 
 
+def test_rgba_overlay_honors_zero_safe_margin_and_corner_radius() -> None:
+    bundle = {
+        "video_width": 200,
+        "video_height": 100,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+        "source_frames": [{"source_pts": 100, "duration_pts": 1}],
+        "annotations": [
+            {
+                "annotation_id": "zero-settings",
+                "anchor_type": "cad_anchor",
+                "text": "body",
+                "anchor": {"cad_world_xyz": [0, 10, 1]},
+                "panel": {
+                    "width_px": 160,
+                    "padding_px": 4,
+                    "safe_margin_px": 0,
+                    "border_radius_px": 0,
+                    "shadow": False,
+                },
+                "leader": {
+                    "line_width_px": 1,
+                    "anchor_radius_px": 2,
+                    "elbow_length_px": 0,
+                },
+                "source_pts_range": {"start_pts": 100, "end_pts_exclusive": 101},
+                "screen_offset": [-20, 0],
+                "visibility_policy": {},
+                "user_visible": True,
+            }
+        ],
+        "tracking_revisions": {},
+    }
+    events = build_annotation_events(
+        bundle,
+        camera_rows=(
+            {
+                "frame_index": 0,
+                "camera_x": 0,
+                "camera_y": 0,
+                "camera_z": 1,
+                "yaw": 0,
+                "pitch": 0,
+                "roll": 0,
+                "fov": 90,
+            },
+        ),
+    )
+
+    overlay = render_callout_overlay(events, width=200, height=100)
+
+    assert overlay.getchannel("A").getpixel((1, 30)) > 0
+
+
 def test_overlay_concat_uses_authoritative_per_frame_durations(tmp_path: Path) -> None:
     document = build_overlay_concat_document(
         [tmp_path / "000.png", tmp_path / "001.png", tmp_path / "002.png"],
@@ -163,7 +279,9 @@ def test_overlay_concat_uses_authoritative_per_frame_durations(tmp_path: Path) -
     )
 
     assert document.startswith("ffconcat version 1.0\n")
-    assert document.count("file '") == 3
+    assert document.count("file '") == 4
+    assert document.splitlines()[-2].endswith("002.png'")
+    assert document.splitlines()[-1] == "option framerate 100"
     assert "duration 0.040000000000" in document
     assert "duration 0.060000000000" in document
     assert "duration 0.050000000000" in document
@@ -256,18 +374,21 @@ def test_sendcmd_hides_at_exact_lost_boundary_and_reanchors_without_freeze() -> 
                         "anchor_xy": [20, 30],
                         "confidence": 0.9,
                         "visibility": True,
+                        "tracking_status": "tracked",
                     },
                     {
                         "source_pts": 1008,
                         "anchor_xy": None,
                         "confidence": 0.0,
                         "visibility": False,
+                        "tracking_status": "lost",
                     },
                     {
                         "source_pts": 1017,
                         "anchor_xy": [70, 40],
                         "confidence": 0.8,
                         "visibility": True,
+                        "tracking_status": "tracked",
                     },
                 ]
             }

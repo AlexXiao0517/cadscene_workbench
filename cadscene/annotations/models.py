@@ -51,7 +51,11 @@ class SourcePtsRange:
             raise ValueError("source time_base must be positive")
 
     def contains(self, source_pts: int) -> bool:
-        return self.start_pts <= _integer(source_pts, "source_pts") < self.end_pts_exclusive
+        return (
+            self.start_pts
+            <= _integer(source_pts, "source_pts")
+            < self.end_pts_exclusive
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -84,6 +88,7 @@ class SourcePtsRange:
             ),
         )
 
+
 @dataclass(frozen=True)
 class AnnotationStyle:
     font_size_px: int = 28
@@ -96,7 +101,9 @@ class AnnotationStyle:
     font_weight: int = 600
 
     def __post_init__(self) -> None:
-        if isinstance(self.font_size_px, bool) or not isinstance(self.font_size_px, int):
+        if isinstance(self.font_size_px, bool) or not isinstance(
+            self.font_size_px, int
+        ):
             raise TypeError("font_size_px must be an integer")
         if not 8 <= self.font_size_px <= 128:
             raise ValueError("font_size_px must be between 8 and 128")
@@ -150,9 +157,13 @@ class AnnotationContent:
 
     def __post_init__(self) -> None:
         if not isinstance(self.title, str) or len(self.title) > 160:
-            raise ValueError("annotation title must be a string of at most 160 characters")
+            raise ValueError(
+                "annotation title must be a string of at most 160 characters"
+            )
         if not isinstance(self.body, str) or len(self.body) > 2000:
-            raise ValueError("annotation body must be a string of at most 2000 characters")
+            raise ValueError(
+                "annotation body must be a string of at most 2000 characters"
+            )
 
     def to_dict(self) -> dict[str, str]:
         return {"title": self.title, "body": self.body}
@@ -257,9 +268,7 @@ class VisibilityPolicy:
             raise TypeError("hide_behind_camera must be boolean")
         if not isinstance(self.hide_outside_viewport, bool):
             raise TypeError("hide_outside_viewport must be boolean")
-        confidence = _finite(
-            self.min_tracking_confidence, "min_tracking_confidence"
-        )
+        confidence = _finite(self.min_tracking_confidence, "min_tracking_confidence")
         if not 0.0 <= confidence <= 1.0:
             raise ValueError("min_tracking_confidence must be between 0 and 1")
 
@@ -276,9 +285,7 @@ class VisibilityPolicy:
         return cls(
             hide_behind_camera=bool(values.get("hide_behind_camera", True)),
             hide_outside_viewport=bool(values.get("hide_outside_viewport", True)),
-            min_tracking_confidence=float(
-                values.get("min_tracking_confidence", 0.5)
-            ),
+            min_tracking_confidence=float(values.get("min_tracking_confidence", 0.5)),
         )
 
 
@@ -302,7 +309,9 @@ def _validate_anchor(
         raise ValueError("video_track requires initialization")
     source_pts = _integer(initialization.get("source_pts"), "initialization source_pts")
     if not source_pts_range.contains(source_pts):
-        raise ValueError("video_track initialization must be inside the annotation PTS range")
+        raise ValueError(
+            "video_track initialization must be inside the annotation PTS range"
+        )
     bbox = initialization.get("bbox")
     anchor_xy = initialization.get("anchor_xy")
     if bbox is None and anchor_xy is None:
@@ -349,7 +358,9 @@ class Annotation:
         if self.anchor_type not in _ANCHOR_TYPES:
             raise ValueError("anchor_type must be cad_anchor or video_track")
         if not isinstance(self.text, str) or len(self.text) > 2000:
-            raise ValueError("annotation text must be a string of at most 2000 characters")
+            raise ValueError(
+                "annotation text must be a string of at most 2000 characters"
+            )
         if not isinstance(self.content, AnnotationContent):
             raise TypeError("annotation content must be AnnotationContent")
         # content.body 是新结构的权威值；text 仅作为旧 Stage 9 兼容别名保留。
@@ -373,7 +384,10 @@ class Annotation:
             raise TypeError("annotation_revision must be an integer")
         if self.annotation_revision < 0:
             raise ValueError("annotation_revision must be non-negative")
-        if self.anchor_type == "cad_anchor" and self.active_tracking_revision is not None:
+        if (
+            self.anchor_type == "cad_anchor"
+            and self.active_tracking_revision is not None
+        ):
             raise ValueError("cad_anchor cannot own a tracking revision")
         for name in (
             "created_at",
@@ -487,7 +501,9 @@ class Annotation:
                 value.get("panel") if isinstance(value.get("panel"), Mapping) else None
             ),
             leader=AnnotationLeader.from_dict(
-                value.get("leader") if isinstance(value.get("leader"), Mapping) else None
+                value.get("leader")
+                if isinstance(value.get("leader"), Mapping)
+                else None
             ),
         )
 

@@ -76,10 +76,8 @@ def _require_clip(
         raise ValueError(f"unknown annotation clip: {clip_id}")
     clip_range = _clip_source_range(clip)
     if (
-        source_pts_range.time_base_numerator
-        != clip_range.time_base_numerator
-        or source_pts_range.time_base_denominator
-        != clip_range.time_base_denominator
+        source_pts_range.time_base_numerator != clip_range.time_base_numerator
+        or source_pts_range.time_base_denominator != clip_range.time_base_denominator
     ):
         raise ValueError("annotation source time_base must match its clip")
     if (
@@ -248,7 +246,11 @@ class AnnotationService:
             current = self.repositories.annotations.load(project_id)
             render = self.repositories.render.load(project_id)
             existing = next(
-                (item for item in current.annotations if item.annotation_id == annotation_id),
+                (
+                    item
+                    for item in current.annotations
+                    if item.annotation_id == annotation_id
+                ),
                 None,
             )
             if existing is None:
@@ -265,9 +267,7 @@ class AnnotationService:
                 if "source_pts_range" in changes
                 else existing.source_pts_range
             )
-            _require_clip(
-                self.repositories, project_id, existing.clip_id, source_range
-            )
+            _require_clip(self.repositories, project_id, existing.clip_id, source_range)
             offset_value = changes.get("screen_offset", existing.screen_offset)
             if not isinstance(offset_value, (tuple, list)) or len(offset_value) != 2:
                 raise ValueError("screen_offset must contain x and y")
@@ -315,9 +315,7 @@ class AnnotationService:
                     else existing.user_visible
                 ),
                 anchor=(
-                    dict(changes["anchor"])
-                    if "anchor" in changes
-                    else existing.anchor
+                    dict(changes["anchor"]) if "anchor" in changes else existing.anchor
                 ),
                 annotation_revision=existing.annotation_revision + 1,
                 updated_at=self.now(),
@@ -384,7 +382,11 @@ class AnnotationService:
             current = self.repositories.annotations.load(project_id)
             render = self.repositories.render.load(project_id)
             existing = next(
-                (item for item in current.annotations if item.annotation_id == annotation_id),
+                (
+                    item
+                    for item in current.annotations
+                    if item.annotation_id == annotation_id
+                ),
                 None,
             )
             if existing is None:
@@ -445,7 +447,11 @@ class AnnotationService:
             current = self.repositories.annotations.load(project_id)
             render = self.repositories.render.load(project_id)
             existing = next(
-                (item for item in current.annotations if item.annotation_id == annotation_id),
+                (
+                    item
+                    for item in current.annotations
+                    if item.annotation_id == annotation_id
+                ),
                 None,
             )
             if existing is None:

@@ -42,7 +42,10 @@ class TrackingFrame:
     def __post_init__(self) -> None:
         if isinstance(self.source_pts, bool) or not isinstance(self.source_pts, int):
             raise TypeError("tracking frame source_pts must be an integer")
-        if not isinstance(self.image_bgr, np.ndarray) or self.image_bgr.ndim not in {2, 3}:
+        if not isinstance(self.image_bgr, np.ndarray) or self.image_bgr.ndim not in {
+            2,
+            3,
+        }:
             raise TypeError("tracking frame image must be a grayscale or BGR ndarray")
 
 
@@ -101,6 +104,10 @@ class TrackingResult:
             raise ValueError("hidden tracking results cannot retain a frozen position")
         if self.tracking_status not in {"initialized", "tracked", "lost"}:
             raise ValueError("unsupported tracking status")
+        if self.tracking_status == "lost" and self.visible:
+            raise ValueError("lost tracking results must be hidden")
+        if self.visible and self.anchor_xy is None:
+            raise ValueError("visible tracking results require anchor_xy")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -289,7 +296,11 @@ class OpenCvLkVideoAnchorTracker(VideoAnchorTracker):
                     )
             count = int(np.count_nonzero(valid))
             diagnostic = "insufficient_tracked_features"
-            if count >= self.min_features and forward is not None and backward is not None:
+            if (
+                count >= self.min_features
+                and forward is not None
+                and backward is not None
+            ):
                 old_valid = points.reshape(-1, 2)[valid]
                 new_valid = forward.reshape(-1, 2)[valid]
                 fb_valid = np.linalg.norm(
@@ -324,8 +335,7 @@ class OpenCvLkVideoAnchorTracker(VideoAnchorTracker):
                 retained = count / max(1, len(points))
                 confidence = float(
                     np.clip(
-                        retained
-                        * math.exp(-float(np.median(fb_valid))),
+                        retained * math.exp(-float(np.median(fb_valid))),
                         0.0,
                         1.0,
                     )
@@ -380,7 +390,9 @@ class OpenCvLkVideoAnchorTracker(VideoAnchorTracker):
         try:
             initial_index = pts.index(initialization.source_pts)
         except ValueError as exc:
-            raise ValueError("tracking initialization must match a decoded source PTS") from exc
+            raise ValueError(
+                "tracking initialization must match a decoded source PTS"
+            ) from exc
         height, width = frames[initial_index].image_bgr.shape[:2]
         bbox = _bbox_for_initialization(initialization, width, height)
         initialized = TrackingResult(
@@ -587,10 +599,14 @@ class TrackingRevisionRepository:
             revision.tracking_revision,
         )
         if target.exists():
-            raise FileExistsError(f"immutable tracking revision already exists: {target}")
+            raise FileExistsError(
+                f"immutable tracking revision already exists: {target}"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = Path(
-            tempfile.mkdtemp(prefix=f".{revision.tracking_revision}-", dir=target.parent)
+            tempfile.mkdtemp(
+                prefix=f".{revision.tracking_revision}-", dir=target.parent
+            )
         )
         try:
             payload = (
@@ -618,9 +634,10 @@ class TrackingRevisionRepository:
         annotation_id: str,
         tracking_revision: str,
     ) -> TrackingRevision:
-        path = self.directory_for(
-            project_id, clip_id, annotation_id, tracking_revision
-        ) / "tracking_results.json"
+        path = (
+            self.directory_for(project_id, clip_id, annotation_id, tracking_revision)
+            / "tracking_results.json"
+        )
         return TrackingRevision.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
@@ -664,7 +681,11 @@ class VideoTrackingService:
     ) -> VideoTrackingRevisionResult:
         annotations = self.repositories.annotations.load(project_id)
         annotation = next(
-            (item for item in annotations.annotations if item.annotation_id == annotation_id),
+            (
+                item
+                for item in annotations.annotations
+                if item.annotation_id == annotation_id
+            ),
             None,
         )
         if annotation is None:
@@ -722,12 +743,12 @@ class VideoTrackingService:
                 else initialization.source_pts
             )
             if correction.source_pts <= last_anchor_pts:
-                raise ValueError(
-                    "correction PTS must follow the latest anchor PTS"
-                )
+                raise ValueError("correction PTS must follow the latest anchor PTS")
             corrections = (*previous.corrections, correction)
             previous_results = tuple(
-                item for item in previous.results if item.source_pts < correction.source_pts
+                item
+                for item in previous.results
+                if item.source_pts < correction.source_pts
             )
             tracking_frames = tuple(
                 frame for frame in frames if frame.source_pts >= correction.source_pts
@@ -736,7 +757,9 @@ class VideoTrackingService:
         tracked = self.tracker.track(tracking_frames, tracker_initialization)
         if self.repositories.clips.load(project_id).revision != clips.revision:
             raise ValueError("clip revision changed while video tracking was running")
-        results = tuple(sorted((*previous_results, *tracked), key=lambda item: item.source_pts))
+        results = tuple(
+            sorted((*previous_results, *tracked), key=lambda item: item.source_pts)
+        )
         tracking_revision = f"tracking-{self.identity()}"
         operation_id = f"tracking-operation-{self.identity()}"
         revision = TrackingRevision(

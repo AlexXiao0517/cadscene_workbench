@@ -667,8 +667,8 @@ h2 {
 }
 
 .engineering-callout {
-  min-width: 160px;
-  max-width: min(720px, calc(100% - 40px));
+  min-width: 0;
+  max-width: none;
   backdrop-filter: blur(3px);
 }
 

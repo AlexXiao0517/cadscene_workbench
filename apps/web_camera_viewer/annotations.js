@@ -437,13 +437,17 @@
       const visible = Boolean(visual?.visible && annotation.user_visible !== false);
       entry.label.hidden = entry.line.hidden = entry.dot.hidden = !visible;
       if (!visible) continue;
-      const anchor = visual.anchor_xy;
-      const label = visual.label_xy;
+      const anchor = visual.anchor_source_xy;
+      const label = visual.label_source_xy;
       entry.title.textContent = annotation.content?.title || "";
       entry.body.textContent = annotation.content?.body ?? annotation.text ?? "";
       const scale = provider?.sourceDeltaToDisplay?.(1, 1) || { x: 1, y: 1 };
-      entry.label.style.width = `${Math.max(160, Number(annotation.panel?.width_px || 320) * Math.abs(scale.x || 1))}px`;
-      entry.label.style.fontSize = `${annotation.style?.font_size_px || 28}px`;
+      const displayScale = Math.max(0.0001, Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1)));
+      const panelWidth = Number(annotation.panel?.width_px ?? 320);
+      const padding = Number(annotation.panel?.padding_px ?? 16);
+      const radius = Number(annotation.panel?.border_radius_px ?? 6);
+      entry.label.style.width = `${panelWidth * displayScale}px`;
+      entry.label.style.fontSize = `${Number(annotation.style?.font_size_px ?? 28) * displayScale}px`;
       entry.label.style.color = annotation.style?.text_color || "#FFFFFF";
       entry.title.style.color = annotation.style?.title_color || "#69D2FF";
       entry.label.style.backgroundColor = colorWithOpacity(
@@ -451,28 +455,34 @@
         annotation.style?.background_opacity ?? 0.7,
       );
       entry.label.style.borderColor = annotation.style?.border_color || "#FFFFFFCC";
-      entry.label.style.padding = `${annotation.panel?.padding_px || 16}px`;
-      entry.label.style.borderRadius = `${annotation.panel?.border_radius_px || 6}px`;
+      entry.label.style.padding = `${padding * displayScale}px`;
+      entry.label.style.borderRadius = `${radius * displayScale}px`;
+      entry.label.style.borderWidth = `${Math.max(1, Number(annotation.leader?.line_width_px ?? 2) * displayScale)}px`;
       entry.label.classList.toggle("has-shadow", annotation.panel?.shadow !== false);
+      entry.label.style.boxShadow = annotation.panel?.shadow === false ? "none"
+        : `0 ${8 * displayScale}px ${28 * displayScale}px rgba(0, 0, 0, .38), 0 0 ${12 * displayScale}px rgba(86, 194, 255, .14)`;
       const layout = window.CadsceneCalloutLayout.layoutCallout({
         anchor_xy: anchor,
         screen_offset: [label[0] - anchor[0], label[1] - anchor[1]],
-        panel_size: [entry.label.offsetWidth, entry.label.offsetHeight],
-        viewport_size: [overlay.clientWidth, overlay.clientHeight],
-        safe_margin: Number(annotation.panel?.safe_margin_px || 20) * Math.abs(scale.x || 1),
-        elbow_length: Number(annotation.leader?.elbow_length_px || 24) * Math.abs(scale.x || 1),
+        panel_size: [panelWidth, entry.label.offsetHeight / displayScale],
+        viewport_size: [video.videoWidth, video.videoHeight],
+        safe_margin: Number(annotation.panel?.safe_margin_px ?? 20),
+        elbow_length: Number(annotation.leader?.elbow_length_px ?? 24),
       });
-      entry.label.style.left = `${layout.panel_rect[0]}px`;
-      entry.label.style.top = `${layout.panel_rect[1]}px`;
-      entry.dot.style.left = `${anchor[0]}px`;
-      entry.dot.style.top = `${anchor[1]}px`;
-      entry.polyline.setAttribute("points", layout.leader_points.map((point) => point.join(",")).join(" "));
+      const panelOrigin = provider.sourceToDisplayPoint(layout.panel_rect.slice(0, 2));
+      const anchorDisplay = provider.sourceToDisplayPoint(anchor);
+      const leaderPoints = layout.leader_points.map((point) => provider.sourceToDisplayPoint(point));
+      entry.label.style.left = `${panelOrigin.x}px`;
+      entry.label.style.top = `${panelOrigin.y}px`;
+      entry.dot.style.left = `${anchorDisplay.x}px`;
+      entry.dot.style.top = `${anchorDisplay.y}px`;
+      entry.polyline.setAttribute("points", leaderPoints.map((point) => `${point.x},${point.y}`).join(" "));
       entry.polyline.setAttribute("stroke", annotation.style?.border_color || "#FFFFFFCC");
-      entry.polyline.setAttribute("stroke-width", String(annotation.leader?.line_width_px || 2));
-      const radius = Number(annotation.leader?.anchor_radius_px || 6);
-      entry.dot.style.width = `${2 * radius}px`;
-      entry.dot.style.height = `${2 * radius}px`;
-      entry.dot.style.margin = `${-radius}px 0 0 ${-radius}px`;
+      entry.polyline.setAttribute("stroke-width", String(Number(annotation.leader?.line_width_px ?? 2) * displayScale));
+      const anchorRadius = Number(annotation.leader?.anchor_radius_px ?? 6) * displayScale;
+      entry.dot.style.width = `${2 * anchorRadius}px`;
+      entry.dot.style.height = `${2 * anchorRadius}px`;
+      entry.dot.style.margin = `${-anchorRadius}px 0 0 ${-anchorRadius}px`;
       entry.dot.classList.toggle("is-crosshair", annotation.leader?.anchor_shape === "crosshair");
       if (annotation.annotation_id === state.selectedId && trackingState) {
         trackingState.textContent = annotation.anchor_type === "video_track"

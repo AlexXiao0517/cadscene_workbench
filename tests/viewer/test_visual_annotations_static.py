@@ -71,6 +71,10 @@ def test_engineering_callout_uses_shared_layout_and_structured_content() -> None
     assert "panel_rect" in script
     assert "leader_points" in script
     assert "entry.label.textContent = annotation.text" not in script
+    assert "visual.anchor_source_xy" in script
+    assert "sourceToDisplayPoint" in script
+    assert "viewport_size: [video.videoWidth, video.videoHeight]" in script
+    assert "viewport_size: [overlay.clientWidth, overlay.clientHeight]" not in script
 
 
 def test_render_stage_uses_full_label_editor_and_collapses_camera_settings() -> None:

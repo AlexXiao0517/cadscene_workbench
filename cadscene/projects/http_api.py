@@ -42,14 +42,10 @@ _WORKFLOW = re.compile(
 _NAME = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/name$"
 )
-_TRAJECTORY = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
-)
+_TRAJECTORY = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$")
 _RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
 _MERGE = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/merge-jobs$")
-_ANNOTATIONS = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations$"
-)
+_ANNOTATIONS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations$")
 _ANNOTATION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})$"
 )
@@ -161,9 +157,7 @@ class ProjectApi:
                 return self._activate_analysis(match["project"], payload)
             match = _WORKFLOW.fullmatch(path)
             if method == "PATCH" and match:
-                return self._update_workflow(
-                    match["project"], match["clip"], payload
-                )
+                return self._update_workflow(match["project"], match["clip"], payload)
             match = _NAME.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_name(match["project"], match["clip"], payload)
@@ -185,9 +179,7 @@ class ProjectApi:
                     match["project"], match["annotation"], payload
                 )
             if method == "GET" and match and match["action"] == "tracking":
-                return self._annotation_tracking(
-                    match["project"], match["annotation"]
-                )
+                return self._annotation_tracking(match["project"], match["annotation"])
             match = _ANNOTATION.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_annotation(
@@ -216,9 +208,7 @@ class ProjectApi:
                 )
             match = _WORKBENCH_SESSION.fullmatch(path)
             if match and method == "GET" and match["action"] is None:
-                return self._inspect_workbench_session(
-                    match["project"], match["token"]
-                )
+                return self._inspect_workbench_session(match["project"], match["token"])
             if match and method == "POST" and match["action"] in {"save", "close"}:
                 return self._mutate_workbench_session(
                     match["project"], match["token"], match["action"], payload
@@ -246,9 +236,13 @@ class ProjectApi:
         except WorkbenchPermissionDenied as exc:
             return ApiResponse(403, {"error": str(exc)})
         except ReplayedWorkbenchSave as exc:
-            return ApiResponse(409, {"error": "workbench_save_replayed", "message": str(exc)})
+            return ApiResponse(
+                409, {"error": "workbench_save_replayed", "message": str(exc)}
+            )
         except StaleWorkbenchSession as exc:
-            return ApiResponse(409, {"error": "stale_workbench_session", "message": str(exc)})
+            return ApiResponse(
+                409, {"error": "stale_workbench_session", "message": str(exc)}
+            )
         except (UploadValidationError, ValueError, KeyError, TypeError) as exc:
             return ApiResponse(400, {"error": str(exc)})
         except (InvalidWorkbenchOutput, InvalidWorkbenchReturnPath) as exc:
@@ -311,9 +305,7 @@ class ProjectApi:
         payload: Mapping[str, object],
         request: UploadRequest,
     ) -> ApiResponse:
-        return self._publish_upload_locked(
-            project_id, asset_type, payload, request
-        )
+        return self._publish_upload_locked(project_id, asset_type, payload, request)
 
     def _publish_upload_locked(
         self,
@@ -391,9 +383,7 @@ class ProjectApi:
             or not isinstance(expected_clips_revision, int)
             or expected_clips_revision < 0
         ):
-            raise ValueError(
-                "expected_clips_revision must be a non-negative integer"
-            )
+            raise ValueError("expected_clips_revision must be a non-negative integer")
         result = self.service.activate_candidate_analysis(
             project_id,
             candidate_analysis_revision=candidate_revision,
@@ -410,9 +400,7 @@ class ProjectApi:
             },
         )
 
-    def _snapshot(
-        self, project_id: str, headers: Mapping[str, str]
-    ) -> ApiResponse:
+    def _snapshot(self, project_id: str, headers: Mapping[str, str]) -> ApiResponse:
         snapshot = self._build_snapshot(project_id)
         etag = f'"{snapshot["snapshot_revision"]}"'
         response_headers = {"ETag": etag, "Cache-Control": "no-store"}
@@ -490,9 +478,7 @@ class ProjectApi:
             project_id,
             annotation_id,
             expected_revision=int(payload["expected_revision"]),
-            expected_annotation_revision=int(
-                payload["expected_annotation_revision"]
-            ),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
             changes=changes,
         )
         return ApiResponse(
@@ -515,9 +501,7 @@ class ProjectApi:
             project_id,
             annotation_id,
             expected_revision=int(payload["expected_revision"]),
-            expected_annotation_revision=int(
-                payload["expected_annotation_revision"]
-            ),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
         )
         return ApiResponse(
             200,
@@ -551,9 +535,7 @@ class ProjectApi:
             project_id,
             annotation_id,
             expected_revision=int(payload["expected_revision"]),
-            expected_annotation_revision=int(
-                payload["expected_annotation_revision"]
-            ),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
             correction=correction,
         )
         visible = sum(1 for item in result.revision.results if item.visible)
@@ -571,12 +553,14 @@ class ProjectApi:
             },
         )
 
-    def _annotation_tracking(
-        self, project_id: str, annotation_id: str
-    ) -> ApiResponse:
+    def _annotation_tracking(self, project_id: str, annotation_id: str) -> ApiResponse:
         annotations = self.repositories.annotations.load(project_id)
         annotation = next(
-            (item for item in annotations.annotations if item.annotation_id == annotation_id),
+            (
+                item
+                for item in annotations.annotations
+                if item.annotation_id == annotation_id
+            ),
             None,
         )
         if annotation is None:
@@ -620,9 +604,7 @@ class ProjectApi:
             if isinstance(analysis_state, Mapping)
             else ()
         )
-        analysis_jobs_by_id = {
-            str(item.get("job_id")): item for item in jobs.jobs
-        }
+        analysis_jobs_by_id = {str(item.get("job_id")): item for item in jobs.jobs}
         analysis_jobs = [
             {
                 "job_id": job_id,
@@ -630,9 +612,7 @@ class ProjectApi:
                 "status": candidate.get("status"),
                 "stage": candidate.get("stage"),
                 "progress": candidate.get("progress"),
-                "depends_on_job_ids": list(
-                    candidate.get("depends_on_job_ids", ())
-                ),
+                "depends_on_job_ids": list(candidate.get("depends_on_job_ids", ())),
                 "error": candidate.get("error"),
             }
             for job_id in analysis_job_ids
@@ -676,11 +656,7 @@ class ProjectApi:
                     (
                         dependency
                         for dependency_id in job.get("depends_on_job_ids", ())
-                        if (
-                            dependency := analysis_jobs_by_id.get(
-                                str(dependency_id)
-                            )
-                        )
+                        if (dependency := analysis_jobs_by_id.get(str(dependency_id)))
                         is not None
                         and dependency.get("status")
                         in {"preparing", "running", "validating"}
@@ -692,11 +668,7 @@ class ProjectApi:
                 job is not None
                 and bool(job.get("depends_on_job_ids"))
                 and all(
-                    (
-                        dependency := analysis_jobs_by_id.get(
-                            str(dependency_id)
-                        )
-                    )
+                    (dependency := analysis_jobs_by_id.get(str(dependency_id)))
                     is not None
                     and dependency.get("status") == "success"
                     for dependency_id in job.get("depends_on_job_ids", ())
@@ -722,7 +694,11 @@ class ProjectApi:
                 # terminal success remains the sole source of 100%.
                 display_progress["fraction"] = 0.99
             capability = self._clip_capability(
-                project_id, clip, preflight, render_preflight, job,
+                project_id,
+                clip,
+                preflight,
+                render_preflight,
+                job,
                 analysis_busy=analysis_busy,
             )
             can_start_any = can_start_any or bool(
@@ -758,11 +734,19 @@ class ProjectApi:
                     ),
                     "progress": display_progress,
                     "render": {
-                        "job_id": None if render_job is None else render_job.get("job_id"),
-                        "status": "not_started" if render_job is None else render_job.get("status"),
-                        "stage": None if render_job is None else render_job.get("stage"),
+                        "job_id": None
+                        if render_job is None
+                        else render_job.get("job_id"),
+                        "status": "not_started"
+                        if render_job is None
+                        else render_job.get("status"),
+                        "stage": None
+                        if render_job is None
+                        else render_job.get("stage"),
                         "progress": _visible_job_progress(render_job),
-                        "output_revision": None if render_job is None else render_job.get("output_revision"),
+                        "output_revision": None
+                        if render_job is None
+                        else render_job.get("output_revision"),
                         "preview_url": _render_preview_url(
                             project_id,
                             clip.clip_id,
@@ -820,7 +804,9 @@ class ProjectApi:
         )
         snapshot = {
             "project_id": project_id,
-            "display_name": str(project.source_assets.get("display_name") or project_id),
+            "display_name": str(
+                project.source_assets.get("display_name") or project_id
+            ),
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
@@ -841,7 +827,9 @@ class ProjectApi:
             },
             "merge": {
                 "job_id": None if merge_job is None else merge_job.get("job_id"),
-                "status": "not_started" if merge_job is None else merge_job.get("status"),
+                "status": "not_started"
+                if merge_job is None
+                else merge_job.get("status"),
                 "stage": None if merge_job is None else merge_job.get("stage"),
                 "progress": _visible_job_progress(merge_job),
                 "download_url": (
@@ -900,7 +888,8 @@ class ProjectApi:
             "reason": reason,
             "can_open_workbench": can_open_workbench,
             "can_prepare_workbench": can_prepare_workbench,
-            "can_render": not analysis_busy and (
+            "can_render": not analysis_busy
+            and (
                 clip.clip_id in render_preflight.eligible
                 or clip.clip_id in render_preflight.confirmation_required
             ),
@@ -915,15 +904,16 @@ class ProjectApi:
             ),
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
-            "can_cancel": status
-            in {"queued", "preparing", "running", "validating"},
+            "can_cancel": status in {"queued", "preparing", "running", "validating"},
         }
 
     def _create_workbench_session(
         self, project_id: str, clip_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         return_to = payload.get("return_to")
         if not isinstance(return_to, str):
             raise InvalidWorkbenchReturnPath("return_to is required")
@@ -965,11 +955,11 @@ class ProjectApi:
             },
         )
 
-    def _inspect_workbench_session(
-        self, project_id: str, token: str
-    ) -> ApiResponse:
+    def _inspect_workbench_session(self, project_id: str, token: str) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.inspect(project_id, token)
         return ApiResponse(
             200,
@@ -984,7 +974,9 @@ class ProjectApi:
         self, project_id: str, token: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.attach_trajectory(
             project_id,
             token,
@@ -1002,7 +994,9 @@ class ProjectApi:
         self, project_id: str, token: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.heartbeat(
             project_id,
             token,
@@ -1024,7 +1018,9 @@ class ProjectApi:
         payload: Mapping[str, object],
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         expected_revision = _required_revision(payload)
         if action == "save":
             existing_save = payload.get("existing_save")
@@ -1178,9 +1174,7 @@ class ProjectApi:
             },
         )
 
-    def _merge_job(
-        self, project_id: str, payload: Mapping[str, object]
-    ) -> ApiResponse:
+    def _merge_job(self, project_id: str, payload: Mapping[str, object]) -> ApiResponse:
         expected_revision = _required_revision(payload)
         result = self.service.enqueue_project_merge(
             project_id, expected_jobs_revision=expected_revision
@@ -1237,8 +1231,7 @@ def _string_sequence(value: object, name: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list) or any(
-        not is_safe_stable_id(item)
-        for item in value
+        not is_safe_stable_id(item) for item in value
     ):
         raise ValueError(f"{name} must be a list of stable IDs")
     return tuple(value)
@@ -1351,9 +1344,7 @@ def _candidate_analysis_preview(
     artifact_path = descriptor.get("analysis_artifact_path")
     if not isinstance(input_snapshot, Mapping) or not isinstance(artifact_path, str):
         return None
-    manifest_path = (
-        Path(artifact_path) / "02_video_analysis" / "clip_manifest.json"
-    )
+    manifest_path = Path(artifact_path) / "02_video_analysis" / "clip_manifest.json"
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if payload.get("analysis_revision") != revision:
@@ -1427,9 +1418,7 @@ def _render_preview_record(
     render_records: tuple[Mapping[str, object], ...],
 ) -> Mapping[str, object] | None:
     output_revision = (
-        render_job.get("output_revision")
-        if isinstance(render_job, Mapping)
-        else None
+        render_job.get("output_revision") if isinstance(render_job, Mapping) else None
     )
     return next(
         (
@@ -1469,7 +1458,11 @@ def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
     fingerprints: dict[str, str] = {}
     for required in ("video", "cad"):
         asset = source_assets.get(required)
-        if not isinstance(asset, Mapping) or not asset.get("path") or not asset.get("sha256"):
+        if (
+            not isinstance(asset, Mapping)
+            or not asset.get("path")
+            or not asset.get("sha256")
+        ):
             return None
         fingerprints[required] = str(asset["sha256"])
     srt = source_assets.get("srt")
