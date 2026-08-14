@@ -59,6 +59,8 @@
   let projectWorkbenchSession = null;
   let projectWorkbenchBootstrapPromise = null;
   let projectWorkbenchBootstrapFailed = false;
+  let projectWorkbenchEditingHeartbeatTimer = null;
+  let projectWorkbenchEditingHeartbeatPromise = null;
   let projectWorkbenchSaveInFlight = false;
   let projectWorkbenchTrajectoryJobId = null;
   let projectWorkbenchTrajectoryStatus = null;
@@ -1373,6 +1375,9 @@
     );
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    if (!new Set(["editing", "pending_save"]).has(payload.state)) {
+      throw new Error("项目工作台会话已失效");
+    }
     projectWorkbenchSession = payload;
     applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession);
     if (projectWorkbenchTrajectoryIsPending()) {
@@ -1383,9 +1388,11 @@
         ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
         : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
     } else {
+      await heartbeatProjectWorkbenchEditingSession();
+      startProjectWorkbenchEditingHeartbeat();
       maybeAutoApplySfmCameraInit();
     }
-    return payload;
+    return projectWorkbenchSession;
   }
 
   function projectWorkbenchTrajectoryIsPending() {
@@ -1434,6 +1441,37 @@
     );
     projectWorkbenchSession = { ...projectWorkbenchSession, ...renewed };
     return renewed;
+  }
+
+  function stopProjectWorkbenchEditingHeartbeat() {
+    if (projectWorkbenchEditingHeartbeatTimer === null) return;
+    window.clearInterval(projectWorkbenchEditingHeartbeatTimer);
+    projectWorkbenchEditingHeartbeatTimer = null;
+  }
+
+  async function heartbeatProjectWorkbenchEditingSession() {
+    if (projectWorkbenchEditingHeartbeatPromise) {
+      return projectWorkbenchEditingHeartbeatPromise;
+    }
+    if (!projectWorkbenchSession || projectWorkbenchSession.state !== "editing") return null;
+    projectWorkbenchEditingHeartbeatPromise = renewProjectWorkbenchSession(
+      projectWorkbenchSession.clips_revision,
+    );
+    try {
+      return await projectWorkbenchEditingHeartbeatPromise;
+    } finally {
+      projectWorkbenchEditingHeartbeatPromise = null;
+    }
+  }
+
+  function startProjectWorkbenchEditingHeartbeat() {
+    if (projectWorkbenchEditingHeartbeatTimer !== null) return;
+    projectWorkbenchEditingHeartbeatTimer = window.setInterval(() => {
+      heartbeatProjectWorkbenchEditingSession().catch((error) => {
+        stateLabel.textContent = "会话续租失败";
+        message.textContent = `项目工作台会话续租失败：${error.message}`;
+      });
+    }, PROJECT_WORKBENCH_HEARTBEAT_MS);
   }
 
   function projectTrajectoryStatusCopy(status, stage) {
@@ -1607,7 +1645,13 @@
     if (!projectWorkbenchToken) return null;
     if (!projectWorkbenchSession) throw new Error("项目工作台会话尚未就绪");
     if (projectWorkbenchSaveInFlight) return null;
-    if (projectWorkbenchSession.state !== "editing" && projectWorkbenchSession.state !== "pending_save") return null;
+    if (projectWorkbenchSession.state !== "editing" && projectWorkbenchSession.state !== "pending_save") {
+      throw new Error("项目工作台会话已失效，请返回项目管理页面重新进入");
+    }
+    stopProjectWorkbenchEditingHeartbeat();
+    if (projectWorkbenchEditingHeartbeatPromise) {
+      await projectWorkbenchEditingHeartbeatPromise;
+    }
     projectWorkbenchSaveInFlight = true;
     try {
       const response = await fetch(
@@ -1628,6 +1672,9 @@
       return payload;
     } finally {
       projectWorkbenchSaveInFlight = false;
+      if (projectWorkbenchSession?.state === "editing") {
+        startProjectWorkbenchEditingHeartbeat();
+      }
     }
   }
 
@@ -1699,6 +1746,7 @@
   }
 
   window.addEventListener("pagehide", () => {
+    stopProjectWorkbenchEditingHeartbeat();
     if (
       projectWorkbenchInternalNavigation
       || projectWorkbenchSaveInFlight
@@ -1996,7 +2044,9 @@
         clip_ids: [clipId],
         enqueue: false,
       });
-      if (!(preflight.eligible || []).includes(clipId)) {
+      const confirmationRequired = preflight.needs_confirmation || preflight.confirmation_required || [];
+      const confirmedClipIds = confirmationRequired.includes(clipId) ? [clipId] : [];
+      if (!(preflight.eligible || []).includes(clipId) && !confirmedClipIds.length) {
         runningStage = null;
         progress.value = 0;
         stateLabel.textContent = "无法开始渲染";
@@ -2005,7 +2055,7 @@
       const queued = await projectWorkbenchRequest("/render-jobs", {
         expected_revision: projectWorkbenchSession.jobs_revision,
         clip_ids: [clipId],
-        confirmed_clip_ids: [],
+        confirmed_clip_ids: confirmedClipIds,
         enqueue: true,
       });
       const jobId = queued.job_ids?.[0];

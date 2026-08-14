@@ -4308,9 +4308,9 @@ class ProjectService:
                 continue
             revision_id = annotation.active_tracking_revision
             if revision_id is None:
-                raise ValueError(
-                    f"video annotation has no active tracking revision: {annotation.annotation_id}"
-                )
+                # 未完成跟踪的视频标牌属于可保存草稿；渲染时按位置为空隐藏，
+                # 不能阻断同片段内已经可用的 CAD 或视频标牌。
+                continue
             revision = self.tracking_revision_repository.load(
                 project_id,
                 annotation.clip_id,

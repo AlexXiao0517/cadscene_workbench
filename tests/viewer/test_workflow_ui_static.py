@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 import subprocess
@@ -335,6 +335,56 @@ def test_project_workbench_renews_session_during_long_trajectory_jobs() -> None:
     assert wait.rindex("renewProjectWorkbenchSession", 0, trajectory_ready) >= 0
 
 
+def test_project_workbench_renews_session_during_manual_editing() -> None:
+    script = _read("workflow.js")
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+
+    assert "startProjectWorkbenchEditingHeartbeat" in script
+    assert "window.setInterval" in script
+    assert "PROJECT_WORKBENCH_HEARTBEAT_MS" in script
+    assert "startProjectWorkbenchEditingHeartbeat" in bootstrap
+
+
+def test_render_rejects_expired_workbench_session_instead_of_silently_skipping_save() -> None:
+    script = _read("workflow.js")
+    finalize = script[
+        script.index("async function finalizeProjectWorkbenchSave") :
+        script.index("async function finishQualityStage")
+    ]
+
+    assert "项目工作台会话已失效" in finalize
+    invalid_state = finalize[
+        finalize.index('projectWorkbenchSession.state !== "editing"') :
+        finalize.index("projectWorkbenchSaveInFlight = true")
+    ]
+    assert "throw new Error" in invalid_state
+    assert "return null" not in invalid_state
+
+
+def test_workbench_save_waits_for_inflight_editing_heartbeat() -> None:
+    script = _read("workflow.js")
+    finalize = script[
+        script.index("async function finalizeProjectWorkbenchSave") :
+        script.index("async function finishQualityStage")
+    ]
+
+    assert "projectWorkbenchEditingHeartbeatPromise" in script
+    assert "await projectWorkbenchEditingHeartbeatPromise" in finalize
+    assert finalize.index("await projectWorkbenchEditingHeartbeatPromise") < finalize.index(
+        "/save`"
+    )
+
+
+def test_render_button_uses_generic_video_copy() -> None:
+    html = _read("index.html")
+
+    assert 'id="workflowRender" data-job-action type="button">渲染视频</button>' in html
+    assert "渲染带标签视频" not in html
+
+
 def test_successful_project_trajectory_navigates_to_keyframe_stage() -> None:
     script = _read("workflow.js")
     wait = script[
@@ -412,7 +462,9 @@ def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
     assert 'projectWorkbenchRequest("/render-jobs"' in render
     assert "enqueue: false" in render
     assert "enqueue: true" in render
-    assert "confirmed_clip_ids: []" in render
+    assert "preflight.needs_confirmation || preflight.confirmation_required || []" in render
+    assert "confirmationRequired.includes(clipId) ? [clipId] : []" in render
+    assert "confirmed_clip_ids: confirmedClipIds" in render
     assert "waitForProjectWorkbenchRender" in render
     assert render.index("if (projectWorkbenchToken)") < render.index('runStage("render")')
     snapshot_refresh = render.index("/snapshot")

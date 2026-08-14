@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cadscene.annotations.models import Annotation, SourcePtsRange
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.media import ProjectMediaSpec, parse_ffprobe
@@ -719,6 +720,43 @@ def test_render_identity_includes_only_the_target_clip_annotations(
 
     assert before["annotation_dependencies"] == {"annotations": []}
     assert before != after
+
+
+def test_render_identity_keeps_untracked_video_draft_hidden_without_blocking(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    clip = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    annotation = Annotation.new(
+        annotation_id="video-draft",
+        clip_id="ready",
+        anchor_type="video_track",
+        text="尚未跟踪",
+        anchor={
+            "initialization": {
+                "source_pts": 500,
+                "bbox": [10.0, 10.0, 20.0, 20.0],
+                "anchor_xy": [20.0, 20.0],
+            }
+        },
+        source_pts_range=SourcePtsRange(500, 600, 1, 1000),
+        created_at="2026-08-04T00:00:02Z",
+        operation_id="create-video-draft",
+    )
+    manifest = repositories.annotations.load("p1")
+    repositories.annotations.update(
+        "p1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(value, annotations=(annotation,)),
+    )
+
+    identity = service._annotation_render_identity("p1", clip)
+
+    assert identity["tracking_dependencies"] == []
+    assert identity["annotations"][0]["annotation_id"] == "video-draft"
+    assert identity["annotations"][0]["active_tracking_revision"] is None
 
 
 def test_reopening_saved_workbench_does_not_stale_current_render_identity(
