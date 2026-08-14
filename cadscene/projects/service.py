@@ -4332,6 +4332,7 @@ class ProjectService:
                 }
             )
         cad_revision = None
+        cad_coordinate_transform = None
         if has_cad_anchor:
             cad = self.repositories.project.load(project_id).source_assets.get("cad")
             cad_revision = (
@@ -4348,10 +4349,22 @@ class ProjectService:
                 if isinstance(cad, Mapping)
                 else cad
             )
+            parameters = _workbench_render_parameters(
+                self.storage_root, project_id, clip
+            )
+            cad_coordinate_transform = {
+                "cad_scale": float(parameters["cad_scale"]),
+                "origin_xy": [float(value) for value in parameters["origin_xy"]],
+            }
         return {
             "annotations": [item.to_dict() for item in annotations],
             "tracking_dependencies": tracking_dependencies,
             "cad_revision": cad_revision,
+            **(
+                {"cad_coordinate_transform": cad_coordinate_transform}
+                if cad_coordinate_transform is not None
+                else {}
+            ),
         }
 
     def _write_annotation_render_bundle(
@@ -4403,6 +4416,11 @@ class ProjectService:
             "annotations": raw_annotations,
             "tracking_revisions": tracking_revisions,
             "dependencies": identity,
+            **(
+                {"cad_coordinate_transform": identity["cad_coordinate_transform"]}
+                if "cad_coordinate_transform" in identity
+                else {}
+            ),
         }
         path = attempt / "annotation_render_bundle.json"
         temporary = path.with_suffix(".json.tmp")

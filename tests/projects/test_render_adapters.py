@@ -372,6 +372,42 @@ def test_workbench_render_draws_annotation_overlay_before_packaging(
     assert render_command[0] == package_command[0]
 
 
+def test_workbench_render_without_annotations_keeps_original_fast_path(
+    tmp_path: Path,
+) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    run_root = (tmp_path / "run").resolve()
+    trajectory = run_root / "03_alignment" / "trajectory.json"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text("{}", encoding="utf-8")
+    sparse = run_root / "02_sfm" / "sparse_points.ply"
+    sparse.parent.mkdir(parents=True)
+    sparse.write_text("ply\n", encoding="utf-8")
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 0.06,
+                "origin_xy": [0.0, 0.0],
+                "trajectory_path": str(trajectory),
+            },
+        }
+    )
+
+    plan = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("sfm_only").prepare(inputs)
+
+    assert len(plan.commands) == 2
+    assert all(
+        "cadscene.cli.render_annotations" not in command for command in plan.commands
+    )
+    assert "cadscene.cli.package_project_render" in plan.commands[-1]
+
+
 def test_render_packaging_preserves_authoritative_source_frame_identity(
     tmp_path: Path,
 ) -> None:

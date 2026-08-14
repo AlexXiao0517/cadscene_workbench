@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 from cadscene.annotations.callout_layout import layout_callout
 from cadscene.cad.projection import project_point
 from cadscene.core.camera import CameraState
+from cadscene.core.coordinates import web_camera_to_cad_meters
 from cadscene.rendering.overlay import load_camera_path_csv
 
 
@@ -78,6 +79,22 @@ def _tracking_by_pts(
         for item in results
         if isinstance(item, Mapping) and isinstance(item.get("source_pts"), int)
     }
+
+
+def _cad_projection_world(
+    bundle: Mapping[str, object], world: Sequence[object]
+) -> Sequence[object]:
+    transform = bundle.get("cad_coordinate_transform")
+    if not isinstance(transform, Mapping):
+        return world
+    origin_xy = transform.get("origin_xy")
+    if not isinstance(origin_xy, (list, tuple)) or len(origin_xy) != 2:
+        raise ValueError("CAD coordinate transform requires origin_xy")
+    return web_camera_to_cad_meters(
+        {"x": float(world[0]), "y": float(world[1]), "z": float(world[2])},
+        origin_xy,
+        float(transform["cad_scale"]),
+    )
 
 
 def build_annotation_events(
@@ -186,7 +203,12 @@ def build_annotation_events(
                 )
                 if camera is None or not isinstance(world, (list, tuple)):
                     continue
-                projected = project_point(world, camera, width=width, height=height)
+                projected = project_point(
+                    _cad_projection_world(bundle, world),
+                    camera,
+                    width=width,
+                    height=height,
+                )
                 if projected is None or not (
                     0.0 <= projected.u < width and 0.0 <= projected.v < height
                 ):
@@ -411,11 +433,19 @@ def build_overlay_concat_document(
         else f"{frame_rate.numerator}/{frame_rate.denominator}"
     )
     lines = ["ffconcat version 1.0"]
-    for path, frame in zip(paths, source_frames):
+    for index, (path, frame) in enumerate(zip(paths, source_frames)):
         escaped = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
         duration_pts = int(frame.get("duration_pts") or 0)
         if duration_pts <= 0:
-            raise ValueError("every annotation overlay frame requires duration_pts")
+            current_pts = int(frame["source_pts"])
+            if index + 1 < len(source_frames):
+                duration_pts = int(source_frames[index + 1]["source_pts"]) - current_pts
+            elif index > 0:
+                duration_pts = current_pts - int(source_frames[index - 1]["source_pts"])
+            else:
+                duration_pts = 1
+        if duration_pts <= 0:
+            raise ValueError("annotation overlay frame PTS must be strictly increasing")
         lines.append(f"file '{escaped}'")
         lines.append(f"option framerate {frame_rate_text}")
         lines.append(f"duration {float(duration_pts * time_base):.12f}")

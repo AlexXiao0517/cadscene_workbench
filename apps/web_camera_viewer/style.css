@@ -736,6 +736,14 @@ h2 {
   transform: rotate(45deg);
 }
 
+.annotation-label[hidden],
+.engineering-callout-leader[hidden],
+.annotation-anchor-dot[hidden],
+[data-annotation-mode="video_track"][hidden],
+#annotationReanchor[hidden] {
+  display: none !important;
+}
+
 .annotation-panel {
   display: grid;
   gap: 12px;

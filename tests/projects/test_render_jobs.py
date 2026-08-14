@@ -18,6 +18,7 @@ from cadscene.projects.render_adapters import RenderAdapterRegistry, RenderExecu
 from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _render_identity_payload
 from cadscene.projects.service import _render_physical_inputs
+from cadscene.video_analysis.pts import DecodedFrameTimestamp
 import cadscene.projects.service as service_module
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -757,6 +758,61 @@ def test_render_identity_keeps_untracked_video_draft_hidden_without_blocking(
     assert identity["tracking_dependencies"] == []
     assert identity["annotations"][0]["annotation_id"] == "video-draft"
     assert identity["annotations"][0]["active_tracking_revision"] is None
+
+
+def test_cad_annotation_bundle_carries_project_coordinate_transform(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    clip = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    annotation = Annotation.new(
+        annotation_id="cad-label",
+        clip_id="ready",
+        anchor_type="cad_anchor",
+        text="K12+340",
+        anchor={"cad_world_xyz": [1000.0, 2020.0, 2.0]},
+        source_pts_range=SourcePtsRange(500, 600, 1, 1000),
+        created_at="2026-08-04T00:00:02Z",
+        operation_id="create-cad-label",
+    )
+    manifest = repositories.annotations.load("p1")
+    repositories.annotations.update(
+        "p1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(value, annotations=(annotation,)),
+    )
+    dataset = tmp_path / "data" / "p1-ready"
+    dataset.mkdir(parents=True)
+    (dataset / "dataset_manifest.json").write_text(
+        json.dumps(
+            {"defaults": {"cad_scale": 0.5, "origin_xy": [1000.0, 2000.0]}}
+        ),
+        encoding="utf-8",
+    )
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    bundle_path = service._write_annotation_render_bundle(
+        "p1",
+        clip,
+        frames=(DecodedFrameTimestamp(0, 500, 40, "pts"),),
+        time_base=Fraction(1, 1000),
+        media_spec=_media_spec(),
+        attempt=attempt,
+    )
+
+    assert bundle_path is not None
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert bundle["cad_coordinate_transform"] == {
+        "cad_scale": 0.5,
+        "origin_xy": [1000.0, 2000.0],
+    }
+    assert bundle["dependencies"]["cad_coordinate_transform"] == {
+        "cad_scale": 0.5,
+        "origin_xy": [1000.0, 2000.0],
+    }
 
 
 def test_reopening_saved_workbench_does_not_stale_current_render_identity(

@@ -12,7 +12,7 @@ def test_render_stage_contains_visual_label_toolbar_editor_and_overlay() -> None
 
     assert 'id="annotationToolbar"' in html
     assert 'data-annotation-mode="cad_anchor"' in html
-    assert 'data-annotation-mode="video_track"' in html
+    assert 'data-annotation-mode="video_track" hidden' in html
     assert 'id="annotationTitle"' in html
     assert 'id="annotationBody"' in html
     assert 'id="annotationPanelWidth"' in html
@@ -22,7 +22,7 @@ def test_render_stage_contains_visual_label_toolbar_editor_and_overlay() -> None
     assert 'id="annotationEndPts"' in html
     assert 'id="annotationVisible"' in html
     assert 'id="annotationDelete"' in html
-    assert 'id="annotationReanchor"' in html
+    assert 'id="annotationReanchor" type="button" disabled hidden' in html
     assert 'id="annotationTrackingState"' in html
     assert 'id="annotationOverlay"' in html
     assert '<script src="./annotations.js?' in html
@@ -61,6 +61,15 @@ def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes
     assert ".engineering-callout-body" in css
     assert ".engineering-callout-leader" in css
     assert "pointer-events: none" in css
+
+
+def test_hidden_callout_hides_panel_leader_and_anchor_as_one_unit() -> None:
+    css = (VIEWER / "style.css").read_text(encoding="utf-8")
+
+    assert ".annotation-label[hidden]" in css
+    assert ".engineering-callout-leader[hidden]" in css
+    assert ".annotation-anchor-dot[hidden]" in css
+    assert "display: none !important" in css
 
 
 def test_engineering_callout_uses_shared_layout_and_structured_content() -> None:

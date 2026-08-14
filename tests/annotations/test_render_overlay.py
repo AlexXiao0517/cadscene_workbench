@@ -287,6 +287,24 @@ def test_overlay_concat_uses_authoritative_per_frame_durations(tmp_path: Path) -
     assert "duration 0.050000000000" in document
 
 
+def test_overlay_concat_derives_missing_durations_from_authoritative_pts(
+    tmp_path: Path,
+) -> None:
+    document = build_overlay_concat_document(
+        tuple(tmp_path / f"{index:03d}.png" for index in range(3)),
+        source_frames=(
+            {"source_pts": 100, "duration_pts": None},
+            {"source_pts": 104, "duration_pts": None},
+            {"source_pts": 110, "duration_pts": None},
+        ),
+        time_base_numerator=1,
+        time_base_denominator=100,
+    )
+
+    assert document.count("duration 0.040000000000") == 1
+    assert document.count("duration 0.060000000000") == 2
+
+
 def test_render_events_project_cad_through_shared_camera_math() -> None:
     bundle = {
         "video_width": 200,
@@ -338,6 +356,56 @@ def test_render_events_project_cad_through_shared_camera_math() -> None:
     events = build_annotation_events(bundle, camera_rows=camera_rows)
 
     assert len(events) == 1
+    assert (events[0].x, events[0].y) == (110.0, 45.0)
+
+
+def test_render_events_convert_frontend_cad_world_with_project_transform() -> None:
+    bundle = {
+        "video_width": 200,
+        "video_height": 100,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+        "source_frames": [{"source_pts": 100, "duration_pts": 1}],
+        "cad_coordinate_transform": {
+            "cad_scale": 0.5,
+            "origin_xy": [1000.0, 2000.0],
+        },
+        "annotations": [
+            {
+                "annotation_id": "cad-label",
+                "clip_id": "clip-1",
+                "anchor_type": "cad_anchor",
+                "text": "K12+340",
+                "anchor": {"cad_world_xyz": [1000.0, 2020.0, 2.0]},
+                "style": {},
+                "source_pts_range": {
+                    "start_pts": 100,
+                    "end_pts_exclusive": 101,
+                },
+                "screen_offset": [10, -5],
+                "visibility_policy": {},
+                "user_visible": True,
+                "active_tracking_revision": None,
+            }
+        ],
+        "tracking_revisions": {},
+    }
+    camera_rows = (
+        {
+            "frame_index": 0,
+            "camera_x": 0,
+            "camera_y": 0,
+            "camera_z": 1,
+            "yaw": 0,
+            "pitch": 0,
+            "roll": 0,
+            "fov": 90,
+        },
+    )
+
+    events = build_annotation_events(bundle, camera_rows=camera_rows)
+
+    assert len(events) == 1
+    assert (events[0].anchor_x, events[0].anchor_y) == (100.0, 50.0)
     assert (events[0].x, events[0].y) == (110.0, 45.0)
 
 
