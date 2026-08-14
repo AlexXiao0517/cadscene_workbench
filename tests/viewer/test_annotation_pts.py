@@ -69,32 +69,43 @@ def test_video_tracking_visual_never_freezes_or_interpolates_across_lost() -> No
     assert visible["visible"] is True
     assert visible["anchor_xy"] == [80, 60]
     assert visible["label_xy"] == [100, 50]
-    assert lost == {"visible": False, "reason": "tracking_lost", "tracking_status": "lost", "confidence": 0}
+    assert lost == {
+        "visible": False,
+        "reason": "tracking_lost",
+        "tracking_status": "lost",
+        "confidence": 0,
+    }
     assert missing_after_lost == {"visible": False, "reason": "no_exact_tracking_pts"}
 
 
-def test_video_tracking_visual_rejects_inconsistent_lost_and_out_of_frame_results() -> None:
+def test_video_tracking_visual_rejects_inconsistent_lost_and_out_of_frame_results() -> (
+    None
+):
     annotation = {
         "screen_offset": [10, -5],
         "visibility_policy": {"min_tracking_confidence": 0.5},
     }
     transform = "(point) => ({x:point.x,y:point.y})"
-    inconsistent_lost = [{
-        "source_pts": 100,
-        "anchor_xy": [40, 30],
-        "bbox": [20, 20, 40, 20],
-        "confidence": 0.9,
-        "visibility": True,
-        "tracking_status": "lost",
-    }]
-    outside = [{
-        "source_pts": 100,
-        "anchor_xy": [205, 30],
-        "bbox": [190, 20, 30, 20],
-        "confidence": 0.9,
-        "visibility": True,
-        "tracking_status": "tracked",
-    }]
+    inconsistent_lost = [
+        {
+            "source_pts": 100,
+            "anchor_xy": [40, 30],
+            "bbox": [20, 20, 40, 20],
+            "confidence": 0.9,
+            "visibility": True,
+            "tracking_status": "lost",
+        }
+    ]
+    outside = [
+        {
+            "source_pts": 100,
+            "anchor_xy": [205, 30],
+            "bbox": [190, 20, 30, 20],
+            "confidence": 0.9,
+            "visibility": True,
+            "tracking_status": "tracked",
+        }
+    ]
 
     lost = _node(
         f"m.videoTrackVisual({json.dumps(annotation)}, {json.dumps(inconsistent_lost)}, 100, {transform}, null, [200, 100])"
@@ -122,9 +133,7 @@ def test_untracked_video_callout_is_visible_only_on_its_initialization_pts() -> 
     }
     transform = "(point) => ({x:point.x,y:point.y})"
 
-    draft = _node(
-        f"m.videoTrackVisual({json.dumps(annotation)}, [], 100, {transform})"
-    )
+    draft = _node(f"m.videoTrackVisual({json.dumps(annotation)}, [], 100, {transform})")
     other_frame = _node(
         f"m.videoTrackVisual({json.dumps(annotation)}, [], 104, {transform})"
     )
@@ -157,3 +166,39 @@ def test_video_tracking_visual_uses_constant_time_pts_index() -> None:
 
     assert visual["visible"] is True
     assert visual["anchor_xy"] == [40, 30]
+
+
+def test_cad_anchor_visual_reprojects_from_each_live_camera_pose() -> None:
+    annotation = {"screen_offset": [30, -20]}
+    transform = "(point) => ({x:point.x*0.5,y:point.y*0.5})"
+
+    first = _node(
+        "m.cadAnchorVisual("
+        f"{json.dumps(annotation)}, {{visible:true,source_xy:[100,80],depth_m:25}}, {transform})"
+    )
+    second = _node(
+        "m.cadAnchorVisual("
+        f"{json.dumps(annotation)}, {{visible:true,source_xy:[180,120],depth_m:18}}, {transform})"
+    )
+
+    assert first["visible"] is True
+    assert first["anchor_source_xy"] == [100, 80]
+    assert first["label_source_xy"] == [130, 60]
+    assert second["anchor_source_xy"] == [180, 120]
+    assert second["label_source_xy"] == [210, 100]
+    assert second["anchor_xy"] != first["anchor_xy"]
+    assert second["label_xy"] != first["label_xy"]
+
+
+def test_cad_anchor_creation_rejects_currently_invisible_projection() -> None:
+    visible = _node(
+        "m.cadAnchorCreationDecision({visible:true,source_xy:[100,80],depth_m:25})"
+    )
+    outside = _node(
+        "m.cadAnchorCreationDecision({visible:false,reason:'outside_viewport'})"
+    )
+    unavailable = _node("m.cadAnchorCreationDecision(null)")
+
+    assert visible == {"ok": True, "reason": "visible"}
+    assert outside == {"ok": False, "reason": "outside_viewport"}
+    assert unavailable == {"ok": False, "reason": "projection_unavailable"}

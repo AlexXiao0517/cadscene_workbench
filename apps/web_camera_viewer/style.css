@@ -640,6 +640,18 @@ h2 {
   pointer-events: none;
 }
 
+#cadAnnotationOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#cadAnnotationOverlay .annotation-label {
+  pointer-events: auto;
+}
+
 #annotationRoiSelection {
   position: absolute;
   z-index: 7;

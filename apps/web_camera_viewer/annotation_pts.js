@@ -113,6 +113,42 @@
     };
   }
 
+  function cadAnchorCreationDecision(projected) {
+    if (!projected || typeof projected !== "object") {
+      return { ok: false, reason: "projection_unavailable" };
+    }
+    if (!projected.visible || !Array.isArray(projected.source_xy)) {
+      return { ok: false, reason: String(projected.reason || "projection_invalid") };
+    }
+    return { ok: true, reason: "visible" };
+  }
+
+  function cadAnchorVisual(annotation, projected, sourceToDisplay, screenOffset = null) {
+    const decision = cadAnchorCreationDecision(projected);
+    if (!decision.ok) return hidden(decision.reason);
+    const offset = screenOffset || annotation.screen_offset || [0, 0];
+    const anchorSource = {
+      x: Number(projected.source_xy[0]),
+      y: Number(projected.source_xy[1]),
+    };
+    const labelSource = {
+      x: anchorSource.x + Number(offset[0]),
+      y: anchorSource.y + Number(offset[1]),
+    };
+    const anchor = sourceToDisplay(anchorSource);
+    const label = sourceToDisplay(labelSource);
+    if (!anchor || !label) return hidden("outside_viewport");
+    return {
+      visible: true,
+      reason: "visible",
+      anchor_source_xy: [anchorSource.x, anchorSource.y],
+      label_source_xy: [labelSource.x, labelSource.y],
+      anchor_xy: [anchor.x, anchor.y],
+      label_xy: [label.x, label.y],
+      depth_m: Number(projected.depth_m),
+    };
+  }
+
   function createBrowserAuthority(browser) {
     const video = browser.document.querySelector("#sourceVideo");
     let projectId = "";
@@ -188,32 +224,12 @@
         const projected = browser.cadsceneProjectCadWorldPoint?.(
           annotation.anchor?.cad_world_xyz,
         );
-        if (!projected?.visible || !projected.source_xy) {
-          return hidden(projected?.reason || "projection_invalid");
-        }
-        const offset = options.screenOffset || annotation.screen_offset || [0, 0];
-        const anchorSource = {
-          x: Number(projected.source_xy[0]),
-          y: Number(projected.source_xy[1]),
-        };
-        const anchor = sourceToDisplay(anchorSource);
-        const label = sourceToDisplay({
-          x: anchorSource.x + Number(offset[0]),
-          y: anchorSource.y + Number(offset[1]),
-        });
-        if (!anchor || !label) return hidden("outside_viewport");
-        return {
-          visible: true,
-          reason: "visible",
-          anchor_source_xy: [anchorSource.x, anchorSource.y],
-          label_source_xy: [
-            anchorSource.x + Number(offset[0]),
-            anchorSource.y + Number(offset[1]),
-          ],
-          anchor_xy: [anchor.x, anchor.y],
-          label_xy: [label.x, label.y],
-          depth_m: projected.depth_m,
-        };
+        return cadAnchorVisual(
+          annotation,
+          projected,
+          sourceToDisplay,
+          options.screenOffset,
+        );
       },
 
       displayDeltaToSource(dx, dy) {
@@ -239,5 +255,11 @@
     };
   }
 
-  return { sourcePtsAtTime, videoTrackVisual, createBrowserAuthority };
+  return {
+    sourcePtsAtTime,
+    videoTrackVisual,
+    cadAnchorVisual,
+    cadAnchorCreationDecision,
+    createBrowserAuthority,
+  };
 });

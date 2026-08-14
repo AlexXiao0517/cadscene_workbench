@@ -1648,6 +1648,30 @@
       };
     }
 
+    function projectCadWorldToInspect(point) {
+      if (!Array.isArray(point) || point.length !== 3) {
+        return { visible: false, reason: "projection_unavailable" };
+      }
+      inspectCamera.updateMatrixWorld(true);
+      const scenePoint = worldToScene(point.map(Number), origin);
+      const cameraPoint = scenePoint.clone().applyMatrix4(inspectCamera.matrixWorldInverse);
+      if (cameraPoint.z >= -inspectCamera.near) {
+        return { visible: false, reason: "behind_inspect_camera" };
+      }
+      const projected = scenePoint.clone().project(inspectCamera);
+      if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+        return { visible: false, reason: "projection_invalid" };
+      }
+      const width = Math.max(1, renderer.domElement.clientWidth || sceneContainer.clientWidth);
+      const height = Math.max(1, renderer.domElement.clientHeight || sceneContainer.clientHeight);
+      const x = (projected.x + 1) * width * 0.5;
+      const y = (1 - projected.y) * height * 0.5;
+      if (x < 0 || x >= width || y < 0 || y >= height) {
+        return { visible: false, reason: "outside_inspect_viewport" };
+      }
+      return { visible: true, reason: "visible", xy: [x, y] };
+    }
+
     renderer.domElement.addEventListener("click", (event) => {
       const hit = pickSuggestion(event);
       if (!hit) return;
@@ -1705,7 +1729,7 @@
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
       setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
-      pickCadWorld,
+      pickCadWorld, projectCadWorldToInspect,
     };
   }
 
@@ -2038,6 +2062,11 @@
 
   window.cadscenePickCadWorld = function (event) {
     return threeScene?.pickCadWorld(event) || null;
+  };
+
+  window.cadsceneProjectCadWorldToInspect = function (point) {
+    return threeScene?.projectCadWorldToInspect(point)
+      || { visible: false, reason: "projection_unavailable" };
   };
 
   window.cadsceneProjectCadWorldPoint = function (point) {

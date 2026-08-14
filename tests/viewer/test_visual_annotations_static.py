@@ -46,7 +46,9 @@ def test_annotation_ui_uses_revisioned_api_drag_offsets_and_raycast() -> None:
     assert "intersectObjects" in legacy
 
 
-def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes() -> None:
+def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes() -> (
+    None
+):
     script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
     css = (VIEWER / "style.css").read_text(encoding="utf-8")
 
@@ -101,13 +103,15 @@ def test_new_label_is_selected_for_immediate_text_editing() -> None:
     assert "await saveSelectedAnnotation()" in script
     assert script.count("focusSelectedAnnotationEditor();") >= 2
     video_create = script[script.index('createAnnotation("video_track"') :]
-    video_create = video_create[:video_create.index("function beginLabelDrag")]
+    video_create = video_create[: video_create.index("function beginLabelDrag")]
     assert "state.pendingInitialTrackingId = annotation.annotation_id;" in video_create
     assert "await runTracking(annotation);" not in video_create
     save = script[script.index("async function saveSelectedAnnotation()") :]
     assert "state.pendingInitialTrackingId === updated.annotation_id" in save
     assert "await runTracking(updated);" in save
-    assert save.index("await runTracking(updated);") < save.index("state.pendingInitialTrackingId = null;")
+    assert save.index("await runTracking(updated);") < save.index(
+        "state.pendingInitialTrackingId = null;"
+    )
 
 
 def test_video_target_supports_click_roi_and_visible_drag_selection() -> None:
@@ -123,13 +127,60 @@ def test_video_target_supports_click_roi_and_visible_drag_selection() -> None:
 def test_video_target_selection_suppresses_native_video_click_playback() -> None:
     script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
 
-    assert 'video.addEventListener("click", suppressVideoPlaybackWhileSelecting, true)' in script
+    assert (
+        'video.addEventListener("click", suppressVideoPlaybackWhileSelecting, true)'
+        in script
+    )
     assert "suppressNextVideoClick: false" in script
     assert "state.suppressNextVideoClick = true;" in script
     suppress = script[
-        script.index("function suppressVideoPlaybackWhileSelecting") :
-        script.index('video.addEventListener("click"', script.index("function suppressVideoPlaybackWhileSelecting"))
+        script.index("function suppressVideoPlaybackWhileSelecting") : script.index(
+            'video.addEventListener("click"',
+            script.index("function suppressVideoPlaybackWhileSelecting"),
+        )
     ]
     assert "event.preventDefault()" in suppress
     assert "event.stopImmediatePropagation()" in suppress
     assert "state.suppressNextVideoClick = false;" in suppress
+
+
+def test_cad_anchor_creation_has_inspect_view_feedback_and_projection_guard() -> None:
+    html = (VIEWER / "index.html").read_text(encoding="utf-8")
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+    legacy = (VIEWER / "viewer_legacy.js").read_text(encoding="utf-8")
+    css = (VIEWER / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="cadAnnotationOverlay"' in html
+    assert "cadsceneProjectCadWorldToInspect" in legacy
+    assert "cadsceneProjectCadWorldToInspect" in script
+    assert "cadAnchorCreationDecision" in script
+    assert script.index("cadAnchorCreationDecision") < script.index(
+        'createAnnotation("cad_anchor"'
+    )
+    assert "#cadAnnotationOverlay" in css
+    assert "cadNodes" in script
+    cad_click = script[
+        script.index('sceneContainer.addEventListener("click"') : script.index(
+            'videoLayer.addEventListener("pointerdown"'
+        )
+    ]
+    assert 'event.target.closest?.(".annotation-label")' in cad_click
+    decision_branch = cad_click[
+        cad_click.index("if (!decision.ok)") : cad_click.index(
+            'await createAnnotation("cad_anchor"'
+        )
+    ]
+    assert "return;" not in decision_branch
+    assert "右侧 CAD 中仍可编辑" in cad_click
+
+
+def test_selected_hidden_cad_anchor_reports_projection_reason() -> None:
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
+
+    hidden_branch = script[
+        script.index("const visible = Boolean") : script.index(
+            "const anchor = visual.anchor_source_xy"
+        )
+    ]
+    assert "CAD 投影已隐藏" in hidden_branch
+    assert "visual?.reason" in hidden_branch

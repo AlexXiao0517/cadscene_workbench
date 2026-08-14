@@ -8,6 +8,7 @@
   const videoLayer = video?.closest(".video-layer");
   const sceneContainer = document.querySelector("#sceneContainer");
   const overlay = document.querySelector("#annotationOverlay");
+  const cadOverlay = document.querySelector("#cadAnnotationOverlay");
   const roiSelection = document.querySelector("#annotationRoiSelection");
   const status = document.querySelector("#annotationToolStatus");
   const trackingState = document.querySelector("#annotationTrackingState");
@@ -26,7 +27,7 @@
     remove: document.querySelector("#annotationDelete"),
     reanchor: document.querySelector("#annotationReanchor"),
   };
-  if (!video || !videoLayer || !sceneContainer || !overlay) return;
+  if (!video || !videoLayer || !sceneContainer || !overlay || !cadOverlay) return;
 
   const state = {
     clipId: "",
@@ -38,6 +39,7 @@
     mode: null,
     selectionStart: null,
     nodes: new Map(),
+    cadNodes: new Map(),
     drag: null,
     renderQueued: false,
     pendingInitialTrackingId: null,
@@ -122,8 +124,10 @@
 
   function selectAnnotation(annotationId) {
     state.selectedId = annotationId;
-    for (const [identity, entry] of state.nodes) {
-      entry.label.classList.toggle("is-selected", identity === annotationId);
+    for (const nodes of [state.nodes, state.cadNodes]) {
+      for (const [identity, entry] of nodes) {
+        entry.label.classList.toggle("is-selected", identity === annotationId);
+      }
     }
     syncEditor();
   }
@@ -134,17 +138,17 @@
     editor.title.select();
   }
 
-  function removeNode(annotationId) {
-    const entry = state.nodes.get(annotationId);
+  function removeNode(annotationId, nodes = state.nodes) {
+    const entry = nodes.get(annotationId);
     if (!entry) return;
     entry.label.remove();
     entry.line.remove();
     entry.dot.remove();
-    state.nodes.delete(annotationId);
+    nodes.delete(annotationId);
   }
 
-  function ensureNode(annotation) {
-    let entry = state.nodes.get(annotation.annotation_id);
+  function ensureNode(annotation, nodes = state.nodes, container = overlay) {
+    let entry = nodes.get(annotation.annotation_id);
     if (entry) return entry;
     const line = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     line.classList.add("engineering-callout-leader");
@@ -165,10 +169,14 @@
       event.stopPropagation();
       selectAnnotation(annotation.annotation_id);
     });
-    overlay.append(line, dot, label);
+    container.append(line, dot, label);
     entry = { line, polyline, dot, label, title, body };
-    state.nodes.set(annotation.annotation_id, entry);
+    nodes.set(annotation.annotation_id, entry);
     return entry;
+  }
+
+  function ensureCadNode(annotation) {
+    return ensureNode(annotation, state.cadNodes, cadOverlay);
   }
 
   function reconcileNodes() {
@@ -179,6 +187,18 @@
       if (!visibleSet.has(identity)) removeNode(identity);
     }
     for (const annotation of state.annotations.slice(0, MAX_DOM_LABELS)) ensureNode(annotation);
+    const cadVisibleSet = new Set(
+      state.annotations
+        .slice(0, MAX_DOM_LABELS)
+        .filter((item) => item.anchor_type === "cad_anchor")
+        .map((item) => item.annotation_id),
+    );
+    for (const identity of state.cadNodes.keys()) {
+      if (!cadVisibleSet.has(identity)) removeNode(identity, state.cadNodes);
+    }
+    for (const annotation of state.annotations.slice(0, MAX_DOM_LABELS)) {
+      if (annotation.anchor_type === "cad_anchor") ensureCadNode(annotation);
+    }
     syncEditor();
   }
 
@@ -292,18 +312,27 @@
 
   sceneContainer.addEventListener("click", async (event) => {
     if (state.mode !== "cad_anchor") return;
+    if (event.target.closest?.(".annotation-label")) return;
     event.preventDefault();
     event.stopPropagation();
     const pts = currentSourcePts();
     if (!Number.isInteger(pts)) return setStatus("当前帧还没有权威 source PTS");
     const picked = window.cadscenePickCadWorld?.(event);
     if (!picked?.cad_world_xyz) return setStatus("未选中 CAD 几何或地面");
+    const projected = window.cadsceneProjectCadWorldPoint?.(picked.cad_world_xyz);
+    const decision = window.CadsceneAnnotationPts?.cadAnchorCreationDecision?.(projected)
+      || { ok: false, reason: "projection_unavailable" };
+    if (!decision.ok) {
+      setStatus(`所选 CAD 点当前不在视频画面内（${decision.reason}）；创建后右侧 CAD 中仍可编辑`);
+    }
     try {
       await createAnnotation("cad_anchor", picked);
       state.mode = null;
       document.querySelectorAll("[data-annotation-mode]").forEach((button) => button.classList.remove("is-active"));
       focusSelectedAnnotationEditor();
-      setStatus("CAD 标签已创建：输入文字后按 Enter 保存，也可在左侧视频拖动标签位置");
+      setStatus(decision.ok
+        ? "CAD 标签已创建：输入文字后按 Enter 保存，也可拖动标牌位置"
+        : `CAD 标签已创建；当前视频投影隐藏（${decision.reason}），右侧 CAD 中仍可编辑`);
     } catch (error) {
       setStatus(error.message);
     }
@@ -411,6 +440,7 @@
     const drag = state.drag;
     state.drag = null;
     state.nodes.get(drag.annotation.annotation_id)?.label.classList.remove("is-dragging");
+    state.cadNodes.get(drag.annotation.annotation_id)?.label.classList.remove("is-dragging");
     if (!drag.previewOffset) return;
     try {
       await updateAnnotation(drag.annotation, { screen_offset: drag.previewOffset });
@@ -426,6 +456,75 @@
     requestAnimationFrame(renderAnnotations);
   }
 
+  function styleCalloutEntry(entry, annotation, displayScale) {
+    const panelWidth = Number(annotation.panel?.width_px ?? 320);
+    const padding = Number(annotation.panel?.padding_px ?? 16);
+    const radius = Number(annotation.panel?.border_radius_px ?? 6);
+    entry.title.textContent = annotation.content?.title || "";
+    entry.body.textContent = annotation.content?.body ?? annotation.text ?? "";
+    entry.label.style.width = `${panelWidth * displayScale}px`;
+    entry.label.style.fontSize = `${Number(annotation.style?.font_size_px ?? 28) * displayScale}px`;
+    entry.label.style.color = annotation.style?.text_color || "#FFFFFF";
+    entry.title.style.color = annotation.style?.title_color || "#69D2FF";
+    entry.label.style.backgroundColor = colorWithOpacity(
+      annotation.style?.background_color || "#000000B3",
+      annotation.style?.background_opacity ?? 0.7,
+    );
+    entry.label.style.borderColor = annotation.style?.border_color || "#FFFFFFCC";
+    entry.label.style.padding = `${padding * displayScale}px`;
+    entry.label.style.borderRadius = `${radius * displayScale}px`;
+    entry.label.style.borderWidth = `${Math.max(1, Number(annotation.leader?.line_width_px ?? 2) * displayScale)}px`;
+    entry.label.classList.toggle("has-shadow", annotation.panel?.shadow !== false);
+    entry.label.style.boxShadow = annotation.panel?.shadow === false ? "none"
+      : `0 ${8 * displayScale}px ${28 * displayScale}px rgba(0, 0, 0, .38), 0 0 ${12 * displayScale}px rgba(86, 194, 255, .14)`;
+    return panelWidth;
+  }
+
+  function renderCadInspectCallout(annotation, provider, displayScale, dragOffset) {
+    const entry = ensureCadNode(annotation);
+    const projected = window.cadsceneProjectCadWorldToInspect?.(
+      annotation.anchor?.cad_world_xyz,
+    );
+    const visible = Boolean(
+      annotation.user_visible !== false && projected?.visible && Array.isArray(projected.xy),
+    );
+    entry.label.hidden = entry.line.hidden = entry.dot.hidden = !visible;
+    if (!visible) return;
+    const panelWidth = styleCalloutEntry(entry, annotation, displayScale);
+    const anchor = projected.xy.map(Number);
+    const offset = dragOffset || annotation.screen_offset || [0, 0];
+    const displayOffset = provider?.sourceDeltaToDisplay?.(
+      Number(offset[0]),
+      Number(offset[1]),
+    ) || { x: Number(offset[0]), y: Number(offset[1]) };
+    const layout = window.CadsceneCalloutLayout.layoutCallout({
+      anchor_xy: anchor,
+      screen_offset: [displayOffset.x, displayOffset.y],
+      panel_size: [panelWidth * displayScale, entry.label.offsetHeight],
+      viewport_size: [sceneContainer.clientWidth, sceneContainer.clientHeight],
+      safe_margin: Number(annotation.panel?.safe_margin_px ?? 20) * displayScale,
+      elbow_length: Number(annotation.leader?.elbow_length_px ?? 24) * displayScale,
+    });
+    entry.label.style.left = `${layout.panel_rect[0]}px`;
+    entry.label.style.top = `${layout.panel_rect[1]}px`;
+    entry.dot.style.left = `${anchor[0]}px`;
+    entry.dot.style.top = `${anchor[1]}px`;
+    entry.polyline.setAttribute(
+      "points",
+      layout.leader_points.map((point) => `${point[0]},${point[1]}`).join(" "),
+    );
+    entry.polyline.setAttribute("stroke", annotation.style?.border_color || "#FFFFFFCC");
+    entry.polyline.setAttribute(
+      "stroke-width",
+      String(Number(annotation.leader?.line_width_px ?? 2) * displayScale),
+    );
+    const anchorRadius = Number(annotation.leader?.anchor_radius_px ?? 6) * displayScale;
+    entry.dot.style.width = `${2 * anchorRadius}px`;
+    entry.dot.style.height = `${2 * anchorRadius}px`;
+    entry.dot.style.margin = `${-anchorRadius}px 0 0 ${-anchorRadius}px`;
+    entry.dot.classList.toggle("is-crosshair", annotation.leader?.anchor_shape === "crosshair");
+  }
+
   function renderAnnotations() {
     state.renderQueued = false;
     const provider = window.CadsceneAnnotationPts;
@@ -434,15 +533,25 @@
       const dragOffset = state.drag?.annotation.annotation_id === annotation.annotation_id
         ? state.drag.previewOffset : null;
       const visual = provider?.visualFor?.(annotation, { screenOffset: dragOffset });
+      const scale = provider?.sourceDeltaToDisplay?.(1, 1) || { x: 1, y: 1 };
+      const displayScale = Math.max(0.0001, Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1)));
+      if (annotation.anchor_type === "cad_anchor") {
+        renderCadInspectCallout(annotation, provider, displayScale, dragOffset);
+      }
       const visible = Boolean(visual?.visible && annotation.user_visible !== false);
       entry.label.hidden = entry.line.hidden = entry.dot.hidden = !visible;
-      if (!visible) continue;
+      if (!visible) {
+        if (annotation.annotation_id === state.selectedId && trackingState) {
+          trackingState.textContent = annotation.anchor_type === "cad_anchor"
+            ? `CAD 投影已隐藏：${visual?.reason || "projection_invalid"}`
+            : `视频标牌已隐藏：${visual?.reason || "tracking_lost"}`;
+        }
+        continue;
+      }
       const anchor = visual.anchor_source_xy;
       const label = visual.label_source_xy;
       entry.title.textContent = annotation.content?.title || "";
       entry.body.textContent = annotation.content?.body ?? annotation.text ?? "";
-      const scale = provider?.sourceDeltaToDisplay?.(1, 1) || { x: 1, y: 1 };
-      const displayScale = Math.max(0.0001, Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1)));
       const panelWidth = Number(annotation.panel?.width_px ?? 320);
       const padding = Number(annotation.panel?.padding_px ?? 16);
       const radius = Number(annotation.panel?.border_radius_px ?? 6);
