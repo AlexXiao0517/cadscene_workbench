@@ -480,6 +480,13 @@
     return panelWidth;
   }
 
+  function setCalloutVisibility(entry, visible) {
+    entry.label.hidden = !visible;
+    entry.dot.hidden = !visible;
+    // SVG 元素没有会反射为 hidden 属性的 .hidden 属性，必须显式切换属性。
+    entry.line.toggleAttribute("hidden", !visible);
+  }
+
   function renderCadInspectCallout(annotation, provider, displayScale, dragOffset) {
     const entry = ensureCadNode(annotation);
     const projected = window.cadsceneProjectCadWorldToInspect?.(
@@ -488,7 +495,7 @@
     const visible = Boolean(
       annotation.user_visible !== false && projected?.visible && Array.isArray(projected.xy),
     );
-    entry.label.hidden = entry.line.hidden = entry.dot.hidden = !visible;
+    setCalloutVisibility(entry, visible);
     if (!visible) return;
     const panelWidth = styleCalloutEntry(entry, annotation, displayScale);
     const anchor = projected.xy.map(Number);
@@ -539,7 +546,7 @@
         renderCadInspectCallout(annotation, provider, displayScale, dragOffset);
       }
       const visible = Boolean(visual?.visible && annotation.user_visible !== false);
-      entry.label.hidden = entry.line.hidden = entry.dot.hidden = !visible;
+      setCalloutVisibility(entry, visible);
       if (!visible) {
         if (annotation.annotation_id === state.selectedId && trackingState) {
           trackingState.textContent = annotation.anchor_type === "cad_anchor"

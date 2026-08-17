@@ -64,12 +64,16 @@ def test_annotation_overlay_is_dom_based_and_does_not_add_per_frame_three_meshes
 
 
 def test_hidden_callout_hides_panel_leader_and_anchor_as_one_unit() -> None:
+    script = (VIEWER / "annotations.js").read_text(encoding="utf-8")
     css = (VIEWER / "style.css").read_text(encoding="utf-8")
 
     assert ".annotation-label[hidden]" in css
     assert ".engineering-callout-leader[hidden]" in css
     assert ".annotation-anchor-dot[hidden]" in css
     assert "display: none !important" in css
+    assert "function setCalloutVisibility" in script
+    assert 'entry.line.toggleAttribute("hidden", !visible)' in script
+    assert "entry.line.hidden" not in script
 
 
 def test_engineering_callout_uses_shared_layout_and_structured_content() -> None:
