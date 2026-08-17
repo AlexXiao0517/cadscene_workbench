@@ -818,6 +818,37 @@ def test_snapshot_exposes_server_derived_workbench_capability_and_state(
     assert clip["workbench"]["workbench_output_revision"] is None
 
 
+def test_workbench_uses_project_active_cad_after_global_replacement(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    new_dataset = tmp_path / "cad-dataset-v2"
+    new_dataset.mkdir()
+    new_design = new_dataset / "design.json"
+    new_design.write_text('{"revision": 2}', encoding="utf-8")
+    project = repositories.project.load("project-1")
+    repositories.project.update(
+        "project-1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "cad": {
+                    "revision": "cad:v2",
+                    "dataset_id": "cad-v2",
+                    "dataset_path": str(new_dataset),
+                },
+            },
+        ),
+    )
+    clip = repositories.clips.load("project-1").clips[0]
+
+    resolved = api.workbench._cad_design_for_context("project-1", clip)
+
+    assert resolved == new_design
+
+
 def test_batch_completed_trajectory_is_materialized_when_workbench_opens(
     tmp_path: Path,
 ) -> None:

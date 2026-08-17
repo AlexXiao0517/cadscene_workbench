@@ -31,6 +31,9 @@ _PROJECT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})$")
 _UPLOAD = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt)$"
 )
+_CAD_REPLACEMENT_UPLOAD = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/cad-replacement$"
+)
 _ANALYSIS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/start$")
 _ANALYSIS_ACTIVATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/activate$"
@@ -141,6 +144,13 @@ class ProjectApi:
                         match["project"], match["clip"]
                     ),
                     {"Cache-Control": "no-store"},
+                )
+            match = _CAD_REPLACEMENT_UPLOAD.fullmatch(path)
+            if method == "POST" and match:
+                if upload is None:
+                    raise ValueError("project upload body is required")
+                return self._publish_cad_replacement(
+                    match["project"], payload, upload
                 )
             match = _UPLOAD.fullmatch(path)
             if method == "POST" and match:
@@ -306,6 +316,48 @@ class ProjectApi:
         request: UploadRequest,
     ) -> ApiResponse:
         return self._publish_upload_locked(project_id, asset_type, payload, request)
+
+    def _publish_cad_replacement(
+        self,
+        project_id: str,
+        payload: Mapping[str, object],
+        request: UploadRequest,
+    ) -> ApiResponse:
+        if payload.get("same_coordinate_system_confirmed") is not True:
+            raise ValueError("必须确认新版 CAD 与当前项目使用相同坐标系")
+        pending = self.uploads.begin(
+            project_id,
+            "cad",
+            request.filename,
+            expected_size=request.size_bytes,
+            expected_sha256=request.sha256,
+        )
+        try:
+            while True:
+                chunk = request.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                pending.write(chunk)
+            published = pending.complete_staged()
+        except BaseException:
+            pending.abort()
+            raise
+        result = self.service.request_cad_replacement(
+            project_id,
+            published,
+            expected_revision=_required_revision(payload),
+            same_coordinate_system_confirmed=True,
+        )
+        return ApiResponse(
+            202,
+            {
+                "project_id": project_id,
+                "project_revision": result.project_revision,
+                "job_id": result.job_id,
+                "candidate_revision": result.candidate_revision,
+                "status": "queued",
+            },
+        )
 
     def _publish_upload_locked(
         self,
@@ -618,6 +670,56 @@ class ProjectApi:
             for job_id in analysis_job_ids
             if (candidate := analysis_jobs_by_id.get(job_id)) is not None
         ]
+        replacement_state = project.source_assets.get("_cad_replacement")
+        replacement_job = None
+        if isinstance(replacement_state, Mapping):
+            replacement_job = analysis_jobs_by_id.get(
+                str(replacement_state.get("job_id") or "")
+            )
+        replacement_eligibility = self.service.cad_replacement_eligibility(
+            project_id
+        )
+        cad_replacement = {
+            **replacement_eligibility,
+            "status": (
+                replacement_job.get("status")
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("status")
+                    if isinstance(replacement_state, Mapping)
+                    else "idle"
+                )
+            ),
+            "job_id": (
+                replacement_state.get("job_id")
+                if isinstance(replacement_state, Mapping)
+                else None
+            ),
+            "progress": (
+                _visible_job_progress(replacement_job)
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("progress")
+                    if isinstance(replacement_state, Mapping)
+                    else None
+                )
+            ),
+            "error": (
+                replacement_job.get("error")
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("error")
+                    if isinstance(replacement_state, Mapping)
+                    else None
+                )
+            ),
+            "active_revision": (
+                project.source_assets.get("cad", {}).get("revision")
+                if isinstance(project.source_assets.get("cad"), Mapping)
+                else None
+            ),
+            "version_count": len(project.source_assets.get("_cad_versions", ())),
+        }
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=[clip.clip_id for clip in clips.clips]
         )
@@ -773,6 +875,23 @@ class ProjectApi:
             ),
             None,
         )
+        merge_download_url = None
+        if merge_job is not None and merge_job.get("status") == "success":
+            try:
+                self.service.published_merge_video_path(project_id)
+                merge_download_url = f"/api/projects/{project_id}/merge-output/video"
+            except (FileNotFoundError, OSError, ValueError, TypeError):
+                pass
+        merge_status = (
+            "not_started"
+            if merge_job is None
+            else (
+                "stale_input"
+                if merge_job.get("status") == "success"
+                and merge_download_url is None
+                else merge_job.get("status")
+            )
+        )
         snapshot = {
             "project_id": project_id,
             "display_name": str(
@@ -787,6 +906,7 @@ class ProjectApi:
                 "status": analysis_status,
                 "jobs": analysis_jobs,
             },
+            "cad_replacement": cad_replacement,
             "assets": _snapshot_assets(project_id, project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,
@@ -798,16 +918,10 @@ class ProjectApi:
             },
             "merge": {
                 "job_id": None if merge_job is None else merge_job.get("job_id"),
-                "status": "not_started"
-                if merge_job is None
-                else merge_job.get("status"),
+                "status": merge_status,
                 "stage": None if merge_job is None else merge_job.get("stage"),
                 "progress": _visible_job_progress(merge_job),
-                "download_url": (
-                    f"/api/projects/{project_id}/merge-output/video"
-                    if merge_job is not None and merge_job.get("status") == "success"
-                    else None
-                ),
+                "download_url": merge_download_url,
             },
             "clips": clip_payloads,
             "annotations": [

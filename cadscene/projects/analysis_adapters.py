@@ -20,7 +20,7 @@ def prepare_analysis_plan(
 ) -> JobExecutionPlan:
     attempt = Path(job.attempts[-1].directory)
     attempt.mkdir(parents=True, exist_ok=True)
-    if job.job_type == "cad_analysis":
+    if job.job_type in {"cad_analysis", "cad_replacement"}:
         cad_path = asset_path(source_assets, "cad")
         if cad_path is None or not cad_path.is_file():
             raise FileNotFoundError("published project CAD is unavailable")
@@ -76,7 +76,9 @@ def prepare_analysis_plan(
 def validate_result_path(job: QueueJob, result: AdapterResult) -> Path:
     attempt_root = Path(job.attempts[-1].directory).resolve()
     output_key = (
-        "cad_dataset" if job.job_type == "cad_analysis" else "analysis_output"
+        "cad_dataset"
+        if job.job_type in {"cad_analysis", "cad_replacement"}
+        else "analysis_output"
     )
     value = result.outputs.get(output_key)
     if value is None:
@@ -86,7 +88,7 @@ def validate_result_path(job: QueueJob, result: AdapterResult) -> Path:
         raise ValueError(f"{output_key} escapes its immutable attempt directory")
     if not output.is_dir():
         raise FileNotFoundError(f"{output_key} directory is missing")
-    if job.job_type == "cad_analysis":
+    if job.job_type in {"cad_analysis", "cad_replacement"}:
         payload = _read_json(output / "dataset_manifest.json", "CAD attempt")
         if str(payload.get("dataset")) != job.project_id:
             raise ValueError("CAD attempt dataset belongs to another project")

@@ -21,6 +21,13 @@ class PublishedAnalysisArtifacts:
     analysis_artifact_path: Path
 
 
+@dataclass(frozen=True)
+class PublishedCadArtifact:
+    dataset_id: str
+    dataset_path: Path
+    manifest: Mapping[str, object]
+
+
 class AnalysisArtifactPublisher:
     """Publishes validated trees by content identity, never by mutable revision."""
 
@@ -89,6 +96,31 @@ class AnalysisArtifactPublisher:
             cad_manifest=cad_manifest,
             analysis_artifact_id=analysis_artifact_id,
             analysis_artifact_path=analysis_target,
+        )
+
+    def publish_cad(
+        self,
+        *,
+        cad_source: Path,
+        cad_fingerprint: str,
+    ) -> PublishedCadArtifact:
+        """发布单份不可变 CAD 数据集，不触碰视频分析产物。"""
+
+        _require_fingerprint(
+            cad_source, cad_fingerprint, label="validated CAD output"
+        )
+        dataset_id = _content_id("cad", cad_fingerprint)
+        target = self.storage_root / "data" / dataset_id
+        self._publish_cad_dataset(
+            cad_source,
+            target,
+            dataset_id=dataset_id,
+            source_fingerprint=cad_fingerprint,
+        )
+        return PublishedCadArtifact(
+            dataset_id=dataset_id,
+            dataset_path=target,
+            manifest=load_dataset_manifest(self.storage_root, dataset_id),
         )
 
     def _publish_immutable_tree(self, source: Path, target: Path) -> None:

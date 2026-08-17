@@ -896,7 +896,7 @@ class ProjectWorkbenchService:
             current_job = candidate
             break
         physical_clip = self._physical_clip_for_context(project_id, clip, jobs.jobs)
-        cad_design = self._cad_design_for_context(clip)
+        cad_design = self._cad_design_for_context(project_id, clip)
         can_open = (
             clip.resolved_workflow is not None
             and physical_clip is not None
@@ -1443,7 +1443,7 @@ class ProjectWorkbenchService:
         return bool(
             source_path
             and Path(str(source_path)).is_file()
-            and self._cad_design_for_context(clip) is not None
+            and self._cad_design_for_context(project_id, clip) is not None
         )
 
     def workbench_url(self, session: WorkbenchSession) -> str:
@@ -1525,8 +1525,18 @@ class ProjectWorkbenchService:
     def _workbench_dataset_id(project_id: str, clip_id: str) -> str:
         return slugify_dataset_name(f"{validate_project_id(project_id)}-{clip_id}")
 
-    @staticmethod
-    def _cad_design_for_context(clip: ClipDefinition) -> Path | None:
+    def _cad_design_for_context(
+        self, project_id: str, clip: ClipDefinition
+    ) -> Path | None:
+        project = self.repositories.project.load(project_id)
+        active = project.source_assets.get("cad")
+        active_dataset = (
+            active.get("dataset_path") if isinstance(active, Mapping) else None
+        )
+        if active_dataset:
+            design = Path(str(active_dataset)) / "design.json"
+            if design.is_file():
+                return design
         snapshot = clip.analysis.get("input_snapshot")
         if not isinstance(snapshot, Mapping):
             return None
@@ -1544,7 +1554,7 @@ class ProjectWorkbenchService:
     ) -> None:
         jobs = self.repositories.jobs.load(project_id)
         video = self._physical_clip_for_context(project_id, clip, jobs.jobs)
-        cad = self._cad_design_for_context(clip)
+        cad = self._cad_design_for_context(project_id, clip)
         if video is None:
             raise WorkbenchPermissionDenied("片段视频尚未准备完成")
         if cad is None:
