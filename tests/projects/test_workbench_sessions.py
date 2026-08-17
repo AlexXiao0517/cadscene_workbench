@@ -726,14 +726,15 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         projects_root=projects_root,
         now=lambda: "2026-08-04T08:00:00Z",
     )
+    adapter = service.adapters.for_workflow(workflow)
     project = repositories.project.load("project-1")
     job = service._new_job(
         "project-1",
         clip,
         job_type="trajectory",
         resource_class="heavy_compute",
-        adapter_name=workflow,
-        adapter_version="1",
+        adapter_name=adapter.name,
+        adapter_version=adapter.version,
         exclusive_key="trajectory:project-1:clip-1",
         dependency_ids=(),
         project_assets=project.source_assets,

@@ -270,6 +270,12 @@ def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:
     assert command[1:3] == ("-m", "cadscene.cli.run_pure_rotation")
 
 
+def test_pure_rotation_adapter_version_invalidates_pre_pinned_calibration_jobs() -> None:
+    adapter = default_workflow_adapters().for_workflow("pure_rotation")
+
+    assert adapter.version == "2"
+
+
 def test_pure_rotation_adapter_passes_configured_external_backend(tmp_path: Path) -> None:
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"mp4")

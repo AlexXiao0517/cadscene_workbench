@@ -282,7 +282,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="pure_rotation",
-                version="1",
+                version="2",
                 srt_requirement="none",
                 modules=("cadscene.cli.run_pure_rotation",),
                 output_relative_path="02_pure_rotation/camera_rotation_raw.json",
