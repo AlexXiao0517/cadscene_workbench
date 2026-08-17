@@ -505,7 +505,6 @@ class ProjectService:
             reference = _saved_workbench_reference(clip)
             if (
                 reference is not None
-                and reference.value.get("status") == "saved"
                 and _validate_workbench_immutable_output(
                     self.projects_root, project_id, clip, reference
                 )

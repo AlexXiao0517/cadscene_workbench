@@ -195,6 +195,35 @@ def test_cad_replacement_requires_a_valid_saved_workbench_output(tmp_path: Path)
         )
 
 
+def test_reopened_editing_session_with_immutable_output_remains_eligible(
+    tmp_path: Path,
+):
+    service, repositories, _queue, _api = _system(tmp_path)
+    clips = repositories.clips.load("p1")
+    clip = clips.clips[0]
+    reference = clip.references[0]
+    repositories.clips.update(
+        "p1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=(
+                replace(
+                    clip,
+                    references=(
+                        replace(
+                            reference,
+                            value={**reference.value, "status": "editing"},
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert service.cad_replacement_eligibility("p1")["eligible"] is True
+
+
 def test_api_queues_candidate_without_replacing_active_cad(tmp_path: Path):
     _service, repositories, queue, api = _system(tmp_path)
     before = repositories.project.load("p1")
