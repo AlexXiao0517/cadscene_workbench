@@ -217,6 +217,21 @@ def test_stale_workbench_url_reopens_current_project_clip_on_refresh() -> None:
     assert "return recoverStaleProjectWorkbenchSession()" in bootstrap
 
 
+def test_saved_workbench_url_reopens_current_project_clip_on_refresh() -> None:
+    script = _read("workflow.js")
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+    terminal_state = bootstrap[
+        bootstrap.index('if (!new Set(["editing", "pending_save"]).has(payload.state))') :
+        bootstrap.index("projectWorkbenchSession = payload")
+    ]
+
+    assert "return recoverStaleProjectWorkbenchSession()" in terminal_state
+    assert "项目工作台会话已失效" not in terminal_state
+
+
 def test_completed_action_restores_next_stage_before_stale_url_stage() -> None:
     script = _read("workflow.js")
     start = script.index("function selectInitialWorkflowStage()")

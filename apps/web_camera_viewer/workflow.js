@@ -1423,7 +1423,7 @@
       throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
     }
     if (!new Set(["editing", "pending_save"]).has(payload.state)) {
-      throw new Error("项目工作台会话已失效");
+      return recoverStaleProjectWorkbenchSession();
     }
     projectWorkbenchSession = payload;
     applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession);
