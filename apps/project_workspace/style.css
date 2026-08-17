@@ -65,6 +65,19 @@ h2 { font-size: 17px; margin-bottom: 6px; }
 .summary-grid { display: grid; grid-template-columns: repeat(3,minmax(180px,1.45fr)) repeat(3,minmax(120px,.8fr)); gap: 12px; margin-bottom: 18px; }
 .summary-card, .panel { border: 1px solid var(--line); background: linear-gradient(145deg,rgba(18,27,36,.96),rgba(11,17,24,.96)); box-shadow: 0 12px 36px rgba(0,0,0,.15); }
 .summary-card { min-height: 94px; padding: 16px; border-radius: 10px; }
+.cad-replacement-card { position: relative; padding: 0; overflow: hidden; background: var(--surface-2); }
+.cad-card-content { position: relative; z-index: 2; min-height: 94px; padding: 16px; background: var(--surface-2); border-radius: 10px; transition: transform .28s cubic-bezier(.22,1,.36,1), border-radius .28s ease; }
+.cad-replacement-rail { position: absolute; z-index: 1; inset: 0 0 0 auto; width: 68px; border: 0; border-left: 1px solid rgba(86,111,143,.42); border-radius: 0 10px 10px 0; display: none; place-content: center; gap: 2px; color: #6f9fff; background: var(--surface-2); font-size: 20px; font-weight: 750; cursor: pointer; }
+.cad-replacement-rail span { color: inherit; line-height: 1.08; }
+.cad-replacement-card.is-replace-eligible .cad-replacement-rail { display: grid; }
+.cad-replacement-card.is-replace-eligible:hover .cad-card-content,
+.cad-replacement-card.is-replace-eligible:focus-within .cad-card-content { transform: translateX(-68px); border-radius: 10px 0 0 10px; }
+.cad-replacement-card.is-replacing .cad-card-content { transform: none; border-radius: 10px; }
+.cad-replacement-card.is-replacing .cad-replacement-rail { display: none; }
+.cad-replacement-progress { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.cad-replacement-progress[hidden] { display: none; }
+.cad-replacement-progress .progress-track { flex: 1; width: auto; }
+.cad-replacement-progress small { min-width: 32px; color: #c8d7e8; text-align: right; font-variant-numeric: tabular-nums; }
 .source-video-card { display: flex; align-items: center; gap: 12px; }
 .source-video-thumb, .clip-thumbnail { position: relative; overflow: hidden; background: linear-gradient(135deg,#1d2e40,#0b1219); }
 .source-video-thumb { width: 88px; height: 58px; flex: 0 0 88px; border-radius: 8px; }.clip-thumbnail { width: 48px; height: 32px; flex: 0 0 48px; border-radius: 5px; }
@@ -109,6 +122,11 @@ tbody tr:hover { background: rgba(255,255,255,.025); }
 .dialog::backdrop { background: rgba(1,5,9,.7); backdrop-filter: blur(3px); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 .analysis-candidate-dialog p { color: var(--muted); line-height: 1.7; }
+.cad-replacement-dialog p { color: var(--muted); line-height: 1.65; }
+.cad-file-field { display: grid; gap: 8px; margin: 18px 0; color: #cbd8e5; }
+.cad-file-field input { padding: 11px; border: 1px dashed #42546a; border-radius: 8px; color: var(--muted); background: #0b1219; }
+.cad-coordinate-confirmation { display: flex; align-items: flex-start; gap: 9px; color: #d8e3ef; line-height: 1.5; }
+.cad-coordinate-confirmation input { margin-top: 3px; accent-color: var(--blue); }
 .analysis-candidate-dialog .candidate-summary { margin: 4px 0 14px; color: var(--text); font-size: 16px; font-weight: 700; }
 .candidate-clips { max-height: min(42vh, 360px); overflow-y: auto; border-block: 1px solid var(--line); }
 .candidate-clip { display: grid; grid-template-columns: minmax(130px,1fr) minmax(145px,1fr) auto; gap: 14px; align-items: center; padding: 12px 2px; border-bottom: 1px solid color-mix(in srgb,var(--line) 68%,transparent); }

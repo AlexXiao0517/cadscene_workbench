@@ -207,6 +207,29 @@ def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> Non
     assert '#reanalyzeButton").addEventListener' in script
 
 
+def test_cad_card_reveals_coordinate_preserving_replacement_with_real_progress() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="cadAssetCard"' in html
+    assert 'id="cadReplacementTrigger"' in html
+    assert 'aria-label="替换 CAD 图纸"' in html
+    assert 'id="cadReplacementDialog"' in html
+    assert 'id="cadReplacementFile"' in html
+    assert 'id="cadCoordinateConfirmation"' in html
+    assert "新版 CAD 与当前项目使用相同坐标系" in html
+    assert "cad_replacement.eligible" in script
+    assert "/uploads/cad-replacement" in script
+    assert "sameCoordinateSystem=1" in script
+    assert "cad_replacement.progress?.fraction" in script
+    assert "Math.min(99" in script
+    assert ".cad-replacement-card.is-replace-eligible:hover" in css
+    assert ".cad-replacement-rail" in css
+    assert "background: var(--surface-2)" in css
+    assert "border-radius: 0 10px 10px 0" in css
+
+
 def test_workspace_wires_batch_render_to_render_preflight_api() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

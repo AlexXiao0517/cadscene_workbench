@@ -16,6 +16,7 @@
     reanalysisSubmitting: false,
     activatingAnalysis: false,
     dismissedCandidateRevision: null,
+    cadReplacementUploading: false,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -159,6 +160,7 @@
     const sourceThumb = $("#sourceVideoThumbnail");
     sourceThumb.src = assets.video?.thumbnail_url || "";
     sourceThumb.hidden = !assets.video?.thumbnail_url;
+    renderCadReplacement(snapshot);
     $("#clipCount").textContent = snapshot.clips.length;
     $("#pendingCount").textContent = snapshot.clips.filter((clip) => ["ready", "queued"].includes(clip.status)).length;
     $("#runningCount").textContent = snapshot.clips.filter((clip) => ["preparing", "running", "validating"].includes(clip.status)).length;
@@ -201,6 +203,98 @@
       return item;
     }));
     offerAnalysisCandidate(snapshot);
+  }
+
+  function renderCadReplacement(snapshot) {
+    const cad_replacement = snapshot.cad_replacement || {};
+    const card = $("#cadAssetCard");
+    const trigger = $("#cadReplacementTrigger");
+    const active = ["queued", "preparing", "running", "validating"]
+      .includes(cad_replacement.status) || state.cadReplacementUploading;
+    card.classList.toggle(
+      "is-replace-eligible",
+      cad_replacement.eligible === true && !active,
+    );
+    card.classList.toggle("is-replacing", active);
+    trigger.disabled = cad_replacement.eligible !== true || active;
+    trigger.title = cad_replacement.eligible
+      ? "替换 CAD 图纸"
+      : (cad_replacement.reason || "项目坐标系尚未打通");
+    const progress = $("#cadReplacementProgress");
+    const reported = cad_replacement.progress?.fraction;
+    const hasProgress = typeof reported === "number";
+    const percent = cad_replacement.status === "success"
+      ? 100
+      : (hasProgress ? Math.min(99, Math.max(0, Math.round(reported * 100))) : null);
+    progress.hidden = !active && !["failed", "success"].includes(cad_replacement.status);
+    $("#cadReplacementFill").style.width = percent == null ? "0%" : `${percent}%`;
+    $("#cadReplacementPercent").textContent = percent == null ? "—" : `${percent}%`;
+    if (state.cadReplacementUploading) {
+      $("#cadMeta").textContent = "正在上传新版 CAD…";
+    } else if (active) {
+      $("#cadMeta").textContent = cad_replacement.progress?.message || "CAD 图纸替换中";
+    } else if (cad_replacement.status === "failed") {
+      $("#cadMeta").textContent = cad_replacement.error || "CAD 图纸替换失败，旧图仍在使用";
+    } else if (cad_replacement.status === "success") {
+      const count = cad_replacement.version_count || 1;
+      $("#cadMeta").textContent = `替换完成 · 已保留 ${count} 个版本`;
+    }
+  }
+
+  function updateCadReplacementConfirmation() {
+    const hasFile = $("#cadReplacementFile").files.length === 1;
+    const confirmed = $("#cadCoordinateConfirmation").checked;
+    $("#confirmCadReplacement").disabled = !hasFile || !confirmed || state.cadReplacementUploading;
+  }
+
+  function openCadReplacementDialog() {
+    if (state.snapshot?.cad_replacement?.eligible !== true) return;
+    const dialog = $("#cadReplacementDialog");
+    $("#cadReplacementFile").value = "";
+    $("#cadCoordinateConfirmation").checked = false;
+    updateCadReplacementConfirmation();
+    dialog.showModal();
+  }
+
+  async function submitCadReplacement(event) {
+    event.preventDefault();
+    if (state.cadReplacementUploading) return;
+    const file = $("#cadReplacementFile").files[0];
+    if (!file || !$("#cadCoordinateConfirmation").checked) return;
+    state.cadReplacementUploading = true;
+    updateCadReplacementConfirmation();
+    if (state.snapshot) renderCadReplacement(state.snapshot);
+    try {
+      const body = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const form = new FormData();
+        form.append("file", file, file.name);
+        const revision = state.snapshot.component_revisions.project;
+        xhr.open(
+          "POST",
+          `/api/projects/${encodeURIComponent(projectId)}/uploads/cad-replacement?expectedRevision=${revision}&sameCoordinateSystem=1`,
+        );
+        xhr.responseType = "json";
+        xhr.addEventListener("load", () => {
+          const result = xhr.response || {};
+          if (xhr.status >= 200 && xhr.status < 300) resolve(result);
+          else reject(new Error(result.error || `CAD 替换提交失败（HTTP ${xhr.status}）`));
+        });
+        xhr.addEventListener("error", () => reject(new Error("CAD 上传连接中断，请检查服务是否运行")));
+        xhr.send(form);
+      });
+      state.snapshot.component_revisions.project = body.project_revision;
+      state.etag = null;
+      $("#cadReplacementDialog").close();
+      setMessage("CAD 图纸替换任务已提交；完成前继续使用当前图纸。", false);
+      await pollSnapshot();
+    } catch (error) {
+      setMessage(error.message, true);
+    } finally {
+      state.cadReplacementUploading = false;
+      updateCadReplacementConfirmation();
+      if (state.snapshot) renderCadReplacement(state.snapshot);
+    }
   }
 
   function offerAnalysisCandidate(snapshot) {
@@ -629,6 +723,11 @@
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#mergeProjectButton").addEventListener("click", mergeProject);
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
+  $("#cadReplacementTrigger").addEventListener("click", openCadReplacementDialog);
+  $("#cadReplacementForm").addEventListener("submit", submitCadReplacement);
+  $("#cadReplacementFile").addEventListener("change", updateCadReplacementConfirmation);
+  $("#cadCoordinateConfirmation").addEventListener("change", updateCadReplacementConfirmation);
+  $("#cancelCadReplacement").addEventListener("click", () => $("#cadReplacementDialog").close());
   $("#confirmAnalysisCandidate").addEventListener("click", activateCandidateAnalysis);
   $("#dismissAnalysisCandidate").addEventListener("click", () => {
     state.dismissedCandidateRevision = state.snapshot?.candidate_analysis_revision || null;

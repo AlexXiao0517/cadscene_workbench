@@ -205,7 +205,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Accept-Ranges", "bytes")
         viewer_path = urlsplit(self.path).path
-        if viewer_path.startswith("/apps/web_camera_viewer/") and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
+        if viewer_path.startswith(
+            ("/apps/web_camera_viewer/", "/apps/project_workspace/")
+        ) and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -253,16 +255,24 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     use_current_revision = (
                         (query.get("useCurrentRevision") or [""])[0] == "1"
                     )
+                    same_coordinate_system_confirmed = (
+                        (query.get("sameCoordinateSystem") or [""])[0] == "1"
+                    )
                     if not use_current_revision and not str(raw_revision).isdigit():
                         raise ValueError("expectedRevision query parameter is required")
                     response = api.handle(
                         method,
                         parsed.path,
-                        json_body=(
-                            {"use_current_revision": True}
-                            if use_current_revision
-                            else {"expected_revision": int(raw_revision)}
-                        ),
+                        json_body={
+                            **(
+                                {"use_current_revision": True}
+                                if use_current_revision
+                                else {"expected_revision": int(raw_revision)}
+                            ),
+                            "same_coordinate_system_confirmed": (
+                                same_coordinate_system_confirmed
+                            ),
+                        },
                         upload=UploadRequest(
                             filename=filename,
                             stream=stream,
