@@ -2062,10 +2062,17 @@
   }
 
   async function startRenderStage() {
-    const result = await saveCurrentCameraTrack();
     if (projectWorkbenchToken) {
       await ensureProjectWorkbenchSession();
-      await finalizeProjectWorkbenchSave(result, { navigate: false });
+      if (
+        projectWorkbenchSession.state === "editing"
+        || projectWorkbenchSession.state === "pending_save"
+      ) {
+        const result = await saveCurrentCameraTrack();
+        await finalizeProjectWorkbenchSave(result, { navigate: false });
+      } else if (projectWorkbenchSession.state !== "saved") {
+        throw new Error("项目工作台会话已失效，请返回项目管理页面重新进入");
+      }
       const clipId = projectWorkbenchSession.clip_id;
       const snapshotResponse = await fetch(
         `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
@@ -2119,6 +2126,7 @@
       document.querySelector("#workflowCancel").hidden = true;
       return waitForProjectWorkbenchRender(jobId);
     }
+    await saveCurrentCameraTrack();
     message.textContent = "正在用最新人工关键帧重新拟合路线并渲染。";
     return runStage("render");
   }

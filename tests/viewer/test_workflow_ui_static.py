@@ -519,6 +519,23 @@ def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
     assert 'new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"])' in wait
 
 
+def test_saved_project_workbench_renders_without_attempting_a_second_save() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function startRenderStage")
+    end = script.index("async function cancelRunningJob", start)
+    render = script[start:end]
+
+    editable_guard = 'projectWorkbenchSession.state === "editing"'
+    saved_guard = 'projectWorkbenchSession.state !== "saved"'
+    assert editable_guard in render
+    assert saved_guard in render
+    assert render.index(editable_guard) < render.index("await saveCurrentCameraTrack()")
+    assert render.index("await saveCurrentCameraTrack()") < render.index(
+        "await finalizeProjectWorkbenchSave"
+    )
+    assert render.index(saved_guard) < render.index('projectWorkbenchRequest("/render-jobs"')
+
+
 def test_project_render_success_keeps_project_status_and_uses_snapshot_preview_url() -> None:
     script = _read("workflow.js")
     wait_start = script.index("async function waitForProjectWorkbenchRender")
@@ -590,7 +607,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260813-stage9-label-editor-v1' in index
+    assert 'workflow.js?v=20260817-render-saved-session-v2' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
