@@ -752,6 +752,13 @@ class ProjectApi:
             render_job = render_job_by_clip.get(clip.clip_id)
             export_job = export_job_by_clip.get(clip.clip_id)
             job = render_job or trajectory_job
+            if (
+                trajectory_job is not None
+                and trajectory_job.get("status") == "success"
+                and render_job is not None
+                and render_job.get("status") in {"stale_input", "superseded"}
+            ):
+                job = trajectory_job
             display_job = job
             if job is not None and job.get("status") == "queued":
                 display_job = next(
