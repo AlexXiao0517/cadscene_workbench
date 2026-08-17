@@ -67,6 +67,23 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
     assert result.progress[0].fraction == 1.0
 
 
+def test_pure_rotation_adapter_forwards_structured_progress_sidecar(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"mp4")
+    attempt = tmp_path / "attempt-1"
+    inputs = AdapterInputs("p1", "c1", video, None, attempt)
+
+    command = default_workflow_adapters().for_workflow(
+        "pure_rotation"
+    ).build_command(inputs)
+
+    assert command[command.index("--progress-file") + 1] == str(
+        attempt / "adapter_progress.json"
+    )
+
+
 def test_sfm_adapter_uses_existing_sfm_interpreter_resolver(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

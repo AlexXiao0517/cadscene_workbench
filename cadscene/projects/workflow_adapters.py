@@ -192,6 +192,8 @@ class ExistingWorkflowAdapter:
             str(inputs.attempt_directory),
             "--video",
             str(inputs.video_path),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
         ]
         if self.pure_rotation_backend_root is not None:
             command.extend(
