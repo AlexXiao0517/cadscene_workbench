@@ -283,7 +283,7 @@ class AnnotationService:
                     else existing.content
                 )
             )
-            updated = replace(
+            proposed = replace(
                 existing,
                 text=content.body,
                 content=content,
@@ -317,6 +317,22 @@ class AnnotationService:
                 anchor=(
                     dict(changes["anchor"]) if "anchor" in changes else existing.anchor
                 ),
+            )
+            if proposed == existing:
+                if current.revision != expected_revision:
+                    raise RevisionConflict(
+                        project_id=project_id,
+                        expected_revision=expected_revision,
+                        current_revision=current.revision,
+                    )
+                return AnnotationMutationResult(
+                    annotation=existing,
+                    manifest_revision=current.revision,
+                    render_revision=render.revision,
+                    operation_id=current.operation_id,
+                )
+            updated = replace(
+                proposed,
                 annotation_revision=existing.annotation_revision + 1,
                 updated_at=self.now(),
             )

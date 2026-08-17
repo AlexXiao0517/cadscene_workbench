@@ -159,3 +159,60 @@ def test_editing_callout_content_and_offset_does_not_create_tracking_revision(
     assert updated.annotation.screen_offset == (80.0, -40.0)
     assert not (tmp_path / "projects" / "p1" / "annotations").exists()
     assert repositories.render.load("p1").clip_renders[0]["status"] == "stale_input"
+
+
+def test_identical_annotation_update_does_not_bump_revision_or_stale_render(
+    tmp_path,
+) -> None:
+    service, repositories = _service(tmp_path)
+    created = service.create(
+        "p1",
+        expected_revision=0,
+        annotation_id="label-1",
+        clip_id="clip-1",
+        anchor_type="cad_anchor",
+        text="K12+340",
+        anchor={"cad_world_xyz": [1.0, 2.0, 3.0]},
+        source_pts_range=SourcePtsRange(2250, 3750, 1, 25),
+    )
+    current_render = repositories.render.load("p1")
+    repositories.render.update(
+        "p1",
+        expected_revision=current_render.revision,
+        mutate=lambda value: replace(
+            value,
+            clip_renders=(
+                {
+                    "render_id": "render-2",
+                    "clip_id": "clip-1",
+                    "status": "success",
+                    "operation_id": "render-operation-2",
+                },
+            ),
+        ),
+    )
+    annotations_before = repositories.annotations.load("p1")
+    render_before = repositories.render.load("p1")
+
+    result = service.update(
+        "p1",
+        "label-1",
+        expected_revision=annotations_before.revision,
+        expected_annotation_revision=created.annotation.annotation_revision,
+        changes={
+            "content": created.annotation.content.to_dict(),
+            "panel": created.annotation.panel.to_dict(),
+            "leader": created.annotation.leader.to_dict(),
+            "style": created.annotation.style.to_dict(),
+            "screen_offset": list(created.annotation.screen_offset),
+            "source_pts_range": created.annotation.source_pts_range.to_dict(),
+            "anchor": dict(created.annotation.anchor),
+            "user_visible": created.annotation.user_visible,
+        },
+    )
+
+    assert result.annotation == created.annotation
+    assert result.manifest_revision == annotations_before.revision
+    assert result.render_revision == render_before.revision
+    assert repositories.annotations.load("p1") == annotations_before
+    assert repositories.render.load("p1") == render_before
