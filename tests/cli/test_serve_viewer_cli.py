@@ -49,6 +49,77 @@ def test_build_parser_accepts_pure_rotation_backend_configuration() -> None:
     assert args.pure_rotation_calibration_root == "D:/cadscene/calibrations"
 
 
+def test_pure_rotation_runtime_is_discovered_from_worktree_and_conda_layout(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "zjic2026" / "cadscene_workbench" / ".worktrees" / "stage9"
+    workspace.mkdir(parents=True)
+    backend = tmp_path / "zjic2026" / "pure_rotation_camera_poc"
+    runner = backend / "scripts" / "run_full_video_exploration.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("# pinned backend", encoding="utf-8")
+    base_python = tmp_path / "anaconda3" / "python.exe"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_bytes(b"")
+    backend_python = (
+        tmp_path / "anaconda3" / "envs" / "pure_rotation_poc" / "python.exe"
+    )
+    backend_python.parent.mkdir(parents=True)
+    backend_python.write_bytes(b"")
+
+    resolved_backend, resolved_python = serve_viewer.resolve_pure_rotation_runtime(
+        backend_root=None,
+        backend_python=None,
+        search_from=workspace,
+        executable=base_python,
+    )
+
+    assert resolved_backend == backend.resolve()
+    assert resolved_python == backend_python.resolve()
+
+
+def test_explicit_pure_rotation_runtime_takes_precedence_over_discovery(
+    tmp_path: Path,
+) -> None:
+    explicit_backend = tmp_path / "configured-backend"
+    explicit_python = tmp_path / "configured-python.exe"
+
+    resolved_backend, resolved_python = serve_viewer.resolve_pure_rotation_runtime(
+        backend_root=str(explicit_backend),
+        backend_python=str(explicit_python),
+        search_from=tmp_path / "workspace",
+        executable=tmp_path / "base" / "python.exe",
+    )
+
+    assert resolved_backend == explicit_backend.resolve()
+    assert resolved_python == explicit_python.resolve()
+
+
+def test_pure_rotation_calibration_defaults_to_projects_root(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+
+    resolved = serve_viewer.resolve_pure_rotation_calibration_root(
+        configured=None,
+        projects_root=projects_root,
+    )
+
+    assert resolved == projects_root.resolve()
+
+
+def test_explicit_pure_rotation_calibration_root_takes_precedence(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    configured = tmp_path / "calibrations"
+
+    resolved = serve_viewer.resolve_pure_rotation_calibration_root(
+        configured=str(configured),
+        projects_root=projects_root,
+    )
+
+    assert resolved == configured.resolve()
+
+
 def test_main_returns_one_for_missing_storage_root(tmp_path: Path) -> None:
     missing_storage_root = tmp_path / "missing-storage"
 

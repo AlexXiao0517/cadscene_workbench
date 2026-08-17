@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from cadscene.pure_rotation.backend import ExternalOpenGVBackend
-from cadscene.pure_rotation.errors import PureRotationBackendUnavailable
+from cadscene.pure_rotation.errors import (
+    PureRotationBackendFailed,
+    PureRotationBackendUnavailable,
+)
 
 
 POC_COMMIT = "85ab6404bfb5a07da8cdaaba0a1e5c4da10dc250"
@@ -108,3 +111,31 @@ def test_run_uses_argument_array_unicode_paths_and_captures_logs(tmp_path: Path)
 
     assert result["summary"]["ok"] is True
     assert (output / "backend_stdout.log").read_text(encoding="utf-8").strip() == "backend-ok"
+
+
+def test_run_failure_reports_backend_stderr_tail(tmp_path: Path) -> None:
+    backend_root = _backend_root(tmp_path)
+    runner = backend_root / "failing_runner.py"
+    runner.write_text(
+        "import sys\n"
+        "print('no same-resolution exploratory intrinsics candidate', file=sys.stderr)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    backend = ExternalOpenGVBackend(
+        backend_root=backend_root,
+        backend_command=[sys.executable, str(runner)],
+    )
+
+    with pytest.raises(
+        PureRotationBackendFailed,
+        match="no same-resolution exploratory intrinsics candidate",
+    ):
+        backend.run_video(
+            video=video,
+            cadscene_readonly=tmp_path,
+            output_dir=tmp_path / "output",
+            timeout_seconds=10,
+        )
