@@ -1085,10 +1085,18 @@ def resolve_pure_rotation_runtime(
 def resolve_pure_rotation_calibration_root(
     *,
     configured: str | None,
-    projects_root: Path,
-) -> Path:
-    """显式配置优先；缺省复用项目库中的既有 COLMAP 内参。"""
-    return Path(configured).resolve() if configured else projects_root.resolve()
+    application_root: Path,
+) -> Path | None:
+    """显式配置优先；缺省只使用随应用固定的标定配置。"""
+    if configured:
+        return Path(configured).resolve()
+    pinned = (
+        application_root
+        / "configs"
+        / "pure_rotation"
+        / "adapter-calibration"
+    ).resolve()
+    return pinned if (pinned / "cameras.txt").is_file() else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1159,7 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     pure_rotation_calibration_root = resolve_pure_rotation_calibration_root(
         configured=args.pure_rotation_calibration_root,
-        projects_root=projects_root,
+        application_root=root,
     )
     project_service = ProjectService(
         repositories,

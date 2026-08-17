@@ -95,26 +95,49 @@ def test_explicit_pure_rotation_runtime_takes_precedence_over_discovery(
     assert resolved_python == explicit_python.resolve()
 
 
-def test_pure_rotation_calibration_defaults_to_projects_root(tmp_path: Path) -> None:
-    projects_root = tmp_path / "projects"
+def test_pure_rotation_calibration_defaults_to_pinned_application_config(
+    tmp_path: Path,
+) -> None:
+    application_root = tmp_path / "worktree"
+    calibration_root = (
+        application_root / "configs" / "pure_rotation" / "adapter-calibration"
+    )
+    calibration_root.mkdir(parents=True)
+    (calibration_root / "cameras.txt").write_text("camera\n", encoding="utf-8")
 
     resolved = serve_viewer.resolve_pure_rotation_calibration_root(
         configured=None,
-        projects_root=projects_root,
+        application_root=application_root,
     )
 
-    assert resolved == projects_root.resolve()
+    assert resolved == calibration_root.resolve()
+
+
+def test_pure_rotation_calibration_does_not_reuse_arbitrary_project_output(
+    tmp_path: Path,
+) -> None:
+    application_root = tmp_path / "worktree"
+    arbitrary = application_root / "projects" / "old-job" / "cameras.txt"
+    arbitrary.parent.mkdir(parents=True)
+    arbitrary.write_text("unrelated camera\n", encoding="utf-8")
+
+    resolved = serve_viewer.resolve_pure_rotation_calibration_root(
+        configured=None,
+        application_root=application_root,
+    )
+
+    assert resolved is None
 
 
 def test_explicit_pure_rotation_calibration_root_takes_precedence(
     tmp_path: Path,
 ) -> None:
-    projects_root = tmp_path / "projects"
+    application_root = tmp_path / "worktree"
     configured = tmp_path / "calibrations"
 
     resolved = serve_viewer.resolve_pure_rotation_calibration_root(
         configured=str(configured),
-        projects_root=projects_root,
+        application_root=application_root,
     )
 
     assert resolved == configured.resolve()
