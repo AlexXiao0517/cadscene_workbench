@@ -138,6 +138,8 @@ class ExistingWorkflowAdapter:
             str(inputs.attempt_directory),
             "--video",
             str(inputs.video_path),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
             "--start-frame",
             "0",
             "--frame-step",
@@ -190,6 +192,8 @@ class ExistingWorkflowAdapter:
             str(inputs.attempt_directory),
             "--video",
             str(inputs.video_path),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
         ]
         if self.pure_rotation_backend_root is not None:
             command.extend(
@@ -278,7 +282,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="pure_rotation",
-                version="1",
+                version="2",
                 srt_requirement="none",
                 modules=("cadscene.cli.run_pure_rotation",),
                 output_relative_path="02_pure_rotation/camera_rotation_raw.json",

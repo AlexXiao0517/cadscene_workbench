@@ -119,7 +119,13 @@ class CrossManifestResult:
     manifests: tuple[ManifestHeader, ...]
 
 
-_LOCK_ORDER = {"project": 0, "clips": 1, "jobs": 2, "render": 3}
+_LOCK_ORDER = {
+    "project": 0,
+    "clips": 1,
+    "jobs": 2,
+    "render": 3,
+    "annotations": 4,
+}
 
 
 def ordered_repositories(
@@ -300,6 +306,12 @@ def _mapping_content(value: Mapping[str, Any]) -> dict[str, Any]:
     return content
 
 
+def _annotation_content(annotation: Any) -> dict[str, Any]:
+    content = annotation.to_dict()
+    content.pop("updated_operation_id", None)
+    return content
+
+
 def _stamp_mapping_items(
     current: tuple[Mapping[str, Any], ...],
     candidate: tuple[Mapping[str, Any], ...],
@@ -435,6 +447,39 @@ def _stamp_operation_changes(
                 ("output_id",),
             ),
         )
+    elif current.owner == "annotations" and candidate.owner == "annotations":
+        current_by_id = {
+            annotation.annotation_id: annotation
+            for annotation in getattr(current, "annotations")
+        }
+        annotations = []
+        for annotation in getattr(candidate, "annotations"):
+            previous = current_by_id.get(annotation.annotation_id)
+            if previous is None:
+                annotations.append(
+                    replace(
+                        annotation,
+                        created_operation_id=operation_id,
+                        updated_operation_id=operation_id,
+                    )
+                )
+            elif _annotation_content(previous) == _annotation_content(annotation):
+                annotations.append(
+                    replace(
+                        annotation,
+                        created_operation_id=previous.created_operation_id,
+                        updated_operation_id=previous.updated_operation_id,
+                    )
+                )
+            else:
+                annotations.append(
+                    replace(
+                        annotation,
+                        created_operation_id=previous.created_operation_id,
+                        updated_operation_id=operation_id,
+                    )
+                )
+        stamped = replace(stamped, annotations=tuple(annotations))
     return stamped
 
 

@@ -632,6 +632,241 @@ h2 {
   pointer-events: none;
 }
 
+#annotationOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#cadAnnotationOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#cadAnnotationOverlay .annotation-label {
+  pointer-events: auto;
+}
+
+#annotationRoiSelection {
+  position: absolute;
+  z-index: 7;
+  border: 2px solid var(--accent);
+  background: rgba(86, 194, 255, .14);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .18);
+  pointer-events: none;
+}
+
+.annotation-label {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, .8);
+  border-radius: 4px;
+  color: #fff;
+  background: rgba(0, 0, 0, .7);
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+}
+
+.engineering-callout {
+  min-width: 0;
+  max-width: none;
+  backdrop-filter: blur(3px);
+}
+
+.engineering-callout.has-shadow {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .38), 0 0 12px rgba(86, 194, 255, .14);
+}
+
+.engineering-callout-title {
+  margin-bottom: .45em;
+  font-size: 1.08em;
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+.engineering-callout-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.annotation-label.is-selected { outline: 2px solid var(--accent); }
+.annotation-label.is-dragging { cursor: grabbing; }
+
+.engineering-callout-leader {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.engineering-callout-leader polyline {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.annotation-anchor-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.annotation-anchor-dot.is-crosshair {
+  border-radius: 0;
+  background: transparent;
+  transform: rotate(45deg);
+}
+
+.annotation-label[hidden],
+.engineering-callout-leader[hidden],
+.annotation-anchor-dot[hidden],
+[data-annotation-mode="video_track"][hidden],
+#annotationReanchor[hidden] {
+  display: none !important;
+}
+
+.annotation-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.annotation-panel[hidden] { display: none; }
+
+.annotation-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.annotation-panel-heading p {
+  max-width: 720px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.annotation-toolbar {
+  display: flex;
+  gap: 10px;
+}
+
+.annotation-toolbar button {
+  display: grid;
+  gap: 3px;
+  min-width: 190px;
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.annotation-toolbar button strong { font-size: 14px; }
+.annotation-toolbar button span { color: var(--muted); font-size: 11px; }
+.annotation-toolbar button.is-active {
+  border-color: var(--accent);
+  background: var(--active-bg);
+}
+
+.annotation-toolbar button.is-active span { color: var(--text); }
+
+.annotation-editor-panel,
+.annotation-editor,
+.annotation-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.annotation-editor-panel {
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--strip);
+}
+
+.annotation-editor { align-items: end; }
+
+.annotation-editor label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.annotation-editor input {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+  padding: 4px 6px;
+}
+
+.annotation-editor textarea {
+  min-height: 72px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.annotation-editor .annotation-title-field { flex: 1 1 240px; }
+.annotation-editor .annotation-body-field { flex: 2 1 420px; }
+.annotation-editor #annotationTitle,
+.annotation-editor #annotationBody { width: min(100%, 520px); }
+
+.annotation-editor .annotation-text-field { flex: 1 1 340px; }
+.annotation-editor #annotationText { width: min(420px, 44vw); }
+.annotation-editor input[type="number"] { width: 112px; }
+.annotation-editor input[type="color"] { width: 48px; padding: 2px; }
+.annotation-editor .annotation-visible { display: flex; align-items: center; min-height: 30px; }
+.annotation-status-row { justify-content: space-between; color: var(--muted); font-size: 11px; }
+
+.annotation-selection-actions { display: flex; align-items: center; gap: 8px; }
+.danger-button { color: #ff9b9b; }
+
+.camera-settings-details { overflow: hidden; }
+.camera-settings-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+.camera-settings-summary small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.camera-settings-details[open] .camera-settings-summary { border-bottom: 1px solid var(--line); }
+.camera-settings-content { display: block; }
+
+@media (max-width: 1050px) {
+  .annotation-panel-heading { align-items: stretch; flex-direction: column; }
+  .annotation-toolbar { flex-wrap: wrap; }
+  .annotation-toolbar button { flex: 1 1 220px; }
+  .annotation-editor #annotationText { width: min(100%, 520px); }
+}
+
 .scene-stage canvas {
   display: block;
   width: 100%;

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import uuid
 
 from cadscene.pure_rotation.backend import ExternalOpenGVBackend
@@ -42,6 +43,7 @@ def main() -> int:
     parser.add_argument("--backend-command")
     parser.add_argument("--backend-command-json")
     parser.add_argument("--cadscene-readonly", type=Path)
+    parser.add_argument("--progress-file", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     output = args.output_root / args.dataset / args.run_id / "02_pure_rotation"
@@ -64,12 +66,19 @@ def main() -> int:
         backend_root=args.backend_root,
         backend_command=backend_command,
     )
+
+    def report(stage: str, message: str, fraction: float) -> None:
+        if args.progress_file is not None:
+            _write_progress(args.progress_file, stage, message, fraction)
+
     try:
+        report("pure_rotation", "正在运行纯旋转轨迹反算", 0.05)
         result = backend.run_video(
             video=args.video,
             cadscene_readonly=args.cadscene_readonly or args.output_root.parents[0],
             output_dir=staged_output,
         )
+        report("converting", "轨迹和预览已生成，正在转换工作台轨迹", 0.90)
         trajectory = json.loads(
             (staged_output / "full_video_rotation_trajectory.json").read_text(encoding="utf-8")
         )
@@ -97,10 +106,41 @@ def main() -> int:
             json.dumps(result["summary"], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        report("publishing", "汇总文件已完成，正在发布结果", 0.96)
         promote_output_tree(staged_output, output, force=args.force)
+        report("ready_for_validation", "结果已发布，正在执行最终校验", 0.98)
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
     return 0
+
+
+def _write_progress(
+    path: Path, stage: str, message: str, fraction: float
+) -> None:
+    payload = {
+        "schema_version": "1.0",
+        "stage": stage,
+        "message": message,
+        "fraction": max(0.0, min(1.0, float(fraction))),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(0.005 * (2**attempt), 0.05))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

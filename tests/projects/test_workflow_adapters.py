@@ -53,6 +53,9 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
 
     assert command[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert str(video) in command
+    assert command[command.index("--progress-file") + 1] == str(
+        attempt / "adapter_progress.json"
+    )
     output = attempt / "02_sfm/camera_trajectory.json"
     output.parent.mkdir(parents=True)
     output.write_text(json.dumps({"poses": [{}]}), encoding="utf-8")
@@ -62,6 +65,23 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
     assert result.output_fingerprint is not None
     assert result.outputs == {"trajectory": str(output)}
     assert result.progress[0].fraction == 1.0
+
+
+def test_pure_rotation_adapter_forwards_structured_progress_sidecar(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"mp4")
+    attempt = tmp_path / "attempt-1"
+    inputs = AdapterInputs("p1", "c1", video, None, attempt)
+
+    command = default_workflow_adapters().for_workflow(
+        "pure_rotation"
+    ).build_command(inputs)
+
+    assert command[command.index("--progress-file") + 1] == str(
+        attempt / "adapter_progress.json"
+    )
 
 
 def test_sfm_adapter_uses_existing_sfm_interpreter_resolver(
@@ -248,6 +268,12 @@ def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:
     command = adapter.build_command(adapter.prepare_inputs(inputs))
 
     assert command[1:3] == ("-m", "cadscene.cli.run_pure_rotation")
+
+
+def test_pure_rotation_adapter_version_invalidates_pre_pinned_calibration_jobs() -> None:
+    adapter = default_workflow_adapters().for_workflow("pure_rotation")
+
+    assert adapter.version == "2"
 
 
 def test_pure_rotation_adapter_passes_configured_external_backend(tmp_path: Path) -> None:

@@ -235,7 +235,9 @@ class LocalJobExecutor:
                 job.project_id,
                 job.job_id,
                 AdapterProgress(
-                    stage="validating", message="validating adapter output"
+                    stage="validating",
+                    message="validating and publishing adapter output",
+                    fraction=0.99,
                 ),
                 attempt_number=attempt_number,
                 claim_token=claim_token,

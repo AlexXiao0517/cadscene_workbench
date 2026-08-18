@@ -139,7 +139,12 @@ class ExternalOpenGVBackend:
             (temporary / "backend_stdout.log").write_text(completed.stdout, encoding="utf-8")
             (temporary / "backend_stderr.log").write_text(completed.stderr, encoding="utf-8")
             if completed.returncode != 0:
-                raise PureRotationBackendFailed(f"external backend exited with {completed.returncode}")
+                stderr = completed.stderr.strip()
+                detail = stderr[-1000:] if stderr else ""
+                suffix = f": {detail}" if detail else ""
+                raise PureRotationBackendFailed(
+                    f"external backend exited with {completed.returncode}{suffix}"
+                )
             missing = [name for name in REQUIRED_OUTPUTS if not (temporary / name).is_file()]
             if missing:
                 raise PureRotationBackendFailed(f"backend output incomplete: {', '.join(missing)}")

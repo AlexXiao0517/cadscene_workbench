@@ -498,7 +498,7 @@ def _validate_files(
     compatibility = media_compatibility(probed.video, inputs.project_media_spec)
     if not compatibility.compatible:
         raise InvalidMediaContract(
-            "source fallback differs from project media specification: "
+            "source fallback differs from the media specification for this project: "
             + ", ".join(compatibility.differences)
         )
     return {

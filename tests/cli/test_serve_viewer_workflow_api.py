@@ -18,19 +18,24 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _start_server(root: Path, port: int) -> subprocess.Popen:
+def _start_server(
+    root: Path, port: int, *, storage_root: Path | None = None
+) -> subprocess.Popen:
+    command = [
+        sys.executable,
+        "-m",
+        "cadscene.cli.serve_viewer",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--root",
+        str(root),
+    ]
+    if storage_root is not None:
+        command.extend(["--storage-root", str(storage_root)])
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "cadscene.cli.serve_viewer",
-            "--bind",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--root",
-            str(root),
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -324,6 +329,74 @@ def test_run_stage_api_accepts_alignment_stage_for_route_fitting(tmp_path: Path)
         assert payload["status"] == "running"
     finally:
         _post(port, "/api/workflow/cancel", {"dataset": "demo", "runId": "r-align"})
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_run_stage_uses_application_pipeline_with_separate_storage_root(
+    tmp_path: Path,
+) -> None:
+    application_root = tmp_path / "application"
+    storage_root = tmp_path / "storage"
+    pipeline = application_root / "configs/pipelines/sfm_overlay_existing_sfm.yaml"
+    pipeline.parent.mkdir(parents=True)
+    pipeline.write_text("stages: {}\n", encoding="utf-8")
+
+    run_dir = storage_root / "runs/demo/r-align"
+    (run_dir / "02_sfm").mkdir(parents=True)
+    (run_dir / "02_sfm/camera_trajectory.json").write_text("{}", encoding="utf-8")
+    (run_dir / "02_sfm/sparse_points.ply").write_text("ply\n", encoding="utf-8")
+    (run_dir / "01_keyframes").mkdir()
+    (run_dir / "01_keyframes/camera_track_manual.json").write_text(
+        '{"keyframes":['
+        '{"frame":0,"source":"manual_anchor","camera":{}},'
+        '{"frame":10,"source":"manual_anchor","camera":{}}'
+        "]}",
+        encoding="utf-8",
+    )
+    data = storage_root / "data/demo"
+    data.mkdir(parents=True)
+    (data / "demo.mp4").write_bytes(b"video")
+    (data / "cad").mkdir()
+    (data / "cad/design.json").write_text("{}", encoding="utf-8")
+    (data / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset": "demo",
+                "video": {"path": "data/demo/demo.mp4"},
+                "cad": {"design_json": "data/demo/cad/design.json", "status": "ready"},
+                "defaults": {"cad_scale": 1.0, "origin_xy": [0, 0]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    port = _free_port()
+    server = _start_server(application_root, port, storage_root=storage_root)
+    try:
+        status, payload = _post(
+            port,
+            "/api/workflow/run-stage",
+            {
+                "dataset": "demo",
+                "runId": "r-align",
+                "stage": "alignment",
+                "options": {},
+            },
+        )
+
+        assert status == 200
+        assert payload["command"][payload["command"].index("--config") + 1] == str(
+            pipeline.resolve()
+        )
+        assert payload["command"][payload["command"].index("--output-root") + 1] == str(
+            (storage_root / "runs").resolve()
+        )
+    finally:
+        try:
+            _post(port, "/api/workflow/cancel", {"dataset": "demo", "runId": "r-align"})
+        except Exception:
+            pass
         server.terminate()
         server.wait(timeout=5)
 

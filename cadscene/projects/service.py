@@ -138,6 +138,13 @@ class ActivateAnalysisResult:
     clips_revision: int
 
 
+@dataclass(frozen=True)
+class EnqueueCadReplacementResult:
+    job_id: str
+    project_revision: int
+    candidate_revision: str
+
+
 class _AnalysisPublicationPending(RuntimeError):
     def __init__(self, project_id: str, job_id: str, cause: Exception) -> None:
         super().__init__(str(cause))
@@ -213,7 +220,132 @@ class ProjectService:
             identity=self._identity,
         )
         self._publication_lock = threading.RLock()
+        from cadscene.annotations.service import AnnotationService
+
+        self.annotation_service = AnnotationService(
+            repositories,
+            now=now,
+            identity=self._identity,
+            publication_lock=self._publication_lock,
+        )
+        from cadscene.annotations.tracking import (
+            OpenCvLkVideoAnchorTracker,
+            TrackingRevisionRepository,
+            VideoTrackingService,
+        )
+
+        self.tracking_revision_repository = TrackingRevisionRepository(
+            self.projects_root
+        )
+        self.video_tracking_service = VideoTrackingService(
+            repositories=repositories,
+            annotations=self.annotation_service,
+            revisions=self.tracking_revision_repository,
+            tracker=OpenCvLkVideoAnchorTracker(),
+            now=now,
+            identity=self._identity,
+        )
         self.queue.enable_publication_gate()
+
+    def track_video_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        *,
+        expected_revision: int,
+        expected_annotation_revision: int,
+        correction=None,
+    ):
+        from cadscene.annotations.tracking import decode_tracking_frames
+
+        project = self.repositories.project.load(project_id)
+        annotations = self.repositories.annotations.load(project_id)
+        annotation = next(
+            (item for item in annotations.annotations if item.annotation_id == annotation_id),
+            None,
+        )
+        if annotation is None:
+            raise FileNotFoundError(f"annotation not found: {annotation_id}")
+        clips = self.repositories.clips.load(project_id)
+        clip = next(
+            (item for item in clips.clips if item.clip_id == annotation.clip_id), None
+        )
+        if clip is None:
+            raise ValueError(f"annotation clip is unavailable: {annotation.clip_id}")
+        descriptor = project.source_assets.get("video")
+        if isinstance(descriptor, Mapping):
+            path_value = descriptor.get("path")
+            fingerprint_value = descriptor.get("sha256")
+        else:
+            path_value = project.source_assets.get("video_path")
+            fingerprint_value = None
+        source = Path(str(path_value or ""))
+        if not source.is_file():
+            raise FileNotFoundError("project source video is unavailable for tracking")
+        if isinstance(fingerprint_value, str) and fingerprint_value:
+            source_fingerprint = fingerprint_value
+        else:
+            digest = sha256()
+            with source.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            source_fingerprint = digest.hexdigest()
+        time_base_payload = clip.analysis.get("source_time_base")
+        if not isinstance(time_base_payload, Mapping):
+            raise ValueError("tracking clip is missing exact source time_base")
+        time_base = Fraction(
+            int(time_base_payload["numerator"]),
+            int(time_base_payload["denominator"]),
+        )
+        frames = decode_tracking_frames(
+            source,
+            source_start_pts=int(clip.analysis["source_start_pts"]),
+            source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
+            expected_time_base=time_base,
+        )
+        return self.video_tracking_service.create_revision(
+            project_id,
+            annotation_id,
+            expected_revision=expected_revision,
+            expected_annotation_revision=expected_annotation_revision,
+            source_video_fingerprint=source_fingerprint,
+            frames=frames,
+            correction=correction,
+        )
+
+    def annotation_preview_timing(
+        self, project_id: str, clip_id: str
+    ) -> dict[str, object]:
+        clips = self.repositories.clips.load(project_id)
+        clip = next((item for item in clips.clips if item.clip_id == clip_id), None)
+        if clip is None:
+            raise FileNotFoundError(f"clip not found: {clip_id}")
+        frame_map_path = _clip_frame_map_path(clip)
+        if frame_map_path is None:
+            stored_jobs = tuple(
+                QueueJob.from_dict(item)
+                for item in self.repositories.jobs.load(project_id).jobs
+            )
+            _video_path, frame_map_path = _render_physical_inputs(clip, stored_jobs)
+        frames = _load_authoritative_source_frames(clip, frame_map_path)
+        time_base = _fraction_time_base(clip)
+        first_pts = frames[0].pts
+        return {
+            "project_id": project_id,
+            "clip_id": clip_id,
+            "timestamp_authority": "source_decoded_frame_integer_pts",
+            "time_base": {
+                "numerator": time_base.numerator,
+                "denominator": time_base.denominator,
+            },
+            "frames": [
+                {
+                    "source_pts": frame.pts,
+                    "clip_time_sec": float((frame.pts - first_pts) * time_base),
+                }
+                for frame in frames
+            ],
+        }
 
     def set_project_media_spec(
         self,
@@ -363,6 +495,172 @@ class ProjectService:
                 project_revision=updated_project.revision,
                 request_key=request_key,
                 analysis_job_ids=(),
+            )
+
+    def cad_replacement_eligibility(self, project_id: str) -> dict[str, object]:
+        """仅已保存且可校验的工作台输出证明项目坐标系已经打通。"""
+
+        clips = self.repositories.clips.load(project_id)
+        for clip in clips.clips:
+            reference = _saved_workbench_reference(clip)
+            if (
+                reference is not None
+                and _validate_workbench_immutable_output(
+                    self.projects_root, project_id, clip, reference
+                )
+            ):
+                return {"eligible": True, "reason": None}
+        return {"eligible": False, "reason": "项目尚未完成坐标系标定"}
+
+    def request_cad_replacement(
+        self,
+        project_id: str,
+        upload: PublishedUpload,
+        *,
+        expected_revision: int,
+        same_coordinate_system_confirmed: bool,
+    ) -> EnqueueCadReplacementResult:
+        """登记新版 CAD 候选并排队导入；成功前旧 CAD 始终保持活动。"""
+
+        if upload.project_id != project_id or upload.asset_type != "cad":
+            raise ValueError("CAD replacement upload belongs to another project")
+        if not same_coordinate_system_confirmed:
+            raise ValueError("必须确认新版 CAD 与当前项目使用相同坐标系")
+        if not upload.path.is_file() or not upload.validation_report_path.is_file():
+            raise FileNotFoundError("immutable replacement upload is unavailable")
+        with self._state_guard(project_id):
+            eligibility = self.cad_replacement_eligibility(project_id)
+            if not eligibility["eligible"]:
+                raise ValueError(str(eligibility["reason"]))
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            active_cad = project.source_assets.get("cad")
+            if (
+                isinstance(active_cad, Mapping)
+                and active_cad.get("sha256") == upload.sha256
+            ):
+                raise ValueError("上传的 CAD 与当前活动图纸完全相同")
+            previous = project.source_assets.get("_cad_replacement")
+            previous_status = (
+                previous.get("status") if isinstance(previous, Mapping) else None
+            )
+            if isinstance(previous, Mapping) and isinstance(
+                previous.get("job_id"), str
+            ):
+                try:
+                    previous_status = self.queue.get(str(previous["job_id"])).status
+                except KeyError:
+                    pass
+            if previous_status in {
+                "queued",
+                "preparing",
+                "running",
+                "validating",
+            }:
+                raise ValueError("CAD 图纸替换任务正在进行")
+            candidate = _upload_descriptor(upload)
+            candidate_revision = (
+                f"cad-upload:{upload.sha256[:16]}:{self._identity()}"
+            )
+            identity_payload = _cad_replacement_identity_payload(
+                project_id=project_id,
+                candidate_revision=candidate_revision,
+                candidate=candidate,
+            )
+            job_id = self._identity()
+            job = QueueJob(
+                job_id=job_id,
+                project_id=project_id,
+                clip_id="__project__",
+                job_type="cad_replacement",
+                resource_class="light_compute",
+                status="queued",
+                stage="queued",
+                priority=0,
+                depends_on_job_ids=(),
+                exclusive_key=f"cad-replacement:{project_id}",
+                idempotency_key=_fingerprint(
+                    {**identity_payload, "purpose": "idempotency"}
+                ),
+                input_revision=candidate_revision,
+                input_fingerprint=_fingerprint(identity_payload),
+                adapter_name=ANALYSIS_ADAPTER_NAME,
+                adapter_version=ANALYSIS_ADAPTER_VERSION,
+                output_revision=None,
+                operation_id=self._identity(),
+                attempts=(
+                    AttemptRecord(
+                        number=1,
+                        directory=str(self._attempt_directory(project_id, job_id, 1)),
+                    ),
+                ),
+            )
+            batch = self.queue.prepare_submission_candidates((job,))
+            submitted = batch.jobs[0]
+            if submitted in batch.new_candidates:
+                Path(submitted.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+            assets = dict(project.source_assets)
+            assets["_cad_replacement"] = {
+                "status": "queued",
+                "job_id": submitted.job_id,
+                "candidate_revision": candidate_revision,
+                "candidate": candidate,
+                "same_coordinate_system_confirmed": True,
+                "requested_at": self.now(),
+                "progress": {
+                    "stage": "queued",
+                    "fraction": 0.0,
+                    "message": "等待替换 CAD 图纸",
+                },
+                "error": None,
+            }
+            jobs_manifest = self.repositories.jobs.load(project_id)
+            known_jobs = {str(item.get("job_id")): dict(item) for item in jobs_manifest.jobs}
+            known_jobs[submitted.job_id] = submitted.to_dict()
+            order = tuple(dict.fromkeys((*jobs_manifest.queue_order, submitted.job_id)))
+            publication = publish_manifests(
+                (
+                    ManifestMutation(
+                        repository=self.repositories.project,
+                        project_id=project_id,
+                        expected_revision=project.revision,
+                        mutate=lambda value, _operation_id: replace(
+                            value,
+                            source_assets=assets,
+                            updated_at=self.now(),
+                        ),
+                    ),
+                    ManifestMutation(
+                        repository=self.repositories.jobs,
+                        project_id=project_id,
+                        expected_revision=jobs_manifest.revision,
+                        mutate=lambda value, _operation_id: replace(
+                            value,
+                            jobs=tuple(known_jobs[job_id] for job_id in order),
+                            queue_order=order,
+                            updated_at=self.now(),
+                        ),
+                    ),
+                )
+            )
+            updated = next(
+                item
+                for item in publication.manifests
+                if isinstance(item, ProjectManifest)
+            )
+            self.queue.commit_submission_candidates(batch.jobs)
+            self.queue.acknowledge_publication(project_id)
+            return EnqueueCadReplacementResult(
+                job_id=submitted.job_id,
+                project_revision=updated.revision,
+                candidate_revision=candidate_revision,
             )
 
     def request_reanalysis(
@@ -1821,6 +2119,13 @@ class ProjectService:
                 return self._finish_analysis_job_locked(
                     current, result, lease=lease
                 )
+            if current.job_type == "cad_replacement":
+                return self._finish_cad_replacement_job_locked(
+                    current,
+                    result,
+                    authoritative_fingerprint=authoritative_fingerprint,
+                    lease=lease,
+                )
             if current.job_type == "clip_render":
                 return self._finish_render_job_locked(
                     current,
@@ -1854,6 +2159,211 @@ class ProjectService:
                     )
             self._publish_queue_locked(project_id)
             return finished
+
+    def _finish_cad_replacement_job_locked(
+        self,
+        current: QueueJob,
+        result: AdapterResult,
+        *,
+        authoritative_fingerprint: str | None,
+        lease: Mapping[str, object],
+    ) -> QueueJob:
+        kwargs = {
+            "attempt_number": int(lease["attempt_number"]),
+            "claim_token": str(lease["claim_token"]),
+        }
+        if authoritative_fingerprint != current.input_fingerprint:
+            finished = self.queue.mark_stale_input(current.job_id, **kwargs)
+            self._record_cad_replacement_state_locked(
+                current, "stale_input", progress=None, error=None
+            )
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if result.status != "success":
+            error = result.error or "CAD replacement adapter execution failed"
+            finished = self.queue.mark_failed(current.job_id, error, **kwargs)
+            self._record_cad_replacement_state_locked(
+                current, "failed", progress=None, error=error
+            )
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if result.output_revision is None or result.output_fingerprint is None:
+            error = "CAD replacement adapter returned no validated output identity"
+            finished = self.queue.mark_failed(current.job_id, error, **kwargs)
+            self._record_cad_replacement_state_locked(
+                current, "failed", progress=None, error=error
+            )
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if current.status == "running":
+            self.queue.mark_validating(current.job_id, **kwargs)
+        cad_source = validate_result_path(current, result)
+        artifact = self.analysis_publisher.publish_cad(
+            cad_source=cad_source,
+            cad_fingerprint=result.output_fingerprint,
+        )
+        project = self.repositories.project.load(current.project_id)
+        state = project.source_assets.get("_cad_replacement")
+        if (
+            not isinstance(state, Mapping)
+            or state.get("job_id") != current.job_id
+            or not isinstance(state.get("candidate"), Mapping)
+        ):
+            raise ValueError("CAD replacement candidate changed before publication")
+        candidate_descriptor = dict(state["candidate"])
+        active_descriptor = project.source_assets.get("cad")
+        if not isinstance(active_descriptor, Mapping):
+            raise ValueError("project active CAD descriptor is unavailable")
+        active_descriptor = _complete_active_cad_descriptor(
+            dict(active_descriptor), self.repositories.clips.load(current.project_id)
+        )
+        new_descriptor = {
+            **candidate_descriptor,
+            "revision": str(result.output_revision),
+            "dataset_id": artifact.dataset_id,
+            "dataset_path": str(artifact.dataset_path),
+            "activated_at": self.now(),
+        }
+        versions = list(project.source_assets.get("_cad_versions", ()))
+        if not versions:
+            versions.append(
+                {
+                    **active_descriptor,
+                    "revision": str(
+                        active_descriptor.get("revision")
+                        or _cad_descriptor_revision(active_descriptor)
+                    ),
+                    "status": "superseded",
+                }
+            )
+        else:
+            versions = [
+                {
+                    **dict(item),
+                    "status": "superseded"
+                    if isinstance(item, Mapping) and item.get("status") == "active"
+                    else (item.get("status") if isinstance(item, Mapping) else None),
+                }
+                for item in versions
+                if isinstance(item, Mapping)
+            ]
+        versions.append({**new_descriptor, "status": "active"})
+        candidate_job = self.queue.prepare_success_candidate(
+            current.job_id,
+            output_revision=str(result.output_revision),
+            output_fingerprint=result.output_fingerprint,
+            output_validated=True,
+            published_outputs={"cad_dataset": str(artifact.dataset_path)},
+            **kwargs,
+        )
+        jobs_manifest = self.repositories.jobs.load(current.project_id)
+        render_manifest = self.repositories.render.load(current.project_id)
+
+        def mutate_project(
+            value: ProjectManifest, operation_id: str
+        ) -> ProjectManifest:
+            current_state = value.source_assets.get("_cad_replacement")
+            if (
+                not isinstance(current_state, Mapping)
+                or current_state.get("job_id") != current.job_id
+            ):
+                raise ValueError("CAD replacement state changed during publication")
+            assets = dict(value.source_assets)
+            assets["cad"] = new_descriptor
+            assets["_cad_versions"] = versions
+            assets["_cad_replacement"] = {
+                **dict(current_state),
+                "status": "success",
+                "active_revision": str(result.output_revision),
+                "completed_at": self.now(),
+                "operation_id": operation_id,
+                "progress": {
+                    "stage": "success",
+                    "fraction": 1.0,
+                    "message": "CAD 图纸替换完成",
+                },
+                "error": None,
+            }
+            return replace(
+                value,
+                source_assets=assets,
+                updated_at=self.now(),
+                operation_id=operation_id,
+            )
+
+        def mutate_jobs(value: JobsManifest, operation_id: str) -> JobsManifest:
+            return replace(
+                value,
+                updated_at=self.now(),
+                jobs=tuple(
+                    replace(
+                        candidate_job,
+                        operation_id=operation_id,
+                        publication_operation_id=operation_id,
+                    ).to_dict()
+                    if item.get("job_id") == current.job_id
+                    else dict(item)
+                    for item in value.jobs
+                ),
+            )
+
+        def stale(item: Mapping[str, object]) -> dict[str, object]:
+            return {
+                **dict(item),
+                "status": "stale_input",
+                "stale_reason": "cad_revision_changed",
+            }
+
+        def mutate_render(
+            value: RenderManifest, _operation_id: str
+        ) -> RenderManifest:
+            return replace(
+                value,
+                updated_at=self.now(),
+                clip_renders=tuple(stale(item) for item in value.clip_renders),
+                merge_plans=tuple(stale(item) for item in value.merge_plans),
+                published_outputs=tuple(
+                    stale(item) for item in value.published_outputs
+                ),
+            )
+
+        publication = publish_manifests(
+            (
+                ManifestMutation(
+                    repository=self.repositories.project,
+                    project_id=current.project_id,
+                    expected_revision=project.revision,
+                    mutate=mutate_project,
+                ),
+                ManifestMutation(
+                    repository=self.repositories.jobs,
+                    project_id=current.project_id,
+                    expected_revision=jobs_manifest.revision,
+                    mutate=mutate_jobs,
+                ),
+                ManifestMutation(
+                    repository=self.repositories.render,
+                    project_id=current.project_id,
+                    expected_revision=render_manifest.revision,
+                    mutate=mutate_render,
+                ),
+            )
+        )
+        persisted_jobs = next(
+            item for item in publication.manifests if isinstance(item, JobsManifest)
+        )
+        persisted = QueueJob.from_dict(
+            next(
+                item
+                for item in persisted_jobs.jobs
+                if item.get("job_id") == current.job_id
+            )
+        )
+        committed = self.queue.commit_prepared_candidate(
+            current.job_id, candidate=persisted, **kwargs
+        )
+        self.queue.acknowledge_publication(current.project_id)
+        return committed
 
     def _finish_render_job_locked(
         self,
@@ -2238,7 +2748,7 @@ class ProjectService:
         compatibility = media_compatibility(probed.video, media_spec)
         if not compatibility.compatible:
             raise ValueError(
-                "rendered video differs from project media specification: "
+                "rendered video differs from the media specification for this project: "
                 + ", ".join(compatibility.differences)
             )
         expected_time_base = {
@@ -2756,6 +3266,32 @@ class ProjectService:
             ),
         )
 
+    def _record_cad_replacement_state_locked(
+        self,
+        job: QueueJob,
+        status: str,
+        *,
+        progress: Mapping[str, object] | None,
+        error: str | None,
+    ) -> None:
+        current = self.repositories.project.load(job.project_id)
+        state = current.source_assets.get("_cad_replacement")
+        if not isinstance(state, Mapping) or state.get("job_id") != job.job_id:
+            return
+        updated_state = dict(state)
+        updated_state.update({"status": status, "error": error})
+        if progress is not None:
+            updated_state["progress"] = dict(progress)
+        assets = dict(current.source_assets)
+        assets["_cad_replacement"] = updated_state
+        self.repositories.project.update(
+            job.project_id,
+            expected_revision=current.revision,
+            mutate=lambda value: replace(
+                value, source_assets=assets, updated_at=self.now()
+            ),
+        )
+
     def cancel_job(
         self,
         project_id: str,
@@ -2792,6 +3328,13 @@ class ProjectService:
             if current.job_type in {"cad_analysis", "video_analysis"}:
                 self._record_analysis_job_state_locked(
                     current, cancelled.status, error=cancelled.error
+                )
+            elif current.job_type == "cad_replacement":
+                self._record_cad_replacement_state_locked(
+                    current,
+                    cancelled.status,
+                    progress=None,
+                    error=cancelled.error,
                 )
             self._publish_queue_locked(project_id)
             return cancelled
@@ -2879,6 +3422,10 @@ class ProjectService:
                     self._record_analysis_job_state_locked(
                         job, "superseded", error=None
                     )
+                elif job.job_type == "cad_replacement":
+                    self._record_cad_replacement_state_locked(
+                        job, "superseded", progress=None, error=None
+                    )
                 self._publish_queue_locked(project_id)
                 raise RuntimeError("job input changed before execution")
             return self._build_job_execution_plan_locked(job)
@@ -2889,7 +3436,7 @@ class ProjectService:
         project_id = job.project_id
         if job.job_type == "clip_export":
             return self._prepare_clip_export(job)
-        if job.job_type in {"cad_analysis", "video_analysis"}:
+        if job.job_type in {"cad_analysis", "video_analysis", "cad_replacement"}:
             return self._prepare_analysis(job)
         if job.job_type == "clip_render":
             return self._prepare_clip_render(job)
@@ -2983,16 +3530,38 @@ class ProjectService:
         if attempt != expected_attempt or not attempt.is_dir():
             raise RuntimeError("clip render attempt directory identity is invalid")
         _, media_spec = media_binding
+        authoritative_frames = _load_authoritative_source_frames(clip, frame_map)
+        source_time_base = _fraction_time_base(clip)
+        annotation_bundle = self._write_annotation_render_bundle(
+            job.project_id,
+            clip,
+            frames=authoritative_frames,
+            time_base=source_time_base,
+            media_spec=media_spec,
+            attempt=attempt,
+        )
+        render_parameters = {
+            **dict(clip.manual_definition),
+            **_workbench_render_parameters(
+                self.storage_root,
+                job.project_id,
+                clip,
+                self.repositories.project.load(job.project_id).source_assets,
+            ),
+            "trajectory_path": dependency.published_outputs["trajectory"],
+        }
+        if annotation_bundle is not None:
+            render_parameters["annotation_render_bundle_path"] = str(
+                annotation_bundle
+            )
         inputs = RenderInputs(
             project_id=job.project_id,
             clip_id=clip.clip_id,
             workflow=str(clip.resolved_workflow),
             physical_video_path=physical_video.resolve(strict=True),
             authoritative_frame_map_path=frame_map.resolve(strict=True),
-            authoritative_source_frames=_load_authoritative_source_frames(
-                clip, frame_map
-            ),
-            source_time_base=_fraction_time_base(clip),
+            authoritative_source_frames=authoritative_frames,
+            source_time_base=source_time_base,
             workbench_artifact_path=_workbench_artifact_path(
                 self.projects_root, job.project_id, workbench
             ),
@@ -3004,13 +3573,7 @@ class ProjectService:
             ),
             attempt_directory=attempt,
             project_media_spec=media_spec,
-            parameters={
-                **dict(clip.manual_definition),
-                **_workbench_render_parameters(
-                    self.storage_root, job.project_id, clip
-                ),
-                "trajectory_path": dependency.published_outputs["trajectory"],
-            },
+            parameters=render_parameters,
         )
         plan = adapter.prepare(inputs)
         return JobExecutionPlan(commands=plan.commands, validate=plan.validate)
@@ -3133,6 +3696,17 @@ class ProjectService:
                 self._record_analysis_job_state_locked(
                     current, str(progress.stage), error=None
                 )
+            elif current.job_type == "cad_replacement":
+                self._record_cad_replacement_state_locked(
+                    current,
+                    str(progress.stage),
+                    progress={
+                        "stage": str(progress.stage),
+                        "fraction": progress.fraction,
+                        "message": progress.message,
+                    },
+                    error=None,
+                )
             self._publish_queue_locked(project_id)
             return updated
 
@@ -3158,6 +3732,10 @@ class ProjectService:
             if current.job_type in {"cad_analysis", "video_analysis"}:
                 self._record_analysis_job_state_locked(
                     current, "failed", error=error
+                )
+            elif current.job_type == "cad_replacement":
+                self._record_cad_replacement_state_locked(
+                    current, "failed", progress=None, error=error
                 )
             self._publish_queue_locked(project_id)
             return failed
@@ -3229,6 +3807,17 @@ class ProjectService:
                 self._record_analysis_job_state_locked(
                     current, "queued", error=None
                 )
+            elif current.job_type == "cad_replacement":
+                self._record_cad_replacement_state_locked(
+                    current,
+                    "queued",
+                    progress={
+                        "stage": "queued",
+                        "fraction": 0.0,
+                        "message": "等待重试 CAD 图纸替换",
+                    },
+                    error=None,
+                )
             self._publish_queue_locked(project_id)
             return retried
 
@@ -3274,6 +3863,7 @@ class ProjectService:
                 unverified_process_policy=unverified_process_policy,
             )
             self._sync_analysis_state_from_queue_locked(project_id)
+            self._sync_cad_replacement_state_from_queue_locked(project_id)
             self._publish_queue_locked(project_id)
             cleanup_reservations = self.queue.pending_restore_cleanups(project_id)
         cleanup_results: list[tuple[RestoreCleanupReservation, Exception | None]] = []
@@ -3613,6 +4203,40 @@ class ProjectService:
             ),
         )
 
+    def _sync_cad_replacement_state_from_queue_locked(
+        self, project_id: str
+    ) -> None:
+        project = self.repositories.project.load(project_id)
+        state = project.source_assets.get("_cad_replacement")
+        if not isinstance(state, Mapping) or not isinstance(state.get("job_id"), str):
+            return
+        try:
+            job = self.queue.get(str(state["job_id"]))
+        except KeyError:
+            return
+        if job.project_id != project_id or job.job_type != "cad_replacement":
+            return
+        progress = None if job.progress is None else dict(job.progress)
+        if (
+            state.get("status") == job.status
+            and state.get("error") == job.error
+            and (progress is None or state.get("progress") == progress)
+        ):
+            return
+        updated = dict(state)
+        updated.update({"status": job.status, "error": job.error})
+        if progress is not None:
+            updated["progress"] = progress
+        assets = dict(project.source_assets)
+        assets["_cad_replacement"] = updated
+        self.repositories.project.update(
+            project_id,
+            expected_revision=project.revision,
+            mutate=lambda value: replace(
+                value, source_assets=assets, updated_at=self.now()
+            ),
+        )
+
     def reap_adopted_jobs(self) -> tuple[str, ...]:
         with self._publication_lock:
             reaped = self.queue.poll_adopted_processes()
@@ -3624,6 +4248,9 @@ class ProjectService:
                 try:
                     with self._state_guard(project_id):
                         self._sync_analysis_state_from_queue_locked(project_id)
+                        self._sync_cad_replacement_state_from_queue_locked(
+                            project_id
+                        )
                     self._publish_queue(project_id)
                 except Exception as exc:
                     failures.append((project_id, exc))
@@ -4097,6 +4724,10 @@ class ProjectService:
         physical_video_path: Path | None = None,
         physical_frame_map_path: Path | None = None,
     ) -> QueueJob:
+        annotation_identity = self._annotation_render_identity(project_id, clip)
+        active_cad_identity = _active_cad_render_identity(
+            self.repositories.project.load(project_id).source_assets, clip
+        )
         identity_payload = _render_identity_payload(
             clip=clip,
             project_revision=project_revision,
@@ -4109,6 +4740,8 @@ class ProjectService:
             adapter_version=adapter_version,
             physical_video_path=physical_video_path,
             physical_frame_map_path=physical_frame_map_path,
+            annotation_identity=annotation_identity,
+            active_cad_identity=active_cad_identity,
         )
         input_fingerprint = _fingerprint(identity_payload)
         revision_fingerprint = _fingerprint(
@@ -4118,6 +4751,8 @@ class ProjectService:
                     workbench.value["workbench_output_revision"]
                 ),
                 "media_spec_revision": media_spec_revision,
+                "annotation_dependencies": annotation_identity,
+                "active_cad": active_cad_identity,
             }
         )
         job_id = self._identity()
@@ -4145,8 +4780,176 @@ class ProjectService:
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
         )
 
+    def _annotation_render_identity(
+        self, project_id: str, clip: ClipDefinition
+    ) -> Mapping[str, object]:
+        manifest = self.repositories.annotations.load(project_id)
+        annotations = tuple(
+            sorted(
+                (
+                    item
+                    for item in manifest.annotations
+                    if item.clip_id == clip.clip_id
+                ),
+                key=lambda item: item.annotation_id,
+            )
+        )
+        tracking_dependencies = []
+        has_cad_anchor = False
+        for annotation in annotations:
+            if annotation.anchor_type == "cad_anchor":
+                has_cad_anchor = True
+                continue
+            revision_id = annotation.active_tracking_revision
+            if revision_id is None:
+                # 未完成跟踪的视频标牌属于可保存草稿；渲染时按位置为空隐藏，
+                # 不能阻断同片段内已经可用的 CAD 或视频标牌。
+                continue
+            revision = self.tracking_revision_repository.load(
+                project_id,
+                annotation.clip_id,
+                annotation.annotation_id,
+                revision_id,
+            )
+            tracking_dependencies.append(
+                {
+                    "annotation_id": annotation.annotation_id,
+                    "tracking_revision": revision.tracking_revision,
+                    "source_video_fingerprint": revision.source_video_fingerprint,
+                    "clip_revision": revision.clip_revision,
+                    "tracker_name": revision.tracker_name,
+                    "tracker_version": revision.tracker_version,
+                    "initialization": revision.initialization.to_dict(),
+                    "corrections": [
+                        item.to_dict() for item in revision.corrections
+                    ],
+                }
+            )
+        cad_revision = None
+        cad_coordinate_transform = None
+        if has_cad_anchor:
+            cad = self.repositories.project.load(project_id).source_assets.get("cad")
+            cad_revision = (
+                {
+                    key: cad.get(key)
+                    for key in (
+                        "sha256",
+                        "dataset_id",
+                        "dataset_path",
+                        "artifact_id",
+                    )
+                    if cad.get(key) is not None
+                }
+                if isinstance(cad, Mapping)
+                else cad
+            )
+            parameters = _workbench_render_parameters(
+                self.storage_root,
+                project_id,
+                clip,
+                self.repositories.project.load(project_id).source_assets,
+            )
+            cad_coordinate_transform = {
+                "cad_scale": float(parameters["cad_scale"]),
+                "origin_xy": [float(value) for value in parameters["origin_xy"]],
+            }
+        return {
+            "annotations": [item.to_dict() for item in annotations],
+            "tracking_dependencies": tracking_dependencies,
+            "cad_revision": cad_revision,
+            **(
+                {"cad_coordinate_transform": cad_coordinate_transform}
+                if cad_coordinate_transform is not None
+                else {}
+            ),
+        }
+
+    def _write_annotation_render_bundle(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        *,
+        frames: Sequence[DecodedFrameTimestamp],
+        time_base: Fraction,
+        media_spec: ProjectMediaSpec,
+        attempt: Path,
+    ) -> Path | None:
+        identity = self._annotation_render_identity(project_id, clip)
+        raw_annotations = identity["annotations"]
+        if not raw_annotations:
+            return None
+        tracking_revisions: dict[str, object] = {}
+        for annotation in self.repositories.annotations.load(project_id).annotations:
+            if annotation.clip_id != clip.clip_id:
+                continue
+            revision_id = annotation.active_tracking_revision
+            if revision_id is None:
+                continue
+            revision = self.tracking_revision_repository.load(
+                project_id,
+                clip.clip_id,
+                annotation.annotation_id,
+                revision_id,
+            )
+            tracking_revisions[revision_id] = revision.to_dict()
+        bundle = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "clip_id": clip.clip_id,
+            "video_width": media_spec.width,
+            "video_height": media_spec.height,
+            "source_time_base": {
+                "numerator": time_base.numerator,
+                "denominator": time_base.denominator,
+            },
+            "source_frames": [
+                {
+                    "source_decoded_frame_ordinal": frame.ordinal,
+                    "source_pts": frame.pts,
+                    "duration_pts": frame.duration_pts,
+                }
+                for frame in frames
+            ],
+            "annotations": raw_annotations,
+            "tracking_revisions": tracking_revisions,
+            "dependencies": identity,
+            **(
+                {"cad_coordinate_transform": identity["cad_coordinate_transform"]}
+                if "cad_coordinate_transform" in identity
+                else {}
+            ),
+        }
+        path = attempt / "annotation_render_bundle.json"
+        temporary = path.with_suffix(".json.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                json.dump(bundle, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return path
+
     def _current_input_fingerprint(self, job: QueueJob) -> str | None:
         project = self.repositories.project.load(job.project_id)
+        if job.job_type == "cad_replacement":
+            state = project.source_assets.get("_cad_replacement")
+            if (
+                not isinstance(state, Mapping)
+                or state.get("job_id") != job.job_id
+                or state.get("candidate_revision") != job.input_revision
+                or not isinstance(state.get("candidate"), Mapping)
+            ):
+                return None
+            return _fingerprint(
+                _cad_replacement_identity_payload(
+                    project_id=job.project_id,
+                    candidate_revision=job.input_revision,
+                    candidate=state["candidate"],
+                )
+            )
         if job.job_type in {"cad_analysis", "video_analysis"}:
             analysis = project.source_assets.get("_analysis")
             if not isinstance(analysis, Mapping):
@@ -4258,6 +5061,12 @@ class ProjectService:
                         adapter_version=render_adapter.version,
                         physical_video_path=physical_video,
                         physical_frame_map_path=physical_map,
+                        annotation_identity=self._annotation_render_identity(
+                            job.project_id, clip
+                        ),
+                        active_cad_identity=_active_cad_render_identity(
+                            project.source_assets, clip
+                        ),
                     )
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -4337,6 +5146,12 @@ class ProjectService:
 
     def _prepare_analysis(self, job: QueueJob) -> JobExecutionPlan:
         project = self.repositories.project.load(job.project_id)
+        if job.job_type == "cad_replacement":
+            state = project.source_assets.get("_cad_replacement")
+            candidate = state.get("candidate") if isinstance(state, Mapping) else None
+            if not isinstance(candidate, Mapping):
+                raise ValueError("CAD replacement candidate is unavailable")
+            return prepare_analysis_plan(job, {"cad": candidate})
         return prepare_analysis_plan(job, project.source_assets)
 
     def _attempt_directory(self, project_id: str, job_id: str, number: int) -> Path:
@@ -4344,7 +5159,7 @@ class ProjectService:
 
     @contextmanager
     def _state_guard(self, project_id: str) -> Iterator[None]:
-        """Serialize project/clips/jobs snapshots before acquiring queue state."""
+        """Serialize project, clip, and job snapshots before acquiring queue state."""
         with self._publication_lock:
             with ExitStack() as stack:
                 for repository in (
@@ -4691,10 +5506,18 @@ def _media_spec_revision(spec: ProjectMediaSpec) -> str:
 
 
 def _workbench_render_parameters(
-    storage_root: Path, project_id: str, clip: ClipDefinition
+    storage_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    active = project_assets.get("cad") if isinstance(project_assets, Mapping) else None
     snapshot = clip.analysis.get("input_snapshot")
-    cad = snapshot.get("cad") if isinstance(snapshot, Mapping) else None
+    cad = (
+        active
+        if isinstance(active, Mapping) and active.get("dataset_path")
+        else (snapshot.get("cad") if isinstance(snapshot, Mapping) else None)
+    )
     cad_path = cad.get("dataset_path") if isinstance(cad, Mapping) else None
     parameters: dict[str, object] = {}
     if isinstance(cad_path, str) and cad_path:
@@ -4862,6 +5685,8 @@ def _render_identity_payload(
     adapter_version: str,
     physical_video_path: Path | None = None,
     physical_frame_map_path: Path | None = None,
+    annotation_identity: Mapping[str, object] | None = None,
+    active_cad_identity: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     return {
         "job_type": "clip_render",
@@ -4896,6 +5721,8 @@ def _render_identity_payload(
         "project_media_spec": media_spec.to_dict(),
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
+        "annotation_dependencies": dict(annotation_identity or {}),
+        "active_cad": dict(active_cad_identity or {}),
     }
 
 
@@ -4965,6 +5792,85 @@ def _fingerprint(value: Mapping[str, object]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _upload_descriptor(upload: PublishedUpload) -> dict[str, object]:
+    return {
+        "path": str(upload.path),
+        "original_filename": upload.original_filename,
+        "size_bytes": upload.size_bytes,
+        "sha256": upload.sha256,
+        "validation": dict(upload.validation),
+        "validation_report": str(upload.validation_report_path),
+    }
+
+
+def _cad_replacement_identity_payload(
+    *,
+    project_id: str,
+    candidate_revision: str,
+    candidate: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "job_type": "cad_replacement",
+        "project_id": project_id,
+        "candidate_revision": candidate_revision,
+        "candidate": {
+            "path": candidate.get("path"),
+            "sha256": candidate.get("sha256"),
+            "size_bytes": candidate.get("size_bytes"),
+            "original_filename": candidate.get("original_filename"),
+        },
+        "adapter_name": ANALYSIS_ADAPTER_NAME,
+        "adapter_version": ANALYSIS_ADAPTER_VERSION,
+    }
+
+
+def _cad_descriptor_revision(descriptor: Mapping[str, object]) -> str:
+    digest = descriptor.get("sha256")
+    if isinstance(digest, str) and digest:
+        return f"cad-upload:{digest[:16]}"
+    dataset_id = descriptor.get("dataset_id")
+    if isinstance(dataset_id, str) and dataset_id:
+        return dataset_id
+    return f"cad-legacy:{_fingerprint(dict(descriptor))[:16]}"
+
+
+def _complete_active_cad_descriptor(
+    descriptor: dict[str, object], clips: ClipsManifest
+) -> dict[str, object]:
+    """兼容旧项目：首次替换时从不可变 clip 快照补齐 CAD 数据集身份。"""
+
+    if descriptor.get("dataset_path") and descriptor.get("dataset_id"):
+        return descriptor
+    for clip in clips.clips:
+        snapshot = clip.analysis.get("input_snapshot")
+        cad = snapshot.get("cad") if isinstance(snapshot, Mapping) else None
+        if not isinstance(cad, Mapping):
+            continue
+        for key in ("dataset_id", "dataset_path"):
+            if key not in descriptor and cad.get(key) is not None:
+                descriptor[key] = cad[key]
+        if descriptor.get("dataset_path"):
+            break
+    return descriptor
+
+
+def _active_cad_render_identity(
+    project_assets: Mapping[str, object], clip: ClipDefinition
+) -> dict[str, object]:
+    active = project_assets.get("cad")
+    snapshot = clip.analysis.get("input_snapshot")
+    fallback = snapshot.get("cad") if isinstance(snapshot, Mapping) else None
+    cad = active if isinstance(active, Mapping) else fallback
+    if not isinstance(cad, Mapping):
+        return {}
+    return {
+        key: cad.get(key)
+        for key in ("revision", "sha256", "dataset_id", "dataset_path")
+        if cad.get(key) is not None
+    }
 
 
 def _job_identity_payload(

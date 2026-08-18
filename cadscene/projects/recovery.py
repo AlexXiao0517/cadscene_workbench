@@ -90,6 +90,11 @@ def _owned_states(manifest: ManifestHeader) -> dict[str, str]:
                     states[f"{reference_prefix}:{identifier}"] = str(
                         item["operation_id"]
                     )
+    elif manifest.owner == "annotations":
+        for annotation in getattr(manifest, "annotations"):
+            states[f"annotation:{annotation.annotation_id}"] = (
+                annotation.updated_operation_id
+            )
     return states
 
 

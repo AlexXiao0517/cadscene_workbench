@@ -304,11 +304,14 @@ class ProjectRepositories:
     clips: AtomicJsonRepository[ClipsManifest]
     jobs: AtomicJsonRepository[JobsManifest]
     render: AtomicJsonRepository[RenderManifest]
+    annotations: AtomicJsonRepository[Any]
 
     def in_lock_order(self) -> tuple[AtomicJsonRepository[Any], ...]:
-        return (self.project, self.clips, self.jobs, self.render)
+        return (self.project, self.clips, self.jobs, self.render, self.annotations)
 
     def create_project(self, project_id: str, *, updated_at: str) -> None:
+        from cadscene.annotations.models import AnnotationsManifest
+
         project_id = validate_project_id(project_id)
         operation_id = new_operation_id()
         values: tuple[ManifestHeader, ...] = (
@@ -332,6 +335,10 @@ class ProjectRepositories:
                 RenderManifest.new(project_id, updated_at=updated_at),
                 operation_id=operation_id,
             ),
+            replace(
+                AnnotationsManifest.new(project_id, updated_at=updated_at),
+                operation_id=operation_id,
+            ),
         )
         repositories = self.in_lock_order()
         with ExitStack() as stack:
@@ -343,6 +350,8 @@ class ProjectRepositories:
     def recover_partial_creation(
         self, project_id: str
     ) -> tuple[tuple[str, ...], str | None]:
+        from cadscene.annotations.models import AnnotationsManifest
+
         repositories = self.in_lock_order()
         with ExitStack() as stack:
             for repository in repositories:
@@ -366,6 +375,29 @@ class ProjectRepositories:
                 for repository in repositories[:published_count]
             )
             operation_ids = {manifest.operation_id for manifest in existing}
+            is_interrupted_current_creation = (
+                None not in operation_ids
+                and len(operation_ids) == 1
+                and all(manifest.revision == 0 for manifest in existing)
+            )
+            if (
+                published_count == len(repositories) - 1
+                and not is_interrupted_current_creation
+            ):
+                # Stage 8 projects predate the independent annotations manifest.
+                # Bootstrap only the new owner; never restamp or rewrite the four
+                # established manifests during this schema migration.
+                operation_id = new_operation_id()
+                value = replace(
+                    AnnotationsManifest.new(
+                        project_id, updated_at=existing[0].updated_at
+                    ),
+                    operation_id=operation_id,
+                )
+                repositories[-1].create(
+                    project_id, expected_revision=-1, value=value
+                )
+                return (repositories[-1].owner,), operation_id
             if None in operation_ids or len(operation_ids) != 1:
                 raise ValueError("partial project creation has inconsistent operation IDs")
             if any(manifest.revision != 0 for manifest in existing):
@@ -393,6 +425,10 @@ class ProjectRepositories:
                     RenderManifest.new(project_id, updated_at=updated_at),
                     operation_id=operation_id,
                 ),
+                replace(
+                    AnnotationsManifest.new(project_id, updated_at=updated_at),
+                    operation_id=operation_id,
+                ),
             )
             changed: list[str] = []
             for repository, value in zip(
@@ -404,6 +440,8 @@ class ProjectRepositories:
 
 
 def project_repositories(root: Path) -> ProjectRepositories:
+    from cadscene.annotations.models import AnnotationsManifest
+
     def manifest_path(name: str) -> Callable[[str], Path]:
         return lambda project_id: root / validate_project_id(project_id) / name
 
@@ -427,5 +465,10 @@ def project_repositories(root: Path) -> ProjectRepositories:
             manifest_path("render_manifest.json"),
             owner="render",
             decoder=RenderManifest.from_dict,
+        ),
+        annotations=AtomicJsonRepository(
+            manifest_path("annotations_manifest.json"),
+            owner="annotations",
+            decoder=AnnotationsManifest.from_dict,
         ),
     )

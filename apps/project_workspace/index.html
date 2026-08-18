@@ -44,7 +44,10 @@
 
       <section class="summary-grid" aria-label="项目概况">
         <article class="summary-card source-video-card"><div class="source-video-thumb"><img id="sourceVideoThumbnail" alt="源视频缩略图"><span class="thumb-play" aria-hidden="true">▶</span></div><div><span>源视频</span><strong id="sourceVideoName">—</strong><small id="sourceVideoMeta">等待文件</small></div></article>
-        <article class="summary-card"><span>CAD</span><strong id="cadName">—</strong><small id="cadMeta">等待文件</small></article>
+        <article id="cadAssetCard" class="summary-card cad-replacement-card">
+          <div class="cad-card-content"><span>CAD</span><strong id="cadName">—</strong><small id="cadMeta">等待文件</small><div id="cadReplacementProgress" class="cad-replacement-progress" hidden><div class="progress-track"><span id="cadReplacementFill" class="progress-fill"></span></div><small id="cadReplacementPercent">—</small></div></div>
+          <button id="cadReplacementTrigger" class="cad-replacement-rail" type="button" aria-label="替换 CAD 图纸" title="替换 CAD 图纸"><span>替</span><span>换</span></button>
+        </article>
         <article class="summary-card"><span>SRT</span><strong id="srtName">未上传</strong><small id="srtMeta">可选</small></article>
         <article class="summary-card metric"><span>总片段数</span><strong id="clipCount">0</strong><small>逻辑片段</small></article>
         <article class="summary-card metric"><span>待处理</span><strong id="pendingCount">0</strong><small>可批量操作</small></article>
@@ -84,6 +87,15 @@
     </form>
   </dialog>
   <dialog id="workbenchPreparationDialog" class="dialog preparation-dialog"><div class="preparation-visual" aria-hidden="true"><span></span><span></span><span></span></div><h2>正在准备片段工作台</h2><p id="workbenchPreparationMessage">正在按原视频时间范围准备片段视频…</p><div class="preparation-progress"><span id="workbenchPreparationFill"></span></div><strong id="workbenchPreparationPercent">—</strong></dialog>
+  <dialog id="cadReplacementDialog" class="dialog cad-replacement-dialog">
+    <form id="cadReplacementForm">
+      <h2>替换项目 CAD 图纸</h2>
+      <p>新版图纸将全局应用到所有片段。已有标定、路线拟合、轨迹和工作台成果会保留，渲染结果需要重新生成。</p>
+      <label class="cad-file-field"><span>选择新版 CAD</span><input id="cadReplacementFile" type="file" accept=".dxf,.dwg,.json,.zip" required></label>
+      <label class="cad-coordinate-confirmation"><input id="cadCoordinateConfirmation" type="checkbox"> <span>新版 CAD 与当前项目使用相同坐标系</span></label>
+      <div class="dialog-actions"><button id="cancelCadReplacement" type="button" class="button secondary">取消</button><button id="confirmCadReplacement" type="submit" class="button primary" disabled>开始替换</button></div>
+    </form>
+  </dialog>
   <template id="clipRowTemplate"><tr><td><input class="clip-select" type="checkbox"></td><td><div class="clip-name-cell"><div class="clip-thumbnail"><img alt="片段缩略图"><span class="thumb-play" aria-hidden="true">▶</span></div><div><button class="clip-name" type="button"></button><span class="review-badge" hidden>需确认</span></div></div></td><td class="time-range"></td><td class="duration"></td><td><span class="motion-mode"></span><small class="confidence"></small></td><td class="workflow-recommendation"></td><td><select class="workflow-select" aria-label="最终工作流"><option value="sfm_only">三维重建（SfM）</option><option value="pure_rotation">旋转估计（OpenGV）</option></select><span class="row-error" role="alert"></span></td><td><span class="status-pill"></span></td><td><div class="progress-cell"><div class="progress-track"><span class="progress-fill"></span></div><span class="progress-percent">—</span></div></td><td><div class="row-actions"><button class="button compact open-workbench" type="button">进入工作台</button><button class="button compact retry-job" type="button">重试</button><button class="button compact cancel-job" type="button">取消</button></div></td></tr></template>
   <script src="project_workspace.js"></script>
 </body>

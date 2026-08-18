@@ -31,6 +31,9 @@ _PROJECT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})$")
 _UPLOAD = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt)$"
 )
+_CAD_REPLACEMENT_UPLOAD = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/cad-replacement$"
+)
 _ANALYSIS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/start$")
 _ANALYSIS_ACTIVATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/analysis/activate$"
@@ -42,11 +45,19 @@ _WORKFLOW = re.compile(
 _NAME = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/name$"
 )
-_TRAJECTORY = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$"
-)
+_TRAJECTORY = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/trajectory-jobs$")
 _RENDER = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/render-jobs$")
 _MERGE = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/merge-jobs$")
+_ANNOTATIONS = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations$")
+_ANNOTATION = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})$"
+)
+_ANNOTATION_TRACKING = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/annotations/(?P<annotation>{_SAFE_ID})/(?P<action>track|tracking)$"
+)
+_ANNOTATION_PREVIEW = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/annotation-preview$"
+)
 _JOB_ACTION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/jobs/(?P<job>{_SAFE_ID})/(?P<action>retry|cancel)$"
 )
@@ -125,6 +136,22 @@ class ProjectApi:
             match = _SNAPSHOT.fullmatch(path)
             if method == "GET" and match:
                 return self._snapshot(match["project"], headers)
+            match = _ANNOTATION_PREVIEW.fullmatch(path)
+            if method == "GET" and match:
+                return ApiResponse(
+                    200,
+                    self.service.annotation_preview_timing(
+                        match["project"], match["clip"]
+                    ),
+                    {"Cache-Control": "no-store"},
+                )
+            match = _CAD_REPLACEMENT_UPLOAD.fullmatch(path)
+            if method == "POST" and match:
+                if upload is None:
+                    raise ValueError("project upload body is required")
+                return self._publish_cad_replacement(
+                    match["project"], payload, upload
+                )
             match = _UPLOAD.fullmatch(path)
             if method == "POST" and match:
                 if upload is None:
@@ -140,9 +167,7 @@ class ProjectApi:
                 return self._activate_analysis(match["project"], payload)
             match = _WORKFLOW.fullmatch(path)
             if method == "PATCH" and match:
-                return self._update_workflow(
-                    match["project"], match["clip"], payload
-                )
+                return self._update_workflow(match["project"], match["clip"], payload)
             match = _NAME.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_name(match["project"], match["clip"], payload)
@@ -155,6 +180,25 @@ class ProjectApi:
             match = _MERGE.fullmatch(path)
             if method == "POST" and match:
                 return self._merge_job(match["project"], payload)
+            match = _ANNOTATIONS.fullmatch(path)
+            if method == "POST" and match:
+                return self._create_annotation(match["project"], payload)
+            match = _ANNOTATION_TRACKING.fullmatch(path)
+            if method == "POST" and match and match["action"] == "track":
+                return self._track_annotation(
+                    match["project"], match["annotation"], payload
+                )
+            if method == "GET" and match and match["action"] == "tracking":
+                return self._annotation_tracking(match["project"], match["annotation"])
+            match = _ANNOTATION.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_annotation(
+                    match["project"], match["annotation"], payload
+                )
+            if method == "DELETE" and match:
+                return self._delete_annotation(
+                    match["project"], match["annotation"], payload
+                )
             match = _JOB_RUNTIME.fullmatch(path)
             if method == "GET" and match:
                 return ApiResponse(
@@ -174,9 +218,7 @@ class ProjectApi:
                 )
             match = _WORKBENCH_SESSION.fullmatch(path)
             if match and method == "GET" and match["action"] is None:
-                return self._inspect_workbench_session(
-                    match["project"], match["token"]
-                )
+                return self._inspect_workbench_session(match["project"], match["token"])
             if match and method == "POST" and match["action"] in {"save", "close"}:
                 return self._mutate_workbench_session(
                     match["project"], match["token"], match["action"], payload
@@ -204,9 +246,13 @@ class ProjectApi:
         except WorkbenchPermissionDenied as exc:
             return ApiResponse(403, {"error": str(exc)})
         except ReplayedWorkbenchSave as exc:
-            return ApiResponse(409, {"error": "workbench_save_replayed", "message": str(exc)})
+            return ApiResponse(
+                409, {"error": "workbench_save_replayed", "message": str(exc)}
+            )
         except StaleWorkbenchSession as exc:
-            return ApiResponse(409, {"error": "stale_workbench_session", "message": str(exc)})
+            return ApiResponse(
+                409, {"error": "stale_workbench_session", "message": str(exc)}
+            )
         except (UploadValidationError, ValueError, KeyError, TypeError) as exc:
             return ApiResponse(400, {"error": str(exc)})
         except (InvalidWorkbenchOutput, InvalidWorkbenchReturnPath) as exc:
@@ -269,8 +315,48 @@ class ProjectApi:
         payload: Mapping[str, object],
         request: UploadRequest,
     ) -> ApiResponse:
-        return self._publish_upload_locked(
-            project_id, asset_type, payload, request
+        return self._publish_upload_locked(project_id, asset_type, payload, request)
+
+    def _publish_cad_replacement(
+        self,
+        project_id: str,
+        payload: Mapping[str, object],
+        request: UploadRequest,
+    ) -> ApiResponse:
+        if payload.get("same_coordinate_system_confirmed") is not True:
+            raise ValueError("必须确认新版 CAD 与当前项目使用相同坐标系")
+        pending = self.uploads.begin(
+            project_id,
+            "cad",
+            request.filename,
+            expected_size=request.size_bytes,
+            expected_sha256=request.sha256,
+        )
+        try:
+            while True:
+                chunk = request.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                pending.write(chunk)
+            published = pending.complete_staged()
+        except BaseException:
+            pending.abort()
+            raise
+        result = self.service.request_cad_replacement(
+            project_id,
+            published,
+            expected_revision=_required_revision(payload),
+            same_coordinate_system_confirmed=True,
+        )
+        return ApiResponse(
+            202,
+            {
+                "project_id": project_id,
+                "project_revision": result.project_revision,
+                "job_id": result.job_id,
+                "candidate_revision": result.candidate_revision,
+                "status": "queued",
+            },
         )
 
     def _publish_upload_locked(
@@ -349,9 +435,7 @@ class ProjectApi:
             or not isinstance(expected_clips_revision, int)
             or expected_clips_revision < 0
         ):
-            raise ValueError(
-                "expected_clips_revision must be a non-negative integer"
-            )
+            raise ValueError("expected_clips_revision must be a non-negative integer")
         result = self.service.activate_candidate_analysis(
             project_id,
             candidate_analysis_revision=candidate_revision,
@@ -368,15 +452,180 @@ class ProjectApi:
             },
         )
 
-    def _snapshot(
-        self, project_id: str, headers: Mapping[str, str]
-    ) -> ApiResponse:
+    def _snapshot(self, project_id: str, headers: Mapping[str, str]) -> ApiResponse:
         snapshot = self._build_snapshot(project_id)
         etag = f'"{snapshot["snapshot_revision"]}"'
         response_headers = {"ETag": etag, "Cache-Control": "no-store"}
         if headers.get("if-none-match") == etag:
             return ApiResponse(304, None, response_headers)
         return ApiResponse(200, snapshot, response_headers)
+
+    def _create_annotation(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        from cadscene.annotations.models import (
+            AnnotationContent,
+            AnnotationLeader,
+            AnnotationPanel,
+            AnnotationStyle,
+            SourcePtsRange,
+            VisibilityPolicy,
+        )
+
+        result = self.service.annotation_service.create(
+            project_id,
+            expected_revision=int(payload["expected_revision"]),
+            annotation_id=(
+                None
+                if payload.get("annotation_id") is None
+                else str(payload["annotation_id"])
+            ),
+            clip_id=str(payload["clip_id"]),
+            anchor_type=str(payload["anchor_type"]),
+            text=str(payload.get("text", "")),
+            content=(
+                AnnotationContent.from_dict(payload["content"])
+                if isinstance(payload.get("content"), Mapping)
+                else None
+            ),
+            panel=(
+                AnnotationPanel.from_dict(payload["panel"])
+                if isinstance(payload.get("panel"), Mapping)
+                else None
+            ),
+            leader=(
+                AnnotationLeader.from_dict(payload["leader"])
+                if isinstance(payload.get("leader"), Mapping)
+                else None
+            ),
+            anchor=dict(payload.get("anchor") or {}),
+            source_pts_range=SourcePtsRange.from_dict(payload["source_pts_range"]),
+            screen_offset=tuple(payload.get("screen_offset", (0.0, 0.0))),
+            style=AnnotationStyle.from_dict(payload.get("style")),
+            visibility_policy=VisibilityPolicy.from_dict(
+                payload.get("visibility_policy")
+            ),
+            user_visible=bool(payload.get("user_visible", True)),
+        )
+        return ApiResponse(
+            201,
+            {
+                "annotation": result.annotation.to_dict(),
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
+    def _update_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        changes = payload.get("changes")
+        if not isinstance(changes, Mapping):
+            raise TypeError("annotation changes must be an object")
+        result = self.service.annotation_service.update(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
+            changes=changes,
+        )
+        return ApiResponse(
+            200,
+            {
+                "annotation": result.annotation.to_dict(),
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
+    def _delete_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        result = self.service.annotation_service.delete(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
+        )
+        return ApiResponse(
+            200,
+            {
+                "annotation_id": result.annotation_id,
+                "annotations_revision": result.manifest_revision,
+                "render_revision": result.render_revision,
+                "operation_id": result.operation_id,
+            },
+        )
+
+    def _track_annotation(
+        self,
+        project_id: str,
+        annotation_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        from cadscene.annotations.tracking import VideoTrackingInitialization
+
+        correction_payload = payload.get("correction")
+        if correction_payload is not None and not isinstance(
+            correction_payload, Mapping
+        ):
+            raise TypeError("tracking correction must be an object")
+        correction = (
+            None
+            if correction_payload is None
+            else VideoTrackingInitialization.from_dict(correction_payload)
+        )
+        result = self.service.track_video_annotation(
+            project_id,
+            annotation_id,
+            expected_revision=int(payload["expected_revision"]),
+            expected_annotation_revision=int(payload["expected_annotation_revision"]),
+            correction=correction,
+        )
+        visible = sum(1 for item in result.revision.results if item.visible)
+        lost = len(result.revision.results) - visible
+        return ApiResponse(
+            201,
+            {
+                "tracking_revision": result.revision.tracking_revision,
+                "visible_frame_count": visible,
+                "lost_frame_count": lost,
+                "annotations_revision": result.annotation_result.manifest_revision,
+                "annotation_revision": result.annotation_result.annotation.annotation_revision,
+                "render_revision": result.annotation_result.render_revision,
+                "operation_id": result.annotation_result.operation_id,
+            },
+        )
+
+    def _annotation_tracking(self, project_id: str, annotation_id: str) -> ApiResponse:
+        annotations = self.repositories.annotations.load(project_id)
+        annotation = next(
+            (
+                item
+                for item in annotations.annotations
+                if item.annotation_id == annotation_id
+            ),
+            None,
+        )
+        if annotation is None:
+            raise FileNotFoundError(f"annotation not found: {annotation_id}")
+        if annotation.active_tracking_revision is None:
+            raise FileNotFoundError("annotation has no active tracking revision")
+        revision = self.service.tracking_revision_repository.load(
+            project_id,
+            annotation.clip_id,
+            annotation.annotation_id,
+            annotation.active_tracking_revision,
+        )
+        return ApiResponse(200, revision.to_dict(), {"Cache-Control": "no-store"})
 
     def _build_snapshot(self, project_id: str) -> dict[str, object]:
         with ExitStack() as stack:
@@ -389,6 +638,7 @@ class ProjectApi:
         clips = self.repositories.clips.load(project_id)
         jobs = self.repositories.jobs.load(project_id)
         render = self.repositories.render.load(project_id)
+        annotations = self.repositories.annotations.load(project_id)
         analysis_state = project.source_assets.get("_analysis")
         analysis_status = (
             str(analysis_state.get("status"))
@@ -406,9 +656,7 @@ class ProjectApi:
             if isinstance(analysis_state, Mapping)
             else ()
         )
-        analysis_jobs_by_id = {
-            str(item.get("job_id")): item for item in jobs.jobs
-        }
+        analysis_jobs_by_id = {str(item.get("job_id")): item for item in jobs.jobs}
         analysis_jobs = [
             {
                 "job_id": job_id,
@@ -416,14 +664,62 @@ class ProjectApi:
                 "status": candidate.get("status"),
                 "stage": candidate.get("stage"),
                 "progress": candidate.get("progress"),
-                "depends_on_job_ids": list(
-                    candidate.get("depends_on_job_ids", ())
-                ),
+                "depends_on_job_ids": list(candidate.get("depends_on_job_ids", ())),
                 "error": candidate.get("error"),
             }
             for job_id in analysis_job_ids
             if (candidate := analysis_jobs_by_id.get(job_id)) is not None
         ]
+        replacement_state = project.source_assets.get("_cad_replacement")
+        replacement_job = None
+        if isinstance(replacement_state, Mapping):
+            replacement_job = analysis_jobs_by_id.get(
+                str(replacement_state.get("job_id") or "")
+            )
+        replacement_eligibility = self.service.cad_replacement_eligibility(
+            project_id
+        )
+        cad_replacement = {
+            **replacement_eligibility,
+            "status": (
+                replacement_job.get("status")
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("status")
+                    if isinstance(replacement_state, Mapping)
+                    else "idle"
+                )
+            ),
+            "job_id": (
+                replacement_state.get("job_id")
+                if isinstance(replacement_state, Mapping)
+                else None
+            ),
+            "progress": (
+                _visible_job_progress(replacement_job)
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("progress")
+                    if isinstance(replacement_state, Mapping)
+                    else None
+                )
+            ),
+            "error": (
+                replacement_job.get("error")
+                if isinstance(replacement_job, Mapping)
+                else (
+                    replacement_state.get("error")
+                    if isinstance(replacement_state, Mapping)
+                    else None
+                )
+            ),
+            "active_revision": (
+                project.source_assets.get("cad", {}).get("revision")
+                if isinstance(project.source_assets.get("cad"), Mapping)
+                else None
+            ),
+            "version_count": len(project.source_assets.get("_cad_versions", ())),
+        }
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=[clip.clip_id for clip in clips.clips]
         )
@@ -435,6 +731,7 @@ class ProjectApi:
             "clips": clips.revision,
             "jobs": jobs.revision,
             "render": render.revision,
+            "annotations": annotations.revision,
         }
         job_by_clip: dict[str, Mapping[str, object]] = {}
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
@@ -455,17 +752,20 @@ class ProjectApi:
             render_job = render_job_by_clip.get(clip.clip_id)
             export_job = export_job_by_clip.get(clip.clip_id)
             job = render_job or trajectory_job
+            if (
+                trajectory_job is not None
+                and trajectory_job.get("status") == "success"
+                and render_job is not None
+                and render_job.get("status") in {"stale_input", "superseded"}
+            ):
+                job = trajectory_job
             display_job = job
             if job is not None and job.get("status") == "queued":
                 display_job = next(
                     (
                         dependency
                         for dependency_id in job.get("depends_on_job_ids", ())
-                        if (
-                            dependency := analysis_jobs_by_id.get(
-                                str(dependency_id)
-                            )
-                        )
+                        if (dependency := analysis_jobs_by_id.get(str(dependency_id)))
                         is not None
                         and dependency.get("status")
                         in {"preparing", "running", "validating"}
@@ -473,41 +773,12 @@ class ProjectApi:
                     job,
                 )
             display_progress = _visible_job_progress(display_job)
-            completed_dependencies = (
-                job is not None
-                and bool(job.get("depends_on_job_ids"))
-                and all(
-                    (
-                        dependency := analysis_jobs_by_id.get(
-                            str(dependency_id)
-                        )
-                    )
-                    is not None
-                    and dependency.get("status") == "success"
-                    for dependency_id in job.get("depends_on_job_ids", ())
-                )
-            )
-            if (
-                display_job is job
-                and job is not None
-                and job.get("job_type") != "clip_render"
-                and completed_dependencies
-                and job.get("status")
-                in {"queued", "preparing", "running", "validating"}
-            ):
-                display_progress = dict(
-                    display_progress
-                    or {
-                        "stage": job.get("stage") or job.get("status"),
-                        "message": "final adapter stage is running",
-                    }
-                )
-                # The prerequisite already supplied the visible 0..99% ramp.
-                # Hold that value through an unquantified final adapter stage;
-                # terminal success remains the sole source of 100%.
-                display_progress["fraction"] = 0.99
             capability = self._clip_capability(
-                project_id, clip, preflight, render_preflight, job,
+                project_id,
+                clip,
+                preflight,
+                render_preflight,
+                job,
                 analysis_busy=analysis_busy,
             )
             can_start_any = can_start_any or bool(
@@ -543,11 +814,19 @@ class ProjectApi:
                     ),
                     "progress": display_progress,
                     "render": {
-                        "job_id": None if render_job is None else render_job.get("job_id"),
-                        "status": "not_started" if render_job is None else render_job.get("status"),
-                        "stage": None if render_job is None else render_job.get("stage"),
+                        "job_id": None
+                        if render_job is None
+                        else render_job.get("job_id"),
+                        "status": "not_started"
+                        if render_job is None
+                        else render_job.get("status"),
+                        "stage": None
+                        if render_job is None
+                        else render_job.get("stage"),
                         "progress": _visible_job_progress(render_job),
-                        "output_revision": None if render_job is None else render_job.get("output_revision"),
+                        "output_revision": None
+                        if render_job is None
+                        else render_job.get("output_revision"),
                         "preview_url": _render_preview_url(
                             project_id,
                             clip.clip_id,
@@ -603,9 +882,28 @@ class ProjectApi:
             ),
             None,
         )
+        merge_download_url = None
+        if merge_job is not None and merge_job.get("status") == "success":
+            try:
+                self.service.published_merge_video_path(project_id)
+                merge_download_url = f"/api/projects/{project_id}/merge-output/video"
+            except (FileNotFoundError, OSError, ValueError, TypeError):
+                pass
+        merge_status = (
+            "not_started"
+            if merge_job is None
+            else (
+                "stale_input"
+                if merge_job.get("status") == "success"
+                and merge_download_url is None
+                else merge_job.get("status")
+            )
+        )
         snapshot = {
             "project_id": project_id,
-            "display_name": str(project.source_assets.get("display_name") or project_id),
+            "display_name": str(
+                project.source_assets.get("display_name") or project_id
+            ),
             "component_revisions": components,
             "project_state": project.project_state,
             "active_analysis_revision": project.active_analysis_revision,
@@ -615,6 +913,7 @@ class ProjectApi:
                 "status": analysis_status,
                 "jobs": analysis_jobs,
             },
+            "cad_replacement": cad_replacement,
             "assets": _snapshot_assets(project_id, project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,
@@ -626,16 +925,15 @@ class ProjectApi:
             },
             "merge": {
                 "job_id": None if merge_job is None else merge_job.get("job_id"),
-                "status": "not_started" if merge_job is None else merge_job.get("status"),
+                "status": merge_status,
                 "stage": None if merge_job is None else merge_job.get("stage"),
                 "progress": _visible_job_progress(merge_job),
-                "download_url": (
-                    f"/api/projects/{project_id}/merge-output/video"
-                    if merge_job is not None and merge_job.get("status") == "success"
-                    else None
-                ),
+                "download_url": merge_download_url,
             },
             "clips": clip_payloads,
+            "annotations": [
+                annotation.to_dict() for annotation in annotations.annotations
+            ],
         }
         revision_payload = json.dumps(
             snapshot,
@@ -682,7 +980,8 @@ class ProjectApi:
             "reason": reason,
             "can_open_workbench": can_open_workbench,
             "can_prepare_workbench": can_prepare_workbench,
-            "can_render": not analysis_busy and (
+            "can_render": not analysis_busy
+            and (
                 clip.clip_id in render_preflight.eligible
                 or clip.clip_id in render_preflight.confirmation_required
             ),
@@ -697,15 +996,16 @@ class ProjectApi:
             ),
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
-            "can_cancel": status
-            in {"queued", "preparing", "running", "validating"},
+            "can_cancel": status in {"queued", "preparing", "running", "validating"},
         }
 
     def _create_workbench_session(
         self, project_id: str, clip_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         return_to = payload.get("return_to")
         if not isinstance(return_to, str):
             raise InvalidWorkbenchReturnPath("return_to is required")
@@ -747,11 +1047,11 @@ class ProjectApi:
             },
         )
 
-    def _inspect_workbench_session(
-        self, project_id: str, token: str
-    ) -> ApiResponse:
+    def _inspect_workbench_session(self, project_id: str, token: str) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.inspect(project_id, token)
         return ApiResponse(
             200,
@@ -766,7 +1066,9 @@ class ProjectApi:
         self, project_id: str, token: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.attach_trajectory(
             project_id,
             token,
@@ -784,7 +1086,9 @@ class ProjectApi:
         self, project_id: str, token: str, payload: Mapping[str, object]
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         session = self.workbench.heartbeat(
             project_id,
             token,
@@ -806,7 +1110,9 @@ class ProjectApi:
         payload: Mapping[str, object],
     ) -> ApiResponse:
         if self.workbench is None:
-            raise WorkbenchPermissionDenied("project workbench sessions are unavailable")
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
         expected_revision = _required_revision(payload)
         if action == "save":
             existing_save = payload.get("existing_save")
@@ -960,9 +1266,7 @@ class ProjectApi:
             },
         )
 
-    def _merge_job(
-        self, project_id: str, payload: Mapping[str, object]
-    ) -> ApiResponse:
+    def _merge_job(self, project_id: str, payload: Mapping[str, object]) -> ApiResponse:
         expected_revision = _required_revision(payload)
         result = self.service.enqueue_project_merge(
             project_id, expected_jobs_revision=expected_revision
@@ -1019,8 +1323,7 @@ def _string_sequence(value: object, name: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list) or any(
-        not is_safe_stable_id(item)
-        for item in value
+        not is_safe_stable_id(item) for item in value
     ):
         raise ValueError(f"{name} must be a list of stable IDs")
     return tuple(value)
@@ -1133,9 +1436,7 @@ def _candidate_analysis_preview(
     artifact_path = descriptor.get("analysis_artifact_path")
     if not isinstance(input_snapshot, Mapping) or not isinstance(artifact_path, str):
         return None
-    manifest_path = (
-        Path(artifact_path) / "02_video_analysis" / "clip_manifest.json"
-    )
+    manifest_path = Path(artifact_path) / "02_video_analysis" / "clip_manifest.json"
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if payload.get("analysis_revision") != revision:
@@ -1209,9 +1510,7 @@ def _render_preview_record(
     render_records: tuple[Mapping[str, object], ...],
 ) -> Mapping[str, object] | None:
     output_revision = (
-        render_job.get("output_revision")
-        if isinstance(render_job, Mapping)
-        else None
+        render_job.get("output_revision") if isinstance(render_job, Mapping) else None
     )
     return next(
         (
@@ -1251,7 +1550,11 @@ def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
     fingerprints: dict[str, str] = {}
     for required in ("video", "cad"):
         asset = source_assets.get(required)
-        if not isinstance(asset, Mapping) or not asset.get("path") or not asset.get("sha256"):
+        if (
+            not isinstance(asset, Mapping)
+            or not asset.get("path")
+            or not asset.get("sha256")
+        ):
             return None
         fingerprints[required] = str(asset["sha256"])
     srt = source_assets.get("srt")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cadscene.annotations.models import Annotation, SourcePtsRange
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.media import ProjectMediaSpec, parse_ffprobe
@@ -17,6 +18,7 @@ from cadscene.projects.render_adapters import RenderAdapterRegistry, RenderExecu
 from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _render_identity_payload
 from cadscene.projects.service import _render_physical_inputs
+from cadscene.video_analysis.pts import DecodedFrameTimestamp
 import cadscene.projects.service as service_module
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -683,6 +685,162 @@ def test_render_identity_includes_saved_workbench_operation_id(tmp_path: Path) -
     )
 
     assert payload["workbench"]["output_operation_id"] == "save-ready"
+
+
+def test_render_identity_changes_with_active_cad_revision(tmp_path: Path) -> None:
+    _service, repositories, _queue, adapter, trajectories = _system(tmp_path)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    clip = next(item for item in clips.clips if item.clip_id == "ready")
+    trajectory = next(item for item in trajectories if item.clip_id == "ready")
+    common = {
+        "clip": clip,
+        "project_revision": project.revision,
+        "clips_revision": clips.revision,
+        "trajectory": trajectory,
+        "workbench": clip.references[0],
+        "media_spec": ProjectMediaSpec.from_dict(project.media_spec),
+        "media_spec_revision": str(project.media_spec_revision),
+        "adapter_name": adapter.name,
+        "adapter_version": adapter.version,
+    }
+
+    before = _render_identity_payload(
+        **common, active_cad_identity={"revision": "cad:old"}
+    )
+    after = _render_identity_payload(
+        **common, active_cad_identity={"revision": "cad:new"}
+    )
+
+    assert before != after
+
+
+def test_render_identity_includes_only_the_target_clip_annotations(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, adapter, trajectories = _system(tmp_path)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    clip = next(item for item in clips.clips if item.clip_id == "ready")
+    trajectory = next(item for item in trajectories if item.clip_id == "ready")
+    common = {
+        "clip": clip,
+        "project_revision": project.revision,
+        "clips_revision": clips.revision,
+        "trajectory": trajectory,
+        "workbench": clip.references[0],
+        "media_spec": ProjectMediaSpec.from_dict(project.media_spec),
+        "media_spec_revision": str(project.media_spec_revision),
+        "adapter_name": adapter.name,
+        "adapter_version": adapter.version,
+    }
+
+    before = _render_identity_payload(
+        **common, annotation_identity={"annotations": []}
+    )
+    after = _render_identity_payload(
+        **common,
+        annotation_identity={
+            "annotations": [
+                {"annotation_id": "label-1", "text": "K12+340"}
+            ]
+        },
+    )
+
+    assert before["annotation_dependencies"] == {"annotations": []}
+    assert before != after
+
+
+def test_render_identity_keeps_untracked_video_draft_hidden_without_blocking(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    clip = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    annotation = Annotation.new(
+        annotation_id="video-draft",
+        clip_id="ready",
+        anchor_type="video_track",
+        text="尚未跟踪",
+        anchor={
+            "initialization": {
+                "source_pts": 500,
+                "bbox": [10.0, 10.0, 20.0, 20.0],
+                "anchor_xy": [20.0, 20.0],
+            }
+        },
+        source_pts_range=SourcePtsRange(500, 600, 1, 1000),
+        created_at="2026-08-04T00:00:02Z",
+        operation_id="create-video-draft",
+    )
+    manifest = repositories.annotations.load("p1")
+    repositories.annotations.update(
+        "p1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(value, annotations=(annotation,)),
+    )
+
+    identity = service._annotation_render_identity("p1", clip)
+
+    assert identity["tracking_dependencies"] == []
+    assert identity["annotations"][0]["annotation_id"] == "video-draft"
+    assert identity["annotations"][0]["active_tracking_revision"] is None
+
+
+def test_cad_annotation_bundle_carries_project_coordinate_transform(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    clip = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    annotation = Annotation.new(
+        annotation_id="cad-label",
+        clip_id="ready",
+        anchor_type="cad_anchor",
+        text="K12+340",
+        anchor={"cad_world_xyz": [1000.0, 2020.0, 2.0]},
+        source_pts_range=SourcePtsRange(500, 600, 1, 1000),
+        created_at="2026-08-04T00:00:02Z",
+        operation_id="create-cad-label",
+    )
+    manifest = repositories.annotations.load("p1")
+    repositories.annotations.update(
+        "p1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(value, annotations=(annotation,)),
+    )
+    dataset = tmp_path / "data" / "p1-ready"
+    dataset.mkdir(parents=True)
+    (dataset / "dataset_manifest.json").write_text(
+        json.dumps(
+            {"defaults": {"cad_scale": 0.5, "origin_xy": [1000.0, 2000.0]}}
+        ),
+        encoding="utf-8",
+    )
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    bundle_path = service._write_annotation_render_bundle(
+        "p1",
+        clip,
+        frames=(DecodedFrameTimestamp(0, 500, 40, "pts"),),
+        time_base=Fraction(1, 1000),
+        media_spec=_media_spec(),
+        attempt=attempt,
+    )
+
+    assert bundle_path is not None
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert bundle["cad_coordinate_transform"] == {
+        "cad_scale": 0.5,
+        "origin_xy": [1000.0, 2000.0],
+    }
+    assert bundle["dependencies"]["cad_coordinate_transform"] == {
+        "cad_scale": 0.5,
+        "origin_xy": [1000.0, 2000.0],
+    }
 
 
 def test_reopening_saved_workbench_does_not_stale_current_render_identity(

@@ -207,6 +207,38 @@ def test_executor_forwards_structured_adapter_progress_while_process_runs(
     )
 
 
+def test_executor_keeps_validation_progress_determinate_at_99_percent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    plan = JobExecutionPlan(
+        commands=((sys.executable, "-c", "pass"),),
+        validate=lambda: AdapterResult.success(
+            output_revision="validated-1",
+            output_fingerprint="validated-fingerprint",
+            outputs={},
+        ),
+    )
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
+    reported = []
+    original = service.update_job_progress
+
+    def record_progress(project_id, current_job_id, progress, **lease):
+        reported.append(progress)
+        return original(project_id, current_job_id, progress, **lease)
+
+    monkeypatch.setattr(service, "update_job_progress", record_progress)
+
+    completed = LocalJobExecutor(service).run_next()
+
+    assert completed is not None and completed.status == "success"
+    validating = next(item for item in reported if item.stage == "validating")
+    assert validating.fraction == 0.99
+
+
 def test_executor_claims_a_reserved_job_only_once_across_concurrent_workers(
     tmp_path: Path,
     monkeypatch,

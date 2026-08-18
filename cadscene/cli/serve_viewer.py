@@ -205,7 +205,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Accept-Ranges", "bytes")
         viewer_path = urlsplit(self.path).path
-        if viewer_path.startswith("/apps/web_camera_viewer/") and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
+        if viewer_path.startswith(
+            ("/apps/web_camera_viewer/", "/apps/project_workspace/")
+        ) and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -253,16 +255,24 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     use_current_revision = (
                         (query.get("useCurrentRevision") or [""])[0] == "1"
                     )
+                    same_coordinate_system_confirmed = (
+                        (query.get("sameCoordinateSystem") or [""])[0] == "1"
+                    )
                     if not use_current_revision and not str(raw_revision).isdigit():
                         raise ValueError("expectedRevision query parameter is required")
                     response = api.handle(
                         method,
                         parsed.path,
-                        json_body=(
-                            {"use_current_revision": True}
-                            if use_current_revision
-                            else {"expected_revision": int(raw_revision)}
-                        ),
+                        json_body={
+                            **(
+                                {"use_current_revision": True}
+                                if use_current_revision
+                                else {"expected_revision": int(raw_revision)}
+                            ),
+                            "same_coordinate_system_confirmed": (
+                                same_coordinate_system_confirmed
+                            ),
+                        },
                         upload=UploadRequest(
                             filename=filename,
                             stream=stream,
@@ -806,6 +816,13 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "API not found")
 
+    def do_DELETE(self) -> None:
+        route = urlsplit(self.path).path
+        if route.startswith("/api/projects/"):
+            self._dispatch_project_api("DELETE")
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "API not found")
+
     def do_HEAD(self) -> None:
         parsed = urlsplit(self.path)
         if re.fullmatch(
@@ -1037,6 +1054,61 @@ def parse_extra_roots(items: list[str]) -> dict[str, Path]:
     return roots
 
 
+def resolve_pure_rotation_runtime(
+    *,
+    backend_root: str | None,
+    backend_python: str | None,
+    search_from: Path,
+    executable: Path,
+) -> tuple[Path | None, Path | None]:
+    """解析显式配置，缺省时发现工作区同级 POC 与 Conda 环境。"""
+    resolved_backend = Path(backend_root).resolve() if backend_root else None
+    if resolved_backend is None:
+        origin = search_from.resolve()
+        for parent in (origin, *origin.parents):
+            candidate = parent / "pure_rotation_camera_poc"
+            if (candidate / "scripts" / "run_full_video_exploration.py").is_file():
+                resolved_backend = candidate.resolve()
+                break
+
+    resolved_python = Path(backend_python).resolve() if backend_python else None
+    if resolved_python is None:
+        current = executable.resolve()
+        executable_name = "python.exe" if current.name.lower() == "python.exe" else "python"
+        candidates = [
+            current,
+            current.parent / "envs" / "pure_rotation_poc" / executable_name,
+            current.parent.parent / "envs" / "pure_rotation_poc" / executable_name,
+            current.parent.parent.parent / "envs" / "pure_rotation_poc" / executable_name,
+        ]
+        resolved_python = next(
+            (
+                candidate.resolve()
+                for candidate in candidates
+                if candidate.parent.name == "pure_rotation_poc" and candidate.is_file()
+            ),
+            None,
+        )
+    return resolved_backend, resolved_python
+
+
+def resolve_pure_rotation_calibration_root(
+    *,
+    configured: str | None,
+    application_root: Path,
+) -> Path | None:
+    """显式配置优先；缺省只使用随应用固定的标定配置。"""
+    if configured:
+        return Path(configured).resolve()
+    pinned = (
+        application_root
+        / "configs"
+        / "pure_rotation"
+        / "adapter-calibration"
+    ).resolve()
+    return pinned if (pinned / "cameras.txt").is_file() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root).resolve()
@@ -1070,7 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     server.root_dir = root
     server.storage_root_dir = storage_root
     server.extra_roots = served_roots
-    server.job_runner = JobRunner(storage_root)
+    server.job_runner = JobRunner(storage_root, application_root=root)
     from cadscene.projects.executor import LocalJobExecutor
     from cadscene.projects.http_api import ProjectApi
     from cadscene.projects.json_repositories import project_repositories
@@ -1091,21 +1163,21 @@ def main(argv: list[str] | None = None) -> int:
     projects_root.mkdir(parents=True, exist_ok=True)
     repositories = project_repositories(projects_root)
     queue = LocalResourceQueue()
-    pure_rotation_root = (
-        Path(args.pure_rotation_backend_root).resolve()
-        if args.pure_rotation_backend_root
-        else None
+    pure_rotation_root, pure_rotation_python = resolve_pure_rotation_runtime(
+        backend_root=args.pure_rotation_backend_root,
+        backend_python=args.pure_rotation_python,
+        search_from=root,
+        executable=Path(sys.executable),
     )
     pure_rotation_command = None
-    if pure_rotation_root is not None and args.pure_rotation_python:
+    if pure_rotation_root is not None and pure_rotation_python is not None:
         pure_rotation_command = (
-            str(Path(args.pure_rotation_python).resolve()),
+            str(pure_rotation_python),
             str(pure_rotation_root / "scripts" / "run_full_video_exploration.py"),
         )
-    pure_rotation_calibration_root = (
-        Path(args.pure_rotation_calibration_root).resolve()
-        if args.pure_rotation_calibration_root
-        else None
+    pure_rotation_calibration_root = resolve_pure_rotation_calibration_root(
+        configured=args.pure_rotation_calibration_root,
+        application_root=root,
     )
     project_service = ProjectService(
         repositories,

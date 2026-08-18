@@ -726,14 +726,15 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         projects_root=projects_root,
         now=lambda: "2026-08-04T08:00:00Z",
     )
+    adapter = service.adapters.for_workflow(workflow)
     project = repositories.project.load("project-1")
     job = service._new_job(
         "project-1",
         clip,
         job_type="trajectory",
         resource_class="heavy_compute",
-        adapter_name=workflow,
-        adapter_version="1",
+        adapter_name=adapter.name,
+        adapter_version=adapter.version,
         exclusive_key="trajectory:project-1:clip-1",
         dependency_ids=(),
         project_assets=project.source_assets,
@@ -815,6 +816,73 @@ def test_snapshot_exposes_server_derived_workbench_capability_and_state(
     assert clip["capabilities"]["can_open_workbench"] is True
     assert clip["workbench"]["state"] == "ready"
     assert clip["workbench"]["workbench_output_revision"] is None
+
+
+def test_snapshot_keeps_completed_trajectory_as_primary_when_old_render_is_superseded(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, trajectory = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    superseded_render = {
+        **trajectory.to_dict(),
+        "job_id": "render-old",
+        "job_type": "clip_render",
+        "status": "superseded",
+        "stage": "superseded",
+        "output_revision": None,
+        "output_fingerprint": None,
+        "output_validated": False,
+        "validated_input_fingerprint": None,
+        "published_outputs": {},
+        "validation_proof": None,
+    }
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=(*value.jobs, superseded_render),
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+
+    clip = snapshot.body["clips"][0]
+    assert clip["status"] == "success"
+    assert clip["job_id"] == trajectory.job_id
+    assert clip["capabilities"]["can_retry"] is False
+    assert clip["render"]["status"] == "superseded"
+
+
+def test_workbench_uses_project_active_cad_after_global_replacement(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    new_dataset = tmp_path / "cad-dataset-v2"
+    new_dataset.mkdir()
+    new_design = new_dataset / "design.json"
+    new_design.write_text('{"revision": 2}', encoding="utf-8")
+    project = repositories.project.load("project-1")
+    repositories.project.update(
+        "project-1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "cad": {
+                    "revision": "cad:v2",
+                    "dataset_id": "cad-v2",
+                    "dataset_path": str(new_dataset),
+                },
+            },
+        ),
+    )
+    clip = repositories.clips.load("project-1").clips[0]
+
+    resolved = api.workbench._cad_design_for_context("project-1", clip)
+
+    assert resolved == new_design
 
 
 def test_batch_completed_trajectory_is_materialized_when_workbench_opens(
@@ -1238,7 +1306,7 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["stage"] == "running"
 
 
-def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
+def test_snapshot_uses_indeterminate_progress_until_parent_reports_measurement(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(
@@ -1348,7 +1416,8 @@ def test_snapshot_keeps_dependency_progress_at_ninety_nine_until_parent_success(
 
     assert payload["status"] == "running"
     assert payload["progress"]["stage"] == "running"
-    assert payload["progress"]["fraction"] == 0.99
+    assert payload["progress"]["message"] == "trajectory adapter is running"
+    assert "fraction" not in payload["progress"]
 
 
 def test_snapshot_exposes_user_facing_candidate_analysis_clip_preview(

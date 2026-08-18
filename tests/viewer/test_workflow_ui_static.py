@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 import subprocess
@@ -175,7 +175,7 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     assert "finalizeProjectWorkbenchSave" not in save_track
     assert "async function finishQualityStage" in script
     quality_start = script.index("async function finishQualityStage")
-    quality_finish = script[quality_start:script.index("async function", quality_start + 20)]
+    quality_finish = script[quality_start:script.index("async function persistWorkbenchDraftForReturn", quality_start)]
     assert "await ensureProjectWorkbenchSession()" in quality_finish
     assert "await saveCurrentCameraTrack()" in quality_finish
     assert "await finalizeProjectWorkbenchSave" in quality_finish
@@ -192,6 +192,55 @@ def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     ]
     assert 'querySelectorAll("[data-job-action]")' in availability
     assert "button.disabled = blocked" in availability
+
+
+def test_stale_workbench_url_reopens_current_project_clip_on_refresh() -> None:
+    script = _read("workflow.js")
+
+    recovery = script[
+        script.index("async function recoverStaleProjectWorkbenchSession") :
+        script.index("async function bootstrapProjectWorkbenchSession")
+    ]
+    assert "/snapshot`" in recovery
+    assert "snapshot.clips.find((item) => item.clip_id === runId)" in recovery
+    assert "clip.capabilities?.can_open_workbench" in recovery
+    assert "/clips/${encodeURIComponent(runId)}/workbench-sessions`" in recovery
+    assert "expected_revision: snapshot.component_revisions.clips" in recovery
+    assert "expected_jobs_revision: snapshot.component_revisions.jobs" in recovery
+    assert "window.location.replace(payload.workbench_url)" in recovery
+
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+    assert 'payload.error === "stale_workbench_session"' in bootstrap
+    assert "return recoverStaleProjectWorkbenchSession()" in bootstrap
+
+
+def test_saved_workbench_url_reopens_current_project_clip_on_refresh() -> None:
+    script = _read("workflow.js")
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+    terminal_state = bootstrap[
+        bootstrap.index('if (!new Set(["editing", "pending_save"]).has(payload.state))') :
+        bootstrap.index("projectWorkbenchSession = payload")
+    ]
+
+    assert "return recoverStaleProjectWorkbenchSession()" in terminal_state
+    assert "项目工作台会话已失效" not in terminal_state
+
+
+def test_completed_action_restores_next_stage_before_stale_url_stage() -> None:
+    script = _read("workflow.js")
+    start = script.index("function selectInitialWorkflowStage()")
+    end = script.index("if (projectWorkbenchToken)", start)
+    select_initial = script[start:end]
+
+    assert select_initial.index("stageOrder.includes(restoredWorkflowStage)") < select_initial.index(
+        "stageOrder.includes(requestedWorkflowStage)"
+    )
 
 
 def test_project_workbench_workflow_never_falls_back_to_sfm_on_manifest_read_error() -> None:
@@ -324,6 +373,56 @@ def test_project_workbench_renews_session_during_long_trajectory_jobs() -> None:
     assert wait.rindex("renewProjectWorkbenchSession", 0, trajectory_ready) >= 0
 
 
+def test_project_workbench_renews_session_during_manual_editing() -> None:
+    script = _read("workflow.js")
+    bootstrap = script[
+        script.index("async function bootstrapProjectWorkbenchSession") :
+        script.index("function projectWorkbenchTrajectoryIsPending")
+    ]
+
+    assert "startProjectWorkbenchEditingHeartbeat" in script
+    assert "window.setInterval" in script
+    assert "PROJECT_WORKBENCH_HEARTBEAT_MS" in script
+    assert "startProjectWorkbenchEditingHeartbeat" in bootstrap
+
+
+def test_render_rejects_expired_workbench_session_instead_of_silently_skipping_save() -> None:
+    script = _read("workflow.js")
+    finalize = script[
+        script.index("async function finalizeProjectWorkbenchSave") :
+        script.index("async function finishQualityStage")
+    ]
+
+    assert "项目工作台会话已失效" in finalize
+    invalid_state = finalize[
+        finalize.index('projectWorkbenchSession.state !== "editing"') :
+        finalize.index("projectWorkbenchSaveInFlight = true")
+    ]
+    assert "throw new Error" in invalid_state
+    assert "return null" not in invalid_state
+
+
+def test_workbench_save_waits_for_inflight_editing_heartbeat() -> None:
+    script = _read("workflow.js")
+    finalize = script[
+        script.index("async function finalizeProjectWorkbenchSave") :
+        script.index("async function finishQualityStage")
+    ]
+
+    assert "projectWorkbenchEditingHeartbeatPromise" in script
+    assert "await projectWorkbenchEditingHeartbeatPromise" in finalize
+    assert finalize.index("await projectWorkbenchEditingHeartbeatPromise") < finalize.index(
+        "/save`"
+    )
+
+
+def test_render_button_uses_generic_video_copy() -> None:
+    html = _read("index.html")
+
+    assert 'id="workflowRender" data-job-action type="button">渲染视频</button>' in html
+    assert "渲染带标签视频" not in html
+
+
 def test_successful_project_trajectory_navigates_to_keyframe_stage() -> None:
     script = _read("workflow.js")
     wait = script[
@@ -401,7 +500,9 @@ def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
     assert 'projectWorkbenchRequest("/render-jobs"' in render
     assert "enqueue: false" in render
     assert "enqueue: true" in render
-    assert "confirmed_clip_ids: []" in render
+    assert "preflight.needs_confirmation || preflight.confirmation_required || []" in render
+    assert "confirmationRequired.includes(clipId) ? [clipId] : []" in render
+    assert "confirmed_clip_ids: confirmedClipIds" in render
     assert "waitForProjectWorkbenchRender" in render
     assert render.index("if (projectWorkbenchToken)") < render.index('runStage("render")')
     snapshot_refresh = render.index("/snapshot")
@@ -416,6 +517,23 @@ def test_project_workbench_render_uses_project_queue_and_snapshot() -> None:
     assert "clip.render" in wait
     assert "/runtime" in wait
     assert 'new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"])' in wait
+
+
+def test_saved_project_workbench_renders_without_attempting_a_second_save() -> None:
+    script = _read("workflow.js")
+    start = script.index("async function startRenderStage")
+    end = script.index("async function cancelRunningJob", start)
+    render = script[start:end]
+
+    editable_guard = 'projectWorkbenchSession.state === "editing"'
+    saved_guard = 'projectWorkbenchSession.state !== "saved"'
+    assert editable_guard in render
+    assert saved_guard in render
+    assert render.index(editable_guard) < render.index("await saveCurrentCameraTrack()")
+    assert render.index("await saveCurrentCameraTrack()") < render.index(
+        "await finalizeProjectWorkbenchSave"
+    )
+    assert render.index(saved_guard) < render.index('projectWorkbenchRequest("/render-jobs"')
 
 
 def test_project_render_success_keeps_project_status_and_uses_snapshot_preview_url() -> None:
@@ -442,8 +560,11 @@ def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None
     end = script.index("async function persistWorkbenchDraftForReturn", start)
     finish = script[start:end]
 
-    assert "await finalizeProjectWorkbenchSave(result, { navigate: false })" in finish
-    assert 'setWorkflowStage("render")' in finish
+    assert 'sessionStorage.setItem(restoredWorkflowStageKey(), "render")' in finish
+    assert finish.index('setWorkflowStage("render")') < finish.index("await persistQualityCompletion()")
+    assert "async function persistQualityCompletion" in finish
+    assert "await saveCurrentCameraTrack()" in finish
+    assert "await finalizeProjectWorkbenchSave" in finish
 
 
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
@@ -486,7 +607,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260811-project-workflow-session-v2' in index
+    assert 'workflow.js?v=20260817-render-saved-session-v2' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
@@ -828,7 +949,7 @@ def test_render_log_updates_visible_frame_progress() -> None:
 def test_suggestion_actions_live_in_bottom_uav_controls() -> None:
     html = _read("index.html")
     workflow_end = html.index('<section class="workspace">')
-    controls = html[html.index('<section class="control-panel">') :]
+    controls = html[html.index('id="cameraSettingsDetails"') :]
 
     assert "查看当前建议帧" not in html[:workflow_end]
     assert 'id="viewCurrentSuggestion"' in controls

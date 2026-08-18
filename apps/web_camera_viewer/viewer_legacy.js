@@ -1626,6 +1626,52 @@
       return suggestionMarkers.find((m) => m.mesh === hits[0].object) || null;
     }
 
+    const cadPickRaycaster = new THREE.Raycaster();
+    const cadPickPointer = new THREE.Vector2();
+    cadPickRaycaster.params.Line.threshold = Math.max(0.5, maxSize * 0.0005);
+
+    function pickCadWorld(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      cadPickPointer.x = ((Number(event.clientX) - rect.left) / rect.width) * 2 - 1;
+      cadPickPointer.y = -((Number(event.clientY) - rect.top) / rect.height) * 2 + 1;
+      cadPickRaycaster.setFromCamera(cadPickPointer, inspectCamera);
+      const cadHits = cadPickRaycaster.intersectObjects(cadGroup.children, true)
+        .filter((hit) => !hit.object.userData?.isCadText);
+      const hit = cadHits[0] || cadPickRaycaster.intersectObject(ground, false)[0];
+      if (!hit) return null;
+      const scenePoint = hit.point.clone();
+      if (cadHits.length > 0) scenePoint.y -= cadVisualLift;
+      const world = sceneToWorld(scenePoint, origin);
+      return {
+        cad_world_xyz: [world.x, world.y, world.z],
+        cad_entity_reference: hit.object.userData?.entityReference || null,
+      };
+    }
+
+    function projectCadWorldToInspect(point) {
+      if (!Array.isArray(point) || point.length !== 3) {
+        return { visible: false, reason: "projection_unavailable" };
+      }
+      inspectCamera.updateMatrixWorld(true);
+      const scenePoint = worldToScene(point.map(Number), origin);
+      const cameraPoint = scenePoint.clone().applyMatrix4(inspectCamera.matrixWorldInverse);
+      if (cameraPoint.z >= -inspectCamera.near) {
+        return { visible: false, reason: "behind_inspect_camera" };
+      }
+      const projected = scenePoint.clone().project(inspectCamera);
+      if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+        return { visible: false, reason: "projection_invalid" };
+      }
+      const width = Math.max(1, renderer.domElement.clientWidth || sceneContainer.clientWidth);
+      const height = Math.max(1, renderer.domElement.clientHeight || sceneContainer.clientHeight);
+      const x = (projected.x + 1) * width * 0.5;
+      const y = (1 - projected.y) * height * 0.5;
+      if (x < 0 || x >= width || y < 0 || y >= height) {
+        return { visible: false, reason: "outside_inspect_viewport" };
+      }
+      return { visible: true, reason: "visible", xy: [x, y] };
+    }
+
     renderer.domElement.addEventListener("click", (event) => {
       const hit = pickSuggestion(event);
       if (!hit) return;
@@ -1683,6 +1729,7 @@
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
       setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
+      pickCadWorld, projectCadWorldToInspect,
     };
   }
 
@@ -2011,6 +2058,35 @@
       pose.rotation_cad_from_camera = pureRotationAuthoritativeMatrix.map((row) => row.slice());
     }
     return pose;
+  };
+
+  window.cadscenePickCadWorld = function (event) {
+    return threeScene?.pickCadWorld(event) || null;
+  };
+
+  window.cadsceneProjectCadWorldToInspect = function (point) {
+    return threeScene?.projectCadWorldToInspect(point)
+      || { visible: false, reason: "projection_unavailable" };
+  };
+
+  window.cadsceneProjectCadWorldPoint = function (point) {
+    if (!camera || !Array.isArray(point) || !video.videoWidth || !video.videoHeight) {
+      return { visible: false, reason: "projection_unavailable" };
+    }
+    const projected = projectPoint(point, camera, video.videoWidth, video.videoHeight);
+    if (!projected) return { visible: false, reason: "behind_camera" };
+    if (
+      projected[0] < 0 || projected[0] >= video.videoWidth
+      || projected[1] < 0 || projected[1] >= video.videoHeight
+    ) return { visible: false, reason: "outside_viewport" };
+    const axes = getCameraAxes(camera);
+    const cameraPoint = worldToCamera(point, camera, axes);
+    return {
+      visible: true,
+      reason: "visible",
+      source_xy: projected,
+      depth_m: Number(cameraPoint[2]),
+    };
   };
 
   window.cadsceneGetDefaultCameraPose = function () {
