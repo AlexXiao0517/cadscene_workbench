@@ -830,7 +830,7 @@ class WorkbenchSessionCoordinator:
 
 
 class ProjectWorkbenchService:
-    """Owns project/clip coordination around credential-only sessions."""
+    """Owns coordination around credential-only project and clip sessions."""
 
     def __init__(
         self,

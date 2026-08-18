@@ -2748,7 +2748,7 @@ class ProjectService:
         compatibility = media_compatibility(probed.video, media_spec)
         if not compatibility.compatible:
             raise ValueError(
-                "rendered video differs from project media specification: "
+                "rendered video differs from the media specification for this project: "
                 + ", ".join(compatibility.differences)
             )
         expected_time_base = {
@@ -5159,7 +5159,7 @@ class ProjectService:
 
     @contextmanager
     def _state_guard(self, project_id: str) -> Iterator[None]:
-        """Serialize project/clips/jobs snapshots before acquiring queue state."""
+        """Serialize project, clip, and job snapshots before acquiring queue state."""
         with self._publication_lock:
             with ExitStack() as stack:
                 for repository in (

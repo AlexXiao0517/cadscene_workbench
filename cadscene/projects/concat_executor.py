@@ -485,7 +485,7 @@ def _validate_input_bindings(execution: ConcatMediaExecutionPlan) -> None:
 def _require_media_spec(media: ProbedMedia, spec: ProjectMediaSpec, label: str) -> None:
     compatibility = media_compatibility(media.video, spec)
     if not compatibility.compatible:
-        raise ValueError(f"{label} differs from project media spec: {', '.join(compatibility.differences)}")
+        raise ValueError(f"{label} differs from the media spec for this project: {', '.join(compatibility.differences)}")
 
 
 def _segment_durations(
