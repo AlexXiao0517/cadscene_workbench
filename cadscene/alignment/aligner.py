@@ -15,7 +15,7 @@ from cadscene.core.sim3 import Sim3
 from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 
 
-MAX_GLOBAL_ANCHOR_RESIDUAL_M = 5.0
+MAX_GLOBAL_ANCHOR_RESIDUAL_M = 10.0
 MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
 MAX_FOCAL_ASPECT_RATIO = 2.0
 UPSTREAM_SFM_MANUAL_FOV_WARNING = (

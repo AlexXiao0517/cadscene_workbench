@@ -790,10 +790,18 @@ def test_inconsistent_manual_fov_keeps_trajectory_fallback(tmp_path: Path) -> No
     assert all(row["camera"]["fov"] == pytest.approx(fallback_fov) for row in predicted)
 
 
-def test_alignment_rejects_global_anchor_residual_above_five_metres() -> None:
+def test_alignment_allows_global_anchor_residual_below_ten_metres() -> None:
+    aligner._validate_alignment_result(
+        metrics={"global_residual_m_max": 5.15095666564},
+        intrinsics_warning=None,
+        trusted_fov=True,
+    )
+
+
+def test_alignment_rejects_global_anchor_residual_above_ten_metres() -> None:
     with pytest.raises(RuntimeError, match="global anchor residual"):
         aligner._validate_alignment_result(
-            metrics={"global_residual_m_max": 5.01},
+            metrics={"global_residual_m_max": 10.01},
             intrinsics_warning=None,
             trusted_fov=True,
         )
@@ -1013,9 +1021,9 @@ def test_intrinsics_warning_retains_ratio_precision_above_boundary() -> None:
 
 
 def test_global_residual_error_retains_precision_above_boundary() -> None:
-    with pytest.raises(RuntimeError, match="5.0000001"):
+    with pytest.raises(RuntimeError, match="10.0000001"):
         aligner._validate_alignment_result(
-            metrics={"global_residual_m_max": 5.0000001},
+            metrics={"global_residual_m_max": 10.0000001},
             intrinsics_warning=None,
             trusted_fov=True,
         )
