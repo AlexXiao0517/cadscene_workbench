@@ -1,6 +1,6 @@
 # HTTP API 与产物参考
 
-这是本地工作台在 `main@a53fbd1` 使用的 HTTP 与文件约定，供部署、前端和排障使用；它不是面向公网的兼容性承诺。架构与坐标语义见[系统架构](../design/system-architecture.md)和[坐标系与 SfM-CAD 对齐](../design/coordinates-and-alignment.md)。
+这是现行本地工作台使用的 HTTP 与文件约定，供部署、前端和排障使用；它不是面向公网的兼容性承诺，也不以容易过期的提交号代替接口版本。架构与坐标语义见[系统架构](../design/system-architecture.md)和[坐标系与 SfM-CAD 对齐](../design/coordinates-and-alignment.md)。
 
 ## 服务与通用约定
 
@@ -32,9 +32,11 @@
 | `POST /api/projects/<project_id>/uploads/srt` | multipart 上传可选 SRT |
 | `POST /api/projects/<project_id>/analysis/start` | 建立 CAD/video analysis DAG |
 | `POST /api/projects/<project_id>/analysis/activate` | 激活已验证 analysis revision 和片段定义 |
-| `POST /api/projects/<project_id>/uploads/cad-replacement` | 上传全局 CAD 候选；要求 `same_coordinate_system_confirmed: true` 和当前 project revision |
+| `POST /api/projects/<project_id>/uploads/cad-replacement` | multipart 上传全局 CAD 候选；HTTP 查询参数要求 `expectedRevision=<当前 revision>&sameCoordinateSystem=1` |
 
 上传先写临时文件，验证扩展名、大小和 SHA-256，再发布到 `assets/`。分析产物位于 `analysis_artifacts/<analysis_revision>/`。前端不能在上传完成前从原始临时路径读取资产。
+
+正式上传界面当前只发送 MP4 视频、DXF 图纸和可选 SRT。Project API 底层校验器为迁移和维护兼容仍接受额外视频/CAD 扩展名，但这些扩展名没有在正式界面开放，不构成用户侧端到端支持承诺。调用方若绕过界面使用兼容格式，必须自行验证解码、CAD 转换、分析、工作台和渲染全链路。
 
 CAD replacement 返回 202 和 `job_id`。候选导入成功前活动 CAD 不变；成功后项目活动 CAD 原子切换，片段/轨迹保持，旧 render/merge owner 记录变为 `stale_input`。相同 SHA-256、无有效工作台输出、未确认坐标系或已有进行中替换都会被拒绝。
 
@@ -54,6 +56,8 @@ CAD replacement 返回 202 和 `job_id`。候选导入成功前活动 CAD 不变
 | `GET /api/projects/<project_id>/merge-output/video` | 读取当前已发布合并视频 |
 
 批量 API 接收 snapshot 中当前 jobs/project revision，服务端按 exclusive key、依赖 DAG、输入指纹和幂等键去重。`pending` 只表示等待依赖或资源槽；100% 只在验证和 manifest 发布完成后出现。
+
+视频分析会写入 `recommended_workflow`。激活候选 analysis revision 时，如不存在人工 `workflow_override`，`resolved_workflow` 直接采用推荐值；项目片段管理的最终工作流选择器通过上述 PATCH 保存覆盖。纯旋转推荐来自自动源视频证据，不依赖上传页复选框。
 
 成功 render revision 必须同时拥有视频、frame map、owner record、输入指纹和 validation proof。文件存在但 owner 不匹配不能作为成功结果。合并同样验证每段 revision、frame identity、项目媒体契约和发布 operation。
 

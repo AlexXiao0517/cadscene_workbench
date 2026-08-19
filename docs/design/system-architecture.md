@@ -1,6 +1,6 @@
 # 系统架构与工作流
 
-本文描述当前 `main@a53fbd1` 已实现的运行架构。历史 `data/<dataset>`、`runs/<dataset>/<runId>` 工作流仍用于兼容单片段管线，但新的人工项目、任务恢复、标牌、渲染和合并由 `cadscene.projects` 项目领域管理。
+本文描述现行代码实现的运行架构，不绑定某个容易过期的提交号。历史 `data/<dataset>`、`runs/<dataset>/<runId>` 工作流仍用于兼容单片段管线，但新的人工项目、任务恢复、标牌、渲染和合并由 `cadscene.projects` 项目领域管理。
 
 ## 组成与职责
 
@@ -33,7 +33,7 @@ stateDiagram-v2
     "严格帧分区合并" --> [*]
 ```
 
-上传端先保存带 SHA-256 和校验报告的不可变视频/CAD，再建立 CAD 分析和视频分析 DAG。视频分析产出 source PTS 半开区间片段；激活 analysis revision 后，`clips_manifest.json` 保存稳定 `clip_id` 和每段推荐/覆盖/最终工作流。
+正式上传界面只开放 MP4 视频、DXF 图纸和可选 SRT。上传端先保存带 SHA-256 和校验报告的不可变视频/CAD，再建立 CAD 分析和视频分析 DAG。视频分析产出 source PTS 半开区间片段并自动计算运动模式和推荐工作流；激活 analysis revision 后，`clips_manifest.json` 保存稳定 `clip_id` 和每段推荐/覆盖/最终工作流。最终工作流默认采用推荐值，项目页可保存人工覆盖；上传页没有旋转模式声明控件。
 
 片段轨迹可以在项目页批量排队，也可以由工作台触发。工作台 session 是临时写权限，刷新后旧 token 可能失效；`workbench_outputs/<revision>/` 才是持久、不可变且可校验的结果。再次进入片段时，项目服务从有效工作台输出恢复阶段，而不是信任旧 URL 参数。
 
@@ -140,4 +140,4 @@ CAD 替换只有在至少一个片段存在可校验的保存工作台输出时�
 
 ## 运行依赖边界
 
-默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV。DXF 依赖解析器，DWG 依赖外部转换器。普通 SRT 只提供能力线索，不能作为 CAD 高程或高精度位姿真值。
+默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV，并由项目视频分析在严格旋转证据成立时自动推荐。正式上传界面的 CAD 输入是 DXF，依赖 DXF 解析器；兼容后端中的 DWG 转换能力不等于正式界面已支持 DWG。普通 SRT 只提供能力线索，不能作为 CAD 高程或高精度位姿真值。

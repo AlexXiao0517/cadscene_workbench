@@ -7,6 +7,7 @@ This document separates delivered behavior from future work. It is not a release
 ### Project pipeline
 
 - The upload portal stores immutable video/CAD inputs, runs asynchronous analysis, segments source video into stable source-PTS clips, and opens Project Clip Management.
+- The official upload UI accepts MP4 video, DXF drawings, and optional SRT. Compatibility validators may accept additional extensions, but those are not advertised as qualified portal formats.
 - `sfm_only` is Stable and covers SfM, manual keyframes, initial/final route fitting, quality inspection, clip rendering, and strict frame-partition concatenation.
 - Project state is split across project, clips, jobs, render, and annotations manifests with optimistic revisions, operation IDs, atomic JSON replacement, and restart reconciliation.
 - The local resource queue reports preparation, computation, validation, and publication separately. A job reaches 100% only after validated owner publication.
@@ -24,7 +25,7 @@ This document separates delivered behavior from future work. It is not a release
 
 ### Experimental and interface-only routes
 
-- `pure_rotation` is Experimental. It can run an external OpenGV rotation backend followed by fixed-center global placement and local pose corrections. Translation and scale are not recovered.
+- `pure_rotation` is Experimental. Conservative automatic motion analysis can recommend it from verified source-level rotation evidence, and Project Clip Management permits a final workflow override. It can run an external OpenGV rotation backend followed by fixed-center global placement and local pose corrections. Translation and scale are not recovered.
 - The partial-SRT core is Experimental CLI functionality: PTS timing, local ENU conversion, robust Sim3 estimation, and fusion helpers exist outside the formal project queue.
 - `srt_sfm_fused` and `srt_full_pose` are Interface only. Upload and capability detection work, but the service blocks formal stage execution.
 - SfM CUDA is Optional and limited to supported feature extraction and matching. Mapping and global bundle adjustment are not advertised as GPU processing.

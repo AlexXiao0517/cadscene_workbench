@@ -5,7 +5,7 @@
 ## 使用工作台
 
 - [中文 README](../README.md)：从上传、项目片段管理、工作台、工程标牌到渲染和合并的完整操作。
-- [上传工作流与轨迹路由](workflow_routing.md)：视频、CAD、可选 SRT 和 pure-rotation 声明如何决定路线。
+- [上传工作流与轨迹路由](workflow_routing.md)：正式项目支持的输入格式、自动运动分析、推荐工作流和人工覆盖边界。
 - [Web Camera Viewer 使用说明](web_viewer_usage.md)：查看器 URL、媒体加载、静态根与存储根。
 - [SRT 能力检测](srt_capability_detection.md)：普通 SRT 的字段、路由和精度边界。
 - [Pipeline 使用说明](pipeline_usage.md)：维护人员的兼容命令行批处理入口。
@@ -17,12 +17,14 @@
 
 上传门户创建项目并异步分析视频/CAD；项目片段管理负责片段工作流选择、批量轨迹、批量渲染、工作台进入和最终合并。刷新或重启后必须使用创建项目时相同的 `--storage-root`，项目主数据位于 `<storage-root>/projects/<project_id>/`。
 
+必须区分两套入口：正式项目流程使用 `/apps/workflow_portal/`、Project API 和 `projects/`，当前上传界面只开放 MP4、DXF 和可选 SRT；兼容 dataset/run 工作流使用 `/api/workflow/*`、`data/` 和 `runs/`，用于既有单片段工件和维护接口。兼容后端接受某个扩展名，不代表正式项目界面支持该格式。
+
 ## 当前能力状态
 
 | 工作流或能力 | 状态 | 应如何理解 |
 | --- | --- | --- |
 | `sfm_only` 项目管线 | Stable | 视频分析、切片、SfM、人工关键帧、路线拟合、质量、渲染和严格帧分区合并已经接入项目队列。 |
-| `pure_rotation` | Experimental | 可执行固定相机中心的旋转恢复、全局放置和局部姿态校正；不恢复平移或尺度。 |
+| `pure_rotation` | Experimental | 视频分析在严格旋转证据成立时自动推荐，可执行固定相机中心的旋转恢复、全局放置和局部姿态校正；项目页仍允许人工覆盖，不恢复平移或尺度。 |
 | CAD 原图文字 | Supported | DXF `TEXT`、`MTEXT` 和块属性文字显示在 CAD 三维视图，用于桩号和图纸标注参考。 |
 | CAD 锚定工程标牌 | Supported | 屏幕空间卡片、折线引线和锚点按有效相机轨迹投影，并可烧录到片段视频。 |
 | 视频目标跟踪标牌 | Hidden baseline | 后端和历史数据兼容存在，但当前创建入口隐藏，不作为用户可用能力。 |

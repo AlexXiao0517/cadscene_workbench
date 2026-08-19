@@ -103,7 +103,7 @@ def test_unknown_or_low_confidence_is_review_only_and_never_auto_selects() -> No
     assert low_rotation.auto_selected is False
 
 
-def test_pure_rotation_requires_explicit_verification() -> None:
+def test_pure_rotation_requires_verified_source_evidence() -> None:
     coverage = assess_clip_srt_coverage(
         [],
         clip_source_start_pts_sec=0.0,

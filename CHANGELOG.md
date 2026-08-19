@@ -4,13 +4,13 @@
 
 ### Added
 
-- Added the upload portal and workflow routing for video, CAD, and optional SRT inputs.
+- Added the official upload portal for MP4 video, DXF CAD, and optional SRT inputs. Extra extensions accepted by compatibility-oriented backend validators are not exposed as supported portal formats.
 - Added the persistent project pipeline: asynchronous video/CAD analysis, scene-aware clip management, workflow selection, resource-aware trajectory and render queues, resumable workbench sessions, immutable clip renders, and strict frame-partition project concatenation.
 - Added DXF `TEXT`, `MTEXT`, and block-attribute text to the 3D CAD view, preserving layer, position, rotation, text size, and CAD-coordinate conversion while applying visibility budgets for large drawings.
 - Added Stage 9 CAD-anchored engineering callouts with editable title/body, screen-space panels, polyline leaders, circular anchors, source-PTS visibility, Base/Corrected camera projection, browser preview, persistence, and burn-in rendering.
 - Added guarded global CAD replacement for calibrated projects. A same-coordinate-system replacement preserves analysis, trajectories, keyframes, and workbench outputs while making CAD-dependent render and merge outputs stale.
 - Added conservative SRT capability detection and the experimental partial-SRT core for PTS, ENU, robust Sim3, and fusion processing. Ordinary SRT remains a metadata capability source, not high-precision position, pose, or CAD elevation truth.
-- Added the experimental `pure_rotation` workflow for fixed-camera-center footage through the external OpenGV backend. It does not recover translation or scale, and users select it explicitly rather than through automatic motion classification.
+- Added the experimental `pure_rotation` workflow for fixed-camera-center footage through the external OpenGV backend. Conservative automatic motion analysis can recommend it from verified source-level rotation evidence; Project Clip Management shows the recommendation and allows a final workflow override. It does not recover translation or scale.
 
 ### Changed
 
@@ -32,7 +32,7 @@
 - The partial-SRT core is an experimental CLI capability and is not connected to the formal job runner.
 - The video-target tracking annotation backend remains available for tests and historical-data compatibility, but its creation control is hidden and it is not a supported user-facing capability.
 - CAD-anchored callouts do not infer real-world occlusion in source video. Cross-clip tracking, cross-scene annotation inheritance, semantic recognition, and neural tracking models are not implemented.
-- CAD readiness for DWG depends on external conversion tools. CUDA coverage does not establish GPU mapper or global bundle-adjustment support.
+- The official project upload UI currently supports DXF rather than DWG. Compatibility-only DWG readiness depends on external conversion tools. CUDA coverage does not establish GPU mapper or global bundle-adjustment support.
 
 ## v0.1.0-road-sfm-only
 

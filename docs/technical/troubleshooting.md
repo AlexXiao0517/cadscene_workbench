@@ -86,11 +86,11 @@
 
 ### 上传被拒绝、数据集找不到或目录异常
 
-**可能原因：** 上传接口要求 `multipart/form-data` 且文件字段名为 `file`；视频只接受 `.mp4`、`.mov`、`.avi`、`.mkv`，SRT 只接受 `.srt`。数据集会被转为 ASCII slug，`runId` 只能使用字母、数字、`_`、`.`、`-`。
+**可能原因：** 混用了正式 Project 上传和兼容 Workflow 上传。正式项目界面只接受 `.mp4` 视频、`.dxf` 图纸和可选 `.srt`；上传接口要求 `multipart/form-data` 且文件字段名为 `file`。兼容 dataset/run 接口使用另一套 ID、目录和较宽的后端扩展名校验，不能据此判断正式界面应该接受某种格式。
 
-**检查：** 查看浏览器网络响应中的 400/404；请求 `GET /api/workflow/list-datasets`，再用返回的 slug 查询 `dataset-manifest`。确认上传请求包含查询参数 `dataset`，而不是把它误放进 JSON。
+**检查：** 正式项目先查看浏览器网络响应和 `<storage-root>/projects/<project_id>/project_manifest.json`，确认调用 `/api/projects/<project_id>/uploads/{video|cad|srt}`。只有排查兼容流程时，才请求 `GET /api/workflow/list-datasets` 并用返回的 slug 查询 dataset manifest；兼容上传的 `dataset` 是查询参数，不在 JSON 中。
 
-**处理：** 使用界面上传，或让客户端发送正确的 multipart 请求；使用简单的 ASCII 数据集名和安全的 run ID。不要把 `..`、盘符或 URL 当作 dataset/run ID。ZIP CAD 若失败，检查压缩包中是否存在可用的 `design.json`，并移除不安全的绝对路径或 `..` 成员。
+**处理：** 日常项目使用正式界面上传 MP4、DXF 和可选 SRT。需要调用 API 时按对应入口发送正确 multipart 请求，不要把 Project ID 与 dataset/run ID 混用。兼容 ZIP/JSON/DWG 或其他视频扩展名只用于迁移和维护，不作为正式端到端支持；使用前需单独验证转换和后续阶段。任何 ID 或 ZIP 成员都不得包含 `..`、盘符、绝对路径或 URL。
 
 ### 查看器缺少视频、CAD 或运行产物
 
@@ -128,11 +128,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ### CAD 上传后不是 ready，或后续阶段提示缺少 CAD
 
-**可能原因：** DXF 解析失败；DWG 仅保存原文件但环境缺少外部 DWG→DXF 转换器；ZIP 不含 `design.json`。
+**可能原因：** 正式项目上传的 DXF 解析失败；或者正在排查的其实是兼容 Workflow 导入，其中 DWG 可能因缺少外部 DWG→DXF 转换器而只保存原文件，ZIP 也可能缺少 `design.json`。
 
-**检查：** 查看 dataset manifest 的 `cad.status`、`cad.error`、`cad.design_json` 及 `warnings`。`raw_saved` 表示 DWG 已保留但尚无可用 `design.json`，不是 ready。
+**检查：** 正式项目查看 snapshot、project manifest 和 CAD analysis job runtime；正式上传界面应提供 DXF。仅对兼容 dataset/run 流程查看 dataset manifest 的 `cad.status`、`cad.error`、`cad.design_json` 及 `warnings`；`raw_saved` 表示兼容 DWG 已保留但尚无可用 `design.json`，不是 ready。
 
-**处理：** 优先上传可解析 DXF 或有效 `design.json`；安装并配置 DWG 转换器后重新导入 DWG。只有 video 与 `cad.status: ready` 同时成立，数据集才会成为 `ready`。
+**处理：** 正式项目重新上传可解析的 DXF。兼容导入如必须使用 DWG/ZIP/`design.json`，先安装并配置转换器或修复资产，再单独验证；不要把这条兼容路径写成正式上传界面的格式能力。
 
 ### 对齐被拒绝、路线漂移，或 CAD / SfM 看起来不在同一平面
 
@@ -162,11 +162,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ### pure-rotation 后无法放置、没有轨迹或渲染位置不对
 
-**可能原因：** 该 Experimental 路线要求用户声明悬停/纯旋转且没有 SRT，并依赖外部 OpenGV 后端；未经全局放置就没有 CAD 中的基础轨迹，未经校正则没有 corrected 轨迹。
+**可能原因：** 自动分析没有形成足够强且无矛盾的旋转证据，项目最终工作流被人工覆盖，或外部 OpenGV 后端不可用；未经全局放置就没有 CAD 中的基础轨迹，未经校正则没有 corrected 轨迹。
 
-**检查：** 确认 manifest 的 `workflow.trajectory_mode` 为 `pure_rotation`，检查 `02_pure_rotation/backend_summary.json`、`camera_rotation_raw.json`、日志和 `/api/pure-rotation/status`。放置前必须已有 raw 轨迹；校正前必须已有 `03_pure_rotation_placement/camera_track_cad_base.json`。
+**检查：** 在项目 snapshot 中比较片段的 `detected_motion_mode`、`recommended_workflow`、`workflow_override` 和 `resolved_workflow`；自动推荐纯旋转只适用于单一逻辑片段且不足 60 秒、具有持续强旋转窗口且没有通用/未知矛盾窗口的源视频。再检查 `02_pure_rotation/backend_summary.json`、`camera_rotation_raw.json`、日志和 `/api/pure-rotation/status`。放置前必须已有 raw 轨迹；校正前必须已有 `03_pure_rotation_placement/camera_track_cad_base.json`。
 
-**处理：** 安装/配置 OpenGV 后端，先运行纯旋转，再保存固定相机中心的全局放置，最后按需提交局部姿态校正。它固定相机中心，不恢复平移或尺度，也不会自动识别纯旋转视频；不能用于推断沿道路行进距离。
+**处理：** 若自动推荐与已知场景不符，在项目片段管理页修正最终工作流，不需要返回上传页寻找旋转复选框。选择 `pure_rotation` 后，安装/配置 OpenGV 后端，先运行旋转恢复，再保存固定相机中心的全局放置，最后按需提交局部姿态校正。该实验路线固定相机中心，不恢复平移或尺度，不能用于推断沿道路行进距离。
 
 ## 关键帧、质量、渲染与道路诊断
 

@@ -12,8 +12,8 @@ Use the workbench to compare site video with building or road designs, reconstru
 
 Prepare:
 
-- a clear, continuous site video; the portal accepts MP4, MOV, AVI, and MKV;
-- a matching CAD file. The portal accepts DXF or DWG. DXF is imported directly; DWG requires an external converter in the deployment environment. Compatibility APIs also accept `design.json` or a ZIP containing it;
+- a clear, continuous MP4 site video;
+- a matching DXF drawing. The official upload UI currently supports only MP4 video and DXF drawings. Extra extensions accepted by compatibility-oriented backend endpoints are not a promise of current UI support or end-to-end qualification;
 - an optional ordinary SRT file. It supplies metadata hints such as time and location, not high-precision position, pose, or CAD elevation truth. If the portal reports Interface only, create a project without SRT or contact a maintainer;
 - someone familiar with the site and drawing who can confirm key images, CAD locations, and field of view (FOV).
 
@@ -50,19 +50,19 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 | Workflow or capability | Status | Boundary |
 |---|---|---|
 | `sfm_only` | Stable | The stable end-to-end path: video analysis, clip management, SfM, manual alignment, quality inspection, rendering, and concatenation. |
-| `pure_rotation` | Experimental | Used only when the user explicitly declares hovering footage with view rotation only. The camera center is fixed, translation and scale are not recovered, and an external OpenGV backend is required. |
+| `pure_rotation` | Experimental | Automatically recommended when video analysis verifies strict rotation evidence. The camera center is fixed, translation and scale are not recovered, and an external OpenGV backend is required. |
 | partial-SRT core | Experimental CLI | Provides PTS, ENU, and robust Sim3 fusion helpers outside the formal project queue. |
 | `srt_sfm_fused` / `srt_full_pose` | Interface only | The portal can detect and describe these routes, but formal stage launch remains blocked. |
 | SfM CUDA | Optional | Confirmed only for supported feature extraction and matching. Mapping and global BA are not represented as GPU processing. |
 | CAD-anchored engineering callout | Supported | Selects a CAD world point and projects it through the current effective camera trajectory in preview and final rendering. |
 | Video-target tracked callout | Hidden baseline | Backend and historical-data compatibility remain, but the creation control is hidden and this is not a supported user-facing capability. |
 
-`pure_rotation` is never selected by automatic motion classification. Ordinary SRT does not replace SfM, manual calibration, SfM-to-CAD alignment, or quality inspection.
+The upload page no longer asks the user to preselect a rotation mode. When no SRT interface route takes precedence, automatic motion analysis can conservatively recommend `sfm_only` or `pure_rotation`. For those executable routes, Project Clip Management shows the recommendation and uses a final-workflow selector containing only SfM and OpenGV. An Interface-only SRT recommendation can appear in the recommendation column while the selector visually falls back to SfM; that visual fallback does not prove an override was saved. The current project cannot rely on it to enter the stable path, so create a project without SRT instead. A recommendation is routing evidence, not an accuracy guarantee. Ordinary SRT does not replace SfM, manual calibration, SfM-to-CAD alignment, or quality inspection.
 
 ## From upload to project delivery
 
 1. Create a project in the upload portal and select video, CAD, and optional SRT. The service stores immutable inputs, then asynchronously performs video analysis, scene segmentation, clip export, and CAD import.
-2. Open Project Clip Management, review clips, detected motion modes, and recommended workflows. You can enqueue trajectory solving or rendering for selected clips, or open one clip in the workbench.
+2. Open Project Clip Management and review the automatically detected motion mode and recommended workflow. The final-workflow selector exposes only SfM and OpenGV. Normally keep the corresponding recommendation and override it when it conflicts with the known scene. Do not treat a visible SfM fallback for an Interface-only SRT recommendation as a saved override; create a project without SRT when the stable route is required. You can enqueue trajectory solving or rendering for selected clips, or open one clip in the workbench.
 3. For an `sfm_only` clip, run SfM. During keyframe calibration, save at least two valid manual keyframes and fit the route. Generate the keyframe plan, finish the remaining calibration, and run the final fit.
 4. Run quality inspection. After it passes, choose Complete Quality Inspection to enter Render and Export. If more frames are required, return to keyframe calibration.
 5. In Render and Export, either create CAD-anchored engineering callouts or render without callouts. Render Video binds the current annotation state into the immutable render revision.
@@ -87,7 +87,9 @@ Authoritative synchronization uses source decoded-frame integer PTS and the exac
 
 After at least one valid workbench output proves that the project coordinate system has been calibrated, the CAD card exposes a hover-only Replace rail:
 
-1. Select a new DXF/DWG and confirm “The new CAD uses the same coordinate system as this project.”
+DXF remains the officially qualified and user-supported replacement path. Other compatibility-oriented filters retained by the replacement dialog are for migration and are not an end-to-end format-support promise.
+
+1. Select a new DXF and confirm “The new CAD uses the same coordinate system as this project.”
 2. The service imports and validates the new drawing as a candidate. The previous CAD remains active until successful publication.
 3. Success switches the entire project to the new CAD. Existing clips, SfM, trajectories, keyframes, and workbench outputs remain valid; CAD-dependent renders and the merged output become stale.
 4. Reopen a clip, inspect the new drawing, make local adjustments if needed, and render again without repeating initial calibration or route fitting.

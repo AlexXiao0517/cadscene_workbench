@@ -42,7 +42,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `cadscene/workflow/` | 数据集导入、JobRunner、工作流状态和关键帧计划 |
 | `cadscene/sfm/` | `pycolmap` / COLMAP CLI 后端、轨迹、相机初始化和点云 |
 | `cadscene/alignment/` 与 `cadscene/core/sim3.py` | 人工关键帧、SfM-CAD Sim3 对齐、质量与工件记录 |
-| `cadscene/cad/` | DXF 导入、DWG 转换、中心线检测与投影 |
+| `cadscene/cad/` | 正式 DXF 导入、兼容 DWG 转换、中心线检测与投影 |
 | `cadscene/srt/` | SRT 解析、PTS 同步、ENU、能力检测和实验性融合核心 |
 | `cadscene/pure_rotation/` | 外部 OpenGV 后端、固定相机中心放置与局部姿态校正 |
 | `cadscene/projects/` | 项目 manifest、视频分析、持久队列、工作台 session、渲染、合并、CAD 替换与启动恢复 |
@@ -51,6 +51,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `apps/workflow_portal/` | 创建项目和上传文件的静态入口 |
 | `apps/project_workspace/` | 项目资产、片段、批量任务、CAD 替换与合并的管理界面 |
 | `apps/web_camera_viewer/` | 视频、CAD、关键帧、工作流阶段与产物查看器 |
+
+正式用户界面的输入契约以 `apps/workflow_portal/index.html` 和
+`apps/workflow_portal/workflow_portal.js` 为准：当前只开放 MP4、DXF 和可选 SRT。
+`cadscene.projects.uploads` 与旧 `cadscene.workflow` 中较宽的扩展名集合用于兼容、迁移
+或维护接口，不能直接转写成 README 的正式格式支持清单。
 
 ## CLI 目录
 
@@ -131,15 +136,21 @@ python -m cadscene.cli.serve_viewer `
 ```powershell
 python -m pytest -q tests/cli/test_serve_viewer_cli.py tests/cli/test_serve_viewer_upload_api.py tests/cli/test_serve_viewer_workflow_api.py
 python -m pytest -q tests/projects tests/annotations tests/rendering tests/integration
+python -m pytest -q tests/docs/test_current_documentation.py
 python -m pytest -p no:cacheprovider
 python scripts/check_no_project_dependency.py
 ```
 
-项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。当前测试包含单元、静态契约和合成集成验证，但不代替真实 GPU、外部 OpenGV、长视频、DXF/DWG 转换器和浏览器人工验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
+项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。当前测试包含单元、静态契约和合成集成验证，但不代替真实 GPU、外部 OpenGV、长 MP4、DXF、兼容 DWG 转换器和浏览器人工验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
+
+现行文档契约测试同时读取上传页、自动分析与项目页源码，锁定“正式界面只支持
+MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project 与兼容 dataset/run 存储
+分层”等事实。修改这些产品契约时，应先改实现和对应行为测试，再同步文档契约，不能
+仅放宽文档措辞。
 
 ## 开发边界
 
-- `sfm_only` 是唯一 Stable 的端到端路线；`pure_rotation` 是 Experimental，固定相机中心，不恢复平移或尺度。
+- `sfm_only` 是唯一 Stable 的端到端路线；`pure_rotation` 是 Experimental，由视频分析在严格旋转证据成立时自动推荐，项目页可人工覆盖，固定相机中心且不恢复平移或尺度。
 - partial-SRT core 是 Experimental CLI，尚未接入正式 JobRunner。门户中的 `srt_sfm_fused` 与 `srt_full_pose` 均为 Interface only，服务会阻止其启动阶段。
 - CAD 锚定工程标牌已经接入预览和正式片段渲染；视频目标跟踪标牌创建入口当前隐藏，不能作为正式功能宣传。
 - 全局 CAD 替换只适用于坐标系、单位和原点不变且已有有效工作台输出的项目；成功后保留轨迹，只让渲染和合并 stale。
