@@ -4069,9 +4069,28 @@ class ProjectService:
                 job.input_fingerprint != legacy_fingerprint
                 or job.idempotency_key != legacy_idempotency
             ):
-                raise ValueError(
-                    "legacy analysis identity does not match exactly"
+                snapshot = self._legacy_analysis_snapshot_assets(
+                    project.source_assets,
+                    video_job=structured[1],
+                    request_key=request_key,
                 )
+                if snapshot is not None:
+                    legacy_payload = _legacy_analysis_identity_payload(
+                        phase=phase,
+                        request_key=request_key,
+                        project_assets=snapshot,
+                    )
+                    legacy_fingerprint = _fingerprint(legacy_payload)
+                    legacy_idempotency = _fingerprint(
+                        {**legacy_payload, "purpose": "idempotency"}
+                    )
+                if (
+                    job.input_fingerprint != legacy_fingerprint
+                    or job.idempotency_key != legacy_idempotency
+                ):
+                    raise ValueError(
+                        "legacy analysis identity does not match exactly"
+                    )
             if job.status == "success":
                 if not _has_exact_success_proof(job):
                     raise ValueError(
@@ -4107,6 +4126,43 @@ class ProjectService:
                 ),
             ),
         )
+
+    @staticmethod
+    def _legacy_analysis_snapshot_assets(
+        project_assets: Mapping[str, object],
+        *,
+        video_job: QueueJob,
+        request_key: str,
+    ) -> Mapping[str, object] | None:
+        revisions = project_assets.get("_analysis_revisions")
+        if not isinstance(revisions, Mapping):
+            return None
+        descriptor = revisions.get(f"analysis-{video_job.job_id}")
+        if not isinstance(descriptor, Mapping):
+            return None
+        snapshot = descriptor.get("input_snapshot")
+        if (
+            not isinstance(snapshot, Mapping)
+            or snapshot.get("request_key") != request_key
+        ):
+            return None
+        for name in ("video", "cad"):
+            asset = snapshot.get(name)
+            if not isinstance(asset, Mapping) or any(
+                not isinstance(asset.get(field), str) or not asset.get(field)
+                for field in ("path", "sha256")
+            ):
+                return None
+        srt = snapshot.get("srt")
+        if srt is not None and (
+            not isinstance(srt, Mapping)
+            or any(
+                not isinstance(srt.get(field), str) or not srt.get(field)
+                for field in ("path", "sha256")
+            )
+        ):
+            return None
+        return snapshot
 
     def _sync_analysis_state_from_queue_locked(self, project_id: str) -> None:
         project = self.repositories.project.load(project_id)

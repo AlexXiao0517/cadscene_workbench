@@ -1371,6 +1371,57 @@ def test_restore_migrates_legacy_validated_success_without_losing_provenance(
     assert project.project_state == "ready"
 
 
+def test_restore_migrates_legacy_analysis_from_snapshot_after_cad_replacement(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    job_ids, revision = _complete_analysis(service, repositories, queue, tmp_path)
+    before = repositories.project.load("p1")
+    current_jobs = tuple(queue.get(job_id) for job_id in job_ids)
+    legacy_jobs = tuple(
+        _as_legacy_analysis_job(item, before.source_assets)
+        for item in current_jobs
+    )
+    _persist_jobs(repositories, "p1", legacy_jobs)
+    replacement = tmp_path / "replacement.dxf"
+    replacement.write_text("replacement", encoding="utf-8")
+    repositories.project.update(
+        "p1",
+        expected_revision=before.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "cad": {
+                    **value.source_assets["cad"],
+                    "path": str(replacement),
+                    "sha256": "c" * 64,
+                },
+            },
+        ),
+    )
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "restart",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    restored = tuple(restarted_queue.get(job_id) for job_id in job_ids)
+    assert all(job.status == "success" for job in restored)
+    assert all(
+        restarted._current_input_fingerprint(job) == job.input_fingerprint
+        for job in restored
+    )
+    project = repositories.project.load("p1")
+    assert project.active_analysis_revision == revision
+    assert project.project_state == "ready"
+
+
 @pytest.mark.parametrize(
     ("representative", "expected_status", "expected_project_state"),
     (
