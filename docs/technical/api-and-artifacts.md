@@ -1,107 +1,177 @@
 # HTTP API 与产物参考
 
-这是本地工作台当前使用的 HTTP 与文件约定，供部署、调试和前端维护使用；它不是面向公网的稳定服务承诺。设计和坐标语义请先阅读[系统架构](../design/system-architecture.md)与[坐标系与 SfM-CAD 对齐](../design/coordinates-and-alignment.md)。
+这是本地工作台在 `main@a53fbd1` 使用的 HTTP 与文件约定，供部署、前端和排障使用；它不是面向公网的兼容性承诺。架构与坐标语义见[系统架构](../design/system-architecture.md)和[坐标系与 SfM-CAD 对齐](../design/coordinates-and-alignment.md)。
 
 ## 服务与通用约定
 
-用 `python -m cadscene.cli.serve_viewer` 启动服务。JSON API 使用 UTF-8。数据集 manifest、SRT 分析和 JobRunner/工作流状态等由各自的临时文件加 `os.replace` 写入；上传文件也先写 `.upload` 临时文件再替换。不要把此保证扩展到所有产物：通用 `core.io.write_json` 直接写目标文件，许多阶段产物和 run manifest 因而不是原子写入。除上传接口外，POST 请求体是 JSON。成功响应通常含有 `ok: true`；无效参数为 400，缺少文件为 404，正在运行的同一 `dataset + runId` 或 Interface-only SRT 路线冲突为 409。
+用 `python -m cadscene.cli.serve_viewer` 启动服务。JSON 使用 UTF-8；除上传外，POST/PATCH 请求体为 JSON。Project API 的稳定 ID 匹配 `[A-Za-z0-9_.-]+`。不可信文件名、URL 或客户端路径不能直接作为项目路径。
 
-`dataset` 会被规范化为小写 ASCII slug（最多 80 个字符）；`runId` 必须匹配 `[A-Za-z0-9_.-]+`。不要把 API 接收到的路径、URL 或客户端文件名当成可穿越目录的路径。
+建议显式传入独立 `--storage-root`。当前 Project API 数据位于 `<storage-root>/projects/`；兼容 Workflow API 使用 `data/` 和 `runs/`。同一 `projects/` 根只能由一个 `serve_viewer` 实例持有租约。
 
-## 工作流 HTTP 端点
+常见状态码：
 
-| 方法与路径 | 输入 | 作用 |
-| --- | --- | --- |
-| `POST /api/workflow/create-dataset` | JSON：`dataset`，可选 `cadScale`、`originX`、`originY`、`hoveringDeclared`、`runId` | 创建或更新数据集并返回 `dataset_manifest.json` 内容 |
-| `POST /api/workflow/upload-video` | 查询 `dataset`，可选 `runId`；`multipart/form-data`，字段名必须为 `file` | 保存 `.mp4/.mov/.avi/.mkv` 视频并更新 manifest |
-| `POST /api/workflow/upload-cad` | 同上 | 导入 `design.json`、`.dxf`、`.dwg` 或 CAD 资产 `.zip` |
-| `POST /api/workflow/upload-srt` | 同上 | 保存 `.srt`，分析并返回 SRT 路由/能力摘要 |
-| `GET /api/workflow/list-datasets` | 无 | 返回存储根下的数据集摘要 |
-| `GET /api/workflow/dataset-manifest?dataset=…` | `dataset` | 返回数据集 manifest |
-| `GET /api/workflow/srt-analysis?dataset=…` | `dataset` | 返回分析结果、`trajectory_mode` 和提示 |
-| `POST /api/workflow/run-stage` | JSON：`dataset`、`runId`、`stage`、可选 `options` | 启动 `sfm`、`alignment`、`quality`、`render` 或底层支持的 `pure_rotation` 后台阶段；纯旋转应优先使用专用的 `POST /api/pure-rotation/run` |
-| `POST /api/workflow/cancel` | JSON：`dataset`、`runId` | 取消当前后台进程 |
-| `POST /api/workflow/job-status` | JSON：`dataset`、`runId`、`stage`，可选 `status`、`progress`、`message`、`error` | 写入工作流槽位状态，主要用于服务内部/调试 |
-| `GET /api/workflow/job-log?dataset=…&runId=…&stage=…&tail=200` | `dataset`、`runId`、`stage`；`tail` 限制为 1–2000 | 返回阶段日志尾部 |
-| `POST /api/workflow/save-camera-track` | JSON：`dataset`、`runId`、对象 `cameraTrack` | 保存人工关键帧轨迹 |
-| `POST /api/workflow/generate-keyframe-plan` | JSON：`dataset`、`runId`，可选 `intervalFrames` | 初始对齐后生成关键帧计划 |
-| `GET /api/workflow/keyframe-plan?dataset=…&runId=…` | `dataset`、`runId` | 读取关键帧计划 |
-| `POST /api/workflow/ignore-suggestion` | JSON：`dataset`、`runId`、`frame_index`，可选 `reason` | 记录用户确认无需补帧的建议 |
-| `GET /api/workflow/sfm-camera-init?dataset=…&runId=…` | `dataset`、`runId` | 从 SfM 轨迹读取相机初始化信息 |
-
-`run-stage` 会拒绝 `srt_sfm_fused` 和 `srt_full_pose`：它们只有上传、检测和界面提示，尚不能由 JobRunner 端到端执行。它在底层接受 `pure_rotation` stage，但门户和客户端应使用 `POST /api/pure-rotation/run`，以便在启动前执行该实验路线的专用 manifest 路由检查。
-
-## pure-rotation 端点
-
-| 方法与路径 | 输入 | 作用 |
-| --- | --- | --- |
-| `POST /api/pure-rotation/run` | JSON：`dataset`、`runId`，可选 `options` | 只在 manifest 路由为 `pure_rotation` 时启动外部后端 |
-| `POST /api/pure-rotation/placement` | JSON：`dataset`、`runId`、`placement` | 保存固定相机中心的全局放置并生成基础轨迹 |
-| `POST /api/pure-rotation/corrections` | JSON：`dataset`、`runId`、数组 `corrections` | 写入局部姿态校正并生成校正轨迹 |
-| `GET /api/pure-rotation/status?dataset=…&runId=…` | `dataset`、`runId` | 返回后端摘要、全局放置和校正列表 |
-| `GET /api/pure-rotation/trajectory?dataset=…&runId=…&kind=raw` | `kind` 为 `raw`、`base` 或 `corrected` | 返回对应轨迹 JSON |
-
-这是 Experimental 工作流：相机中心固定，结果不恢复平移或尺度，也不会自动判断视频是否为纯旋转。
-
-## 数据集 manifest 与输入存储
-
-`<storage-root>/data/<dataset>/dataset_manifest.json` 是数据集的入口。主要字段如下：
-
-| 字段 | 含义 |
+| 状态 | 含义 |
 | --- | --- |
-| `dataset`、`created_at`、`updated_at`、`status` | 数据集身份和总体状态；`ready` 需要视频与可用 CAD，CAD 失败时为 `failed` |
-| `video` | 原始文件名、相对路径和查看器 URL 等视频记录 |
-| `cad` | `status`、`source_type`、原始/转换文件、`design_json`、URL、边界框及道路中心线能力 |
-| `defaults` | `cad_scale` 与 `origin_xy`；应与人工关键帧和管线参数一起审计 |
-| `srt` | 原始 SRT、分析 JSON/报告、覆盖率、姿态来源和警告 |
-| `workflow` | `trajectory_mode`、实现状态、用户声明的运动模式与可观测性元数据 |
-| `warnings` | 导入、转换或能力检测警告 |
+| 200/201/202 | 读取成功、资源已创建或异步作业已入队 |
+| 400 | 请求字段、文件、坐标系确认或状态前提无效 |
+| 403 | workbench token 无权访问项目/片段 |
+| 404 | 项目、片段、产物或不可变 revision 不存在 |
+| 409 | `expected_revision` 冲突、session replay/stale 或资源/路线冲突 |
 
-典型输入目录如下（具体文件名以上传文件名为准）：
+## Project API
+
+### 项目、上传与分析
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /api/projects` | 创建五类空 manifest，返回 `project_id` 和项目页 URL |
+| `PATCH /api/projects/<project_id>` | 按 `expected_revision` 更新项目显示名 |
+| `GET /api/projects/<project_id>/snapshot` | 返回项目、片段、作业、渲染、标牌和 capability 的一致快照；支持 ETag/no-store |
+| `POST /api/projects/<project_id>/uploads/video` | multipart 上传并发布不可变视频与校验报告 |
+| `POST /api/projects/<project_id>/uploads/cad` | multipart 上传初始 CAD |
+| `POST /api/projects/<project_id>/uploads/srt` | multipart 上传可选 SRT |
+| `POST /api/projects/<project_id>/analysis/start` | 建立 CAD/video analysis DAG |
+| `POST /api/projects/<project_id>/analysis/activate` | 激活已验证 analysis revision 和片段定义 |
+| `POST /api/projects/<project_id>/uploads/cad-replacement` | 上传全局 CAD 候选；要求 `same_coordinate_system_confirmed: true` 和当前 project revision |
+
+上传先写临时文件，验证扩展名、大小和 SHA-256，再发布到 `assets/`。分析产物位于 `analysis_artifacts/<analysis_revision>/`。前端不能在上传完成前从原始临时路径读取资产。
+
+CAD replacement 返回 202 和 `job_id`。候选导入成功前活动 CAD 不变；成功后项目活动 CAD 原子切换，片段/轨迹保持，旧 render/merge owner 记录变为 `stale_input`。相同 SHA-256、无有效工作台输出、未确认坐标系或已有进行中替换都会被拒绝。
+
+### 片段、作业、渲染和合并
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `PATCH /api/projects/<project_id>/clips/<clip_id>/workflow` | 保存人工工作流覆盖 |
+| `PATCH /api/projects/<project_id>/clips/<clip_id>/name` | 更新片段显示名 |
+| `POST /api/projects/<project_id>/trajectory-jobs` | 对一个或多个片段建立轨迹作业和依赖 |
+| `POST /api/projects/<project_id>/render-jobs` | 对一个或多个片段建立渲染作业 |
+| `POST /api/projects/<project_id>/merge-jobs` | 由全部当前片段 render revision 建立严格 concat 作业 |
+| `GET /api/projects/<project_id>/jobs/<job_id>/runtime` | 返回阶段、真实进度、尝试、日志和错误 |
+| `POST /api/projects/<project_id>/jobs/<job_id>/retry` | 为可重试作业创建下一 attempt |
+| `POST /api/projects/<project_id>/jobs/<job_id>/cancel` | 取消当前项目队列中的作业 |
+| `GET /api/projects/<project_id>/clips/<clip_id>/renders/<render_revision>/video` | 读取已发布片段视频 |
+| `GET /api/projects/<project_id>/merge-output/video` | 读取当前已发布合并视频 |
+
+批量 API 接收 snapshot 中当前 jobs/project revision，服务端按 exclusive key、依赖 DAG、输入指纹和幂等键去重。`pending` 只表示等待依赖或资源槽；100% 只在验证和 manifest 发布完成后出现。
+
+成功 render revision 必须同时拥有视频、frame map、owner record、输入指纹和 validation proof。文件存在但 owner 不匹配不能作为成功结果。合并同样验证每段 revision、frame identity、项目媒体契约和发布 operation。
+
+### Workbench session
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /api/projects/<project_id>/clips/<clip_id>/workbench-sessions` | 创建或恢复片段编辑会话，返回带 token 的 viewer URL |
+| `GET /api/projects/<project_id>/workbench-sessions/<token>` | 检查 session 身份、阶段和恢复信息 |
+| `POST .../<token>/heartbeat` | 延长活动编辑会话 |
+| `POST .../<token>/trajectory-ready` | 把项目轨迹作业输出接入当前 session |
+| `POST .../<token>/save` | 校验并发布不可变 `workbench_output_revision` |
+| `POST .../<token>/close` | 关闭临时编辑授权 |
+
+token 同时绑定项目和片段，不是持久结果。刷新后如 token 失效，应从项目页重新创建/恢复 session。服务端只接受 session 允许目录中的工件，并为 workbench output manifest、工件路径、SHA-256 和 operation ID 建立校验引用。
+
+### Annotation 与工程标牌
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /api/projects/<project_id>/annotations` | 创建 `cad_anchor` 或兼容 `video_track` annotation |
+| `PATCH /api/projects/<project_id>/annotations/<annotation_id>` | 按 annotation manifest revision 更新内容、样式、偏移、范围或可见性 |
+| `DELETE /api/projects/<project_id>/annotations/<annotation_id>` | 删除 annotation；不删除历史 tracking revision |
+| `POST /api/projects/<project_id>/annotations/<annotation_id>/track` | 生成新的 immutable tracking revision（当前 UI 不开放创建入口） |
+| `GET /api/projects/<project_id>/annotations/<annotation_id>/tracking` | 读取 active tracking revision 的精确 PTS 结果 |
+| `GET /api/projects/<project_id>/clips/<clip_id>/annotation-preview` | 返回浏览器把 currentTime 映射到权威 source PTS 所需的 timing |
+
+Annotation 至少包含 `annotation_id`、`clip_id`、`anchor_type`、`content.title`、`content.body`、`panel`、`leader`、`style`、source PTS 范围、`screen_offset`、visibility policy、annotation revision 和 active tracking revision。旧 `text` 字段读取时兼容为 body。
+
+标题、正文、样式和 screen offset 修改只使对应片段 render stale，不触发轨迹或 video tracking。`cad_anchor` 不产生 tracking revision。`video_track` 的 ROI/re-anchor 才生成新 revision；lost 帧要求 `visibility=false` 且位置为空，不冻结、不跨区间插值。
+
+## 五类 manifest 与原子更新
 
 ```text
-<storage-root>/data/<dataset>/
-  dataset_manifest.json
-  <uploaded-video>
-  raw_cad/<uploaded.dxf-or-dwg>
-  design.json
-  telemetry/<uploaded.srt>
-  srt_analysis.json
-  srt_analysis_report.md
+<storage-root>/projects/<project_id>/
+  project_manifest.json
+  clips_manifest.json
+  jobs_manifest.json
+  render_manifest.json
+  annotations_manifest.json
 ```
 
-DXF 会解析为 `design.json`；DWG 先保存原件，再依赖外部 DWG→DXF 转换器。转换器缺失时可能得到 `cad.status: raw_saved`，这不代表后续阶段已有可用 CAD。CAD `.zip` 只在其中包含 `design.json` 时可直接标记为 ready。
+每个 manifest 都包含 `manifest_owner`、`schema_version`、`revision`、`updated_at`、`project_id` 和可选 `operation_id/operation_intent`。单 owner 写入先生成同目录临时文件、flush/fsync，再 `os.replace`。跨 owner publication 保存 participants、base revisions 和 candidate，启动恢复按 operation ID 验证并修复前缀。
 
-## 运行目录与阶段产物
+不要把“文件 JSON 可解析”等同于“领域状态有效”。成功作业必须与 owner record、输出 revision、fingerprint 和 validation proof 完整对应。
 
-每次执行位于 `<storage-root>/runs/<dataset>/<runId>/`。`manifest.json` 是 run manifest，记录每个阶段的命令、输入、输出、指标、状态和时间；它与数据集的 `dataset_manifest.json` 不同。`job_status.json` 提供面向界面的五个槽位（`upload`、`sfm`、`keyframes`、`quality`、`render`），`job_process.json` 保存当前或最近一次后台子进程的 PID、命令、返回码和日志路径。
+## 当前项目产物
 
 ```text
+<storage-root>/projects/<project_id>/
+  assets/
+    <asset>-<sha256>.<ext>
+    <asset>.validation.json
+    validation_attempts/
+  analysis_artifacts/<analysis_revision>/
+  jobs/<job_id>/attempt-<number>/
+  workbench_sessions/<token-hash>.json
+  workbench_outputs/<workbench_revision>/
+    workbench_output_manifest.json
+    artifacts/
+  annotations/<clip_id>/<annotation_id>/<tracking_revision>/
+    tracking_results.json
+  render_outputs/<clip_id>/<render_revision>/
+    rendered.mp4
+    render_frame_map.json
+    render_output_manifest.json
+  thumbnails/
+```
+
+Job attempt 是可变执行现场；`analysis_artifacts`、`workbench_outputs`、tracking revision 和 render revision 一旦发布即不可变。重试创建新 attempt/revision，不覆盖已发布证据。
+
+## source PTS 与 frame map
+
+项目视频分析用 source decoded-frame integer PTS 和精确 `time_base` 定义片段半开区间。片段导出、标牌、渲染和 concat 必须沿用同一帧身份。
+
+`render_frame_map.json` 至少证明每个 output ordinal 对应的 source PTS。渲染验证要求：
+
+- 输出帧数与权威 source frames 数量一致；
+- source PTS 严格按片段定义出现；
+- output ordinal 连续且不重复；
+- 标牌叠加不增删帧；
+- concat 后每个项目 source frame 恰好出现一次。
+
+浏览器可用 `video.currentTime` 查找邻近 PTS 做预览，但正式渲染禁止 `currentTime × fps`、固定 FPS index 或 clip-local float time 反推源帧。
+
+## 启动恢复
+
+服务启动会扫描含 `project_manifest.json` 的项目，修复跨 manifest publication，恢复持久队列，校验成功 render revision，并恢复项目媒体契约。无法验证仍存活的旧进程会被标为 interrupted，不能伪装 running。
+
+CAD 替换后，旧分析 job 的 CAD identity 与当前活动 CAD 不同。服务只在 `source_assets._analysis_revisions[analysis-<video_job_id>].input_snapshot` 的 request key、视频/CAD 路径和 SHA-256 与 job fingerprint/idempotency 精确匹配时，重绑到当前项目契约。缺失或不匹配时 fail closed，并报告恢复错误；不要手工把 fingerprint 改成当前值。
+
+## 兼容 Workflow API 与 `data/runs`
+
+`/api/workflow/*` 和 `/api/pure-rotation/*` 仍支持既有单 dataset/run 工作台阶段。其主要端点包括创建/上传 dataset、`run-stage`、job status/log、camera track、keyframe plan，以及 pure-rotation run/placement/corrections/trajectory。
+
+`srt_sfm_fused` 和 `srt_full_pose` 仍是 Interface only，`run-stage` 会拒绝。兼容 JobRunner 的活动外部子进程不能在服务重启后重新接管；这与当前 ProjectRuntime 能恢复 manifest/队列状态不是同一语义。
+
+旧目录：
+
+```text
+<storage-root>/data/<dataset>/dataset_manifest.json
 <storage-root>/runs/<dataset>/<runId>/
-  00_inputs/                         # 已解析的数据集、管线与覆盖项
-  01_keyframes/                      # camera_track_manual.json、keyframe_plan.json
-  02_sfm/                            # camera_trajectory.json、sparse_points.ply、sfm_stats.json
-  03_alignment/                      # alignment.json、sfm_camera_path.csv、对应关系与报告
-  04_quality/                        # 时间线、建议、质量化轨迹和报告
-  05_viewer_scene/                   # sfm_viewer_scene.json、统计和报告
-  06_road_surface/                   # 几何/道路诊断及可选查看器诊断场景
-  08_render/                         # sfm_align_overlay.mp4、渲染统计和报告
-  02_pure_rotation/                  # 原始旋转轨迹与后端摘要（实验性）
-  03_pure_rotation_placement/        # 全局放置与基础固定中心轨迹
-  04_pure_rotation_corrections/      # 局部校正与校正后轨迹
-  logs/workflow/<stage>.log
-  reports/run_summary.md
   job_status.json
   job_process.json
   manifest.json
+  01_keyframes/
+  02_sfm/
+  03_alignment/
+  04_quality/
+  08_render/
 ```
 
-道路中心线不可用时，`run_pipeline` 会把 `road_surface` 作为 `skipped` 记录到 run manifest；这不是渲染或对齐成功的替代证明。质量阶段可在没有 matplotlib 时跳过 PNG 图表，同时在报告中记录警告。
+它们可能被当前 workbench adapter 引用，但不是当前项目 manifest 的替代品。备份/迁移项目时必须保留项目 manifest 所引用的兼容工件，不能只复制 `projects/<project_id>` 中的 JSON。
 
-## 根目录、静态文件和路径安全
+## 根目录与路径安全
 
-- `--root` 提供静态站点；未传 `--storage-root` 时，`--root` 也就是可写的 workflow 根。传入 `--storage-root` 时，服务要求该目录预先存在，并在根分离时把它的 `data/` 与 `runs/` 映射到 `/data/` 与 `/runs/`。
-- `--extra-root NAME=PATH` 是必须预先存在的只读挂载，用于旧数据兼容。程序仅在根分离时拒绝 `data`、`runs` 这两个名称；文档约定始终不要使用它们，避免与 workflow 路径混淆。静态路径和 ZIP 成员都会解析并验证仍在允许根目录内。
-- 服务器校验数据集和 run ID，运行目录不能逃离 `runs/`；`ArtifactManager` 也只允许把阶段产物写进当前 run 目录。
-- 服务重启不会接管、续跑或重试旧子进程。恢复时先检查 `job_process.json`、`job_status.json`、`manifest.json` 和阶段日志；优先使用新的 `runId` 重跑以保留原始证据。若确需在原 run 内重跑，先完整备份整个 run 目录：同名阶段产物、`manifest.json`、`job_status.json` 和 `job_process.json` 都可能被覆盖。
-- 服务重启后如考虑调用取消接口，先核对 `job_process.json` 的 PID 当前进程命令是否与 `job_process.command` 一致；无法确认一致性时不要取消该 PID，改用新的 `runId` 重新运行。
+- `--storage-root` 必须预先存在；省略时继承 `--root`，会把 `projects/` 写入代码根。
+- `--extra-root NAME=PATH` 是只读旧数据挂载，不能成为项目写入根；不要使用保留名 `data` 或 `runs`。
+- 服务校验 project/dataset/run/clip/revision ID 和 ZIP 成员，拒绝 `..`、绝对路径及根逃逸。
+- 不要公开绑定服务；Project API 和 workbench token 不是公网认证系统。
+- 删除、移动或手工修复数据前，先停止指向该 storage root 的唯一服务并完整备份根目录。

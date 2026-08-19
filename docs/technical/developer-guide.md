@@ -45,8 +45,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `cadscene/cad/` | DXF 导入、DWG 转换、中心线检测与投影 |
 | `cadscene/srt/` | SRT 解析、PTS 同步、ENU、能力检测和实验性融合核心 |
 | `cadscene/pure_rotation/` | 外部 OpenGV 后端、固定相机中心放置与局部姿态校正 |
+| `cadscene/projects/` | 项目 manifest、视频分析、持久队列、工作台 session、渲染、合并、CAD 替换与启动恢复 |
+| `cadscene/annotations/` | CAD/video 锚点模型、工程标牌布局、tracking revision 与透明叠加渲染 |
 | `cadscene/rendering/`、`cadscene/diagnostics/`、`cadscene/viewer/` | 叠加渲染、道路/姿态诊断及查看器场景导出 |
-| `apps/workflow_portal/` | 创建数据集和上传文件的静态入口 |
+| `apps/workflow_portal/` | 创建项目和上传文件的静态入口 |
+| `apps/project_workspace/` | 项目资产、片段、批量任务、CAD 替换与合并的管理界面 |
 | `apps/web_camera_viewer/` | 视频、CAD、关键帧、工作流阶段与产物查看器 |
 
 ## CLI 目录
@@ -71,13 +74,17 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ## 本地服务、静态根与存储根
 
-最小本地启动命令为：
+建议为人工项目显式准备独立可写根：
 
 ```powershell
-python -m cadscene.cli.serve_viewer --bind 127.0.0.1 --port 8300
+New-Item -ItemType Directory -Force -Path D:\cadscene-work | Out-Null
+python -m cadscene.cli.serve_viewer `
+  --bind 127.0.0.1 `
+  --port 8300 `
+  --storage-root D:\cadscene-work
 ```
 
-打开 `http://127.0.0.1:8300/apps/workflow_portal/index.html`。`--root` 是静态站点根，默认是项目根；未传 `--storage-root` 时，它也同时是可写 workflow `data/` 与 `runs/` 根。传入 `--storage-root` 时，该目录必须预先存在，并成为可写 workflow 根；部署时将二者分开可避免把运行产物写入静态代码目录：
+打开 `http://127.0.0.1:8300/apps/workflow_portal/`。`--root` 是静态站点根，默认是代码仓库根；`--storage-root` 是项目、兼容 workflow 和产物的可写根。未传 `--storage-root` 时它继承 `--root`，服务会在代码目录中创建 `projects/`。生产部署可进一步分离静态根：
 
 ```powershell
 python -m cadscene.cli.serve_viewer `
@@ -86,7 +93,36 @@ python -m cadscene.cli.serve_viewer `
   --extra-root legacy=D:\cadscene-legacy
 ```
 
-服务会以 `/data/` 和 `/runs/` 暴露 workflow 数据；当两个根分离时，它们映射到 storage root 的两个目录。`--extra-root` 只读挂载，目录必须已存在，也不会改变写入位置。虽然程序只在两个根不同时拒绝名为 `data` 或 `runs` 的额外挂载，部署约定一律不要使用这两个名称，以免覆盖或混淆 workflow 路径。视频请求支持 HTTP Range。不要把监听地址改为外网地址，除非另有认证和网络隔离措施。
+服务以 Project API 访问 `projects/`，并以 `/data/`、`/runs/` 暴露兼容 workflow 数据；根分离时它们都位于 storage root。`--extra-root` 是只读旧数据挂载，不改变写入位置。不要把额外挂载命名为 `data` 或 `runs`。视频请求支持 HTTP Range。项目 workbench token 是写权限凭据；服务没有公网认证层，不要把监听地址改为外网地址，除非另有认证和网络隔离。
+
+同一个 `<storage-root>/projects/` 由 `.serve_viewer.lease` 保证只有一个服务进程消费队列。启动第二个指向同一根的服务会失败；不同端口不能规避此约束。
+
+## 当前项目目录与持久化边界
+
+项目主目录不是旧版 `data/runs`，而是：
+
+```text
+<storage-root>/projects/<project_id>/
+  project_manifest.json
+  clips_manifest.json
+  jobs_manifest.json
+  render_manifest.json
+  annotations_manifest.json
+  assets/
+  analysis_artifacts/
+  jobs/<job_id>/attempt-<n>/
+  workbench_sessions/
+  workbench_outputs/<revision>/
+  annotations/<clip_id>/<annotation_id>/<tracking_revision>/
+  render_outputs/<clip_id>/<render_revision>/
+  thumbnails/
+```
+
+五个 manifest 分别拥有项目、片段、队列、渲染和标牌状态。更新必须携带当前 `expected_revision`；跨 manifest 操作使用 `operation_id` 和恢复 intent。不要通过脚本直接把某个 JSON 的 `status` 改为 success，也不要只移动单个 immutable revision。
+
+`workbench_sessions/` 保存临时授权和心跳；`workbench_outputs/` 保存可恢复的持久结果。前端刷新后应从项目页创建/恢复 session，不能长期复用带 `projectWorkbenchToken` 的旧 URL。
+
+渲染成功必须同时发布 `rendered.mp4`、`render_frame_map.json` 和 `render_output_manifest.json`。source decoded-frame integer PTS、精确 `time_base` 和 output ordinal 是渲染/合并契约；任何标牌叠加都不得修改该映射。
 
 ## 开发与测试
 
@@ -94,14 +130,18 @@ python -m cadscene.cli.serve_viewer `
 
 ```powershell
 python -m pytest -q tests/cli/test_serve_viewer_cli.py tests/cli/test_serve_viewer_upload_api.py tests/cli/test_serve_viewer_workflow_api.py
-python -m pytest -q tests/workflow tests/alignment tests/sfm tests/srt
-python -m pytest -q
+python -m pytest -q tests/projects tests/annotations tests/rendering tests/integration
+python -m pytest -p no:cacheprovider
+python scripts/check_no_project_dependency.py
 ```
 
-静态前端契约在 `tests/viewer/`；命令行契约在 `tests/cli/`；端到端的 partial-SRT 覆盖在 `tests/integration/`。当前测试包含单元、静态契约和合成集成验证，但并不证明真实 GPU、外部 OpenGV、大规模视频、DXF/DWG 转换器或所有采集设备已经验证。提交前应至少运行受改动覆盖的测试；涉及行为改动时再运行完整套件。
+项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。当前测试包含单元、静态契约和合成集成验证，但不代替真实 GPU、外部 OpenGV、长视频、DXF/DWG 转换器和浏览器人工验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
 
 ## 开发边界
 
 - `sfm_only` 是唯一 Stable 的端到端路线；`pure_rotation` 是 Experimental，固定相机中心，不恢复平移或尺度。
 - partial-SRT core 是 Experimental CLI，尚未接入正式 JobRunner。门户中的 `srt_sfm_fused` 与 `srt_full_pose` 均为 Interface only，服务会阻止其启动阶段。
+- CAD 锚定工程标牌已经接入预览和正式片段渲染；视频目标跟踪标牌创建入口当前隐藏，不能作为正式功能宣传。
+- 全局 CAD 替换只适用于坐标系、单位和原点不变且已有有效工作台输出的项目；成功后保留轨迹，只让渲染和合并 stale。
+- 相机轨迹、annotation、渲染和合并必须保持 source PTS/frame-map 契约；禁止用固定 FPS frame index 替代。
 - 可靠且一致的人工关键帧 FOV 优先于不可靠的 SfM 重建 FOV；普通 SRT 只是元数据能力线索，而非高精度位置、姿态或 CAD 高程真值。

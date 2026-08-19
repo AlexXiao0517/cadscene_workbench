@@ -1,6 +1,86 @@
 # 故障排查
 
-本页按“症状 → 可能原因 → 检查 → 处理”组织。先保留同一 `dataset + runId` 的 `job_status.json`、`job_process.json` 和 `logs/workflow/<stage>.log`；服务重启不会自动接管旧后台子进程。产物位置与字段说明见[HTTP API 与产物参考](api-and-artifacts.md)。
+本页按“症状 → 可能原因 → 检查 → 处理”组织。当前项目管线先保留 `project_id`、`clip_id`、job ID、`GET /api/projects/<project_id>/snapshot`、job runtime 和对应 attempt 日志；兼容 dataset/run 工作流再保留 `job_status.json`、`job_process.json` 与 `logs/workflow/<stage>.log`。ProjectRuntime 会恢复可验证的持久队列状态，但不会假装已中断的外部子进程仍在运行。产物和字段见[HTTP API 与产物参考](api-and-artifacts.md)。
+
+## 项目加载、会话与启动恢复
+
+### 重启后旧项目找不到、全部待处理或显示结果已失效
+
+**可能原因：** 服务使用了不同的 `--storage-root`；打开了旧 `project_id`；项目 manifest 引用的兼容 `data/runs` 工件被移动；不可变 workbench/render 输出校验失败；或 CAD 替换后的旧分析身份恢复失败。
+
+**检查：** 核对实际启动命令，确认 `<storage-root>/projects/<project_id>/project_manifest.json`、`clips_manifest.json`、`jobs_manifest.json`、`render_manifest.json` 均存在。请求 `GET /api/projects/<project_id>/snapshot`，检查服务启动 stderr 中是否包含 lease、manifest reconciliation、media spec、render validation 或 `legacy analysis identity` 错误。不要只看浏览器旧 URL。
+
+**处理：** 用项目创建时相同的 storage root 重启，并从 `/apps/project_workspace/?projectId=<project_id>` 进入。若 manifest 引用了旧 `data/runs` 产物，恢复完整原目录或从备份恢复，不要只改绝对路径。CAD 已合法替换但出现 `legacy analysis identity does not match exactly` 时，应使用包含 CAD 替换恢复修复的版本；修复会用 `_analysis_revisions.*.input_snapshot` 精确校验，不应重跑分析或手工修改 fingerprint。
+
+### 刷新后提示“项目工作台会话已失效”“clip has no matching session”或已有 active session
+
+**可能原因：** 带 token 的工作台 URL 已过期、被关闭、属于另一片段，或旧标签页仍持有活动编辑 session。session 是临时写权限，不是持久工作台输出。
+
+**检查：** 返回项目片段管理查看该片段 capability；用 session inspect API 核对 token 的 project/clip/status。确认 `workbench_outputs/<revision>/workbench_output_manifest.json` 是否已经保存成功。
+
+**处理：** 关闭旧工作台标签页，从同一项目页重新点击“进入工作台”，让服务恢复或签发新 session。不要复制旧 token、删除 `workbench_sessions/*.json` 或把 session 状态当成已保存结果。只有服务确认旧 session 已关闭/过期后才创建新编辑会话。
+
+## 项目队列与进度
+
+### 任务一直 pending、直接到 99%，或一个进度条结束后又从低百分比开始
+
+**可能原因：** 作业在等待依赖/资源槽；前端正在展示同一 DAG 的不同阶段；算法已结束但产物仍在 validating/publishing；或两个服务竞争同一 storage root。
+
+**检查：** 请求 job runtime，核对 `status`、`stage`、`progress`、`depends_on_job_ids`、attempt 和日志。检查项目页“进行中”数量和服务端 `.serve_viewer.lease`。预览视频、生成摘要或 FFmpeg 结束都不是发布成功证明。
+
+**处理：** 保持唯一服务运行，让 validating/publishing 完成。仅当 runtime 明确失败或可取消时使用项目 API retry/cancel；不要根据动画直接杀算法进程。进度应在结果校验和 owner manifest 发布后才到 100%。
+
+### 服务重启后任务状态不可信或取消了错误 PID
+
+**可能原因：** 旧进程 PID 已复用，或兼容 JobRunner 的 `job_process.json` 仍记录重启前进程。当前 ProjectRuntime 会把无法验证的执行标为 interrupted，并恢复安全 queued 作业。
+
+**检查：** 对当前项目使用 job runtime 和 attempt claim/token；对兼容 run 同时比对 PID、进程启动时间和 `job_process.command`。检查服务启动时的 restore 日志。
+
+**处理：** 不要仅凭 PID 调用系统终止。通过项目 API retry 生成新 attempt；兼容 run 优先使用新 `runId`，需要原地重跑时先备份整个 run。
+
+## 全局 CAD 替换
+
+### 项目页没有“替换”入口，或替换请求被拒绝
+
+**可能原因：** 项目尚无可验证的保存工作台输出，坐标系确认未勾选，上传 CAD 与当前 SHA-256 相同，或已有替换作业进行中。
+
+**检查：** 查看 snapshot 的 `cad_replacement.eligible/reason/status`，验证至少一个片段引用的 `workbench_outputs/<revision>` 完整且 SHA-256 正确。
+
+**处理：** 先完成并保存一个片段的坐标系标定。确认新版 CAD 的坐标系、单位和原点确实相同后再勾选确认。坐标系变化时新建项目，不要绕过 eligibility。
+
+### CAD 替换失败、成功后渲染失效，或重启时项目恢复失败
+
+**可能原因：** 候选 CAD 导入/转换失败；成功替换按设计使 CAD 依赖的 render/merge stale；旧分析 job 仍包含替换前 CAD identity。
+
+**检查：** 查看 snapshot 的 replacement progress/error、对应 `cad_replacement` job runtime、`project_manifest.source_assets._cad_versions` 和活动 CAD。成功时 clips/trajectory/workbench 引用应保持，render/merge owner 应为 `stale_input`。
+
+**处理：** 替换失败时修复 CAD 文件后重新提交，旧 CAD 会继续活动。替换成功后重新进入工作台检查/微调并重新渲染、合并，不要重跑 SfM/初始路线。重启恢复错误应先升级/使用 snapshot identity 修复，再检查不可变输入是否缺失；不要手工把 job 标为 success。
+
+## CAD 文字与工程标牌
+
+### DXF 桩号/文字不显示，或大型 CAD 拖动明显卡顿
+
+**可能原因：** 文本实体不是受支持的 `TEXT`、`MTEXT` 或块属性；图层隐藏；CAD 转换丢失文字；或显示预算/距离裁剪主动隐藏了远处文字。
+
+**检查：** 查看导出的 `design.json` 文本实体数量、内容、图层、位置、旋转、字号和 `text_role`。切换图层并靠近文本区域，比较原 DXF 与转换后的设计数据。
+
+**处理：** 优先使用可直接解析的 DXF，确认块属性实际包含值。不要为显示所有远距离文字取消预算；应调整字号/可见图层或分区查看，保持相机交互性能。
+
+### 播放时标牌、引线或锚点单独残留，或 CAD 标牌不随视角移动
+
+**可能原因：** 浏览器缓存了旧脚本；当前 PTS 没有有效 Base/Corrected CameraState；只更新了卡片可见性而没有同步 leader/anchor；或 annotation 的 CAD world 坐标/PTS 范围不正确。
+
+**检查：** 从项目页重新进入工作台并强制刷新，确认当前阶段为 render、annotation 为 `cad_anchor`，查看 annotation-preview 的权威 PTS、有效相机轨迹和浏览器控制台/API 错误。behind-camera、出画和超时范围应让卡片、线和锚点一起隐藏。
+
+**处理：** 使用当前服务生成的新 session，不复用旧 token URL。重新在右侧 CAD 选点并保存；确认 Base/Corrected 切换后重新投影。视频目标跟踪标牌创建入口当前隐藏，不应通过 DOM 或旧 URL 强行启用。
+
+### 预览有标牌但 `rendered.mp4` 没有，或提示“输入已变化，本次渲染未发布”
+
+**可能原因：** 渲染启动后 annotation、CAD、工作台输出或活动轨迹 revision 发生变化；渲染绑定的 annotation bundle 为空/旧；或标牌叠加后帧数/frame map 校验失败。
+
+**检查：** 查看 render job runtime、attempt 中的 annotation render bundle、`annotated_overlay.mp4`、`render_frame_map.json` 和 validation error。对比启动和完成时的 input fingerprint/annotation revision。
+
+**处理：** 停止编辑，保存最新标牌后重新点击“渲染视频”。存在标牌时应烧录完整卡片/引线/锚点；无标牌时仍允许快速渲染。不要复制未发布 attempt 视频代替 `render_outputs/<clip>/<revision>/rendered.mp4`。
 
 ## 上传、路径与查看器媒体
 
@@ -14,11 +94,11 @@
 
 ### 查看器缺少视频、CAD 或运行产物
 
-**可能原因：** `--root` 与 `--storage-root` 指向不同部署但查看器访问了另一台服务；`dataset`/`runId` 不一致；旧数据没有被显式只读挂载。
+**可能原因：** `--root` 与 `--storage-root` 指向不同部署但查看器访问了另一台服务；`project_id`/`clip_id` 或兼容 `dataset`/`runId` 不一致；旧数据没有被显式只读挂载。
 
-**检查：** 核对服务启动参数、浏览器 URL、`<storage-root>/data/<dataset>/dataset_manifest.json` 和 `<storage-root>/runs/<dataset>/<runId>/manifest.json`。确认浏览器可访问 `/data/<dataset>/…` 和 `/runs/<dataset>/<runId>/…`。
+**检查：** 对当前项目核对 `<storage-root>/projects/<project_id>` 五类 manifest、snapshot 和 workbench output 引用；对兼容 workflow 再核对 `<storage-root>/data/<dataset>/dataset_manifest.json` 与 `<storage-root>/runs/<dataset>/<runId>/manifest.json`。确认浏览器媒体 URL 指向当前服务。
 
-**处理：** 用同一个 storage root 重启服务，或为旧数据配置 `--extra-root legacy=PATH` 并让查看器使用相应只读 URL。若未传 `--storage-root`，`--root` 同时也是 workflow 写入根；若传入，storage root 必须预先存在。不要将 `--extra-root` 命名为 `data` 或 `runs`，也不要期望它成为 workflow 写入根。
+**处理：** 用项目创建时相同的 storage root 重启；旧数据可配置 `--extra-root legacy=PATH` 只读访问。若未传 `--storage-root`，`--root` 同时是项目/workflow 写入根；若传入，storage root 必须预先存在。不要将 `--extra-root` 命名为 `data` 或 `runs`，也不要期望它成为项目写入根。
 
 ## SfM、CUDA 与全局 BA
 
