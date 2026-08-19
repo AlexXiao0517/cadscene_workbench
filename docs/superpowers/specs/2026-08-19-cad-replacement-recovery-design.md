@@ -15,7 +15,9 @@
 - 修订必须由当前记录的 video analysis job 标识；
 - `input_snapshot.request_key` 必须与 `_analysis.request_key` 完全一致；
 - 快照必须包含创建原分析任务所需的 CAD、视频和可选 SRT 资产；
-- 旧 fingerprint 和 idempotency key 使用该快照校验，而不是替换后的当前资产。
+- 原分析任务可能使用当前 identity schema，也可能使用旧版无 project scope 的
+  legacy schema；两种 fingerprint 和 idempotency key 都使用该快照精确校验，
+  而不是替换后的当前资产。
 
 快照缺失、归属不一致或 identity 仍不匹配时继续 fail closed。不会跳过恢复错误，
 也不会修改现有项目 manifest、分析输出或 CAD 替换历史。
@@ -27,7 +29,7 @@
 1. 原 CAD 下完成并验证的分析 DAG；
 2. 保存不可变分析输入快照；
 3. 当前 CAD 被同坐标系新版本替换；
-4. `restore_jobs` 可以迁移旧 identity 并恢复队列；
+4. `restore_jobs` 可以迁移快照下的当前格式或 legacy identity 并恢复队列；
 5. 篡改 identity 时仍拒绝恢复。
 
 完成后运行项目服务聚焦测试、完整测试、依赖扫描和 `git diff --check`，再使用真实

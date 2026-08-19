@@ -4,7 +4,7 @@
 
 **Goal:** 让完成全局 CAD 替换的项目在服务重启时，使用不可变分析输入快照验证旧分析任务并恢复队列。
 
-**Architecture:** 保持当前分析契约和 fail-closed 校验不变。仅当旧 identity 无法由当前资产验证时，按 video analysis job 精确定位 `_analysis_revisions` 快照并再次验证；验证成功后继续使用现有迁移逻辑重写为当前契约。
+**Architecture:** 保持当前分析契约和 fail-closed 校验不变。仅当已保存的 identity 无法由当前资产验证时，按 video analysis job 精确定位 `_analysis_revisions` 快照，并分别验证快照下的当前 schema 与 legacy schema；验证成功后继续使用现有迁移逻辑重写为当前契约。
 
 **Tech Stack:** Python 3.11、dataclasses、pytest、原子 JSON repositories。
 
@@ -113,7 +113,7 @@ def _legacy_analysis_snapshot_assets(
     return snapshot
 ```
 
-在 legacy fingerprint 校验处，先用当前资产校验；不匹配时仅尝试上述精确快照。两者都不匹配则保留原异常。成功后仍将 job identity 更新为 `current_contract`。
+在 identity 校验处，先保留当前资产下的 legacy 兼容校验；不匹配时仅尝试上述精确快照，并接受快照下成对匹配的当前 schema 或 legacy schema。所有候选都不匹配则保留原异常。成功后仍将 job identity 更新为 `current_contract`。
 
 - [ ] **Step 4: 运行聚焦测试并确认 GREEN**
 

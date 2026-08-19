@@ -4065,16 +4065,23 @@ class ProjectService:
             legacy_idempotency = _fingerprint(
                 {**legacy_payload, "purpose": "idempotency"}
             )
-            if (
-                job.input_fingerprint != legacy_fingerprint
-                or job.idempotency_key != legacy_idempotency
-            ):
+            identity_matches = (
+                job.input_fingerprint == legacy_fingerprint
+                and job.idempotency_key == legacy_idempotency
+            )
+            if not identity_matches:
                 snapshot = self._legacy_analysis_snapshot_assets(
                     project.source_assets,
                     video_job=structured[1],
                     request_key=request_key,
                 )
                 if snapshot is not None:
+                    snapshot_contract = _analysis_job_contract(
+                        project_id=project_id,
+                        phase=phase,
+                        request_key=request_key,
+                        project_assets=snapshot,
+                    )
                     legacy_payload = _legacy_analysis_identity_payload(
                         phase=phase,
                         request_key=request_key,
@@ -4084,13 +4091,19 @@ class ProjectService:
                     legacy_idempotency = _fingerprint(
                         {**legacy_payload, "purpose": "idempotency"}
                     )
-                if (
-                    job.input_fingerprint != legacy_fingerprint
-                    or job.idempotency_key != legacy_idempotency
-                ):
-                    raise ValueError(
-                        "legacy analysis identity does not match exactly"
+                    identity_matches = (
+                        job.input_fingerprint
+                        == snapshot_contract["input_fingerprint"]
+                        and job.idempotency_key
+                        == snapshot_contract["idempotency_key"]
+                    ) or (
+                        job.input_fingerprint == legacy_fingerprint
+                        and job.idempotency_key == legacy_idempotency
                     )
+            if not identity_matches:
+                raise ValueError(
+                    "legacy analysis identity does not match exactly"
+                )
             if job.status == "success":
                 if not _has_exact_success_proof(job):
                     raise ValueError(
