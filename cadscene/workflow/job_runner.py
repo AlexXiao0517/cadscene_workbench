@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.core.config import load_dataset_config
 from cadscene.workflow.data_import import load_dataset_manifest
 from cadscene.workflow.job_status import JobStatusStore
@@ -77,14 +78,7 @@ def _manual_keyframe_count(path: Path) -> int:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"无法读取人工关键帧文件: {path}") from error
-    keyframes = payload.get("keyframes", []) if isinstance(payload, dict) else []
-    return sum(
-        1
-        for item in keyframes
-        if isinstance(item, dict)
-        and isinstance(item.get("camera"), dict)
-        and item.get("source") != "algorithm_prediction"
-    )
+    return len(confirmed_keyframes(payload)) if isinstance(payload, dict) else 0
 
 
 def _safe_name(value: str, label: str) -> str:

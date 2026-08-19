@@ -25,6 +25,23 @@ def _wait_for_status(runner: JobRunner, dataset: str, run_id: str, expected: str
     raise AssertionError(f"job did not reach {expected}")
 
 
+def test_manual_keyframe_count_excludes_unconfirmed_initial_seed(tmp_path: Path) -> None:
+    track = tmp_path / "camera_track_manual.json"
+    track.write_text(
+        json.dumps(
+            {
+                "keyframes": [
+                    {"frame": 0, "camera": {"x": 100.0}},
+                    {"frame": 10, "source": "manual_anchor", "camera": {"x": 101.0}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert job_runner_module._manual_keyframe_count(track) == 1
+
+
 def test_runner_starts_short_command_and_writes_log_and_process_file(tmp_path: Path) -> None:
     runner = JobRunner(tmp_path)
 

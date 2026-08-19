@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.sfm.trajectory import load_sfm_trajectory
 
 
@@ -22,14 +23,10 @@ def keyframe_plan_path(run_dir: str | Path) -> Path:
 
 
 def _manual_frames(camera_track: Mapping[str, Any]) -> set[int]:
-    keyframes = camera_track.get("keyframes") or []
     return {
         int(item["frame"])
-        for item in keyframes
-        if isinstance(item, Mapping)
-        and isinstance(item.get("camera"), Mapping)
-        and item.get("source") != "algorithm_prediction"
-        and item.get("frame") is not None
+        for item in confirmed_keyframes(dict(camera_track))
+        if item.get("frame") is not None
     }
 
 

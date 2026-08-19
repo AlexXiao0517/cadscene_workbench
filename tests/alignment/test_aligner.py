@@ -799,6 +799,15 @@ def test_alignment_rejects_global_anchor_residual_above_five_metres() -> None:
         )
 
 
+def test_alignment_rejects_large_global_residual_with_three_keyframes() -> None:
+    with pytest.raises(RuntimeError, match="global anchor residual"):
+        aligner._validate_alignment_result(
+            metrics={"global_residual_m_max": 45.693, "num_keyframes": 3},
+            intrinsics_warning=None,
+            trusted_fov=True,
+        )
+
+
 @pytest.mark.parametrize(
     "baseline_direction_error",
     [float("nan"), 0.1000001],

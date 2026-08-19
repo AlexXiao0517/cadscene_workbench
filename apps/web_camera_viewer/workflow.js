@@ -1922,8 +1922,8 @@
   async function startAlignmentStage() {
     // 路线拟合 = 先保存当前已标定关键帧，再用它们运行 alignment（生成初步路线/相机计划）。
     const cameraTrack = window.cadsceneGetCameraTrack();
-    const manualAnchorCount = (cameraTrack.keyframes || []).filter(
-      (keyframe) => keyframe?.camera && keyframe.source !== "algorithm_prediction",
+    const manualAnchorCount = window.CadsceneKeyframes.confirmedManualKeyframes(
+      cameraTrack.keyframes || [],
     ).length;
     if (manualAnchorCount < 2) {
       throw new Error(`路线拟合至少需要 2 个人工关键帧；当前为 ${manualAnchorCount} 个。请在另一帧完成“添加/更新关键帧”后再运行。`);

@@ -152,7 +152,7 @@
   }
 
   function isManualKeyframe(keyframe) {
-    return keyframe && keyframe.source !== "algorithm_prediction";
+    return window.CadsceneKeyframes.isConfirmedManualKeyframe(keyframe);
   }
 
   async function fetchJsonWithFallback(paths, label) {
@@ -187,7 +187,7 @@
   }
 
   function manualKeyframes() {
-    return (cameraTrack?.keyframes || []).filter(isManualKeyframe);
+    return window.CadsceneKeyframes.confirmedManualKeyframes(cameraTrack?.keyframes || []);
   }
 
   function dot(a, b) {

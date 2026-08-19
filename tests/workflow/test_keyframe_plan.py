@@ -58,6 +58,22 @@ def test_keyframe_plan_uses_first_anchor_interval_and_last_sfm_frame(tmp_path: P
     assert plan["frames"][1]["status"] == "pending"
 
 
+def test_keyframe_plan_rejects_unconfirmed_initial_seed(tmp_path: Path) -> None:
+    trajectory = tmp_path / "camera_trajectory.json"
+    _trajectory(trajectory)
+    unconfirmed = {
+        "keyframes": [
+            {
+                "frame": 0,
+                "camera": {"x": 0, "y": 0, "z": 100, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="create a manual keyframe"):
+        create_keyframe_plan(trajectory, unconfirmed, interval_frames=120)
+
+
 def test_keyframe_plan_sync_marks_only_matching_manual_frames_complete(tmp_path: Path) -> None:
     trajectory = tmp_path / "camera_trajectory.json"
     _trajectory(trajectory)

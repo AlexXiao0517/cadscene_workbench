@@ -18,6 +18,7 @@ def test_web_viewer_static_files_exist() -> None:
     assert (APP_DIR / "viewer_legacy.js").exists()
     assert (APP_DIR / "fallback.js").exists()
     assert (APP_DIR / "cad_text.js").exists()
+    assert (APP_DIR / "keyframe_sources.js").exists()
     assert (APP_DIR / "vendor").is_dir()
 
 
@@ -55,9 +56,11 @@ def test_paths_js_supports_runs_outputs_and_url_overrides() -> None:
 
 def test_viewer_legacy_contains_quality_suggestions_and_prediction_guards() -> None:
     text = _text(APP_DIR / "viewer_legacy.js")
+    keyframe_sources = _text(APP_DIR / "keyframe_sources.js")
 
-    assert "algorithm_prediction" in text
+    assert "confirmedManualSources.has" in keyframe_sources
     assert "isManualKeyframe" in text
+    assert "isConfirmedManualKeyframe" in text
     assert "qualityTimeline" in text
     assert "loadSuggestions" in text
     assert "sfmScene" in text

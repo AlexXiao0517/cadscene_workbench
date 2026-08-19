@@ -698,6 +698,9 @@ def test_keyframe_plan_shows_progress_without_counting_pending_frames_as_manual_
     assert "待标定" in workflow
     assert "继续未完成标定" in html
     assert "人工关键帧：${manualKeyframes().length}" in viewer
+    assert "window.CadsceneKeyframes.isConfirmedManualKeyframe(keyframe)" in viewer
+    assert "window.CadsceneKeyframes.confirmedManualKeyframes(" in viewer
+    assert "window.CadsceneKeyframes.confirmedManualKeyframes(" in workflow
 
 
 def test_completed_keyframe_plan_refits_then_opens_quality_with_a_return_path() -> None:

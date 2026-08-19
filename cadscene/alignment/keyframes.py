@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -10,7 +11,16 @@ from cadscene.cad.loader import CadBundle
 from cadscene.core.camera import CameraState
 from cadscene.core.coordinates import web_camera_to_python_state
 
-PENDING_SOURCES = {"algorithm_prediction"}
+CONFIRMED_KEYFRAME_SOURCES = frozenset(
+    {
+        "manual_keyframe",
+        "confirmed_keyframe",
+        "manual",
+        "confirmed",
+        "manual_anchor",
+        "manual_corrected",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -42,14 +52,27 @@ def load_web_camera_track(path: str | Path) -> dict:
         return json.load(f)
 
 
+def is_confirmed_keyframe(item: object) -> bool:
+    """只接受用户明确保存过的人工关键帧，排除 Viewer 初始预览位姿。"""
+    return (
+        isinstance(item, Mapping)
+        and isinstance(item.get("camera"), Mapping)
+        and str(item.get("source") or "") in CONFIRMED_KEYFRAME_SOURCES
+    )
+
+
 def confirmed_keyframes(track: dict) -> list[dict]:
-    keyframes: list[dict] = []
-    for item in track.get("keyframes", []):
-        if item.get("source") in PENDING_SOURCES:
-            continue
-        if "camera" not in item:
-            continue
-        keyframes.append(item)
+    candidates = [
+        item
+        for item in track.get("keyframes", [])
+        if isinstance(item, Mapping) and isinstance(item.get("camera"), Mapping)
+    ]
+    explicit = [item for item in candidates if is_confirmed_keyframe(item)]
+    if explicit:
+        keyframes = explicit
+    else:
+        legacy = [item for item in candidates if not str(item.get("source") or "")]
+        keyframes = legacy if len(legacy) >= 2 else []
     keyframes.sort(key=lambda row: int(row.get("frame", 0)))
     return keyframes
 
@@ -97,4 +120,3 @@ def anchor_segments(anchors: Sequence[KeyframeAnchor]) -> list[dict]:
             }
         )
     return segments
-

@@ -7,6 +7,7 @@ from cadscene.core.coordinates import web_camera_to_python_state
 def test_confirmed_keyframes_skip_algorithm_prediction_and_sort():
     track = {
         "keyframes": [
+            {"frame": 0, "camera": {"x": 0}},
             {"frame": 30, "source": "algorithm_prediction", "camera": {"x": 1}},
             {"frame": 20, "source": "confirmed_keyframe", "camera": {"x": 2}},
             {"frame": 10, "source": "manual_keyframe", "camera": {"x": 3}},
@@ -17,6 +18,30 @@ def test_confirmed_keyframes_skip_algorithm_prediction_and_sort():
     frames = [item["frame"] for item in confirmed_keyframes(track)]
 
     assert frames == [10, 20]
+
+
+def test_confirmed_keyframes_accept_current_explicit_manual_sources():
+    sources = ["manual", "confirmed", "manual_anchor", "manual_corrected"]
+    track = {
+        "keyframes": [
+            {"frame": frame, "source": source, "camera": {"x": frame}}
+            for frame, source in enumerate(sources)
+        ]
+    }
+
+    assert [item["source"] for item in confirmed_keyframes(track)] == sources
+
+
+def test_confirmed_keyframes_accept_legacy_track_only_when_multiple_poses_exist():
+    legacy = {
+        "keyframes": [
+            {"frame": 0, "camera": {"x": 0}},
+            {"frame": 10, "camera": {"x": 1}},
+        ]
+    }
+
+    assert [item["frame"] for item in confirmed_keyframes(legacy)] == [0, 10]
+    assert confirmed_keyframes({"keyframes": [legacy["keyframes"][0]]}) == []
 
 
 def test_load_web_camera_track_reads_utf8_sig(tmp_path):
@@ -37,4 +62,3 @@ def test_keyframe_conversion_matches_legacy_pitch_rule():
     assert state.camera_y == 0.5
     assert state.camera_z == 12.5
     assert state.pitch_deg == 30.0
-
