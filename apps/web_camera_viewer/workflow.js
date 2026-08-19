@@ -1066,6 +1066,7 @@
         }
         sessionStorage.removeItem(postAlignmentStageKey());
       }
+      projectWorkbenchInternalNavigation = true;
       window.location.reload();
     } else if (pendingReload && ["failed", "cancelled"].includes(payload.status)) {
       sessionStorage.removeItem(reloadKey);

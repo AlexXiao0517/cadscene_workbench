@@ -93,6 +93,19 @@ def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> No
     assert 'fetch(path, { cache: "no-store" })' in viewer
 
 
+def test_alignment_success_reload_keeps_project_workbench_session_open() -> None:
+    script = _read("workflow.js")
+    reload_flow = script[
+        script.index('const pendingReload = sessionStorage.getItem(reloadKey)') :
+        script.index('} else if (pendingReload && ["failed", "cancelled"]')
+    ]
+
+    internal_navigation = reload_flow.index("projectWorkbenchInternalNavigation = true")
+    reload_page = reload_flow.index("window.location.reload()")
+
+    assert internal_navigation < reload_page
+
+
 def test_ignored_suggestions_are_forwarded_to_the_legacy_timeline_and_scene() -> None:
     workflow = _read("workflow.js")
     viewer = _read("viewer_legacy.js")
