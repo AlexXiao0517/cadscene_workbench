@@ -727,6 +727,40 @@ def test_path_rows_and_camera_track_prediction_schema(tmp_path: Path) -> None:
     json.dumps(pred, ensure_ascii=False)
 
 
+def test_run_alignment_normalizes_prediction_times_to_trajectory_fps(tmp_path: Path) -> None:
+    traj = _trajectory()
+    track = _track_from_states(
+        {
+            0: CameraState(camera_x=0.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+            10: CameraState(camera_x=1.0, camera_y=0.0, camera_z=0.0, cad_scale=1.0),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    track["fps"] = 23.976
+    for keyframe in track["keyframes"]:
+        keyframe["time"] = keyframe["frame"] / 23.976
+    trajectory_path = tmp_path / "trajectory.json"
+    track_path = tmp_path / "camera_track.json"
+    _write_trajectory(trajectory_path, traj)
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+            frontend_track_step=10,
+        ),
+    )
+
+    assert result.camera_track_pred["fps"] == pytest.approx(traj.fps)
+    assert result.camera_track_pred["keyframes"]
+    for keyframe in result.camera_track_pred["keyframes"]:
+        assert keyframe["time"] == pytest.approx(keyframe["frame"] / traj.fps)
+
+
 def test_manual_fov_overrides_trajectory_for_path_and_predictions(tmp_path: Path) -> None:
     traj = _trajectory()
     traj.intrinsics["params"] = [3788.0]
@@ -756,7 +790,14 @@ def test_manual_fov_overrides_trajectory_for_path_and_predictions(tmp_path: Path
     predicted = [row for row in result.camera_track_pred["keyframes"] if row["source"] == "algorithm_prediction"]
     assert predicted
     assert {row["camera"]["fov"] for row in predicted} == {67.0}
-    assert result.camera_track_pred["keyframes"][:2] == track["keyframes"]
+    preserved = [
+        {key: value for key, value in keyframe.items() if key != "time"}
+        for keyframe in result.camera_track_pred["keyframes"][:2]
+    ]
+    assert preserved == track["keyframes"]
+    assert [keyframe["time"] for keyframe in result.camera_track_pred["keyframes"][:2]] == pytest.approx(
+        [0.0, 10.0 / traj.fps]
+    )
 
 
 def test_inconsistent_manual_fov_keeps_trajectory_fallback(tmp_path: Path) -> None:

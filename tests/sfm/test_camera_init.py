@@ -27,6 +27,7 @@ def test_sfm_camera_initialization_uses_rotation_and_fov_without_position(tmp_pa
     trajectory.write_text(
         json.dumps(
             {
+                "fps": 29.97,
                 "width": 1920,
                 "height": 1080,
                 "intrinsics": [{"width": 1920, "height": 1080, "params": [960.0, 960.0, 960.0, 540.0]}],
@@ -47,6 +48,7 @@ def test_sfm_camera_initialization_uses_rotation_and_fov_without_position(tmp_pa
     result = load_sfm_camera_initialization(trajectory)
 
     assert result["frame_index"] == 5
+    assert result["fps"] == pytest.approx(29.97)
     assert result["yaw"] == pytest.approx(35.0)
     assert result["pitch"] == pytest.approx(-12.0)
     assert result["roll"] == pytest.approx(4.0)

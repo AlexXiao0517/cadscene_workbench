@@ -2209,7 +2209,7 @@
   }
 
   async function applySfmCameraInitializationOnce() {
-    const key = `cadsceneSfmCameraInit:v4:${dataset}:${runId}`;
+    const key = `cadsceneSfmCameraInit:v5:${dataset}:${runId}`;
     if (sessionStorage.getItem(key) === "1") return;
     const response = await fetch(
       `/api/workflow/sfm-camera-init?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}`,

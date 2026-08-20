@@ -28,7 +28,7 @@ def load_sfm_camera_initialization(path: str | Path) -> dict:
     width = float(intrinsics.get("width") or payload.get("width") or 0)
     fx = float(params[0]) if params else 0.0
     fov = math.degrees(2.0 * math.atan((width / 2.0) / fx)) if width > 0 and fx > 0 else 70.0
-    return {
+    result = {
         "frame_index": int(pose.get("frame_index", 0)),
         "yaw": float(yaw),
         "pitch": float(-python_pitch),
@@ -40,3 +40,7 @@ def load_sfm_camera_initialization(path: str | Path) -> dict:
         "safe_fields": ["fov"],
         "warning": "SfM world 尚未与 CAD/重力方向对齐，raw yaw/pitch/roll 仅供诊断。",
     }
+    fps = float(payload.get("fps") or 0.0)
+    if math.isfinite(fps) and fps > 0.0:
+        result["fps"] = fps
+    return result

@@ -141,6 +141,14 @@ def test_workflow_buttons_call_real_runner_and_quality_saves_track_first() -> No
     assert "safe_fields" in viewer
 
 
+def test_sfm_initialization_retimes_the_loaded_track_with_authoritative_fps() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "const fps = Number(params.fps);" in viewer
+    assert "cameraTrack.fps = fps;" in viewer
+    assert "keyframe.time = frameToTime(Number(keyframe.frame));" in viewer
+
+
 def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:
     script = _read("workflow.js")
 
@@ -602,7 +610,7 @@ def test_sfm_fov_is_applied_after_the_legacy_viewer_has_loaded_the_saved_track()
 
     assert "cadsceneViewerReady" in workflow
     assert "cadsceneViewerReady" in viewer
-    assert "cadsceneSfmCameraInit:v4" in workflow
+    assert "cadsceneSfmCameraInit:v5" in workflow
     assert "Array.isArray(appliedFields)" in workflow
 
 
@@ -614,19 +622,19 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
     assert "if (!viewerReadyForSfmCameraInit || isPureRotationWorkflow()) return;" in auto_apply
     assert "viewerReadyForSfmCameraInit = true;" in workflow
     assert "window.addEventListener(\"cadsceneViewerReady\", () => {" in workflow
-    assert "cadsceneSfmCameraInit:v4" in workflow
+    assert "cadsceneSfmCameraInit:v5" in workflow
 
 
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260817-render-saved-session-v2' in index
+    assert 'workflow.js?v=20260820-authoritative-fps-v1' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
     workflow = _read("workflow.js")
 
-    assert "cadsceneSfmCameraInit:v4" in workflow
+    assert "cadsceneSfmCameraInit:v5" in workflow
 
 
 def test_viewer_keeps_requested_frame_for_keyframe_save_when_video_seeks_nearby() -> None:

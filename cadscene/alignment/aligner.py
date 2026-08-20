@@ -637,7 +637,13 @@ def generate_aligned_camera_path(
     return rows
 
 
-def generate_camera_track_pred(track: Mapping[str, object], path_rows: Sequence[Mapping[str, object]], config: AlignmentConfig) -> dict:
+def generate_camera_track_pred(
+    track: Mapping[str, object],
+    path_rows: Sequence[Mapping[str, object]],
+    config: AlignmentConfig,
+    *,
+    fps: float | None = None,
+) -> dict:
     kept = []
     manual_frames: set[int] = set()
     for keyframe in confirmed_keyframes(dict(track)):
@@ -661,6 +667,11 @@ def generate_camera_track_pred(track: Mapping[str, object], path_rows: Sequence[
     kept.sort(key=lambda item: (int(item.get("frame", 0)), str(item.get("source", ""))))
     out = dict(track)
     out["keyframes"] = kept
+    effective_fps = float(fps if fps is not None else out.get("fps") or 0.0)
+    if math.isfinite(effective_fps) and effective_fps > 0.0:
+        out["fps"] = effective_fps
+        for keyframe in kept:
+            keyframe["time"] = int(keyframe.get("frame", 0)) / effective_fps
     out["schema_version"] = out.get("schema_version", "cadscene_camera_track_pred_v1")
     out["meta"] = {
         **dict(out.get("meta") or {}),
@@ -862,7 +873,7 @@ def run_alignment(
     sim3 = estimate_global_sim3(correspondences)
     anchored = apply_segment_anchoring(sim3, correspondences, traj, config)
     path_rows = generate_aligned_camera_path(traj, sim3, anchored, config)
-    camera_track_pred = generate_camera_track_pred(track, path_rows, config)
+    camera_track_pred = generate_camera_track_pred(track, path_rows, config, fps=traj.fps)
     metrics = _compute_metrics(correspondences, traj, sim3, anchored, config)
     intrinsics_warning = _trajectory_intrinsics_warning(traj)
     _validate_alignment_result(

@@ -1964,10 +1964,19 @@
     if (initialKeyframe && Number(initialKeyframe.frame) === 0 && !initialKeyframe.source) {
       for (const key of safeFields) initialKeyframe.camera[key] = camera[key];
     }
+    const appliedFields = [...safeFields];
+    const fps = Number(params.fps);
+    if (cameraTrack && Number.isFinite(fps) && fps > 0) {
+      cameraTrack.fps = fps;
+      for (const keyframe of cameraTrack.keyframes) {
+        keyframe.time = frameToTime(Number(keyframe.frame));
+      }
+      appliedFields.push("fps");
+    }
     syncControls();
     updateViews({ forceOverlay: true });
-    setStatus(`已应用 SfM 相机初值：${safeFields.join(", ")}`);
-    return safeFields;
+    setStatus(`已应用 SfM 相机初值：${appliedFields.join(", ")}`);
+    return appliedFields;
   };
 
   window.cadsceneApplyPureRotationPose = function (pose) {
