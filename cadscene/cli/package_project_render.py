@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import json
 import os
 from pathlib import Path
@@ -30,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         source_map = json.loads(args.source_frame_map.read_text(encoding="utf-8"))
         render_map = _render_frame_map(source_map)
+        source_time_base = _source_time_base(render_map)
+        if source_time_base != spec.time_base:
+            raise ValueError("source frame map time base disagrees with project media spec")
+        source_frame_pts = tuple(
+            int(frame["source_pts"]) for frame in render_map["frames"]
+        )
         output_dir = args.output_dir.resolve(strict=True)
         temporary = output_dir / "rendered.tmp.mp4"
         output = output_dir / "rendered.mp4"
@@ -38,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
             source=args.input.resolve(strict=True),
             target=temporary,
             spec=spec,
+            source_frame_pts=source_frame_pts,
         )
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
@@ -78,7 +86,12 @@ def _render_frame_map(source_map: object) -> dict[str, object]:
 
 
 def _normalization_command(
-    *, ffmpeg: str, source: Path, target: Path, spec: ProjectMediaSpec
+    *,
+    ffmpeg: str,
+    source: Path,
+    target: Path,
+    spec: ProjectMediaSpec,
+    source_frame_pts: tuple[int, ...] | None = None,
 ) -> tuple[str, ...]:
     sar = spec.sample_aspect_ratio
     time_base = spec.time_base
@@ -91,6 +104,12 @@ def _normalization_command(
         f"setparams=range={signal_range}:color_primaries={spec.color_primaries}:"
         f"color_trc={spec.color_transfer}:colorspace={spec.color_space}"
     )
+    frame_duration_pts = _constant_frame_duration_pts(source_frame_pts)
+    if frame_duration_pts is not None:
+        filters += (
+            f",settb=expr={time_base.numerator}/{time_base.denominator},"
+            f"setpts=N*{frame_duration_pts}"
+        )
     return (
         ffmpeg,
         "-hide_banner",
@@ -110,6 +129,8 @@ def _normalization_command(
         "libx264",
         "-profile:v",
         spec.profile.casefold(),
+        "-bf",
+        "0",
         "-pix_fmt",
         spec.pixel_format,
         "-enc_time_base",
@@ -126,8 +147,34 @@ def _normalization_command(
         spec.color_primaries,
         "-movflags",
         "+faststart",
+        "-use_editlist",
+        "0",
         str(target),
     )
+
+
+def _source_time_base(render_map: dict[str, object]) -> Fraction:
+    value = render_map.get("source_time_base")
+    if not isinstance(value, dict):
+        raise ValueError("render frame map requires source_time_base")
+    result = Fraction(int(value["numerator"]), int(value["denominator"]))
+    if result <= 0:
+        raise ValueError("render frame map source_time_base must be positive")
+    return result
+
+
+def _constant_frame_duration_pts(
+    source_frame_pts: tuple[int, ...] | None,
+) -> int | None:
+    if source_frame_pts is None or len(source_frame_pts) < 2:
+        return None
+    deltas = tuple(
+        current - previous
+        for previous, current in zip(source_frame_pts, source_frame_pts[1:])
+    )
+    if deltas[0] <= 0 or any(delta != deltas[0] for delta in deltas[1:]):
+        return None
+    return deltas[0]
 
 
 def _atomic_json(path: Path, payload: object) -> None:

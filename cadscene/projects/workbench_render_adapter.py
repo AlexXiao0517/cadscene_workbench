@@ -184,7 +184,7 @@ def default_workbench_render_adapters(
             ExistingWorkbenchRenderAdapter(
                 workflow=workflow,
                 application_root=root,
-                version="4",
+                version="5",
             )
             for workflow in (
                 "sfm_only",

@@ -54,7 +54,10 @@ h1, h2, p { margin-top: 0; }
 h1 { font-size: 23px; margin-bottom: 4px; }
 h2 { font-size: 17px; margin-bottom: 6px; }
 .breadcrumb, .panel-heading p, .merge-preview p { color: var(--muted); margin-bottom: 0; }
-.top-actions { display: flex; gap: 10px; }
+.top-actions { display: flex; align-items: flex-start; gap: 10px; }
+.merge-action { display: grid; justify-items: stretch; gap: 4px; min-width: 128px; }
+.merge-status-message { max-width: 220px; color: var(--muted); font-size: 11px; line-height: 1.3; text-align: center; }
+.merge-status-message.is-error { color: var(--danger); }
 .button { min-height: 38px; padding: 0 16px; border: 1px solid #334252; border-radius: 8px; background: #111a23; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
 .button:hover:not(:disabled) { transform: translateY(-1px); border-color: #597089; background: #172330; }
 .button:focus-visible { outline: 2px solid #73a1ff; outline-offset: 2px; }

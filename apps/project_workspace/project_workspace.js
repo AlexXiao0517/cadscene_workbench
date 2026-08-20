@@ -182,10 +182,27 @@
     const mergeButton = $("#mergeProjectButton");
     const mergeStatus = snapshot.merge?.status || "not_started";
     const mergeActive = ["queued", "preparing", "running", "validating"].includes(mergeStatus);
+    const mergeStatusMessage = $("#mergeStatusMessage");
+    const mergeFraction = snapshot.merge?.progress?.fraction;
+    const mergePercent = typeof mergeFraction === "number"
+      ? `${Math.max(0, Math.min(100, Math.round(mergeFraction * 100)))}%`
+      : "";
     mergeButton.disabled = mergeActive || !snapshot.capabilities.can_merge;
     mergeButton.textContent = snapshot.merge?.download_url
       ? "下载合并视频"
       : (mergeActive ? "合并输出中…" : "合并并输出");
+    mergeStatusMessage.classList.remove("is-error");
+    if (snapshot.merge?.download_url) {
+      mergeStatusMessage.textContent = "合并完成，点击下载";
+    } else if (mergeActive) {
+      const stage = STATUS_LABELS[snapshot.merge?.stage] || "合并处理中";
+      mergeStatusMessage.textContent = mergePercent ? `${stage} ${mergePercent}` : stage;
+    } else if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(mergeStatus)) {
+      mergeStatusMessage.textContent = `合并失败：${STATUS_LABELS[mergeStatus] || mergeStatus}`;
+      mergeStatusMessage.classList.add("is-error");
+    } else {
+      mergeStatusMessage.textContent = "";
+    }
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
     if (focusClipId) {
@@ -617,6 +634,12 @@
       window.location.assign(state.snapshot.merge.download_url);
       return;
     }
+    const mergeButton = $("#mergeProjectButton");
+    const mergeStatusMessage = $("#mergeStatusMessage");
+    mergeButton.disabled = true;
+    mergeButton.textContent = "正在提交…";
+    mergeStatusMessage.classList.remove("is-error");
+    mergeStatusMessage.textContent = "正在提交合并任务…";
     try {
       const { body } = await request(
         `/api/projects/${encodeURIComponent(projectId)}/merge-jobs`,
@@ -633,7 +656,11 @@
       setMessage("已加入合并输出队列，完成后可直接下载。");
       await pollSnapshot();
     } catch (error) {
-      setMessage(error.message, true);
+      mergeButton.disabled = !state.snapshot?.capabilities?.can_merge;
+      mergeButton.textContent = "合并并输出";
+      mergeStatusMessage.textContent = `合并失败：${error.message}`;
+      mergeStatusMessage.classList.add("is-error");
+      setMessage(`合并失败：${error.message}`, true);
     }
   }
 

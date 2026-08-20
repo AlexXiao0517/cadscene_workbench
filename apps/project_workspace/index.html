@@ -36,7 +36,10 @@
           <button id="reanalyzeButton" class="button secondary" type="button" disabled>重新分析</button>
           <button id="batchTrajectoryButton" class="button secondary" type="button" disabled>批量轨迹反算</button>
           <button id="batchRenderButton" class="button secondary" type="button" disabled>批量渲染</button>
-          <button id="mergeProjectButton" class="button primary" type="button" data-action="merge-project" disabled>合并并输出</button>
+          <div class="merge-action">
+            <button id="mergeProjectButton" class="button primary" type="button" data-action="merge-project" disabled>合并并输出</button>
+            <small id="mergeStatusMessage" class="merge-status-message" role="status" aria-live="polite"></small>
+          </div>
         </div>
       </header>
 

@@ -241,11 +241,16 @@ def test_workspace_wires_batch_render_to_render_preflight_api() -> None:
 
 
 def test_workspace_wires_merge_button_to_project_queue_and_download() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
+    assert 'id="mergeStatusMessage"' in html
     assert '"/merge-jobs"' in script or "/merge-jobs`" in script
     assert "snapshot.capabilities.can_merge" in script
     assert "snapshot.merge?.download_url" in script
+    assert "snapshot.merge?.progress?.fraction" in script
+    assert "正在提交合并任务…" in script
+    assert "合并失败：" in script
     assert 'addEventListener("click", mergeProject)' in script
 
 

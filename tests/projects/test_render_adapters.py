@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from fractions import Fraction
 import json
 from pathlib import Path
@@ -254,7 +255,7 @@ def test_default_workbench_render_adapters_cover_every_project_workflow(
 
     adapter = registry.for_workflow(workflow)
     assert adapter.workflow == workflow
-    assert adapter.version == "4"
+    assert adapter.version == "5"
 
 
 def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
@@ -278,7 +279,7 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
         application_root=tmp_path
     ).for_workflow("pure_rotation")
 
-    assert adapter.version == "4"
+    assert adapter.version == "5"
     plan = adapter.prepare(inputs)
     render_command, package_command = plan.commands
 
@@ -448,6 +449,30 @@ def test_render_packaging_preserves_authoritative_source_frame_identity(
     assert "-r" not in command
 
 
+def test_render_packaging_retimes_constant_authoritative_source_cadence(
+    tmp_path: Path,
+) -> None:
+    spec = replace(
+        _media_spec(),
+        width=64,
+        height=48,
+        time_base=Fraction(1, 90000),
+        nominal_frame_rate=Fraction(30000, 1001),
+    )
+
+    command = _normalization_command(
+        ffmpeg="ffmpeg",
+        source=(tmp_path / "legacy.mp4").resolve(),
+        target=(tmp_path / "rendered.mp4").resolve(),
+        spec=spec,
+        source_frame_pts=(0, 3003, 6006),
+    )
+
+    filters = command[command.index("-vf") + 1]
+    assert "settb=expr=1/90000,setpts=N*3003" in filters
+    assert command[command.index("-fps_mode") + 1] == "passthrough"
+
+
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe are required for render packaging",
@@ -494,3 +519,87 @@ def test_render_packaging_cli_emits_validated_frame_count(tmp_path: Path) -> Non
     assert result == 0
     assert probe_media(tmp_path / "rendered.mp4").video.frame_count == 2
     assert len(json.loads((tmp_path / "render_frame_map.json").read_text())["frames"]) == 2
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe are required for render packaging",
+)
+def test_render_packaging_cli_restores_30000_over_1001_source_timing(
+    tmp_path: Path,
+) -> None:
+    try:
+        ffmpeg = str(resolve_ffmpeg_executable())
+    except (FileNotFoundError, RuntimeError):
+        pytest.skip("an H.264-capable FFmpeg is unavailable")
+    source = tmp_path / "legacy-30fps.mp4"
+    subprocess.run(
+        (
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=30:duration=0.14",
+            "-frames:v",
+            "4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ),
+        check=True,
+    )
+    source_map = tmp_path / "source_map.json"
+    source_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 90000},
+                "clips": [
+                    {
+                        "frames": [
+                            {"ordinal": 0, "pts": 0},
+                            {"ordinal": 1, "pts": 3003},
+                            {"ordinal": 2, "pts": 6006},
+                            {"ordinal": 3, "pts": 9009},
+                        ]
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    media_spec = tmp_path / "media_spec.json"
+    media_spec.write_text(
+        json.dumps(
+            replace(
+                _media_spec(),
+                width=64,
+                height=48,
+                time_base=Fraction(1, 90000),
+                nominal_frame_rate=Fraction(30000, 1001),
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    result = package_project_render_main(
+        [
+            "--input",
+            str(source),
+            "--source-frame-map",
+            str(source_map),
+            "--media-spec",
+            str(media_spec),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    output_pts = probe_media(tmp_path / "rendered.mp4").video.frame_pts
+    assert output_pts == (0, 3003, 6006, 9009)
