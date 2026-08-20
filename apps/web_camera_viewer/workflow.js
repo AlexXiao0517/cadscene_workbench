@@ -967,6 +967,15 @@
     if (isPureRotationWorkflow() && selectedWorkflowStage === "keyframes") {
       setPureRotationEditMode("placement");
     }
+    if (
+      selectedWorkflowStage === "render"
+      && projectWorkbenchToken
+      && projectWorkbenchSession?.clip_id
+    ) {
+      refreshRenderOutputState().catch((error) => {
+        console.warn("[cadscene workflow] 已发布渲染结果恢复失败", error);
+      });
+    }
   }
 
   async function refreshQualityArtifactsAfterSuccess(payload) {

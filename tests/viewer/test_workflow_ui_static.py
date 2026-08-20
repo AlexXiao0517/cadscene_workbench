@@ -575,6 +575,18 @@ def test_project_render_success_keeps_project_status_and_uses_snapshot_preview_u
     assert "activeRenderPath" in script
 
 
+def test_entering_render_stage_refreshes_the_published_project_output() -> None:
+    script = _read("workflow.js")
+    start = script.index("function setWorkflowStage")
+    end = script.index("async function refreshQualityArtifactsAfterSuccess", start)
+    select_stage = script[start:end]
+
+    assert 'selectedWorkflowStage === "render"' in select_stage
+    assert "projectWorkbenchToken" in select_stage
+    assert "projectWorkbenchSession?.clip_id" in select_stage
+    assert "refreshRenderOutputState().catch" in select_stage
+
+
 def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None:
     script = _read("workflow.js")
     start = script.index("async function finishQualityStage")
@@ -628,7 +640,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260820-authoritative-fps-v1' in index
+    assert 'workflow.js?v=20260820-project-render-restore-v1' in index
 
 
 def test_sfm_fov_initialization_uses_a_new_session_key_after_cache_recovery() -> None:
