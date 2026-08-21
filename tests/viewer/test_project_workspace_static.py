@@ -245,10 +245,20 @@ def test_workspace_wires_merge_button_to_project_queue_and_download() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert 'id="mergeStatusMessage"' in html
+    assert 'id="mergeResultDialog"' in html
+    assert 'id="mergeResultVideo"' in html
+    assert 'id="mergeResultDownload"' in html
+    assert 'id="closeMergeResult"' in html
     assert '"/merge-jobs"' in script or "/merge-jobs`" in script
     assert "snapshot.capabilities.can_merge" in script
     assert "snapshot.merge?.download_url" in script
     assert "snapshot.merge?.progress?.fraction" in script
+    assert "function openMergeResult" in script
+    assert 'searchParams.set("download", "1")' in script
+    assert "mergeResultDialog" in script
+    assert "mergeResultVideo" in script
+    assert "mergeResultDownload" in script
+    assert "window.location.assign(state.snapshot.merge.download_url)" not in script
     assert "正在提交合并任务…" in script
     assert "合并失败：" in script
     assert 'addEventListener("click", mergeProject)' in script

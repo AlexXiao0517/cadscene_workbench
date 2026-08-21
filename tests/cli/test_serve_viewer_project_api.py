@@ -1104,6 +1104,55 @@ def test_serve_viewer_streams_published_project_render_with_head_and_range(
     assert partial_body == b"2345"
 
 
+def test_serve_viewer_downloads_merged_video_only_when_requested(
+    tmp_path: Path,
+) -> None:
+    merged = tmp_path / "merged.mp4"
+    merged.write_bytes(b"merged-video")
+
+    class FakeMergeService:
+        def published_merge_video_path(self, project_id):
+            assert project_id == "p1"
+            return merged
+
+    class FakeProjectApi:
+        service = FakeMergeService()
+
+    server = ViewerHTTPServer(("127.0.0.1", 0), RangeRequestHandler)
+    server.root_dir = tmp_path
+    server.storage_root_dir = tmp_path
+    server.extra_roots = {}
+    server.project_api = FakeProjectApi()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    route = "/api/projects/p1/merge-output/video"
+    try:
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("HEAD", route)
+        preview = connection.getresponse()
+        preview.read()
+        connection.close()
+
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("HEAD", f"{route}?download=1")
+        download = connection.getresponse()
+        download.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert preview.status == 200
+    assert preview.getheader("Content-Type") == "video/mp4"
+    assert preview.getheader("Content-Disposition") is None
+    assert download.status == 200
+    assert download.getheader("Content-Type") == "video/mp4"
+    assert download.getheader("Content-Disposition") == (
+        'attachment; filename="p1-merged.mp4"'
+    )
+
+
 def test_analysis_dag_is_published_once_only_after_explicit_start(
     tmp_path: Path,
 ) -> None:

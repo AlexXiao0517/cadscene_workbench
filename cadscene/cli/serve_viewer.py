@@ -324,7 +324,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         finally:
             stream.close()
 
-    def _send_project_merge_video(self, path: str, *, send_body: bool) -> None:
+    def _send_project_merge_video(
+        self, path: str, *, send_body: bool, download: bool = False
+    ) -> None:
         match = re.fullmatch(
             r"/api/projects/(?P<project>[A-Za-z0-9_.-]+)/merge-output/video",
             path,
@@ -339,7 +341,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except (AttributeError, FileNotFoundError, ValueError):
             self.send_error(HTTPStatus.NOT_FOUND, "merged video not found")
             return
-        stream = self._send_file_head(video)
+        download_name = f'{match["project"]}-merged.mp4' if download else None
+        stream = self._send_file_head(video, download_name=download_name)
         if stream is None:
             return
         try:
@@ -828,7 +831,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/merge-output/video", parsed.path
         ):
-            self._send_project_merge_video(parsed.path, send_body=False)
+            download = (parse_qs(parsed.query).get("download") or [""])[0] == "1"
+            self._send_project_merge_video(
+                parsed.path, send_body=False, download=download
+            )
             return
         if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
@@ -844,7 +850,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/merge-output/video", parsed.path
         ):
-            self._send_project_merge_video(parsed.path, send_body=True)
+            download = (parse_qs(parsed.query).get("download") or [""])[0] == "1"
+            self._send_project_merge_video(
+                parsed.path, send_body=True, download=download
+            )
             return
         if re.fullmatch(
             r"/api/projects/[A-Za-z0-9_.-]+/clips/[A-Za-z0-9_.-]+/"
@@ -943,7 +952,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
-    def _send_file_head(self, path: Path):
+    def _send_file_head(self, path: Path, *, download_name: str | None = None):
         if not path.exists() or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
@@ -959,6 +968,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             f.seek(start)
             self.send_response(HTTPStatus.PARTIAL_CONTENT)
             self.send_header("Content-type", ctype)
+            if download_name is not None:
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{download_name}"'
+                )
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Content-Length", str(end - start + 1))
             self.end_headers()
@@ -967,6 +980,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         f = path.open("rb")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-type", ctype)
+        if download_name is not None:
+            self.send_header(
+                "Content-Disposition", f'attachment; filename="{download_name}"'
+            )
         self.send_header("Content-Length", str(size))
         self.end_headers()
         self.range = None

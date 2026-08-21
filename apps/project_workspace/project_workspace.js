@@ -189,11 +189,11 @@
       : "";
     mergeButton.disabled = mergeActive || !snapshot.capabilities.can_merge;
     mergeButton.textContent = snapshot.merge?.download_url
-      ? "下载合并视频"
+      ? "查看合并视频"
       : (mergeActive ? "合并输出中…" : "合并并输出");
     mergeStatusMessage.classList.remove("is-error");
     if (snapshot.merge?.download_url) {
-      mergeStatusMessage.textContent = "合并完成，点击下载";
+      mergeStatusMessage.textContent = "合并完成，可预览或下载";
     } else if (mergeActive) {
       const stage = STATUS_LABELS[snapshot.merge?.stage] || "合并处理中";
       mergeStatusMessage.textContent = mergePercent ? `${stage} ${mergePercent}` : stage;
@@ -629,9 +629,32 @@
     } catch (error) { setMessage(error.message, true); }
   }
 
+  function mergeDownloadUrl(previewUrl) {
+    const target = new URL(previewUrl, window.location.origin);
+    target.searchParams.set("download", "1");
+    return `${target.pathname}${target.search}${target.hash}`;
+  }
+
+  function openMergeResult(previewUrl) {
+    const dialog = $("#mergeResultDialog");
+    const video = $("#mergeResultVideo");
+    const download = $("#mergeResultDownload");
+    video.src = previewUrl;
+    download.href = mergeDownloadUrl(previewUrl);
+    download.download = `${projectId || "project"}-merged.mp4`;
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function resetMergeResult() {
+    const video = $("#mergeResultVideo");
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+
   async function mergeProject() {
     if (state.snapshot?.merge?.download_url) {
-      window.location.assign(state.snapshot.merge.download_url);
+      openMergeResult(state.snapshot.merge.download_url);
       return;
     }
     const mergeButton = $("#mergeProjectButton");
@@ -749,6 +772,8 @@
   $("#batchTrajectoryButton").addEventListener("click", () => preflightBatch("trajectory"));
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#mergeProjectButton").addEventListener("click", mergeProject);
+  $("#closeMergeResult").addEventListener("click", () => $("#mergeResultDialog").close());
+  $("#mergeResultDialog").addEventListener("close", resetMergeResult);
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#cadReplacementTrigger").addEventListener("click", openCadReplacementDialog);
   $("#cadReplacementForm").addEventListener("submit", submitCadReplacement);
