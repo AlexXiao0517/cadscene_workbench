@@ -206,10 +206,6 @@
           <div class="sfm-panel" id="sfmPanel">
             <div class="sfm-panel-head">
               <span>SfM 诊断场景（点云 + 双轨迹 + 建议）</span>
-              <label class="file-button">
-                导入 SfM 场景
-                <input id="importSfmScene" type="file" accept="application/json,.json" />
-              </label>
             </div>
             <div class="sfm-toggles">
               <label><input type="checkbox" id="sfmShowPoints" checked /> SfM 点云</label>
@@ -230,7 +226,7 @@
                 </select>
               </label>
             </div>
-            <div class="sfm-info" id="sfmInfo">未加载 SfM 场景（用「导入 SfM 场景」或 URL 参数 sfmScene=）</div>
+            <div class="sfm-info" id="sfmInfo">正在从项目加载 SfM 场景…</div>
             <div class="sfm-info" id="sfmFrameInfo"></div>
           </div>
         </section>
@@ -296,15 +292,6 @@
             <button id="rotateMode" type="button">旋转</button>
             <button id="toggleGizmo" type="button">隐藏 Gizmo</button>
             <button id="toggleCadText" type="button">隐藏标注</button>
-            <button id="exportCamera" type="button">导出相机轨迹</button>
-            <label class="file-button dev-only-control">
-              导入相机轨迹
-              <input id="importCamera" type="file" accept="application/json,.json" />
-            </label>
-            <label class="file-button dev-only-control">
-              导入质量建议
-              <input id="importSuggestions" type="file" accept="application/json,.json" />
-            </label>
           </div>
         </div>
         <p id="pureRotationControlNotice" class="workflow-hidden-control pure-rotation-control-notice">

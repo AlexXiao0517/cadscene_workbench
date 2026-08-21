@@ -201,7 +201,6 @@
       "nextKeyframe",
       "toggleGizmo",
       "toggleCadText",
-      "exportCamera",
     ]) {
       document.querySelector(`#${id}`)?.toggleAttribute("hidden", pure);
     }

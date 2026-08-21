@@ -339,7 +339,6 @@ def test_pure_rotation_calibration_controls_live_below_camera_parameters() -> No
         "nextKeyframe",
         "toggleGizmo",
         "toggleCadText",
-        "exportCamera",
     ):
         assert hidden_control in pure_layout
     toolbar_hiding = pure_layout.split("for (const id of [", 1)[1].split("])", 1)[0]

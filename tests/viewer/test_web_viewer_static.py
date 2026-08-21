@@ -35,8 +35,28 @@ def test_web_viewer_files_do_not_default_to_old_out_or_project_paths() -> None:
 def test_index_keeps_legacy_viewer_dom() -> None:
     text = _text(APP_DIR / "index.html")
 
-    for token in ("sourceVideo", "overlayCanvas", "sceneContainer", "qualityTimelineCanvas", "sfmPanel", "cameraControls", "exportCamera"):
+    for token in ("sourceVideo", "overlayCanvas", "sceneContainer", "qualityTimelineCanvas", "sfmPanel", "cameraControls"):
         assert token in text
+
+
+def test_index_omits_obsolete_manual_test_file_controls() -> None:
+    text = _text(APP_DIR / "index.html")
+
+    for identifier in (
+        "importSfmScene",
+        "exportCamera",
+        "importCamera",
+        "importSuggestions",
+    ):
+        assert f'id="{identifier}"' not in text
+    for identifier in (
+        "resetCamera",
+        "addKeyframe",
+        "toggleCadText",
+        "sfmPanel",
+        "annotationPanel",
+    ):
+        assert f'id="{identifier}"' in text
 
 
 def test_paths_js_supports_runs_outputs_and_url_overrides() -> None:

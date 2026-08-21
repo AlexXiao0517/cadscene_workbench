@@ -2625,7 +2625,7 @@
     const info = document.querySelector("#sfmInfo");
     if (!info) return;
     if (!sfmScene) {
-      info.textContent = "未加载 SfM 场景（用「导入 SfM 场景」或 URL 参数 sfmScene=）";
+      info.textContent = "当前项目没有可用的 SfM 诊断场景";
       return;
     }
     const p = sfmScene.points || {};
@@ -2813,7 +2813,6 @@
       threeScene.setGizmoVisible(!threeScene.transformControls.visible);
     });
     document.querySelector("#toggleCadText")?.addEventListener("click", toggleCadText);
-    document.querySelector("#exportCamera").addEventListener("click", exportTrack);
     document.querySelector("#goToFrame").addEventListener("click", () => {
       const input = document.querySelector("#frameInput");
       if (!input || input.value === "") return;
@@ -2829,16 +2828,6 @@
         document.querySelector("#goToFrame")?.click();
       }
     });
-    document.querySelector("#importCamera").addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (file) importTrack(file);
-      event.target.value = "";
-    });
-    document.querySelector("#importSuggestions")?.addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (file) importSuggestions(file);
-      event.target.value = "";
-    });
     if (qualityCanvas) {
       qualityCanvas.addEventListener("click", handleTimelineClick);
       qualityCanvas.addEventListener("mousemove", handleTimelineHover);
@@ -2850,11 +2839,6 @@
   }
 
   function bindSfmSceneControls() {
-    document.querySelector("#importSfmScene")?.addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (file) importSfmScene(file);
-      event.target.value = "";
-    });
     const bindToggle = (id, fn) => {
       const el = document.querySelector(id);
       if (el) el.addEventListener("change", () => { if (threeScene) fn(el.checked); });
