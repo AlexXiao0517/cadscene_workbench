@@ -31,7 +31,7 @@ Project API 的底层上传校验器和兼容 Workflow API 仍能接收一些额
 | 路由或能力 | 触发条件 | 状态 | 当前行为 |
 | --- | --- | --- | --- |
 | `sfm_only` | 未上传/无法解析 SRT 或 SRT 覆盖不足，且不是已验证纯旋转；或人工覆盖为 SfM | **Stable** | 当前唯一稳定的 JobRunner 端到端路径：SfM、人工关键帧、路线拟合、质量和渲染。 |
-| `pure_rotation` | 无 SRT 路由优先级，且自动分析验证完整短视频具有持续、无矛盾的强旋转证据；也可在项目页人工覆盖 | **Experimental** | 系统自动推荐后运行外部 OpenGV 旋转恢复，再人工全局放置和局部姿态校正；固定相机中心，不恢复平移或尺度。 |
+| `pure_rotation` | 无 SRT 路由优先级，且自动分析验证完整短视频具有持续、无矛盾的强旋转证据；也可在项目页人工覆盖 | **Supported** | 运行固定版本外部 OpenGV 旋转恢复，再人工全局放置、局部姿态校正并渲染；固定相机中心，不恢复平移或尺度。自动推荐精度仍需人工复核。 |
 | partial-SRT core | 独立命令行使用 | **Experimental CLI** | 可做 PTS 时间同步、局部 ENU、稳健 Sim3 和融合辅助；尚未接入正式 JobRunner。 |
 | `srt_sfm_fused` portal route | SRT 有足够 GPS 与高度，未满足完整相机姿态 | **Interface only** | 上传、分析和提示可用；HTTP 服务拒绝启动正式工作流阶段。 |
 | `srt_full_pose` | SRT 有足够 GPS、高度与完整云台相机姿态 | **Interface only** | 上传、分析和提示可用；没有端到端执行任务。 |

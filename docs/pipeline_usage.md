@@ -6,8 +6,8 @@
 http://127.0.0.1:8300/apps/workflow_portal/index.html
 ```
 
-门户的稳定端到端路径是 `sfm_only`（**Stable**）。`pure_rotation` 是
-**Experimental**，partial-SRT core 是 **Experimental CLI**；
+门户的正式端到端路径包括 `sfm_only`（**Stable**）和固定相机中心的
+`pure_rotation`（**Supported**）。自动视频分析与路线推荐仍需人工复核；partial-SRT core 是 **Experimental CLI**；
 `srt_sfm_fused` 和 `srt_full_pose` 门户路由均为 **Interface only**，不能通过
 JobRunner 启动。不要用 SRT 的检测标签替代本节所述的 SfM、人工关键帧和质量验证。
 

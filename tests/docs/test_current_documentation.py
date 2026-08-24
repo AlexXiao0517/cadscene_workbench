@@ -145,6 +145,23 @@ def test_current_docs_do_not_pin_themselves_to_an_obsolete_commit() -> None:
         assert re.search(r"\b[0-9a-f]{7,40}\b", introduction) is None, path
 
 
+def test_installation_and_supported_pure_rotation_status_are_current() -> None:
+    readme = _read("README.md")
+    readme_en = _read("README_EN.md")
+    developer_guide = _read("docs/technical/developer-guide.md")
+
+    assert "python -m pip install ." in readme
+    assert "cadscene-workbench doctor" in readme
+    assert "cadscene-workbench serve" in readme
+    assert "python -m pip install ." in readme_en
+    assert "cadscene-workbench doctor" in readme_en
+    assert "cadscene-workbench serve" in readme_en
+    assert "`pure_rotation` | Supported" in readme
+    assert "`pure_rotation` | Supported" in readme_en
+    assert "`segmentation`" not in developer_guide
+    assert "临时显式安装 `PyYAML`" not in developer_guide
+
+
 def test_current_document_links_and_documented_cli_modules_exist() -> None:
     markdown_link = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
     cli_module = re.compile(r"python -m cadscene\.cli\.([A-Za-z0-9_]+)")

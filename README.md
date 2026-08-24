@@ -25,7 +25,9 @@ DXF 中的 `TEXT`、`MTEXT` 和块属性文字会随图层、位置、旋转和�
 
 ```powershell
 New-Item -ItemType Directory -Force -Path D:\cadscene-work | Out-Null
-python -m cadscene.cli.serve_viewer `
+python -m pip install .
+cadscene-workbench doctor --storage-root D:\cadscene-work
+cadscene-workbench serve `
   --bind 127.0.0.1 `
   --port 8300 `
   --storage-root D:\cadscene-work
@@ -50,7 +52,7 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 | 工作流或能力 | 状态 | 边界 |
 |---|---|---|
 | `sfm_only` | Stable（稳定） | 当前稳定的端到端主路径：视频分析、片段管理、SfM、人工对齐、质量检测、渲染和合并。 |
-| `pure_rotation` | Experimental（实验性） | 视频分析在严格旋转证据成立时自动推荐；固定相机中心，不恢复平移或尺度，依赖外部 OpenGV 后端。 |
+| `pure_rotation` | Supported（正式支持） | 固定相机中心的旋转恢复、全局放置、局部校正和渲染已进入正式流程；依赖固定版本外部 OpenGV 后端。自动场景判断仍需人工复核。 |
 | partial-SRT core | Experimental CLI | 提供 PTS、ENU 和稳健 Sim3 融合核心，尚未接入正式项目任务队列。 |
 | `srt_sfm_fused` / `srt_full_pose` | Interface only | 门户可识别并提示，正式阶段启动仍被阻止。 |
 | SfM CUDA | Optional（可选） | 只确认受支持的特征提取和匹配；建图与全局 BA 不应描述为 GPU 处理。 |
@@ -69,7 +71,7 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 6. 返回项目片段管理，确认所有需要交付的片段已有当前有效渲染，再执行“合并输出”。合并严格使用每段 `render_frame_map.json` 的 source PTS 分区，不能重复或遗漏帧。
 7. 刷新页面或重启服务后，使用相同 `--storage-root` 和 `project_id` 重新进入；已保存工作台输出、标签、任务、渲染和版本历史会从项目 manifest 恢复。
 
-`pure_rotation` 使用“开始运行—全局放置—局部姿态校正—渲染”的实验步骤，跳过标准 alignment/quality 路径；它不适用于恢复沿道路行进距离。
+`pure_rotation` 使用“开始运行—全局放置—局部姿态校正—渲染”步骤，跳过标准 alignment/quality 路径；它固定相机中心，因此不适用于恢复沿道路行进距离。当前不成熟的是自动视频分析与路线推荐精度，而不是纯旋转执行流程本身。
 
 ## CAD 文字与工程信息标牌
 
@@ -122,7 +124,7 @@ CAD 原图文字和用户创建的工程标牌是两类不同内容：
 ## 能力边界
 
 - `sfm_only` 是当前稳定主路径；SRT 融合和 full-pose 尚未形成正式端到端流程。
-- `pure_rotation`、partial-SRT 和视频目标跟踪标牌仍是实验性或隐藏能力。
+- `pure_rotation` 是正式支持的固定相机中心路线；自动视频分析与路线推荐仍需人工复核。partial-SRT 和视频目标跟踪标牌仍是实验性或隐藏能力。
 - CAD 锚定标牌不承诺真实视频中的物体遮挡推理；当前只处理相机前后、画面范围和时间范围。
 - 不支持跨片段自动跟踪、跨场景标签继承、语义识别或大型神经跟踪模型。
 - 结果必须由熟悉现场和设计意图的人员复核；实验性能力不能替代工程测量或专业验收。

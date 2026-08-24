@@ -111,8 +111,8 @@ cad=/legacy/out/...
 - 点云和 global track 只使用 global sim3；anchored path 来自分段锚定结果，二者不完全重合是正常现象。
 - 已确认且一致的人工关键帧 FOV 优先于不可靠的上游 SfM 重建 FOV；Viewer 的提示会说明
   该人工覆盖，不能据此推断 SRT 或 SfM 的绝对精度。
-- `pure_rotation` 是 Experimental 工作流：它固定相机中心，只恢复旋转，随后由人工全局
-  放置和局部姿态校正进入渲染；不恢复平移或尺度。
+- `pure_rotation` 是 Supported 工作流：它固定相机中心，只恢复旋转，随后由人工全局
+  放置和局部姿态校正进入渲染；不恢复平移或尺度。自动路线推荐仍需人工复核。
 
 ## 常见问题
 

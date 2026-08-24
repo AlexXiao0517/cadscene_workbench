@@ -23,9 +23,9 @@ This document separates delivered behavior from future work. It is not a release
 - Global CAD replacement is available only after the project has a valid saved workbench output and the user confirms an unchanged coordinate system. It preserves analysis and trajectories, retains CAD-version history, and makes render/merge outputs stale.
 - Service startup after CAD replacement verifies stored analysis jobs against immutable original input snapshots and rebinds them to the current project contract without rerunning analysis.
 
-### Experimental and interface-only routes
+### Supported route with an immature classifier, and experimental routes
 
-- `pure_rotation` is Experimental. Conservative automatic motion analysis can recommend it from verified source-level rotation evidence, and Project Clip Management permits a final workflow override. It can run an external OpenGV rotation backend followed by fixed-center global placement and local pose corrections. Translation and scale are not recovered.
+- `pure_rotation` is Supported. It runs a pinned external OpenGV backend followed by fixed-center global placement, local pose corrections, and rendering. Translation and scale are not recovered. The automatic motion classifier remains immature, so Project Clip Management retains human review and a final workflow override.
 - The partial-SRT core is Experimental CLI functionality: PTS timing, local ENU conversion, robust Sim3 estimation, and fusion helpers exist outside the formal project queue.
 - `srt_sfm_fused` and `srt_full_pose` are Interface only. Upload and capability detection work, but the service blocks formal stage execution.
 - SfM CUDA is Optional and limited to supported feature extraction and matching. Mapping and global bundle adjustment are not advertised as GPU processing.
@@ -49,9 +49,9 @@ Connect the experimental partial-SRT core to a supported project route only afte
 
 Implement and validate an end-to-end `srt_full_pose` route. Capability detection alone is not execution and must not be used as an accuracy claim.
 
-### Pure-rotation promotion
+### Motion-analysis reliability
 
-Keep `pure_rotation` Experimental until repeated real-footage validation covers backend availability, progress reporting, global placement, local correction continuity, render publication, and restart recovery without orientation discontinuities.
+Improve and validate the automatic `sfm_only` versus `pure_rotation` recommendation on broader real footage. Recommendation accuracy must remain distinct from the supported execution workflows, and the project page must retain a human override.
 
 ### Callout extensions
 

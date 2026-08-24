@@ -4,15 +4,13 @@
 
 ## 环境与安装
 
-项目要求 Python 3.10 或更高版本。基础安装只包含 `numpy`；按需安装的依赖组由 `pyproject.toml` 定义：
+项目要求 Python 3.10 或更高版本。基础安装包含当前正式服务、SfM、DXF 和媒体处理所需依赖；按需安装的依赖组由 `pyproject.toml` 定义：
 
 | 依赖组 | 用途 |
 | --- | --- |
 | `dev` | `pytest` 测试工具 |
-| `sfm` | OpenCV 与 `pycolmap` SfM 后端 |
-| `cad` | `ezdxf` DXF 导入 |
 | `diagnostics` | 质量图表等可选诊断输出 |
-| `segmentation` | Torch/Transformers 语义分割实验依赖 |
+| `sfm` / `cad` / `video_analysis` | 兼容既有安装命令的能力别名；正式依赖已在基础安装中声明 |
 
 在 PowerShell 中建立可编辑开发环境：
 
@@ -20,11 +18,11 @@
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev,sfm,cad,diagnostics]"
-python -m pip install PyYAML
+python -m pip install -e ".[dev,diagnostics]"
+cadscene-workbench doctor --storage-root D:\cadscene-work
 ```
 
-当前 `pyproject.toml` 没有声明 PyYAML；上面的 extras 不会安装它。需要读取 YAML 管线/数据集配置时，临时显式安装 `PyYAML`，直到项目元数据更新为止。`segmentation` 只在需要该实验性依赖时追加安装。安装后先检查解释器和 SfM 后端能力：
+`doctor` 会统一检查核心 Python 包、FFmpeg/FFprobe、pycolmap、正式网页和配置资源、固定版本 OpenGV 纯旋转后端及存储目录可写性。也可继续单独检查 SfM 后端能力：
 
 ```powershell
 python --version
@@ -63,7 +61,9 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 | 命令 | 主要用途与关键参数 |
 | --- | --- |
-| `serve_viewer` | 本地 HTTP 服务；`--bind`、`--port`、`--root`、`--storage-root`、可重复的 `--extra-root NAME=PATH` |
+| `cadscene-workbench serve` | 统一本地 HTTP 服务；参数与 `serve_viewer` 兼容 |
+| `cadscene-workbench doctor` | 检查完整正式运行环境并可输出 JSON |
+| `serve_viewer` | 兼容的 Python 模块入口 |
 | `check_sfm_environment` | 检查后端；`--colmap-exe`、`--device {auto,cpu,cuda}`、`--json` |
 | `run_sfm` | 运行 SfM；`--dataset`、`--run-id`、`--output-root`、`--video`、`--backend {auto,pycolmap,colmap_cli}`、`--device {auto,cpu,cuda}`、全局 BA 参数 |
 | `align_to_cad` | 用人工轨迹做 Sim3 对齐；需要 `--trajectory`、`--web-camera-track`、`--cad-dir`、`--cad-scale`、`--origin-xy` |
@@ -83,7 +83,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ```powershell
 New-Item -ItemType Directory -Force -Path D:\cadscene-work | Out-Null
-python -m cadscene.cli.serve_viewer `
+cadscene-workbench serve `
   --bind 127.0.0.1 `
   --port 8300 `
   --storage-root D:\cadscene-work
@@ -150,7 +150,7 @@ MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project �
 
 ## 开发边界
 
-- `sfm_only` 是唯一 Stable 的端到端路线；`pure_rotation` 是 Experimental，由视频分析在严格旋转证据成立时自动推荐，项目页可人工覆盖，固定相机中心且不恢复平移或尺度。
+- `sfm_only` 与 `pure_rotation` 都是正式可执行路线；后者固定相机中心且不恢复平移或尺度，依赖固定版本 OpenGV 后端。当前仍不成熟的是自动视频分析和路线推荐精度，项目页允许人工覆盖。
 - partial-SRT core 是 Experimental CLI，尚未接入正式 JobRunner。门户中的 `srt_sfm_fused` 与 `srt_full_pose` 均为 Interface only，服务会阻止其启动阶段。
 - CAD 锚定工程标牌已经接入预览和正式片段渲染；视频目标跟踪标牌创建入口当前隐藏，不能作为正式功能宣传。
 - 全局 CAD 替换只适用于坐标系、单位和原点不变且已有有效工作台输出的项目；成功后保留轨迹，只让渲染和合并 stale。

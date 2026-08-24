@@ -25,7 +25,9 @@ Always specify a writable storage root for normal testing and long-lived project
 
 ```powershell
 New-Item -ItemType Directory -Force -Path D:\cadscene-work | Out-Null
-python -m cadscene.cli.serve_viewer `
+python -m pip install .
+cadscene-workbench doctor --storage-root D:\cadscene-work
+cadscene-workbench serve `
   --bind 127.0.0.1 `
   --port 8300 `
   --storage-root D:\cadscene-work
@@ -50,7 +52,7 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 | Workflow or capability | Status | Boundary |
 |---|---|---|
 | `sfm_only` | Stable | The stable end-to-end path: video analysis, clip management, SfM, manual alignment, quality inspection, rendering, and concatenation. |
-| `pure_rotation` | Experimental | Automatically recommended when video analysis verifies strict rotation evidence. The camera center is fixed, translation and scale are not recovered, and an external OpenGV backend is required. |
+| `pure_rotation` | Supported | Fixed-center rotation recovery, global placement, local correction, and rendering are in the supported workflow. A pinned external OpenGV backend is required; automatic scene classification still needs human review. |
 | partial-SRT core | Experimental CLI | Provides PTS, ENU, and robust Sim3 fusion helpers outside the formal project queue. |
 | `srt_sfm_fused` / `srt_full_pose` | Interface only | The portal can detect and describe these routes, but formal stage launch remains blocked. |
 | SfM CUDA | Optional | Confirmed only for supported feature extraction and matching. Mapping and global BA are not represented as GPU processing. |
@@ -69,7 +71,7 @@ The upload page no longer asks the user to preselect a rotation mode. When no SR
 6. Return to Project Clip Management. When every delivery clip has a current render, run Merge Output. Concatenation uses each `render_frame_map.json` source-PTS partition and rejects duplicate or missing frames.
 7. After a refresh or service restart, use the same `--storage-root` and `project_id`. Saved workbench outputs, annotations, jobs, renders, and version history are restored from project manifests.
 
-`pure_rotation` follows the experimental sequence Start—Global Placement—Local Pose Corrections—Render, and skips the standard alignment/quality route. It cannot recover travel distance.
+`pure_rotation` follows Start—Global Placement—Local Pose Corrections—Render and skips the standard alignment/quality route. Its fixed camera center cannot recover travel distance. Automatic video analysis and route recommendation remain the immature part, not the Pure Rotation execution workflow.
 
 ## CAD text and engineering callouts
 
@@ -122,7 +124,7 @@ A workbench session token is temporary write authorization; a saved workbench ou
 ## Capability boundaries
 
 - `sfm_only` is the stable primary path; SRT fusion and full-pose do not yet have formal end-to-end routes.
-- `pure_rotation`, partial-SRT, and video-target tracked callouts remain experimental or hidden.
+- `pure_rotation` is a supported fixed-center route; automatic video analysis and route recommendation still require human review. Partial-SRT and video-target tracked callouts remain experimental or hidden.
 - CAD-anchored callouts do not infer real-object occlusion in the source video; they currently evaluate camera-facing, viewport, trajectory, and time-range visibility.
 - Cross-clip tracking, cross-scene label inheritance, semantic recognition, and large neural trackers are not supported.
 - Results require review by someone who understands the site and design intent. Experimental features do not replace engineering survey or professional acceptance.
