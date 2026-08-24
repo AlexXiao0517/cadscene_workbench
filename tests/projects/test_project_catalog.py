@@ -161,3 +161,73 @@ def test_project_catalog_isolates_a_malformed_manifest(tmp_path: Path) -> None:
     assert unavailable["status"] == "unavailable"
     assert unavailable["openable"] is False
     assert str(tmp_path) not in json.dumps(unavailable)
+
+
+def test_current_success_is_not_overridden_by_historical_failed_jobs(tmp_path: Path) -> None:
+    service, repositories = _service(tmp_path / "projects")
+    _create_project(
+        repositories,
+        "project-recovered",
+        updated_at="2026-08-24T10:00:00Z",
+        rendered=True,
+    )
+    jobs = repositories.jobs.load("project-recovered")
+    repositories.jobs.update(
+        "project-recovered",
+        expected_revision=jobs.revision,
+        mutate=lambda current: replace(
+            current,
+            jobs=(
+                {"job_id": "old-analysis", "job_type": "video_analysis", "status": "failed"},
+                *current.jobs,
+            ),
+        ),
+    )
+
+    summary = service.list_projects()[0]
+
+    assert summary.status == "completed"
+
+
+def test_catalog_uses_latest_domain_manifest_update_time(tmp_path: Path) -> None:
+    service, repositories = _service(tmp_path / "projects")
+    _create_project(
+        repositories,
+        "project-active",
+        updated_at="2026-08-20T10:00:00Z",
+        rendered=False,
+    )
+    annotations = repositories.annotations.load("project-active")
+    repositories.annotations.update(
+        "project-active",
+        expected_revision=annotations.revision,
+        mutate=lambda current: replace(current, updated_at="2026-08-24T15:30:00Z"),
+    )
+    latest_annotation_time = repositories.annotations.load("project-active").updated_at
+
+    summary = service.list_projects()[0]
+
+    assert summary.updated_at == latest_annotation_time
+
+
+def test_catalog_sanitizes_foreign_windows_asset_paths(tmp_path: Path) -> None:
+    service, repositories = _service(tmp_path / "projects")
+    repositories.create_project("project-migrated", updated_at="2026-08-24T10:00:00Z")
+    project = repositories.project.load("project-migrated")
+    repositories.project.update(
+        "project-migrated",
+        expected_revision=project.revision,
+        mutate=lambda current: replace(
+            current,
+            source_assets={
+                "video": {"path": r"D:\private\site\flight.mp4"},
+                "cad": {"path": "/srv/private/site/design.dxf"},
+            },
+        ),
+    )
+
+    payload = service.list_projects()[0].to_dict()
+
+    assert payload["video_filename"] == "flight.mp4"
+    assert payload["cad_filename"] == "design.dxf"
+    assert "private" not in json.dumps(payload)

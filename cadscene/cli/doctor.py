@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -55,6 +56,7 @@ class DoctorProbes:
     resources_check: Callable[[Path], tuple[bool, str]]
     storage_check: Callable[[Path], tuple[bool, str]]
     pure_rotation_check: Callable[[DoctorOptions], tuple[bool, str]]
+    module_importable: Callable[[str], tuple[bool, str]] | None = None
 
 
 _CORE_MODULES = (
@@ -76,8 +78,8 @@ def run_doctor(
     active = probes or default_probes()
     checks: list[DoctorCheck] = []
     for display_name, module_name in _CORE_MODULES:
-        available = active.module_available(module_name)
-        checks.append(_check(display_name, "core", available, f"Python module {module_name}"))
+        available, message = _module_check(active, module_name)
+        checks.append(_check(display_name, "core", available, message))
 
     resources_ok, resources_message = active.resources_check(options.application_root)
     checks.append(_check("application_resources", "core", resources_ok, resources_message))
@@ -85,8 +87,8 @@ def run_doctor(
         path = active.executable_path(executable)
         checks.append(_check(executable, "media", bool(path), path or f"{executable} not found"))
 
-    pycolmap_ok = active.module_available("pycolmap")
-    checks.append(_check("pycolmap", "sfm", pycolmap_ok, "Python module pycolmap"))
+    pycolmap_ok, pycolmap_message = _module_check(active, "pycolmap")
+    checks.append(_check("pycolmap", "sfm", pycolmap_ok, pycolmap_message))
     rotation_ok, rotation_message = active.pure_rotation_check(options)
     checks.append(_check("opengv_backend", "pure_rotation", rotation_ok, rotation_message))
     storage_ok, storage_message = active.storage_check(options.storage_root)
@@ -98,6 +100,13 @@ def _check(name: str, group: str, ok: bool, message: str) -> DoctorCheck:
     return DoctorCheck(name, group, "ok" if ok else "error", True, message)
 
 
+def _module_check(probes: DoctorProbes, name: str) -> tuple[bool, str]:
+    if probes.module_importable is not None:
+        return probes.module_importable(name)
+    available = probes.module_available(name)
+    return available, f"Python module {name}" if available else f"Python module {name} not found"
+
+
 def default_probes() -> DoctorProbes:
     return DoctorProbes(
         module_available=lambda name: importlib.util.find_spec(name) is not None,
@@ -105,7 +114,16 @@ def default_probes() -> DoctorProbes:
         resources_check=_resources_check,
         storage_check=_storage_check,
         pure_rotation_check=_pure_rotation_check,
+        module_importable=_module_import_check,
     )
+
+
+def _module_import_check(name: str) -> tuple[bool, str]:
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        return False, f"unable to import {name}: {exc}"
+    return True, f"imported {name}"
 
 
 def _resources_check(root: Path) -> tuple[bool, str]:
@@ -167,7 +185,7 @@ def _pure_rotation_check(options: DoctorOptions) -> tuple[bool, str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    root = application_root()
+    root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Check the complete cadscene-workbench environment.")
     parser.add_argument("--application-root", default=str(root))
     parser.add_argument("--storage-root", default=str(root))

@@ -1092,6 +1092,7 @@ def test_serve_viewer_serves_project_library_and_catalog_over_http(tmp_path: Pat
     assert catalog_response.status == 200
     assert catalog["projects"][0]["project_id"] == "p1"
     assert page_response.status == 200
+    assert page_response.getheader("Cache-Control") == "no-store"
     assert "项目库" in page
 
 

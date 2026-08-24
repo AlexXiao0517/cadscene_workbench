@@ -270,6 +270,7 @@ class ProjectService:
                         self.repositories.clips.load(project_id),
                         self.repositories.jobs.load(project_id),
                         self.repositories.render.load(project_id),
+                        self.repositories.annotations.load(project_id),
                     )
                 )
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):

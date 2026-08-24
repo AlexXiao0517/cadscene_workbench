@@ -56,6 +56,7 @@ def test_project_library_has_safe_empty_error_and_retry_states() -> None:
     assert 'fetch("/api/projects"' in script
     assert "textContent" in script
     assert "innerHTML" not in script
+    assert "const hasError = !errorState.hidden" in script
 
 
 def test_project_rename_is_hover_only_and_uses_existing_revision_api() -> None:

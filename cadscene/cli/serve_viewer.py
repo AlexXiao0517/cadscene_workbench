@@ -207,7 +207,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         viewer_path = urlsplit(self.path).path
         if viewer_path.startswith(
-            ("/apps/web_camera_viewer/", "/apps/project_workspace/")
+            (
+                "/apps/web_camera_viewer/",
+                "/apps/project_workspace/",
+                "/apps/project_library/",
+            )
         ) and Path(viewer_path).suffix.lower() in {".html", ".js", ".css"}:
             self.send_header("Cache-Control", "no-store")
         super().end_headers()

@@ -180,7 +180,9 @@ function renderList() {
 
 function renderProjects() {
   const hasProjects = state.projects.length > 0;
-  $("#emptyState").hidden = hasProjects || state.loading;
+  const errorState = $("#errorState");
+  const hasError = !errorState.hidden;
+  $("#emptyState").hidden = hasProjects || state.loading || hasError;
   $("#projectGrid").hidden = !hasProjects || state.view !== "cards";
   $("#projectTable").hidden = !hasProjects || state.view !== "list";
   $("#cardViewButton").classList.toggle("active", state.view === "cards");

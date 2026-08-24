@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from pathlib import Path
+import re
 from typing import Mapping, Sequence
 
 
@@ -27,7 +27,7 @@ _RUNNING = {"queued", "preparing", "running", "validating", "publishing"}
 _FAILED = {"failed", "cancelled", "stale_input", "superseded"}
 
 
-def build_project_summary(project, clips, jobs, render) -> ProjectSummary:
+def build_project_summary(project, clips, jobs, render, annotations) -> ProjectSummary:
     jobs_by_clip: dict[str, Mapping[str, object]] = {}
     for job in jobs.jobs:
         clip_id = job.get("clip_id")
@@ -44,14 +44,23 @@ def build_project_summary(project, clips, jobs, render) -> ProjectSummary:
         _render_is_current(jobs_by_clip.get(clip.clip_id), renders_by_clip.get(clip.clip_id))
         for clip in clips.clips
     )
-    statuses = {str(job.get("status") or "") for job in jobs.jobs}
-    running_count = sum(str(job.get("status") or "") in _RUNNING for job in jobs.jobs)
+    current_jobs: dict[str, Mapping[str, object]] = {}
+    for job in jobs.jobs:
+        clip_id = job.get("clip_id")
+        scope = (
+            f"clip:{clip_id}"
+            if isinstance(clip_id, str) and clip_id
+            else f"project:{job.get('job_type') or job.get('job_id')}"
+        )
+        current_jobs[scope] = job
+    statuses = {str(job.get("status") or "") for job in current_jobs.values()}
+    running_count = sum(status in _RUNNING for status in statuses)
     if running_count:
         status = "processing"
-    elif statuses & _FAILED:
-        status = "failed"
     elif clips.clips and rendered_count == len(clips.clips):
         status = "completed"
+    elif statuses & _FAILED:
+        status = "failed"
     elif clips.clips:
         status = "ready"
     else:
@@ -60,7 +69,13 @@ def build_project_summary(project, clips, jobs, render) -> ProjectSummary:
         project_id=project.project_id,
         revision=project.revision,
         display_name=str(project.source_assets.get("display_name") or project.project_id),
-        updated_at=project.updated_at,
+        updated_at=max(
+            project.updated_at,
+            clips.updated_at,
+            jobs.updated_at,
+            render.updated_at,
+            annotations.updated_at,
+        ),
         video_filename=_asset_filename(project.source_assets, "video"),
         cad_filename=_asset_filename(project.source_assets, "cad"),
         clip_count=len(clips.clips),
@@ -111,6 +126,10 @@ def _asset_filename(source_assets: Mapping[str, object], asset_type: str) -> str
         for key in ("original_filename", "original_name", "filename", "path"):
             value = descriptor.get(key)
             if isinstance(value, str) and value:
-                return Path(value).name
+                return _portable_basename(value)
     legacy = source_assets.get(f"{asset_type}_path")
-    return Path(legacy).name if isinstance(legacy, str) and legacy else None
+    return _portable_basename(legacy) if isinstance(legacy, str) and legacy else None
+
+
+def _portable_basename(value: str) -> str:
+    return re.split(r"[\\/]+", value)[-1]

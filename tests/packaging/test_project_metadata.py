@@ -54,3 +54,10 @@ def test_distribution_declares_the_unified_console_script() -> None:
 
 def test_broken_stage3f_viewer_is_not_distributed_from_source() -> None:
     assert not (ROOT / "apps" / "web_camera_viewer_broken_stage3f").exists()
+
+
+def test_development_install_declares_wheel_build_tooling() -> None:
+    project = _project_metadata()
+    dev = project["optional-dependencies"]["dev"]  # type: ignore[index]
+
+    assert any(str(requirement).startswith("wheel") for requirement in dev)

@@ -38,6 +38,7 @@ cad = [
 ]
 dev = [
   "pytest>=7.4",
+  "wheel>=0.41",
 ]
 
 [tool.setuptools.packages.find]
