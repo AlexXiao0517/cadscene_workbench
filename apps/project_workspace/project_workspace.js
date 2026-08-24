@@ -2,6 +2,7 @@
   "use strict";
 
   const POLL_INTERVAL_MS = 1500;
+  const THEME_STORAGE_KEY = "mediaflow-theme";
   const params = new URLSearchParams(window.location.search);
   const projectId = params.get("projectId") || "";
   const focusClipId = params.get("focusClip") || "";
@@ -46,6 +47,24 @@
     static: "静止",
     unknown: "待确认",
   };
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    const toggle = $("#sidebarThemeToggle");
+    if (!toggle) return;
+    const isLight = theme === "light";
+    const help = isLight ? "切换为深色模式" : "切换为浅色模式";
+    toggle.setAttribute("aria-pressed", String(isLight));
+    toggle.setAttribute("aria-label", help);
+    toggle.setAttribute("title", help);
+    $("#sidebarThemeLabel").textContent = isLight ? "深色模式" : "浅色模式";
+  }
+
+  function initializeTheme() {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    const preferred = window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    applyTheme(saved === "light" || saved === "dark" ? saved : preferred);
+  }
 
   function setMessage(message, isError = false) {
     const element = $("#liveMessage");
@@ -753,6 +772,11 @@
     event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
     event.currentTarget.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
   });
+  $("#sidebarThemeToggle").addEventListener("click", () => {
+    const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyTheme(theme);
+  });
   document.querySelector('[data-nav="files"]').addEventListener("click", () => {
     window.location.assign("/apps/project_library/");
   });
@@ -789,6 +813,7 @@
   });
   $("#confirmPreflight").addEventListener("click", enqueuePreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
+  initializeTheme();
   if (!projectId) setMessage("缺少项目标识，无法载入工作区。", true);
   else pollSnapshot();
   window.setInterval(pollSnapshot, POLL_INTERVAL_MS);

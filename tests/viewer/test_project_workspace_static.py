@@ -38,6 +38,47 @@ def test_workspace_sidebar_opens_project_library_and_uses_original_icons() -> No
     assert ".project-name-row:focus-within .project-rename-button" in css
 
 
+def test_workspace_sidebar_theme_toggle_reuses_the_global_preference() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="sidebarThemeToggle"' in html
+    assert 'class="sun-icon"' in html
+    assert 'class="moon-icon"' in html
+    assert html.index('id="sidebarThemeToggle"') < html.index('class="sidebar-project')
+    for contract in (
+        'const THEME_STORAGE_KEY = "mediaflow-theme"',
+        'document.documentElement.setAttribute("data-theme", theme)',
+        "window.localStorage.getItem(THEME_STORAGE_KEY)",
+        "window.localStorage.setItem(THEME_STORAGE_KEY, theme)",
+        'window.matchMedia?.("(prefers-color-scheme: light)")',
+        'setAttribute("aria-pressed", String(isLight))',
+    ):
+        assert contract in script
+
+
+def test_workspace_light_theme_covers_the_full_application_shell() -> None:
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    for contract in (
+        ':root[data-theme="light"]',
+        "--bg: #f5f8fc",
+        "--surface: #ffffff",
+        "--line: #cad7e5",
+        "background: var(--page-background)",
+        "background: var(--sidebar-background)",
+        "background: var(--topbar-background)",
+        "background: var(--panel-background)",
+        ".sidebar-theme-toggle",
+        ':root[data-theme="light"] .sidebar-theme-toggle .sun-icon',
+        ".app-shell.sidebar-collapsed .sidebar-theme-toggle",
+        ".button.primary { color: #fff;",
+        ".cad-file-field { display: grid; gap: 8px; margin: 18px 0; color: var(--text);",
+        ".cad-coordinate-confirmation { display: flex; align-items: flex-start; gap: 9px; color: var(--text);",
+    ):
+        assert contract in css
+
+
 def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")

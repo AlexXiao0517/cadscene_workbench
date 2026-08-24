@@ -71,6 +71,47 @@ def test_project_library_matches_the_existing_workspace_visual_shell() -> None:
         assert declaration in css
 
 
+def test_project_library_sidebar_theme_toggle_reuses_the_global_preference() -> None:
+    html = _read("index.html")
+    script = _read("project_library.js")
+
+    assert 'id="sidebarThemeToggle"' in html
+    assert 'class="sun-icon"' in html
+    assert 'class="moon-icon"' in html
+    assert html.index('id="sidebarThemeToggle"') < html.index('id="sidebarToggle"')
+    for contract in (
+        'const THEME_STORAGE_KEY = "mediaflow-theme"',
+        'document.documentElement.setAttribute("data-theme", theme)',
+        "window.localStorage.getItem(THEME_STORAGE_KEY)",
+        "window.localStorage.setItem(THEME_STORAGE_KEY, theme)",
+        'window.matchMedia?.("(prefers-color-scheme: light)")',
+        'setAttribute("aria-pressed", String(isLight))',
+    ):
+        assert contract in script
+
+
+def test_project_library_light_theme_covers_the_full_application_shell() -> None:
+    css = _read("style.css")
+
+    for contract in (
+        ':root[data-theme="light"]',
+        "--bg: #f5f8fc",
+        "--surface: #ffffff",
+        "--line: #cad7e5",
+        "background: var(--page-background)",
+        "background: var(--sidebar-background)",
+        "background: var(--topbar-background)",
+        "background: var(--panel-background)",
+        ".sidebar-theme-toggle",
+        ':root[data-theme="light"] .sidebar-theme-toggle .sun-icon',
+        ".app-shell.sidebar-collapsed .sidebar-theme-toggle",
+        ".primary-button { color: #fff;",
+        ".asset-names { display: grid; gap: 3px; color: var(--text);",
+        "background: var(--status-background); color: var(--status-color)",
+    ):
+        assert contract in css
+
+
 def test_project_library_has_safe_empty_error_and_retry_states() -> None:
     html = _read("index.html")
     script = _read("project_library.js")

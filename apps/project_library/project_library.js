@@ -1,6 +1,7 @@
 "use strict";
 
 const VIEW_KEY = "mediaflow-project-library-view";
+const THEME_STORAGE_KEY = "mediaflow-theme";
 const state = {
   projects: [],
   view: localStorage.getItem(VIEW_KEY) === "list" ? "list" : "cards",
@@ -8,6 +9,24 @@ const state = {
   editingProjectId: null,
 };
 const $ = (selector) => document.querySelector(selector);
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const toggle = $("#sidebarThemeToggle");
+  if (!toggle) return;
+  const isLight = theme === "light";
+  const help = isLight ? "切换为深色模式" : "切换为浅色模式";
+  toggle.setAttribute("aria-pressed", String(isLight));
+  toggle.setAttribute("aria-label", help);
+  toggle.setAttribute("title", help);
+  $("#sidebarThemeLabel").textContent = isLight ? "深色模式" : "浅色模式";
+}
+
+function initializeTheme() {
+  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+  const preferred = window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  applyTheme(saved === "light" || saved === "dark" ? saved : preferred);
+}
 
 function svgIcon(path) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -232,11 +251,17 @@ $("#cardViewButton").addEventListener("click", () => setView("cards"));
 $("#listViewButton").addEventListener("click", () => setView("list"));
 $("#refreshButton").addEventListener("click", loadProjects);
 $("#retryButton").addEventListener("click", loadProjects);
+$("#sidebarThemeToggle").addEventListener("click", () => {
+  const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  applyTheme(theme);
+});
 $("#sidebarToggle").addEventListener("click", () => {
   const collapsed = $("#appShell").classList.toggle("sidebar-collapsed");
   $("#sidebarToggle").setAttribute("aria-expanded", String(!collapsed));
   $("#sidebarToggle").setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
 });
 
+initializeTheme();
 renderProjects();
 loadProjects();
