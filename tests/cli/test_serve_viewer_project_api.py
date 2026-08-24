@@ -185,6 +185,17 @@ def test_snapshot_etag_returns_304_with_an_empty_body(tmp_path: Path) -> None:
     assert lowercase.encoded_body == b""
 
 
+def test_project_catalog_api_lists_safe_project_summaries(tmp_path: Path) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+
+    response = api.handle("GET", "/api/projects")
+
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.body["projects"][0]["project_id"] == "p1"
+    assert str(tmp_path) not in json.dumps(response.body)
+
+
 def test_annotation_crud_api_and_snapshot_use_independent_revisions(
     tmp_path: Path,
 ) -> None:

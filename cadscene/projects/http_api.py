@@ -128,6 +128,12 @@ class ProjectApi:
         headers = {str(key).lower(): value for key, value in (headers or {}).items()}
         payload = json_body or {}
         try:
+            if method == "GET" and path == "/api/projects":
+                return ApiResponse(
+                    200,
+                    {"projects": [item.to_dict() for item in self.service.list_projects()]},
+                    {"Cache-Control": "no-store"},
+                )
             if method == "POST" and path == "/api/projects":
                 return self._create_project(payload)
             match = _PROJECT.fullmatch(path)

@@ -33,6 +33,12 @@ from .concat import (
 )
 from .concat_adapters import ConcatMediaAdapter, ConcatMediaInputs
 from .concat_executor import validate_concat_outputs
+from .catalog import (
+    ProjectSummary,
+    build_project_summary,
+    sort_project_summaries,
+    unavailable_project_summary,
+)
 from .executor import JobExecutionPlan
 from .json_repositories import ProjectRepositories
 from .models import (
@@ -246,6 +252,29 @@ class ProjectService:
             identity=self._identity,
         )
         self.queue.enable_publication_gate()
+
+    def list_projects(self) -> tuple[ProjectSummary, ...]:
+        """枚举本地项目；单个损坏项目不会阻断整个项目库。"""
+
+        summaries: list[ProjectSummary] = []
+        if not self.projects_root.is_dir():
+            return ()
+        for directory in self.projects_root.iterdir():
+            if not directory.is_dir() or not is_safe_stable_id(directory.name):
+                continue
+            project_id = directory.name
+            try:
+                summaries.append(
+                    build_project_summary(
+                        self.repositories.project.load(project_id),
+                        self.repositories.clips.load(project_id),
+                        self.repositories.jobs.load(project_id),
+                        self.repositories.render.load(project_id),
+                    )
+                )
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                summaries.append(unavailable_project_summary(project_id))
+        return sort_project_summaries(summaries)
 
     def track_video_annotation(
         self,
