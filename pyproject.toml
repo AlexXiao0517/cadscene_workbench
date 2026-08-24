@@ -19,6 +19,9 @@ dependencies = [
   "pycolmap>=0.6",
 ]
 
+[project.scripts]
+cadscene-workbench = "cadscene.cli.main:main"
+
 [project.optional-dependencies]
 sfm = [
   "pycolmap>=0.6",

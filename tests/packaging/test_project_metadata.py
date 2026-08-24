@@ -44,5 +44,13 @@ def test_semantic_segmentation_is_not_an_install_extra() -> None:
     assert "segmentation" not in project.get("optional-dependencies", {})
 
 
+def test_distribution_declares_the_unified_console_script() -> None:
+    project = _project_metadata()
+
+    assert project["scripts"] == {  # type: ignore[index]
+        "cadscene-workbench": "cadscene.cli.main:main"
+    }
+
+
 def test_broken_stage3f_viewer_is_not_distributed_from_source() -> None:
     assert not (ROOT / "apps" / "web_camera_viewer_broken_stage3f").exists()
