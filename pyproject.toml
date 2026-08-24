@@ -37,7 +37,23 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["cadscene*"]
+include = ["cadscene*", "apps", "configs"]
+
+[tool.setuptools.package-data]
+apps = [
+  "*/*.html",
+  "*/*.js",
+  "*/*.css",
+  "*/*.md",
+  "*/assets/*.png",
+  "*/assets/*.svg",
+  "*/vendor/*.js",
+  "*/vendor/controls/*.js",
+]
+configs = [
+  "*/*.yaml",
+  "*/*/*.txt",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

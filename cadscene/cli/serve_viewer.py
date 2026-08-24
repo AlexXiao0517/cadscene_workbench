@@ -16,6 +16,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from cadscene.application_resources import application_root
 from cadscene.workflow.job_runner import JobAlreadyRunningError, JobRunner, save_camera_track
 from cadscene.pure_rotation.placement import apply_global_placement
 from cadscene.pure_rotation.corrections import apply_rotation_corrections
@@ -167,7 +168,7 @@ class ViewerHTTPServer(ThreadingHTTPServer):
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return application_root()
 
 
 def _storage_root(server: ThreadingHTTPServer) -> Path:
