@@ -866,7 +866,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path.startswith("/api/projects/") and "/thumbnails/" in parsed.path:
             self._send_project_thumbnail(parsed.path)
             return
-        if parsed.path.startswith("/api/projects/"):
+        if parsed.path == "/api/projects" or parsed.path.startswith("/api/projects/"):
             self._dispatch_project_api("GET")
             return
         if parsed.path == "/":

@@ -33,7 +33,13 @@ cadscene-workbench serve `
   --storage-root D:\cadscene-work
 ```
 
-浏览器入口：
+浏览器首先进入项目库，可用卡片或列表重新打开现有项目，也可从“新建项目”进入上传页：
+
+```text
+http://127.0.0.1:8300/apps/project_library/
+```
+
+直接新建项目的上传入口：
 
 ```text
 http://127.0.0.1:8300/apps/workflow_portal/

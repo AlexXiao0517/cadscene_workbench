@@ -4,13 +4,15 @@
 
 ### Added
 
+- Added a local project library with fixed-width folder cards, a detailed list view, durable view preference, safe project summaries, project reopening, optimistic renaming, and navigation back to the existing upload flow.
+- Added packaged official web/config resources, complete runtime dependency declarations, and the unified `cadscene-workbench serve` / `cadscene-workbench doctor` console entry point.
 - Added the official upload portal for MP4 video, DXF CAD, and optional SRT inputs. Extra extensions accepted by compatibility-oriented backend validators are not exposed as supported portal formats.
 - Added the persistent project pipeline: asynchronous video/CAD analysis, scene-aware clip management, workflow selection, resource-aware trajectory and render queues, resumable workbench sessions, immutable clip renders, and strict frame-partition project concatenation.
 - Added DXF `TEXT`, `MTEXT`, and block-attribute text to the 3D CAD view, preserving layer, position, rotation, text size, and CAD-coordinate conversion while applying visibility budgets for large drawings.
 - Added Stage 9 CAD-anchored engineering callouts with editable title/body, screen-space panels, polyline leaders, circular anchors, source-PTS visibility, Base/Corrected camera projection, browser preview, persistence, and burn-in rendering.
 - Added guarded global CAD replacement for calibrated projects. A same-coordinate-system replacement preserves analysis, trajectories, keyframes, and workbench outputs while making CAD-dependent render and merge outputs stale.
 - Added conservative SRT capability detection and the experimental partial-SRT core for PTS, ENU, robust Sim3, and fusion processing. Ordinary SRT remains a metadata capability source, not high-precision position, pose, or CAD elevation truth.
-- Added the experimental `pure_rotation` workflow for fixed-camera-center footage through the external OpenGV backend. Conservative automatic motion analysis can recommend it from verified source-level rotation evidence; Project Clip Management shows the recommendation and allows a final workflow override. It does not recover translation or scale.
+- Added the supported `pure_rotation` workflow for fixed-camera-center footage through the pinned external OpenGV backend. Conservative automatic motion analysis can recommend it and Project Clip Management allows a final override; the classifier remains immature and the route does not recover translation or scale.
 
 ### Changed
 
@@ -26,7 +28,7 @@
 
 ### Limitations
 
-- `sfm_only` is the only stable end-to-end primary path.
+- `sfm_only` and fixed-center `pure_rotation` are executable end-to-end paths. Automatic motion classification still requires human review.
 - The `srt_sfm_fused` portal route is interface-only: it can be recognized and described, but formal workflow launch is blocked.
 - `srt_full_pose` is interface-only and has no end-to-end execution workflow.
 - The partial-SRT core is an experimental CLI capability and is not connected to the formal job runner.

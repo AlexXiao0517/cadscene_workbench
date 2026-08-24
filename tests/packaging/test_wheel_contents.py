@@ -66,6 +66,8 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
     for required in (
         "apps/workflow_portal/index.html",
         "apps/project_workspace/index.html",
+        "apps/project_library/index.html",
+        "apps/project_library/project_library.js",
         "apps/web_camera_viewer/index.html",
         "apps/web_camera_viewer/vendor/three.min.js",
         "configs/pipelines/sfm_overlay_existing_sfm.yaml",

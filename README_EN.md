@@ -33,7 +33,13 @@ cadscene-workbench serve `
   --storage-root D:\cadscene-work
 ```
 
-Open the upload portal:
+Open the project library first. Its card and list views reopen durable projects, while New Project opens the upload flow:
+
+```text
+http://127.0.0.1:8300/apps/project_library/
+```
+
+Direct upload portal:
 
 ```text
 http://127.0.0.1:8300/apps/workflow_portal/

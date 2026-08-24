@@ -1063,6 +1063,38 @@ def test_serve_viewer_serves_real_project_snapshot_over_http(tmp_path: Path) -> 
     assert body["clips"][0]["clip_id"] == "clip-1"
 
 
+def test_serve_viewer_serves_project_library_and_catalog_over_http(tmp_path: Path) -> None:
+    api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    server = ViewerHTTPServer(("127.0.0.1", 0), RangeRequestHandler)
+    server.root_dir = Path(__file__).resolve().parents[2]
+    server.storage_root_dir = tmp_path
+    server.extra_roots = {}
+    server.project_api = api
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("GET", "/api/projects")
+        catalog_response = connection.getresponse()
+        catalog = json.loads(catalog_response.read().decode("utf-8"))
+        connection.close()
+
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        connection.request("GET", "/apps/project_library/index.html")
+        page_response = connection.getresponse()
+        page = page_response.read().decode("utf-8")
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert catalog_response.status == 200
+    assert catalog["projects"][0]["project_id"] == "p1"
+    assert page_response.status == 200
+    assert "项目库" in page
+
+
 def test_serve_viewer_streams_published_project_render_with_head_and_range(
     tmp_path: Path,
 ) -> None:

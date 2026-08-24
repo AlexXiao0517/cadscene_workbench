@@ -6,6 +6,7 @@ from pathlib import Path
 _REQUIRED_RESOURCES = (
     Path("apps/workflow_portal/index.html"),
     Path("apps/project_workspace/index.html"),
+    Path("apps/project_library/index.html"),
     Path("apps/web_camera_viewer/index.html"),
     Path("configs/pipelines/sfm_overlay_existing_sfm.yaml"),
     Path("configs/pure_rotation/adapter-calibration/cameras.txt"),

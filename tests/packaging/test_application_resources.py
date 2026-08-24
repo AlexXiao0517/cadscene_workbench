@@ -10,6 +10,7 @@ def test_application_resources_find_official_apps_and_configs() -> None:
 
     assert (root / "apps" / "workflow_portal" / "index.html").is_file()
     assert (root / "apps" / "project_workspace" / "index.html").is_file()
+    assert (root / "apps" / "project_library" / "index.html").is_file()
     assert (root / "apps" / "web_camera_viewer" / "index.html").is_file()
     assert (
         root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"

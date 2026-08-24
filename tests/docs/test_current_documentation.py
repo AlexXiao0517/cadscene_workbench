@@ -162,6 +162,16 @@ def test_installation_and_supported_pure_rotation_status_are_current() -> None:
     assert "临时显式安装 `PyYAML`" not in developer_guide
 
 
+def test_project_library_is_the_normal_reopen_entry() -> None:
+    readme = _read("README.md")
+    readme_en = _read("README_EN.md")
+
+    assert "http://127.0.0.1:8300/apps/project_library/" in readme
+    assert "项目库" in readme
+    assert "http://127.0.0.1:8300/apps/project_library/" in readme_en
+    assert "project library" in readme_en.lower()
+
+
 def test_current_document_links_and_documented_cli_modules_exist() -> None:
     markdown_link = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
     cli_module = re.compile(r"python -m cadscene\.cli\.([A-Za-z0-9_]+)")

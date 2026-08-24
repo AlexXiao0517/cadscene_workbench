@@ -47,6 +47,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `cadscene/annotations/` | CAD/video 锚点模型、工程标牌布局、tracking revision 与透明叠加渲染 |
 | `cadscene/rendering/`、`cadscene/diagnostics/`、`cadscene/viewer/` | 叠加渲染、道路/姿态诊断及查看器场景导出 |
 | `apps/workflow_portal/` | 创建项目和上传文件的静态入口 |
+| `apps/project_library/` | 本地项目库、卡片/列表切换和项目重命名入口 |
 | `apps/project_workspace/` | 项目资产、片段、批量任务、CAD 替换与合并的管理界面 |
 | `apps/web_camera_viewer/` | 视频、CAD、关键帧、工作流阶段与产物查看器 |
 
