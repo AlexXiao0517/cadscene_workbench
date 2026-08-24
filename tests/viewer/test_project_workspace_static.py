@@ -19,7 +19,7 @@ def test_workspace_sidebar_has_exactly_the_four_approved_destinations() -> None:
     assert 'aria-label="收起侧栏"' in html
 
 
-def test_workspace_sidebar_opens_project_library_and_uses_line_icons() -> None:
+def test_workspace_sidebar_opens_project_library_and_uses_original_icons() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
@@ -27,8 +27,13 @@ def test_workspace_sidebar_opens_project_library_and_uses_line_icons() -> None:
     assert 'data-nav="files"' in html
     assert 'querySelector(\'[data-nav="files"]\')' in script
     assert 'window.location.assign("/apps/project_library/")' in script
-    assert 'd="M3.5 7.5h6l2-2h3l2 2h4' in html
-    assert 'id="sidebarToggle"' in html and '<svg viewBox="0 0 24 24"' in html
+    assert 'd="M4 6.5h6l2 2h8v10.5H4z"' in html
+    assert "M19.4 15a1.7 1.7" in html
+    assert '<span aria-hidden="true">«</span>' in html
+    assert "M3.5 7.5h6l2-2h3l2 2h4" not in html
+    assert "M12 2.8v2.1" not in html
+    assert 'd="m14 6-6 6 6 6"' not in html
+    assert ".app-shell.sidebar-collapsed .sidebar-toggle span:first-child" in css
     assert ".project-name-row:hover .project-rename-button" in css
     assert ".project-name-row:focus-within .project-rename-button" in css
 

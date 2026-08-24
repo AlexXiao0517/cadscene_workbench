@@ -21,6 +21,12 @@ def test_project_library_has_shared_sidebar_and_project_files_active() -> None:
     files_item = html.split('data-nav="files"', 1)[0].rsplit("<button", 1)[1]
     assert "active" in files_item
     assert 'aria-current="page"' in files_item
+    assert 'd="M4 6.5h6l2 2h8v10.5H4z"' in html
+    assert "M19.4 15a1.7 1.7" in html
+    assert '<span aria-hidden="true">«</span>' in html
+    assert "M3.5 7.5h6l2-2h3l2 2h4" not in html
+    assert "M12 2.8v2.1" not in html
+    assert 'd="m14 6-6 6 6 6"' not in html
 
 
 def test_project_library_supports_fixed_card_and_detailed_list_views() -> None:
@@ -43,6 +49,25 @@ def test_project_library_supports_fixed_card_and_detailed_list_views() -> None:
     assert "localStorage.setItem" in script
     assert "renderCards" in script
     assert "renderList" in script
+
+
+def test_project_library_matches_the_existing_workspace_visual_shell() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+
+    assert '<span class="brand-mark" aria-hidden="true">' in html
+    for declaration in (
+        "--bg: #070b10",
+        "--surface: #0e151d",
+        "--blue: #3c7dff",
+        "background: radial-gradient(circle at 80% -10%, #14243d 0, transparent 34%), var(--bg)",
+        "grid-template-columns: 228px minmax(0, 1fr)",
+        "background: rgba(9,15,21,.92)",
+        ".topbar { min-height: 88px",
+        "background: linear-gradient(135deg,#4381ff,#2364e9)",
+        ".app-shell.sidebar-collapsed .sidebar-toggle span:first-child",
+    ):
+        assert declaration in css
 
 
 def test_project_library_has_safe_empty_error_and_retry_states() -> None:
