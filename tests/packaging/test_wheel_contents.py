@@ -75,3 +75,39 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
     ):
         assert required in members
     assert not any("web_camera_viewer_broken_stage3f" in item for item in members)
+
+
+def test_extracted_wheel_finds_resources_away_from_the_checkout(tmp_path: Path) -> None:
+    wheel = _build_wheel(tmp_path)
+    installed = tmp_path / "installed"
+    outside = tmp_path / "outside"
+    installed.mkdir()
+    outside.mkdir()
+    with ZipFile(wheel) as archive:
+        archive.extractall(installed)
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(installed)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from cadscene.application_resources import application_root; "
+                "root = application_root(); "
+                "print(root); "
+                "assert (root / 'apps/project_library/index.html').is_file(); "
+                "assert (root / 'configs/pipelines/sfm_overlay_existing_sfm.yaml').is_file()"
+            ),
+        ],
+        cwd=outside,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert str(installed.resolve()) in completed.stdout
