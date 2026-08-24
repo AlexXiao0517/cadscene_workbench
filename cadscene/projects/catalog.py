@@ -54,7 +54,9 @@ def build_project_summary(project, clips, jobs, render, annotations) -> ProjectS
         )
         current_jobs[scope] = job
     statuses = {str(job.get("status") or "") for job in current_jobs.values()}
-    running_count = sum(status in _RUNNING for status in statuses)
+    running_count = sum(
+        str(job.get("status") or "") in _RUNNING for job in jobs.jobs
+    )
     if running_count:
         status = "processing"
     elif clips.clips and rendered_count == len(clips.clips):

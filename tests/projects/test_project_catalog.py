@@ -231,3 +231,30 @@ def test_catalog_sanitizes_foreign_windows_asset_paths(tmp_path: Path) -> None:
     assert payload["video_filename"] == "flight.mp4"
     assert payload["cad_filename"] == "design.dxf"
     assert "private" not in json.dumps(payload)
+
+
+def test_catalog_counts_every_active_job_even_with_the_same_status(tmp_path: Path) -> None:
+    service, repositories = _service(tmp_path / "projects")
+    _create_project(
+        repositories,
+        "project-busy",
+        updated_at="2026-08-24T10:00:00Z",
+        rendered=False,
+    )
+    jobs = repositories.jobs.load("project-busy")
+    repositories.jobs.update(
+        "project-busy",
+        expected_revision=jobs.revision,
+        mutate=lambda current: replace(
+            current,
+            jobs=(
+                {"job_id": "analysis-running", "job_type": "video_analysis", "status": "running"},
+                {"job_id": "render-running", "job_type": "clip_render", "clip_id": "clip-1", "status": "running"},
+            ),
+        ),
+    )
+
+    summary = service.list_projects()[0]
+
+    assert summary.running_job_count == 2
+    assert summary.status == "processing"

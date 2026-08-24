@@ -185,7 +185,7 @@ def _pure_rotation_check(options: DoctorOptions) -> tuple[bool, str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Check the complete cadscene-workbench environment.")
     parser.add_argument("--application-root", default=str(root))
     parser.add_argument("--storage-root", default=str(root))

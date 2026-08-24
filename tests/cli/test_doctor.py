@@ -194,3 +194,13 @@ def test_doctor_help_does_not_validate_broken_default_resources(monkeypatch) -> 
         doctor.main(["--help"])
     except SystemExit as exc:
         assert exc.code == 0
+
+
+def test_doctor_default_application_root_contains_packaged_resources() -> None:
+    from cadscene.cli.doctor import build_parser
+
+    args = build_parser().parse_args([])
+
+    root = Path(args.application_root)
+    assert (root / "apps" / "project_library" / "index.html").is_file()
+    assert (root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml").is_file()
