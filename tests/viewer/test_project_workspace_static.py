@@ -19,6 +19,20 @@ def test_workspace_sidebar_has_exactly_the_four_approved_destinations() -> None:
     assert 'aria-label="收起侧栏"' in html
 
 
+def test_workspace_sidebar_opens_project_library_and_uses_line_icons() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'data-nav="files"' in html
+    assert 'querySelector(\'[data-nav="files"]\')' in script
+    assert 'window.location.assign("/apps/project_library/")' in script
+    assert 'd="M3.5 7.5h6l2-2h3l2 2h4' in html
+    assert 'id="sidebarToggle"' in html and '<svg viewBox="0 0 24 24"' in html
+    assert ".project-name-row:hover .project-rename-button" in css
+    assert ".project-name-row:focus-within .project-rename-button" in css
+
+
 def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")

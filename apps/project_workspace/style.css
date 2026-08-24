@@ -37,16 +37,18 @@ button { color: inherit; }
 .project-name-row { display: grid; grid-template-columns: minmax(0,1fr) 24px; align-items: center; gap: 5px; }
 .project-name-field { width: 100%; min-width: 0; padding: 0; border: 0; border-bottom: 1px solid transparent; color: var(--text); background: transparent; outline: none; font-weight: 700; overflow: hidden; text-overflow: ellipsis; cursor: default; }
 .project-name-field.is-editing { border-bottom-color: var(--blue); cursor: text; }
-.project-rename-button { width: 24px; height: 24px; padding: 0; border: 0; display: grid; place-items: center; color: var(--muted); background: transparent; cursor: pointer; }
+.project-rename-button { width: 24px; height: 24px; padding: 0; border: 0; display: grid; place-items: center; color: var(--muted); background: transparent; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .14s ease, color .14s ease; }
+.project-name-row:hover .project-rename-button, .project-name-row:focus-within .project-rename-button { opacity: 1; pointer-events: auto; }
 .project-rename-button:hover, .project-rename-button:focus-visible { color: var(--text); outline: none; }
 .project-rename-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar-toggle { min-height: 42px; padding: 0 12px; border-top: 1px solid var(--line); border-radius: 0; }
+.sidebar-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .2s ease; }
 .sidebar-label { display: inline-block; min-width: 0; max-width: 160px; opacity: 1; overflow: hidden; transition: max-width .3s cubic-bezier(.22,1,.36,1), opacity .18s ease, transform .3s cubic-bezier(.22,1,.36,1); }
 .app-shell.sidebar-collapsed .sidebar { padding-inline: 12px; }
 .app-shell.sidebar-collapsed .sidebar-label { opacity: 0; pointer-events: none; max-width: 0; transform: translateX(-6px); }
 .app-shell.sidebar-collapsed .brand { grid-template-columns: 34px 0fr; gap: 0; padding-inline: 7px; }
 .app-shell.sidebar-collapsed .nav-item, .app-shell.sidebar-collapsed .sidebar-toggle { grid-template-columns: 24px 0fr; gap: 0; padding-inline: 12px; }
-.app-shell.sidebar-collapsed .sidebar-toggle span:first-child { transform: rotate(180deg); }
+.app-shell.sidebar-collapsed .sidebar-toggle svg { transform: rotate(180deg); }
 .main-content { min-width: 0; padding: 0 24px 34px; }
 .topbar { min-height: 88px; margin: 0 -24px 20px; padding: 15px 24px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 24px; background: rgba(7,11,16,.72); backdrop-filter: blur(14px); position: sticky; top: 0; z-index: 5; }
 .eyebrow { color: #6f9fff; margin: 0 0 3px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }

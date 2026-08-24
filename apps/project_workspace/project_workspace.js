@@ -753,6 +753,9 @@
     event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
     event.currentTarget.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
   });
+  document.querySelector('[data-nav="files"]').addEventListener("click", () => {
+    window.location.assign("/apps/project_library/");
+  });
   $("#projectRenameButton").addEventListener("click", startProjectRename);
   $("#sidebarProjectName").addEventListener("blur", saveProjectRename);
   $("#sidebarProjectName").addEventListener("keydown", (event) => {
