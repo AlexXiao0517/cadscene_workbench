@@ -28,6 +28,7 @@ sfm = [
 ]
 video_analysis = [
   "imageio-ffmpeg>=0.4.9",
+  "opencv-python>=4.8",
 ]
 diagnostics = [
   "matplotlib>=3.7",
