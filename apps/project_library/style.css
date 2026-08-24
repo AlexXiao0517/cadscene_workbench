@@ -33,6 +33,14 @@
   --state-background: linear-gradient(145deg,rgba(18,27,36,.72),rgba(11,17,24,.72));
   --status-background: rgba(109,126,145,.16);
   --status-color: #c4d0dc;
+  --view-active-color: #ffffff;
+  --view-active-background: rgba(60,125,255,.14);
+  --status-completed-color: #8be1b3;
+  --status-completed-background: rgba(49,148,98,.18);
+  --status-processing-color: #92b8ff;
+  --status-processing-background: rgba(60,125,255,.14);
+  --status-failed-color: #ff9da4;
+  --status-failed-background: rgba(173,55,64,.2);
   --font-size-body: 14px;
   font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
 }
@@ -72,6 +80,14 @@
   --state-background: linear-gradient(145deg,rgba(255,255,255,.78),rgba(240,245,250,.78));
   --status-background: rgba(100,117,138,.12);
   --status-color: #52667c;
+  --view-active-color: #245fb8;
+  --view-active-background: #dbe8ff;
+  --status-completed-color: #16734f;
+  --status-completed-background: #d8efe5;
+  --status-processing-color: #245fb8;
+  --status-processing-background: #dbe8ff;
+  --status-failed-color: #b42332;
+  --status-failed-background: #fde1e4;
 }
 
 * { box-sizing: border-box; }
@@ -125,7 +141,7 @@ h2 { font-size: 17px; margin-bottom: 6px; }
 .icon-button svg, .view-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .view-switch { display: flex; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .view-switch .view-button { width: 34px; height: 32px; border: 0; background: transparent; }
-.view-switch .view-button.active { color: #fff; background: var(--blue-soft); }
+.view-switch .view-button.active { color: var(--view-active-color); background: var(--view-active-background); }
 .primary-button, .secondary-button { min-height: 40px; padding: 0 16px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; color: var(--text); text-decoration: none; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
 .primary-button { color: #fff; border: 1px solid #4381ff; background: linear-gradient(135deg,#4381ff,#2364e9); box-shadow: 0 8px 22px rgba(33,102,235,.2); }
 .secondary-button { border: 1px solid var(--control-border); background: var(--control-background); }
@@ -165,9 +181,9 @@ tbody tr:hover { background: var(--row-hover-background); }
 .asset-names small { color: var(--muted); }
 .completion { font-variant-numeric: tabular-nums; }
 .status-pill { display: inline-flex; align-items: center; min-height: 25px; padding: 0 8px; border-radius: 99px; background: var(--status-background); color: var(--status-color); font-size: 12px; }
-.status-pill.completed { color: #8be1b3; background: rgba(49,148,98,.18); }
-.status-pill.processing { color: #92b8ff; background: var(--blue-soft); }
-.status-pill.failed, .status-pill.unavailable { color: #ff9da4; background: rgba(173,55,64,.2); }
+.status-pill.completed { color: var(--status-completed-color); background: var(--status-completed-background); }
+.status-pill.processing { color: var(--status-processing-color); background: var(--status-processing-background); }
+.status-pill.failed, .status-pill.unavailable { color: var(--status-failed-color); background: var(--status-failed-background); }
 .state-panel { padding: 70px 20px; border: 1px dashed var(--control-border); border-radius: 11px; text-align: center; background: var(--state-background); }
 .state-panel h2 { margin: 17px 0 7px; }
 .state-panel p { margin: 0 0 22px; color: var(--muted); }

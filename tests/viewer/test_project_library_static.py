@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -9,6 +10,23 @@ LIBRARY = ROOT / "apps" / "project_library"
 
 def _read(name: str) -> str:
     return (LIBRARY / name).read_text(encoding="utf-8")
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(value: str) -> float:
+        channels = [int(value[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    lighter, darker = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _light_theme_variable(css: str, name: str) -> str:
+    block = css.split(':root[data-theme="light"] {', 1)[1].split("}", 1)[0]
+    match = re.search(rf"{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}});", block)
+    assert match, f"missing light theme variable {name}"
+    return match.group(1)
 
 
 def test_project_library_has_shared_sidebar_and_project_files_active() -> None:
@@ -110,6 +128,25 @@ def test_project_library_light_theme_covers_the_full_application_shell() -> None
         "background: var(--status-background); color: var(--status-color)",
     ):
         assert contract in css
+
+
+def test_project_library_light_theme_controls_and_statuses_have_readable_contrast() -> None:
+    css = _read("style.css")
+
+    contrast_contracts = (
+        ("--view-active-color", "--view-active-background", 3.0),
+        ("--status-completed-color", "--status-completed-background", 4.5),
+        ("--status-processing-color", "--status-processing-background", 4.5),
+        ("--status-failed-color", "--status-failed-background", 4.5),
+    )
+    for foreground_name, background_name, minimum in contrast_contracts:
+        foreground = _light_theme_variable(css, foreground_name)
+        background = _light_theme_variable(css, background_name)
+        assert _contrast_ratio(foreground, background) >= minimum
+
+    assert "color: var(--view-active-color); background: var(--view-active-background)" in css
+    assert "color: var(--status-completed-color); background: var(--status-completed-background)" in css
+    assert "color: var(--status-failed-color); background: var(--status-failed-background)" in css
 
 
 def test_project_library_has_safe_empty_error_and_retry_states() -> None:
