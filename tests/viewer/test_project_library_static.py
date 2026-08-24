@@ -49,6 +49,7 @@ def test_project_library_supports_fixed_card_and_detailed_list_views() -> None:
     assert "localStorage.setItem" in script
     assert "renderCards" in script
     assert "renderList" in script
+    assert "[hidden] { display: none !important; }" in css
 
 
 def test_project_library_matches_the_existing_workspace_visual_shell() -> None:

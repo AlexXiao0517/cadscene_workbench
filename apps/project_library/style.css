@@ -15,6 +15,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; min-width: 1120px; min-height: 100vh; color: var(--text); background: radial-gradient(circle at 80% -10%, #14243d 0, transparent 34%), var(--bg); font-size: var(--font-size-body); }
 button, input { font: inherit; }
 button { color: inherit; }
