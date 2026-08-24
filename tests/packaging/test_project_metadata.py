@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _project_metadata() -> dict[str, object]:
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
+
+
+def _dependency_name(requirement: str) -> str:
+    return re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0].strip().lower()
+
+
+def test_default_install_declares_supported_runtime_dependencies() -> None:
+    project = _project_metadata()
+
+    names = {
+        _dependency_name(str(requirement))
+        for requirement in project["dependencies"]  # type: ignore[index]
+    }
+
+    assert {
+        "numpy",
+        "scipy",
+        "pyyaml",
+        "pillow",
+        "opencv-python",
+        "ezdxf",
+        "imageio-ffmpeg",
+        "pycolmap",
+    } <= names
+
+
+def test_semantic_segmentation_is_not_an_install_extra() -> None:
+    project = _project_metadata()
+
+    assert "segmentation" not in project.get("optional-dependencies", {})
+
+
+def test_broken_stage3f_viewer_is_not_distributed_from_source() -> None:
+    assert not (ROOT / "apps" / "web_camera_viewer_broken_stage3f").exists()
