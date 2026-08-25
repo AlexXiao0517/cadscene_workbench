@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Protocol
 
 from .identifiers import validate_project_id
@@ -108,7 +109,7 @@ def _unlock_stream(stream) -> None:
 
 
 class ProjectRuntime:
-    """Owns recovery and the single-machine queue worker lifecycle."""
+    """Owns recovery and the single-machine resource-worker lifecycle."""
 
     def __init__(
         self,
@@ -132,11 +133,12 @@ class ProjectRuntime:
         self.poll_interval = poll_interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._threads: tuple[threading.Thread, ...] = ()
         self.last_worker_error: Exception | None = None
         self.media_spec_recovery_errors: dict[str, str] = {}
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._threads:
             return
         self.lease.acquire()
         try:
@@ -154,19 +156,39 @@ class ProjectRuntime:
                     # Legacy/incomplete projects remain readable; render preflight
                     # reports the unavailable media contract explicitly.
                     self.media_spec_recovery_errors[project_id] = str(exc)
-            self._thread = threading.Thread(
-                target=self._run_worker,
-                name="project-job-worker",
-                daemon=False,
+            capacities = getattr(self.service.queue, "capacities", {})
+            worker_count = max(
+                1,
+                sum(
+                    int(value)
+                    for value in capacities.values()
+                    if not isinstance(value, bool) and int(value) > 0
+                ),
             )
-            self._thread.start()
+            threads = tuple(
+                threading.Thread(
+                    target=self._run_worker,
+                    name=f"project-job-worker-{index + 1}",
+                    daemon=False,
+                )
+                for index in range(worker_count)
+            )
+            self._threads = threads
+            self._thread = threads[0]
+            for thread in threads:
+                thread.start()
         except BaseException:
+            self._stop.set()
+            for thread in self._threads:
+                thread.join(1)
+            self._threads = ()
+            self._thread = None
             self.lease.release()
             raise
 
     def close(self, *, timeout: float = 30.0) -> None:
-        thread = self._thread
-        if thread is None:
+        threads = self._threads
+        if not threads:
             if self.analysis is not None:
                 self.analysis.close(wait=True)
                 self.analysis = None
@@ -174,22 +196,27 @@ class ProjectRuntime:
             return
         self._stop.set()
         grace = min(0.25, max(0.0, timeout / 4.0))
-        thread.join(grace)
+        grace_deadline = time.monotonic() + grace
+        for thread in threads:
+            thread.join(max(0.0, grace_deadline - time.monotonic()))
         cancellation_errors: list[Exception] = []
-        if thread.is_alive():
+        if any(thread.is_alive() for thread in threads):
             for job_id in self.service.queue.execution_claimed_ids():
                 try:
                     job = self.service.queue.get(job_id)
                     self.service.cancel_job(job.project_id, job_id)
                 except Exception as exc:
                     cancellation_errors.append(exc)
-            thread.join(max(0.0, timeout - grace))
-        if thread.is_alive():
+            deadline = time.monotonic() + max(0.0, timeout - grace)
+            for thread in threads:
+                thread.join(max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
             details = (
                 "; ".join(str(error) for error in cancellation_errors)
                 or "claimed work did not terminate"
             )
-            raise RuntimeError(f"project job worker did not stop cleanly: {details}")
+            raise RuntimeError(f"project job workers did not stop cleanly: {details}")
+        self._threads = ()
         self._thread = None
         try:
             if self.analysis is not None:
