@@ -118,6 +118,54 @@ def test_runtime_worker_keeps_polling_until_orderly_shutdown(tmp_path: Path) -> 
     assert calls == stopped_calls
 
 
+def test_runtime_runs_multiple_resource_slots_without_serializing_all_jobs(
+    tmp_path: Path,
+) -> None:
+    repositories = project_repositories(tmp_path / "projects")
+    repositories.create_project("p1", updated_at="now")
+    queue = LocalResourceQueue()
+    service = ProjectService(
+        repositories,
+        queue,
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "later",
+    )
+    release = threading.Event()
+    two_workers_entered = threading.Event()
+    lock = threading.Lock()
+    active_calls = 0
+
+    class BlockingExecutor:
+        def run_next(self):
+            nonlocal active_calls
+            with lock:
+                active_calls += 1
+                if active_calls >= 2:
+                    two_workers_entered.set()
+            release.wait(1)
+            with lock:
+                active_calls -= 1
+            return None
+
+    runtime = ProjectRuntime(
+        projects_root=tmp_path / "projects",
+        repositories=repositories,
+        service=service,
+        executor=BlockingExecutor(),
+        analysis=None,
+        poll_interval=0.01,
+    )
+    runtime.start()
+    try:
+        assert two_workers_entered.wait(0.5), (
+            "independent queue resource slots were serialized by one runtime worker"
+        )
+    finally:
+        release.set()
+        runtime.close()
+
+
 def test_runtime_marks_alive_but_unverifiable_old_process_interrupted(
     tmp_path: Path,
 ) -> None:
