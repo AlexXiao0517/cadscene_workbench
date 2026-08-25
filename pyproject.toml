@@ -17,6 +17,7 @@ dependencies = [
   "ezdxf>=1.1",
   "imageio-ffmpeg>=0.4.9",
   "pycolmap>=0.6",
+  "psutil>=5.9",
 ]
 
 [project.scripts]
