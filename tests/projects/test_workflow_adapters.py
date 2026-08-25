@@ -262,12 +262,22 @@ def test_full_pose_adapter_preserves_interface_only_existing_contract(
 def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"mp4")
-    inputs = AdapterInputs("p1", "c1", video, None, tmp_path / "attempt-1")
+    frame_map = tmp_path / "clip_frame_map.json"
+    frame_map.write_text("{}", encoding="utf-8")
+    inputs = AdapterInputs(
+        "p1",
+        "c1",
+        video,
+        None,
+        tmp_path / "attempt-1",
+        frame_map_path=frame_map,
+    )
     adapter = default_workflow_adapters().for_workflow("pure_rotation")
 
     command = adapter.build_command(adapter.prepare_inputs(inputs))
 
     assert command[1:3] == ("-m", "cadscene.cli.run_pure_rotation")
+    assert command[command.index("--frame-map") + 1] == str(frame_map)
 
 
 def test_pure_rotation_adapter_version_invalidates_pre_pinned_calibration_jobs() -> None:

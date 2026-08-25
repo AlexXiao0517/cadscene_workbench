@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
+import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Sequence
+import threading
+import time
+from typing import Any, Callable, Sequence
 
 from .errors import PureRotationBackendFailed, PureRotationBackendUnavailable
 
@@ -19,6 +23,7 @@ REQUIRED_OUTPUTS = (
     "full_video_pairwise_rotations.csv",
     "pure_rotation_intervals.json",
 )
+_FRAME_PROGRESS = re.compile(r"evaluated through decoded frame\s+(\d+)")
 
 
 class ExternalOpenGVBackend:
@@ -119,6 +124,8 @@ class ExternalOpenGVBackend:
         cadscene_readonly: str | Path,
         output_dir: str | Path,
         timeout_seconds: float = 3600,
+        expected_frame_count: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         inspected = self.inspect_backend()
         video_path = Path(video)
@@ -135,15 +142,26 @@ class ExternalOpenGVBackend:
             "--output", str(temporary),
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=timeout_seconds, check=False)
-            (temporary / "backend_stdout.log").write_text(completed.stdout, encoding="utf-8")
-            (temporary / "backend_stderr.log").write_text(completed.stderr, encoding="utf-8")
-            if completed.returncode != 0:
-                stderr = completed.stderr.strip()
-                detail = stderr[-1000:] if stderr else ""
+            if expected_frame_count is not None and expected_frame_count <= 0:
+                raise PureRotationBackendFailed("expected frame count must be positive")
+            completed = self._run_streaming(
+                command,
+                timeout_seconds=timeout_seconds,
+                expected_frame_count=expected_frame_count,
+                progress_callback=progress_callback,
+            )
+            (temporary / "backend_stdout.log").write_text(
+                completed[1], encoding="utf-8"
+            )
+            (temporary / "backend_stderr.log").write_text(
+                completed[2], encoding="utf-8"
+            )
+            if completed[0] != 0:
+                diagnostic = completed[2].strip() or completed[1].strip()
+                detail = diagnostic[-1000:] if diagnostic else ""
                 suffix = f": {detail}" if detail else ""
                 raise PureRotationBackendFailed(
-                    f"external backend exited with {completed.returncode}{suffix}"
+                    f"external backend exited with {completed[0]}{suffix}"
                 )
             missing = [name for name in REQUIRED_OUTPUTS if not (temporary / name).is_file()]
             if missing:
@@ -156,3 +174,81 @@ class ExternalOpenGVBackend:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary, ignore_errors=True)
+
+    @staticmethod
+    def _run_streaming(
+        command: Sequence[str],
+        *,
+        timeout_seconds: float,
+        expected_frame_count: int | None,
+        progress_callback: Callable[[int, int], None] | None,
+    ) -> tuple[int, str, str]:
+        process = subprocess.Popen(
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        events: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        streams = {"stdout": process.stdout, "stderr": process.stderr}
+
+        def drain(name: str) -> None:
+            stream = streams[name]
+            if stream is None:
+                events.put((name, None))
+                return
+            try:
+                for line in stream:
+                    events.put((name, line))
+            finally:
+                stream.close()
+                events.put((name, None))
+
+        readers = tuple(
+            threading.Thread(
+                target=drain,
+                args=(name,),
+                name=f"pure-rotation-{name}-reader",
+                daemon=True,
+            )
+            for name in streams
+        )
+        for reader in readers:
+            reader.start()
+        output = {"stdout": [], "stderr": []}
+        open_streams = set(streams)
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            while open_streams:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(list(command), timeout_seconds)
+                try:
+                    name, line = events.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    open_streams.discard(name)
+                    continue
+                output[name].append(line)
+                if (
+                    name == "stdout"
+                    and expected_frame_count is not None
+                    and progress_callback is not None
+                    and (match := _FRAME_PROGRESS.search(line)) is not None
+                ):
+                    processed = min(int(match.group(1)) + 1, expected_frame_count)
+                    progress_callback(processed, expected_frame_count)
+            remaining = max(0.0, deadline - time.monotonic())
+            returncode = process.wait(timeout=remaining)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join(1)
+        return returncode, "".join(output["stdout"]), "".join(output["stderr"])
