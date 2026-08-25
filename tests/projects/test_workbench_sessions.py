@@ -1072,6 +1072,11 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
     _add_same_scene_adjacent_clips(api, repositories, tmp_path)
     _save_completed_sfm_route(api, repositories, runs_root)
+    before = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in before.body["clips"] if item["clip_id"] == "clip-2")
+    assert source["capabilities"]["can_bridge_up"] is True
+    assert source["capabilities"]["can_bridge_down"] is True
+    assert source["capabilities"]["bridge_down_target_clip_id"] == "clip-3"
 
     response = api.handle(
         "POST",
@@ -1094,6 +1099,11 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert dependency.job_type == "trajectory"
     assert dependency.clip_id == "clip-3"
     assert api.service._current_input_fingerprint(bridge) == bridge.input_fingerprint
+    queued = api.handle("GET", "/api/projects/project-1/snapshot")
+    target = next(item for item in queued.body["clips"] if item["clip_id"] == "clip-3")
+    assert target["scene_bridge"]["job_id"] == bridge.job_id
+    assert target["scene_bridge"]["source_clip_id"] == "clip-2"
+    assert target["scene_bridge"]["direction"] == "down"
 
 
 def test_repeated_current_scene_bridge_request_is_idempotent(tmp_path: Path) -> None:
@@ -1210,6 +1220,35 @@ def test_scene_bridge_success_publishes_immutable_route_refinement(
     )
     assert (published_root / "camera_track_seed.json").is_file()
     assert not (published_root / "core_alignment/04_quality").exists()
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-3/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    assert parse_qs(urlsplit(opened.body["workbench_url"]).query)[
+        "workflowStage"
+    ] == ["keyframes"]
+    target_run = runs_root / "project-1-clip-3/clip-3"
+    assert (
+        target_run / "01_keyframes/camera_track_manual.json"
+    ).read_bytes() == (published_root / "camera_track_seed.json").read_bytes()
+    assert (
+        target_run / "03_alignment/alignment.json"
+    ).read_bytes() == (
+        published_root / "core_alignment/03_alignment/alignment.json"
+    ).read_bytes()
+    assert (target_run / "05_viewer_scene/sfm_viewer_scene.json").is_file()
+    assert not (target_run / "04_quality").exists()
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    target_payload = next(
+        item for item in snapshot.body["clips"] if item["clip_id"] == "clip-3"
+    )
+    assert target_payload["scene_bridge"]["status"] == "success"
+    assert target_payload["workbench"]["bridge_revision"] == result.output_revision
 
 
 def test_scene_bridge_does_not_publish_when_source_route_changes(

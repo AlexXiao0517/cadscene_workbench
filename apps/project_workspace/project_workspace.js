@@ -107,18 +107,18 @@
     open.title = capabilities.can_open_workbench
       ? "进入片段工作台"
       : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪");
-    const locateUp = $(".locate-up", row);
-    locateUp.hidden = capabilities.can_locate_up !== true;
-    locateUp.disabled = capabilities.can_locate_up !== true;
-    locateUp.title = capabilities.can_locate_up
-      ? `将路线起点定位到 ${capabilities.locate_up_target_clip_id}`
-      : "没有可安全定位的同场景上一片段";
-    const locateDown = $(".locate-down", row);
-    locateDown.hidden = capabilities.can_locate_down !== true;
-    locateDown.disabled = capabilities.can_locate_down !== true;
-    locateDown.title = capabilities.can_locate_down
-      ? `将路线终点定位到 ${capabilities.locate_down_target_clip_id}`
-      : "没有可安全定位的同场景下一片段";
+    const bridgeUp = $(".bridge-up", row);
+    bridgeUp.hidden = capabilities.can_bridge_up !== true;
+    bridgeUp.disabled = capabilities.can_bridge_up !== true;
+    bridgeUp.title = capabilities.can_bridge_up
+      ? `用重叠帧打通 ${capabilities.bridge_up_target_clip_id} 的路线，完成后进入微调`
+      : "没有可安全打通的同场景上一片段";
+    const bridgeDown = $(".bridge-down", row);
+    bridgeDown.hidden = capabilities.can_bridge_down !== true;
+    bridgeDown.disabled = capabilities.can_bridge_down !== true;
+    bridgeDown.title = capabilities.can_bridge_down
+      ? `用重叠帧打通 ${capabilities.bridge_down_target_clip_id} 的路线，完成后进入微调`
+      : "没有可安全打通的同场景下一片段";
     $(".retry-job", row).disabled = !capabilities.can_retry;
     $(".cancel-job", row).disabled = !capabilities.can_cancel;
     $(".workflow-select", row).title = capabilities.reason || "";
@@ -170,8 +170,8 @@
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
-    $(".locate-up", row).addEventListener("click", () => locateAdjacent(clip, "up", row));
-    $(".locate-down", row).addEventListener("click", () => locateAdjacent(clip, "down", row));
+    $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
+    $(".bridge-down", row).addEventListener("click", () => bridgeAdjacent(clip, "down", row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
     $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
@@ -750,19 +750,15 @@
     }
   }
 
-  async function locateAdjacent(clip, direction, row) {
+  async function bridgeAdjacent(clip, direction, row) {
     const capability = clip.capabilities || {};
     const targetClipId = direction === "up"
-      ? capability.locate_up_target_clip_id
-      : capability.locate_down_target_clip_id;
+      ? capability.bridge_up_target_clip_id
+      : capability.bridge_down_target_clip_id;
     if (!targetClipId) return;
-    const returnParams = new URLSearchParams({
-      projectId,
-      focusClip: targetClipId,
-    });
     try {
       const { response, body } = await request(
-        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/locate-adjacent`,
+        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/scene-bridges`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -770,17 +766,13 @@
             expected_revision: state.snapshot.component_revisions.clips,
             expected_jobs_revision: state.snapshot.component_revisions.jobs,
             direction: direction,
-            return_to: `/apps/project_workspace/?${returnParams.toString()}`,
           }),
         },
       );
-      if (response.status === 202) {
-        state.snapshot.component_revisions.jobs = body.jobs_revision;
-        await waitForAdjacentPreparation(clip.clip_id, targetClipId, direction);
-        return;
-      }
+      if (response.status !== 202) throw new Error("场景路线打通任务未成功入队");
       state.snapshot.component_revisions.clips = body.clips_revision;
-      window.location.assign(body.workbench_url);
+      state.snapshot.component_revisions.jobs = body.jobs_revision;
+      await waitForSceneBridge(body.job_id, targetClipId);
     } catch (error) {
       $(".row-error", row).textContent = error.message;
       state.etag = null;
@@ -788,34 +780,35 @@
     }
   }
 
-  async function waitForAdjacentPreparation(sourceClipId, targetClipId, direction) {
+  async function waitForSceneBridge(jobId, targetClipId) {
     const dialog = $("#workbenchPreparationDialog");
     if (!dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;
       await pollSnapshot();
       const target = state.snapshot?.clips.find((item) => item.clip_id === targetClipId);
-      if (!target) throw new Error("目标片段已不存在，无法继续定位");
-      const preparation = target.workbench?.preparation;
-      const fraction = preparation?.progress?.fraction;
+      if (!target) throw new Error("目标片段已不存在，无法继续打通路线");
+      const bridge = target.scene_bridge;
+      if (bridge?.job_id !== jobId) {
+        dialog.close();
+        throw new Error("目标片段的场景路线任务已变化，请重新操作");
+      }
+      const fraction = bridge?.progress?.fraction;
       const percent = typeof fraction === "number"
         ? Math.max(0, Math.min(100, Math.round(fraction * 100)))
         : null;
-      $("#workbenchPreparationMessage").textContent = preparation?.stage
-        ? (STATUS_LABELS[preparation.stage] || preparation.stage)
-        : "正在准备相邻片段，完成后将自动应用定位…";
+      $("#workbenchPreparationMessage").textContent = bridge?.progress?.message
+        || (bridge?.stage ? (STATUS_LABELS[bridge.stage] || bridge.stage) : "正在使用共同 PTS 打通相邻片段路线…");
       $("#workbenchPreparationFill").style.width = percent == null ? "0%" : `${percent}%`;
       $("#workbenchPreparationPercent").textContent = percent == null ? "—" : `${percent}%`;
-      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(preparation?.status)) {
+      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(bridge?.status)) {
         dialog.close();
-        throw new Error(preparation?.error || "相邻片段准备失败，请重试");
+        throw new Error(bridge?.error || "相邻片段路线打通失败，请重试");
       }
-      if (target.capabilities?.can_open_workbench) {
+      if (bridge?.status === "success") {
         dialog.close();
-        const source = state.snapshot.clips.find((item) => item.clip_id === sourceClipId);
-        if (!source) throw new Error("源片段已不存在，无法继续定位");
-        const row = document.querySelector(`[data-clip-id="${CSS.escape(sourceClipId)}"]`);
-        await locateAdjacent(source, direction, row);
+        const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
+        await openWorkbench(target, targetRow);
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));

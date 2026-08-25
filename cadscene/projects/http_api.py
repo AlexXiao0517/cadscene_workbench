@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .json_repositories import ProjectRepositories
 from .identifiers import is_safe_stable_id, validate_project_id
-from .models import ClipDefinition, ProjectManifest
+from .models import ClipDefinition, ProjectManifest, StateReference
 from .repositories import RevisionConflict
 from .service import ProjectService, RenderPreflight, TrajectoryPreflight
 from .uploads import UploadValidationError, ValidatedUploadStore
@@ -758,6 +758,7 @@ class ProjectApi:
         job_by_clip: dict[str, Mapping[str, object]] = {}
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
         export_job_by_clip: dict[str, Mapping[str, object]] = {}
+        scene_bridge_job_by_clip: dict[str, Mapping[str, object]] = {}
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
             if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
@@ -766,6 +767,8 @@ class ProjectApi:
                 render_job_by_clip[clip_id] = job
             elif isinstance(clip_id, str) and job.get("job_type") == "clip_export":
                 export_job_by_clip[clip_id] = job
+            elif isinstance(clip_id, str) and job.get("job_type") == "scene_bridge":
+                scene_bridge_job_by_clip[clip_id] = job
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
         can_render_any = False
@@ -773,7 +776,8 @@ class ProjectApi:
             trajectory_job = job_by_clip.get(clip.clip_id)
             render_job = render_job_by_clip.get(clip.clip_id)
             export_job = export_job_by_clip.get(clip.clip_id)
-            job = render_job or trajectory_job
+            scene_bridge_job = scene_bridge_job_by_clip.get(clip.clip_id)
+            job = render_job or scene_bridge_job or trajectory_job
             if (
                 trajectory_job is not None
                 and trajectory_job.get("status") == "success"
@@ -816,6 +820,15 @@ class ProjectApi:
                 or capability["trajectory_needs_confirmation"]
             )
             can_render_any = can_render_any or bool(capability["can_render"])
+            bridge_context = _scene_bridge_job_context(
+                self.service, clip, scene_bridge_job
+            )
+            workbench_snapshot = (
+                {"state": "unavailable", "workbench_output_revision": None}
+                if self.workbench is None
+                else self.workbench.snapshot_for_clip(project_id, clip)
+            )
+            bridge_reference = _scene_bridge_reference(clip)
             clip_payloads.append(
                 {
                     "clip_id": clip.clip_id,
@@ -867,13 +880,28 @@ class ProjectApi:
                             clip.clip_id, render_job, render.clip_renders
                         ),
                     },
+                    "scene_bridge": {
+                        "job_id": None
+                        if scene_bridge_job is None
+                        else scene_bridge_job.get("job_id"),
+                        "status": "not_started"
+                        if scene_bridge_job is None
+                        else scene_bridge_job.get("status"),
+                        "stage": None
+                        if scene_bridge_job is None
+                        else scene_bridge_job.get("stage"),
+                        "progress": _visible_job_progress(scene_bridge_job),
+                        "error": None
+                        if scene_bridge_job is None
+                        else scene_bridge_job.get("error"),
+                        **bridge_context,
+                    },
                     "capabilities": capability,
                     "workbench": {
-                        **(
-                            {"state": "unavailable", "workbench_output_revision": None}
-                            if self.workbench is None
-                            else self.workbench.snapshot_for_clip(project_id, clip)
-                        ),
+                        **workbench_snapshot,
+                        "bridge_revision": None
+                        if bridge_reference is None
+                        else bridge_reference.value.get("bridge_revision"),
                         "preparation": (
                             None
                             if export_job is None
@@ -1016,6 +1044,14 @@ class ProjectApi:
                 project_id, clip.clip_id
             )
         )
+        bridge = {
+            "can_bridge_up": bool(location.get("can_locate_up")),
+            "can_bridge_down": bool(location.get("can_locate_down")),
+            "bridge_up_target_clip_id": location.get("locate_up_target_clip_id"),
+            "bridge_down_target_clip_id": location.get(
+                "locate_down_target_clip_id"
+            ),
+        }
         return {
             "can_start_trajectory": can_start,
             "trajectory_needs_confirmation": needs_confirmation,
@@ -1040,6 +1076,7 @@ class ProjectApi:
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
             "can_cancel": status in {"queued", "preparing", "running", "validating"},
             **location,
+            **bridge,
         }
 
     def _locate_adjacent_clip(
@@ -1653,6 +1690,63 @@ def _render_preview_url(
         f"/api/projects/{project_id}/clips/{clip_id}/renders/"
         f"{output_revision}/video"
     )
+
+
+def _scene_bridge_reference(clip: ClipDefinition) -> StateReference | None:
+    return next(
+        (
+            reference
+            for reference in reversed(clip.references)
+            if reference.owner == "clips"
+            and reference.key == f"scene_bridge:{clip.clip_id}"
+        ),
+        None,
+    )
+
+
+def _scene_bridge_job_context(
+    service: ProjectService,
+    clip: ClipDefinition,
+    job: Mapping[str, object] | None,
+) -> dict[str, object]:
+    reference = _scene_bridge_reference(clip)
+    if reference is not None:
+        return {
+            "source_clip_id": reference.value.get("source_clip_id"),
+            "target_clip_id": clip.clip_id,
+            "direction": reference.value.get("direction"),
+            "bridge_revision": reference.value.get("bridge_revision"),
+        }
+    if not isinstance(job, Mapping):
+        return {
+            "source_clip_id": None,
+            "target_clip_id": clip.clip_id,
+            "direction": None,
+            "bridge_revision": None,
+        }
+    operation_id = job.get("operation_id")
+    project_id = job.get("project_id")
+    if not isinstance(operation_id, str) or not isinstance(project_id, str):
+        return {}
+    path = (
+        service.projects_root
+        / project_id
+        / "scene_bridge_requests"
+        / f"{operation_id}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        identity = payload.get("runner_identity")
+    except (OSError, json.JSONDecodeError):
+        identity = None
+    if not isinstance(identity, Mapping):
+        return {}
+    return {
+        "source_clip_id": identity.get("source_clip_id"),
+        "target_clip_id": identity.get("target_clip_id"),
+        "direction": identity.get("direction"),
+        "bridge_revision": None,
+    }
 
 
 def _render_preview_is_current(

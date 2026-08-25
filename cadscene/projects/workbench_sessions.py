@@ -20,6 +20,7 @@ from .json_repositories import ProjectRepositories
 from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
+from .scene_bridge_runner import validate_scene_bridge_candidate
 from .service import ProjectService
 from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
@@ -1004,7 +1005,10 @@ class ProjectWorkbenchService:
                         resume_baseline, clip, context.trajectory_job_id
                     )
             if resume_baseline is None:
-                self._restore_workbench_seed_to_run(project_id, clip)
+                if self._scene_bridge_reference(clip) is not None:
+                    self._restore_scene_bridge_to_run(project_id, clip)
+                else:
+                    self._restore_workbench_seed_to_run(project_id, clip)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -1568,6 +1572,19 @@ class ProjectWorkbenchService:
         )
 
     @staticmethod
+    def _scene_bridge_reference(clip: ClipDefinition) -> StateReference | None:
+        return next(
+            (
+                item
+                for item in reversed(clip.references)
+                if item.owner == "clips"
+                and item.key == f"scene_bridge:{clip.clip_id}"
+                and item.value.get("status") == "awaiting_route_refinement"
+            ),
+            None,
+        )
+
+    @staticmethod
     def _require_session_reference(
         session: WorkbenchSession,
         reference: StateReference | None,
@@ -1923,6 +1940,72 @@ class ProjectWorkbenchService:
             / "01_keyframes/camera_track_manual.json"
         )
         _atomic_write_bytes(destination, track_bytes)
+
+    def _restore_scene_bridge_to_run(
+        self, project_id: str, clip: ClipDefinition
+    ) -> None:
+        reference = self._scene_bridge_reference(clip)
+        if reference is None:
+            return
+        revision = reference.value.get("bridge_revision")
+        if not isinstance(revision, str) or not revision.startswith("bridge-"):
+            raise InvalidWorkbenchOutput("场景路线桥接 revision 无效")
+        root = (
+            self.projects_root
+            / project_id
+            / "scene_bridges"
+            / clip.clip_id
+            / revision
+        )
+        manifest_path = root / "scene_bridge_manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InvalidWorkbenchOutput("场景路线桥接结果不可读") from exc
+        identity = manifest.get("identity") if isinstance(manifest, Mapping) else None
+        if not isinstance(identity, Mapping):
+            raise InvalidWorkbenchOutput("场景路线桥接身份缺失")
+        validated = validate_scene_bridge_candidate(root, identity)
+        if (
+            validated.status != "success"
+            or validated.output_revision != revision
+            or validated.output_fingerprint
+            != reference.value.get("output_fingerprint")
+            or identity.get("project_id") != project_id
+            or identity.get("target_clip_id") != clip.clip_id
+            or identity.get("source_clip_id")
+            != reference.value.get("source_clip_id")
+            or identity.get("direction") != reference.value.get("direction")
+        ):
+            raise InvalidWorkbenchOutput("场景路线桥接结果校验失败")
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        run = self.viewer_runs_root / dataset / clip.clip_id
+        _atomic_write_bytes(
+            run / "01_keyframes/camera_track_manual.json",
+            (root / "camera_track_seed.json").read_bytes(),
+        )
+        for stage in ("03_alignment", "05_viewer_scene"):
+            source = root / "core_alignment" / stage
+            destination = run / stage
+            temporary = run / f".{stage}.{uuid4().hex}.tmp"
+            stale = run / f".{stage}.{uuid4().hex}.stale"
+            shutil.copytree(source, temporary)
+            moved_old = False
+            try:
+                if destination.exists():
+                    os.replace(destination, stale)
+                    moved_old = True
+                os.replace(temporary, destination)
+                _fsync_directory(run)
+            except Exception:
+                if moved_old and stale.exists() and not destination.exists():
+                    os.replace(stale, destination)
+                raise
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+                if stale.exists():
+                    shutil.rmtree(stale)
 
     def _validated_workbench_seed(
         self,
