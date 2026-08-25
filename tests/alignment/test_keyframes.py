@@ -21,7 +21,13 @@ def test_confirmed_keyframes_skip_algorithm_prediction_and_sort():
 
 
 def test_confirmed_keyframes_accept_current_explicit_manual_sources():
-    sources = ["manual", "confirmed", "manual_anchor", "manual_corrected"]
+    sources = [
+        "manual",
+        "confirmed",
+        "manual_anchor",
+        "manual_corrected",
+        "scene_overlap_anchor",
+    ]
     track = {
         "keyframes": [
             {"frame": frame, "source": source, "camera": {"x": frame}}

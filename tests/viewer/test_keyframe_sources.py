@@ -26,6 +26,7 @@ def test_only_explicit_manual_sources_are_confirmed() -> None:
         "manual_anchor",
         "manual_corrected",
         "scene_boundary_anchor",
+        "scene_overlap_anchor",
     ):
         assert _is_confirmed({"frame": 10, "source": source, "camera": {"x": 1}})
 
