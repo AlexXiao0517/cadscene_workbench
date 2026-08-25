@@ -2736,12 +2736,32 @@ class ProjectService:
         frame_map_path.relative_to(attempt)
         if not video.is_file() or not frame_map_path.is_file():
             raise ValueError("render adapter outputs are missing")
-        return self._validate_render_files(
+        validated = self._validate_render_files(
             job,
             output_revision=result.output_revision,
             video_path=video,
             frame_map_path=frame_map_path,
         )
+        publication_identity = {
+            "schema_version": 1,
+            "project_id": job.project_id,
+            "clip_id": job.clip_id,
+            "job_id": job.job_id,
+            "input_revision": job.input_revision,
+            "input_fingerprint": job.input_fingerprint,
+            "adapter_name": job.adapter_name,
+            "adapter_version": job.adapter_version,
+            "adapter_output_revision": result.output_revision,
+            "validated_output_fingerprint": validated.output_fingerprint,
+        }
+        fingerprint = sha256(
+            json.dumps(
+                publication_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return replace(validated, output_revision=f"render-{fingerprint[:16]}")
 
     def _validate_render_files(
         self,
