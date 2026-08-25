@@ -778,7 +778,15 @@ class ProjectApi:
                     ),
                     job,
                 )
-            display_progress = _visible_job_progress(display_job)
+            display_progress = (
+                _pure_rotation_trajectory_progress(trajectory_job, display_job)
+                if (
+                    job is trajectory_job
+                    and isinstance(trajectory_job, Mapping)
+                    and trajectory_job.get("adapter_name") == "pure_rotation"
+                )
+                else _visible_job_progress(display_job)
+            )
             capability = self._clip_capability(
                 project_id,
                 clip,
@@ -1395,6 +1403,39 @@ def _visible_job_progress(
     ):
         progress["fraction"] = min(float(fraction), 0.99)
     return progress
+
+
+def _pure_rotation_trajectory_progress(
+    trajectory_job: Mapping[str, object],
+    display_job: Mapping[str, object] | None,
+) -> dict[str, object]:
+    visible = _visible_job_progress(display_job)
+    if visible is None:
+        visible = {
+            "stage": (
+                "queued" if display_job is None else display_job.get("stage", "queued")
+            ),
+            "message": (
+                "等待片段准备"
+                if display_job is None
+                else display_job.get("stage", "正在准备片段")
+            ),
+        }
+    trajectory_id = str(trajectory_job.get("job_id") or "")
+    display_id = "" if display_job is None else str(display_job.get("job_id") or "")
+    raw_fraction = visible.get("fraction")
+    measured = (
+        float(raw_fraction)
+        if isinstance(raw_fraction, (int, float)) and not isinstance(raw_fraction, bool)
+        else 0.0
+    )
+    if display_id != trajectory_id:
+        overall = 0.15 * min(1.0, max(0.0, measured))
+    elif trajectory_job.get("status") == "success":
+        overall = 1.0
+    else:
+        overall = min(0.99, 0.15 + 0.85 * min(1.0, max(0.0, measured)))
+    return {**visible, "fraction": overall}
 
 
 def _clip_seconds(clip: ClipDefinition) -> tuple[float, float]:

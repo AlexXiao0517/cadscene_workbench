@@ -113,6 +113,40 @@ def test_run_uses_argument_array_unicode_paths_and_captures_logs(tmp_path: Path)
     assert (output / "backend_stdout.log").read_text(encoding="utf-8").strip() == "backend-ok"
 
 
+def test_run_streams_actual_decoded_frame_progress(tmp_path: Path) -> None:
+    backend_root = _backend_root(tmp_path)
+    runner = backend_root / "progress_runner.py"
+    runner.write_text(
+        "import json, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1]); out.mkdir(parents=True, exist_ok=True)\n"
+        "print('evaluated through decoded frame 99', flush=True)\n"
+        "print('evaluated through decoded frame 199', flush=True)\n"
+        "(out / 'summary.json').write_text(json.dumps({'ok': True}), encoding='utf-8')\n"
+        "(out / 'full_video_rotation_trajectory.json').write_text(json.dumps({'poses': []}), encoding='utf-8')\n"
+        "(out / 'full_video_pairwise_rotations.csv').write_text('success\\n', encoding='utf-8')\n"
+        "(out / 'pure_rotation_intervals.json').write_text('{}', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    updates: list[tuple[int, int]] = []
+    backend = ExternalOpenGVBackend(
+        backend_root=backend_root,
+        backend_command=[sys.executable, str(runner)],
+    )
+
+    backend.run_video(
+        video=video,
+        cadscene_readonly=tmp_path,
+        output_dir=tmp_path / "output",
+        timeout_seconds=10,
+        expected_frame_count=250,
+        progress_callback=lambda processed, total: updates.append((processed, total)),
+    )
+
+    assert updates == [(100, 250), (200, 250)]
+
+
 def test_run_failure_reports_backend_stderr_tail(tmp_path: Path) -> None:
     backend_root = _backend_root(tmp_path)
     runner = backend_root / "failing_runner.py"

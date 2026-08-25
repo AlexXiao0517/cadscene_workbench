@@ -45,9 +45,25 @@ def test_run_pure_rotation_reports_determinate_progress_until_validation(
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"video")
     progress_file = tmp_path / "adapter_progress.json"
+    frame_map = tmp_path / "clip_frame_map.json"
+    frame_map.write_text(
+        json.dumps({"frames": [{"source_pts": index} for index in range(200)]}),
+        encoding="utf-8",
+    )
     reported: list[tuple[str, float]] = []
 
-    def fake_run_video(self, *, video, cadscene_readonly, output_dir, **_kwargs):
+    def fake_run_video(
+        self,
+        *,
+        video,
+        cadscene_readonly,
+        output_dir,
+        expected_frame_count,
+        progress_callback,
+        **_kwargs,
+    ):
+        assert expected_frame_count == 200
+        progress_callback(100, expected_frame_count)
         output_dir.mkdir(parents=True)
         (output_dir / "full_video_rotation_trajectory.json").write_text(
             json.dumps({"poses": []}), encoding="utf-8"
@@ -90,12 +106,15 @@ def test_run_pure_rotation_reports_determinate_progress_until_validation(
             str(video),
             "--progress-file",
             str(progress_file),
+            "--frame-map",
+            str(frame_map),
         ],
     )
 
     assert run_pure_rotation.main() == 0
     assert reported == [
         ("pure_rotation", 0.05),
+        ("pure_rotation_frames", 0.465),
         ("converting", 0.90),
         ("publishing", 0.96),
         ("ready_for_validation", 0.98),

@@ -213,6 +213,8 @@ class ExistingWorkflowAdapter:
                     str(inputs.attempt_directory / "pure_rotation_calibration"),
                 ]
             )
+        if inputs.frame_map_path is not None:
+            command.extend(["--frame-map", str(inputs.frame_map_path)])
         return tuple(command)
 
     def _pure_rotation_calibration_command(

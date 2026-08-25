@@ -1304,9 +1304,10 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["job_id"] == trajectory["job_id"]
     assert payload["status"] == "running"
     assert payload["stage"] == "running"
+    assert payload["progress"]["fraction"] == 0.0
 
 
-def test_snapshot_uses_indeterminate_progress_until_parent_reports_measurement(
+def test_snapshot_combines_export_and_pure_rotation_into_monotonic_progress(
     tmp_path: Path,
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(
@@ -1372,7 +1373,7 @@ def test_snapshot_uses_indeterminate_progress_until_parent_reports_measurement(
 
     assert payload["status"] == "validating"
     assert payload["progress"]["stage"] == "validating"
-    assert payload["progress"]["fraction"] == 0.99
+    assert payload["progress"]["fraction"] == pytest.approx(0.1485)
 
     manifest = repositories.jobs.load("project-1")
     trajectory = next(
@@ -1417,7 +1418,33 @@ def test_snapshot_uses_indeterminate_progress_until_parent_reports_measurement(
     assert payload["status"] == "running"
     assert payload["progress"]["stage"] == "running"
     assert payload["progress"]["message"] == "trajectory adapter is running"
-    assert "fraction" not in payload["progress"]
+    assert payload["progress"]["fraction"] == 0.15
+
+    manifest = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "progress": {
+                        "stage": "pure_rotation_frames",
+                        "message": "正在反算 100 / 200 帧",
+                        "fraction": 0.465,
+                    },
+                }
+                if item["job_id"] == trajectory["job_id"]
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    payload = snapshot.body["clips"][0]
+
+    assert payload["progress"]["fraction"] == pytest.approx(0.54525)
 
 
 def test_snapshot_exposes_user_facing_candidate_analysis_clip_preview(

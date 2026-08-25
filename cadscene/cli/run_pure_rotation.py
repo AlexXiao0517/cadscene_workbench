@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--backend-command-json")
     parser.add_argument("--cadscene-readonly", type=Path)
     parser.add_argument("--progress-file", type=Path)
+    parser.add_argument("--frame-map", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     output = args.output_root / args.dataset / args.run_id / "02_pure_rotation"
@@ -71,12 +72,28 @@ def main() -> int:
         if args.progress_file is not None:
             _write_progress(args.progress_file, stage, message, fraction)
 
+    expected_frame_count = (
+        None if args.frame_map is None else _frame_count(args.frame_map)
+    )
+
+    def report_frames(processed: int, total: int) -> None:
+        fraction = round(0.05 + 0.83 * min(1.0, processed / total), 6)
+        report(
+            "pure_rotation_frames",
+            f"正在反算 {processed} / {total} 帧",
+            fraction,
+        )
+
     try:
         report("pure_rotation", "正在运行纯旋转轨迹反算", 0.05)
         result = backend.run_video(
             video=args.video,
             cadscene_readonly=args.cadscene_readonly or args.output_root.parents[0],
             output_dir=staged_output,
+            expected_frame_count=expected_frame_count,
+            progress_callback=(
+                report_frames if expected_frame_count is not None else None
+            ),
         )
         report("converting", "轨迹和预览已生成，正在转换工作台轨迹", 0.90)
         trajectory = json.loads(
@@ -112,6 +129,18 @@ def main() -> int:
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
     return 0
+
+
+def _frame_count(path: Path) -> int:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    frames = payload.get("frames") if isinstance(payload, dict) else None
+    if not isinstance(frames, list) and isinstance(payload, dict):
+        clips = payload.get("clips")
+        if isinstance(clips, list) and len(clips) == 1 and isinstance(clips[0], dict):
+            frames = clips[0].get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("authoritative clip frame map contains no frames")
+    return len(frames)
 
 
 def _write_progress(
