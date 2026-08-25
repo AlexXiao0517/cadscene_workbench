@@ -14,23 +14,37 @@ $statePath = Join-Path $PSScriptRoot "service-state.json"
 $relocatedMarker = Join-Path $runtime ".cadscene-relocated"
 
 function Test-ManagedService([object]$state) {
-    if ($null -eq $state -or $null -eq $state.pid) {
+    if ($null -eq $state -or $null -eq $state.pid -or $null -eq $state.process_start_time) {
         return $false
     }
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$state.pid)" -ErrorAction SilentlyContinue
+    $process = Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
     if ($null -eq $process) {
         return $false
     }
     $expectedPython = [IO.Path]::GetFullPath($python)
-    $actualPython = if ($process.ExecutablePath) { [IO.Path]::GetFullPath($process.ExecutablePath) } else { "" }
-    $command = [string]$process.CommandLine
-    return (
+    $actualPython = if ($process.Path) { [IO.Path]::GetFullPath($process.Path) } else { "" }
+    $expectedStart = [DateTime]::Parse([string]$state.process_start_time).ToUniversalTime()
+    $actualStart = $process.StartTime.ToUniversalTime()
+    if (
         $actualPython -ieq $expectedPython -and
-        $command.Contains("cadscene.cli.main") -and
-        $command.Contains("serve") -and
-        $command.Contains("--storage-root") -and
-        $command.Contains($workspace)
-    )
+        [Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -le 1 -and
+        [IO.Path]::GetFullPath([string]$state.storage_root) -ieq [IO.Path]::GetFullPath($workspace)
+    ) {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$state.pid)" -ErrorAction SilentlyContinue
+        if ($null -ne $cim) {
+            $command = [string]$cim.CommandLine
+            return (
+                $cim.ExecutablePath -and
+                [IO.Path]::GetFullPath($cim.ExecutablePath) -ieq $expectedPython -and
+                $command.Contains("cadscene.cli.main") -and
+                $command.Contains("serve") -and
+                $command.Contains("--storage-root") -and
+                $command.Contains($workspace)
+            )
+        }
+        return $true
+    }
+    return $false
 }
 
 function Get-FreePort([int]$startPort) {
@@ -77,6 +91,9 @@ try {
     }
 
     $env:PATH = "$runtime;$runtime\Scripts;$runtime\Library\bin;$env:PATH"
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    Set-Location -LiteralPath $bundleRoot
     if (-not (Test-Path -LiteralPath $relocatedMarker -PathType Leaf)) {
         $unpacker = Join-Path $runtime "Scripts\conda-unpack.exe"
         if (-not (Test-Path -LiteralPath $unpacker -PathType Leaf)) {
@@ -151,6 +168,7 @@ try {
         port = $port
         python = [IO.Path]::GetFullPath($python)
         storage_root = [IO.Path]::GetFullPath($workspace)
+        process_start_time = $process.StartTime.ToUniversalTime().ToString("o")
         started_at = [DateTime]::UtcNow.ToString("o")
     } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 

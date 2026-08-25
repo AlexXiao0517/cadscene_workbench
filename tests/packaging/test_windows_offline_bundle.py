@@ -143,15 +143,34 @@ def test_start_launcher_uses_only_bundle_local_runtime_and_storage() -> None:
     assert "service-state.json" in source
 
 
+def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert '$env:PYTHONUTF8 = "1"' in source
+    assert '$env:PYTHONIOENCODING = "utf-8"' in source
+    assert "Set-Location -LiteralPath $bundleRoot" in source
+    assert source.index("Set-Location -LiteralPath $bundleRoot") < source.index("$doctorArguments")
+
+
 def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
 
     assert "Get-CimInstance" in source
+    assert "Get-Process" in source
     assert "ExecutablePath" in source
+    assert "process_start_time" in source
     assert "cadscene.cli.main" in source
     assert "--storage-root" in source
     assert "Stop-Process" in source
     assert source.index("ExecutablePath") < source.index("Stop-Process")
+
+
+def test_start_launcher_persists_process_start_time_for_pid_reuse_protection() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert "Get-Process" in source
+    assert "process_start_time" in source
+    assert "ToUniversalTime().ToString(\"o\")" in source
 
 
 @pytest.mark.parametrize("script_name", ("start.ps1", "stop.ps1"))
@@ -203,8 +222,9 @@ def test_prepare_runtime_commands_clone_install_check_and_pack(tmp_path: Path) -
     assert commands[1][1:4] == ("-m", "pip", "install")
     assert commands[2][1:] == ("-m", "pip", "check")
     assert commands[3][1:3] == ("-c", "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap")
-    assert commands[4][0].endswith("conda-pack.exe")
-    assert "--force" in commands[4]
+    assert commands[4][1:] == ("-m", "pip", "install", "conda-pack==0.9.2")
+    assert commands[5][0].endswith("build env\\Scripts\\conda-pack.exe")
+    assert "--force" in commands[5]
 
 
 def _write_fake_runtime_archive(path: Path) -> None:

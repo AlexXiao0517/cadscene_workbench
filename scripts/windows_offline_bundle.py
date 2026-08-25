@@ -134,6 +134,9 @@ def prepare_runtime_commands(
 ) -> tuple[tuple[str, ...], ...]:
     """生成构建专用环境所需的可审计命令序列。"""
 
+    # 主环境的 conda-pack 可能被其他 setuptools/backports 安装破坏；
+    # 参数继续保留以兼容旧调用，但实际打包器固定安装在一次性构建环境中。
+    _ = conda_pack
     python = build_prefix / "python.exe"
     return (
         (
@@ -153,7 +156,14 @@ def prepare_runtime_commands(
             "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap",
         ),
         (
-            str(conda_pack),
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "conda-pack==0.9.2",
+        ),
+        (
+            str(build_prefix / "Scripts" / "conda-pack.exe"),
             "--prefix",
             str(build_prefix),
             "--output",
