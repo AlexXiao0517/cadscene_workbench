@@ -26,6 +26,10 @@ from cadscene.projects.models import ClipDefinition, register_analysis_revision
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.service import ProjectService
 from cadscene.projects.service import _validate_clip_export_outputs
+from cadscene.projects.scene_bridge_runner import (
+    SceneBridgeInputs,
+    validate_scene_bridge_candidate,
+)
 from cadscene.projects.uploads import ValidatedUploadStore
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 from cadscene.workflow.data_import import slugify_dataset_name
@@ -820,13 +824,27 @@ def _add_same_scene_adjacent_clips(
         frame_map.write_text(
             json.dumps(
                 {
-                    "frames": [
+                    "schema_version": 1,
+                    "interval_semantics": "half_open",
+                    "source_time_base": {"numerator": 1, "denominator": 1000},
+                    "clips": [
                         {
-                            "output_frame_ordinal": ordinal,
-                            "source_decoded_frame_ordinal": ordinal,
-                            "source_pts": (index - 1) * 100 + ordinal * 25,
+                            "clip_id": f"clip-{index}",
+                            "source_start_pts": (index - 1) * 100,
+                            "source_end_pts_exclusive": index * 100,
+                            "frames": [
+                                {
+                                    "output_frame_ordinal": ordinal,
+                                    "source_decoded_frame_ordinal": (
+                                        (index - 1) * 4 + ordinal
+                                    ),
+                                    "source_pts": (
+                                        (index - 1) * 100 + ordinal * 25
+                                    ),
+                                }
+                                for ordinal in range(4)
+                            ],
                         }
-                        for ordinal in range(4)
                     ]
                 }
             ),
@@ -879,8 +897,19 @@ def _add_same_scene_adjacent_clips(
         )
         trajectory.parent.mkdir(parents=True, exist_ok=True)
         trajectory.write_text(
-            json.dumps({"poses": [{"frame_index": 0}]}), encoding="utf-8"
+            json.dumps(
+                {
+                    "fps": 40.0,
+                    "poses": [
+                        {"frame_index": frame, "registered": True}
+                        for frame in (0, 3)
+                    ],
+                }
+            ),
+            encoding="utf-8",
         )
+        sparse = trajectory.with_name("sparse_points.ply")
+        sparse.write_bytes(b"ply")
         jobs.append(
             replace(
                 job,
@@ -899,6 +928,345 @@ def _add_same_scene_adjacent_clips(
         expected_revision=manifest.revision,
         mutate=lambda value: replace(value, jobs=tuple(jobs)),
     )
+    api.service.queue.merge_restored(
+        jobs,
+        project_id="project-1",
+        queue_order=[str(item["job_id"]) for item in jobs],
+    )
+
+
+def _save_completed_sfm_route(
+    api: ProjectApi,
+    repositories,
+    runs_root: Path,
+    *,
+    clip_id: str = "clip-2",
+) -> dict[str, object]:
+    opened = api.handle(
+        "POST",
+        f"/api/projects/project-1/clips/{clip_id}/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    track = {
+        "version": 1,
+        "fps": 25.0,
+        "keyframes": [
+            {
+                "frame": frame,
+                "time": frame / 25.0,
+                "source": "manual_anchor",
+                "camera": {
+                    "x": float(frame),
+                    "y": 2.0,
+                    "z": 3.0,
+                    "yaw": 4.0,
+                    "pitch": -20.0,
+                    "roll": 0.0,
+                    "fov": 70.0,
+                },
+            }
+            for frame in (0, 3)
+        ],
+    }
+    manual = (
+        runs_root
+        / f"project-1-{clip_id}"
+        / clip_id
+        / "01_keyframes/camera_track_manual.json"
+    )
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(json.dumps(track), encoding="utf-8")
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+    return dict(saved.body)
+
+
+def _scene_bridge_result(api: ProjectApi, bridge) -> object:
+    request_path = (
+        api.service.projects_root
+        / bridge.project_id
+        / "scene_bridge_requests"
+        / f"{bridge.operation_id}.json"
+    )
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    identity = request["runner_identity"]
+    root = Path(bridge.attempts[-1].directory) / "candidate"
+    artifacts = {
+        "camera_track": "camera_track_seed.json",
+        "alignment": "core_alignment/03_alignment/alignment.json",
+        "camera_path": "core_alignment/03_alignment/sfm_camera_path.csv",
+        "viewer_scene": "core_alignment/05_viewer_scene/sfm_viewer_scene.json",
+    }
+    for name, relative in artifacts.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if name == "camera_track":
+            path.write_text(
+                json.dumps(
+                    {
+                        "keyframes": [
+                            {"frame": frame, "source": "scene_overlap_anchor"}
+                            for frame in (0, 3)
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            path.write_text(f"{name}\n", encoding="utf-8")
+    artifact_identity = {
+        name: {
+            "path": relative,
+            "sha256": sha256((root / relative).read_bytes()).hexdigest(),
+            "size_bytes": (root / relative).stat().st_size,
+        }
+        for name, relative in artifacts.items()
+    }
+    proof = {
+        "identity": identity,
+        "solve_interval": {
+            "source_start_pts": 96,
+            "source_end_pts_exclusive": 204,
+            "core_start_pts": 100,
+            "core_end_pts_exclusive": 200,
+            "time_base": {"numerator": 1, "denominator": 25},
+        },
+        "anchor_source_pts": [96, 100],
+        "artifacts": artifact_identity,
+    }
+    fingerprint = sha256(
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    revision = f"bridge-{fingerprint[:16]}"
+    (root / "scene_bridge_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "awaiting_route_refinement",
+                **proof,
+                "output_revision": revision,
+                "output_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = validate_scene_bridge_candidate(root, identity)
+    assert result.status == "success"
+    return result
+
+
+def test_scene_bridge_request_queues_current_target_trajectory_dependency(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+
+    assert response.status == 202
+    assert response.body["state"] == "scene_bridge_queued"
+    assert response.body["target_clip_id"] == "clip-3"
+    bridge = api.service.queue.get(str(response.body["job_id"]))
+    assert bridge.job_type == "scene_bridge"
+    assert bridge.adapter_name == "scene_bridge"
+    assert len(bridge.depends_on_job_ids) == 1
+    dependency = api.service.queue.get(bridge.depends_on_job_ids[0])
+    assert dependency.job_type == "trajectory"
+    assert dependency.clip_id == "clip-3"
+    assert api.service._current_input_fingerprint(bridge) == bridge.input_fingerprint
+
+
+def test_repeated_current_scene_bridge_request_is_idempotent(tmp_path: Path) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+
+    def enqueue():
+        return api.handle(
+            "POST",
+            "/api/projects/project-1/clips/clip-2/scene-bridges",
+            json_body={
+                "direction": "down",
+                "expected_revision": repositories.clips.load("project-1").revision,
+                "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            },
+        )
+
+    first = enqueue()
+    second = enqueue()
+
+    assert first.status == second.status == 202
+    assert second.body["job_id"] == first.body["job_id"]
+    requests = list(
+        (
+            api.service.projects_root
+            / "project-1"
+            / "scene_bridge_requests"
+        ).glob("*.json")
+    )
+    assert len(requests) == 1
+
+
+def test_scene_bridge_execution_plan_binds_saved_route_and_current_core_inputs(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    saved = _save_completed_sfm_route(api, repositories, runs_root)
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    bridge = api.service.queue.get(str(response.body["job_id"]))
+
+    plan = api.service._build_job_execution_plan_locked(bridge)
+
+    assert len(plan.commands) == 1
+    command = plan.commands[0]
+    assert command[1:3] == ("-m", "cadscene.cli.run_scene_bridge")
+    inputs = SceneBridgeInputs.from_json(Path(command[command.index("--inputs") + 1]))
+    assert inputs.identity["operation_id"] == bridge.operation_id
+    assert inputs.identity["source_workbench_output_revision"] == saved[
+        "workbench_output_revision"
+    ]
+    assert inputs.source_manual_track_path.is_file()
+    assert inputs.source_core_frame_map_path.name.endswith("frame-map.json")
+    assert inputs.target_core_frame_map_path.name.endswith("frame-map.json")
+    assert inputs.target_core_trajectory_path.is_file()
+    assert inputs.target_core_sparse_ply_path.is_file()
+
+
+def test_scene_bridge_success_publishes_immutable_route_refinement(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == response.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    attempt = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    assert finished.status == "success"
+    assert finished.validation_proof == result.validation_proof
+    target = repositories.clips.load("project-1").clips[2]
+    active = next(
+        reference
+        for reference in target.references
+        if reference.key == "scene_bridge:clip-3"
+    )
+    assert active.value["status"] == "awaiting_route_refinement"
+    assert active.value["source_clip_id"] == "clip-2"
+    assert active.value["bridge_revision"] == result.output_revision
+    published_root = (
+        api.service.projects_root
+        / "project-1/scene_bridges/clip-3"
+        / str(result.output_revision)
+    )
+    assert Path(active.value["manifest_path"]) == (
+        published_root / "scene_bridge_manifest.json"
+    )
+    assert (published_root / "camera_track_seed.json").is_file()
+    assert not (published_root / "core_alignment/04_quality").exists()
+
+
+def test_scene_bridge_does_not_publish_when_source_route_changes(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == response.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    clips = repositories.clips.load("project-1")
+    source = clips.clips[1]
+    changed = tuple(
+        replace(
+            reference,
+            value={**reference.value, "workbench_output_fingerprint": "f" * 64},
+        )
+        if reference.key == "workbench:clip-2"
+        else reference
+        for reference in source.references
+    )
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=(value.clips[0], replace(source, references=changed), value.clips[2]),
+        ),
+    )
+    attempt = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    assert finished.status == "stale_input"
+    target = repositories.clips.load("project-1").clips[2]
+    assert not any(reference.key == "scene_bridge:clip-3" for reference in target.references)
+    assert not (
+        api.service.projects_root
+        / "project-1/scene_bridges/clip-3"
+        / str(result.output_revision)
+    ).exists()
 
 
 def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(

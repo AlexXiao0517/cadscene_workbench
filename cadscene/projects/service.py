@@ -64,6 +64,11 @@ from .identifiers import is_safe_stable_id
 from .render_adapters import RenderAdapterRegistry
 from .render_adapters import RenderInputs
 from .source_fallback import SourceIntervalRenderAdapter, SourceIntervalRenderInputs
+from .scene_bridge_runner import (
+    BRIDGE_ALGORITHM_VERSION,
+    SceneBridgeInputs,
+    validate_scene_bridge_candidate,
+)
 from .repositories import ManifestMutation, RevisionConflict, publish_manifests
 from .uploads import PublishedUpload
 from .queue import (
@@ -75,6 +80,7 @@ from .queue import (
 )
 from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.workflow.job_runner import read_workflow_log_text
+from cadscene.application_resources import application_root
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
@@ -101,6 +107,14 @@ class EnqueueTrajectoryResult:
     enqueued_clip_ids: tuple[str, ...]
     job_ids: tuple[str, ...]
     preflight: TrajectoryPreflight
+
+
+@dataclass(frozen=True)
+class EnqueueSceneBridgeResult:
+    job: QueueJob
+    source_clip_id: str
+    target_clip_id: str
+    direction: str
 
 
 @dataclass(frozen=True)
@@ -1860,6 +1874,209 @@ class ProjectService:
             self._publish_queue_locked(project_id)
             return submitted
 
+    def enqueue_scene_bridge(
+        self,
+        project_id: str,
+        source_clip_id: str,
+        *,
+        direction: str,
+        expected_jobs_revision: int,
+        expected_clips_revision: int,
+    ) -> EnqueueSceneBridgeResult:
+        if direction not in {"up", "down"}:
+            raise ValueError("scene bridge direction must be up or down")
+        with self._state_guard(project_id):
+            self._require_jobs_revision_locked(project_id, expected_jobs_revision)
+            clips_manifest = self.repositories.clips.load(project_id)
+            if clips_manifest.revision != expected_clips_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_clips_revision,
+                    current_revision=clips_manifest.revision,
+                )
+            project = self.repositories.project.load(project_id)
+            source = next(
+                (clip for clip in clips_manifest.clips if clip.clip_id == source_clip_id),
+                None,
+            )
+            if source is None:
+                raise KeyError(f"unknown clip ID: {source_clip_id}")
+            target = _same_scene_adjacent_clip(clips_manifest.clips, source, direction)
+            if target is None:
+                raise ValueError("same scene has no adjacent target clip")
+            if source.resolved_workflow != "sfm_only" or target.resolved_workflow != "sfm_only":
+                raise ValueError("scene bridge supports only SfM clips")
+            source_workbench = _saved_workbench_reference(source)
+            if (
+                source_workbench is None
+                or source_workbench.value.get("status") != "saved"
+                or not _validate_workbench_immutable_output(
+                    self.projects_root, project_id, source, source_workbench
+                )
+            ):
+                raise ValueError("source clip has no validated saved route")
+            target_workbench = next(
+                (
+                    reference
+                    for reference in reversed(target.references)
+                    if reference.owner == "clips"
+                    and reference.key == f"workbench:{target.clip_id}"
+                    and reference.value.get("status")
+                    in {"editing", "pending_save", "saved"}
+                ),
+                None,
+            )
+            if target_workbench is not None:
+                raise ValueError("target clip already has a workbench result")
+            stored_jobs = tuple(
+                QueueJob.from_dict(item)
+                for item in self.repositories.jobs.load(project_id).jobs
+            )
+            source_trajectory = self._current_trajectory_for_render(
+                source, stored_jobs
+            )
+            if source_trajectory is None:
+                raise ValueError("source clip trajectory is not current")
+            target_trajectory = self._current_trajectory_for_render(
+                target, stored_jobs
+            )
+            dependency_ids: tuple[str, ...]
+            if target_trajectory is None:
+                adapter = self.adapters.for_workflow(str(target.resolved_workflow))
+                physical = _clip_output_path(target)
+                frame_map = _clip_frame_map_path(target)
+                export_dependencies: tuple[str, ...] = ()
+                if (
+                    physical is None
+                    or not physical.is_file()
+                    or frame_map is None
+                    or not frame_map.is_file()
+                ):
+                    export = self._new_export_job(
+                        project_id,
+                        target,
+                        project_assets=project.source_assets,
+                        project_revision=project.revision,
+                        clips_revision=clips_manifest.revision,
+                    )
+                    submitted_export = self.queue.submit(export)
+                    if submitted_export.job_id == export.job_id:
+                        Path(submitted_export.attempts[-1].directory).mkdir(
+                            parents=True, exist_ok=False
+                        )
+                    export_dependencies = (submitted_export.job_id,)
+                solve = self._new_job(
+                    project_id,
+                    target,
+                    job_type="trajectory",
+                    resource_class="heavy_compute",
+                    adapter_name=adapter.name,
+                    adapter_version=adapter.version,
+                    exclusive_key=f"trajectory:{project_id}:{target.clip_id}",
+                    dependency_ids=export_dependencies,
+                    project_assets=project.source_assets,
+                    project_revision=project.revision,
+                    clips_revision=clips_manifest.revision,
+                )
+                target_trajectory = self.queue.submit(solve)
+                if target_trajectory.job_id == solve.job_id:
+                    Path(target_trajectory.attempts[-1].directory).mkdir(
+                        parents=True, exist_ok=False
+                    )
+                dependency_ids = (target_trajectory.job_id,)
+            else:
+                if target_trajectory.job_id not in {
+                    job.job_id for job in self.queue.jobs()
+                }:
+                    raise RuntimeError("current target trajectory is not in the live queue")
+                dependency_ids = (target_trajectory.job_id,)
+            semantic_identity = _scene_bridge_identity_payload(
+                project=project,
+                source=source,
+                target=target,
+                source_workbench=source_workbench,
+                source_trajectory=source_trajectory,
+                target_trajectory=target_trajectory,
+                direction=direction,
+            )
+            input_fingerprint = _fingerprint(semantic_identity)
+            idempotency_key = _fingerprint(
+                {**semantic_identity, "purpose": "idempotency"}
+            )
+            existing = next(
+                (
+                    job
+                    for job in reversed(self.queue.jobs())
+                    if job.project_id == project_id
+                    and job.clip_id == target.clip_id
+                    and job.job_type == "scene_bridge"
+                    and job.idempotency_key == idempotency_key
+                    and job.status
+                    in {"queued", "preparing", "running", "validating", "success"}
+                ),
+                None,
+            )
+            if existing is not None:
+                return EnqueueSceneBridgeResult(
+                    existing, source.clip_id, target.clip_id, direction
+                )
+            operation_id = self._identity()
+            request = {
+                "schema_version": 1,
+                "operation_id": operation_id,
+                "identity": semantic_identity,
+                "runner_identity": {
+                    **semantic_identity,
+                    "schema_version": 1,
+                    "algorithm_version": BRIDGE_ALGORITHM_VERSION,
+                    "project_id": project_id,
+                    "source_clip_id": source.clip_id,
+                    "target_clip_id": target.clip_id,
+                    "direction": direction,
+                    "operation_id": operation_id,
+                },
+                "source_trajectory_job_id": source_trajectory.job_id,
+                "target_trajectory_job_id": target_trajectory.job_id,
+            }
+            request_path = (
+                self.projects_root
+                / project_id
+                / "scene_bridge_requests"
+                / f"{operation_id}.json"
+            )
+            _atomic_write_json_file(request_path, request)
+            job_id = self._identity()
+            attempt_dir = self._attempt_directory(project_id, job_id, 1)
+            bridge = QueueJob(
+                job_id=job_id,
+                project_id=project_id,
+                clip_id=target.clip_id,
+                job_type="scene_bridge",
+                resource_class="heavy_compute",
+                status="queued",
+                stage="queued",
+                priority=0,
+                depends_on_job_ids=dependency_ids,
+                exclusive_key=f"scene_bridge:{project_id}:{target.clip_id}",
+                idempotency_key=idempotency_key,
+                input_revision=target.analysis_revision,
+                input_fingerprint=input_fingerprint,
+                adapter_name="scene_bridge",
+                adapter_version="1",
+                output_revision=None,
+                operation_id=operation_id,
+                attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            )
+            submitted = self.queue.submit(bridge)
+            if submitted.job_id == bridge.job_id:
+                Path(submitted.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+            self._publish_queue_locked(project_id)
+            return EnqueueSceneBridgeResult(
+                submitted, source.clip_id, target.clip_id, direction
+            )
+
     def update_clip_workflow(
         self,
         project_id: str,
@@ -2163,6 +2380,13 @@ class ProjectService:
                     authoritative_fingerprint=authoritative_fingerprint,
                     lease=lease,
                 )
+            if current.job_type == "scene_bridge":
+                return self._finish_scene_bridge_job_locked(
+                    current,
+                    result,
+                    authoritative_fingerprint=authoritative_fingerprint,
+                    lease=lease,
+                )
             if authoritative_fingerprint != current.input_fingerprint:
                 finished = self.queue.mark_stale_input(job_id, **lease)
             elif result.status != "success":
@@ -2189,6 +2413,186 @@ class ProjectService:
                     )
             self._publish_queue_locked(project_id)
             return finished
+
+    def _finish_scene_bridge_job_locked(
+        self,
+        current: QueueJob,
+        result: AdapterResult,
+        *,
+        authoritative_fingerprint: str | None,
+        lease: Mapping[str, object],
+    ) -> QueueJob:
+        kwargs = {
+            "attempt_number": int(lease["attempt_number"]),
+            "claim_token": str(lease["claim_token"]),
+        }
+        if authoritative_fingerprint != current.input_fingerprint:
+            finished = self.queue.mark_stale_input(current.job_id, **kwargs)
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if result.status != "success":
+            finished = self.queue.mark_failed(
+                current.job_id,
+                result.error or "scene bridge execution failed",
+                **kwargs,
+            )
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if (
+            not result.output_revision
+            or not is_safe_stable_id(result.output_revision)
+            or not result.output_fingerprint
+        ):
+            finished = self.queue.mark_failed(
+                current.job_id,
+                "scene bridge returned no validated output identity",
+                **kwargs,
+            )
+            self._publish_queue_locked(current.project_id)
+            return finished
+        if current.status == "running":
+            self.queue.mark_validating(current.job_id, **kwargs)
+        try:
+            request = self._load_scene_bridge_request(current)
+            identity = request["runner_identity"]
+            if not isinstance(identity, Mapping):
+                raise ValueError("scene bridge runner identity is invalid")
+            candidate_value = result.outputs.get("candidate_root")
+            if not isinstance(candidate_value, str) or not current.attempts:
+                raise ValueError("scene bridge candidate path is missing")
+            attempt = Path(current.attempts[-1].directory).resolve(strict=True)
+            candidate = Path(candidate_value).resolve(strict=True)
+            candidate.relative_to(attempt)
+            validated = validate_scene_bridge_candidate(candidate, identity)
+            if (
+                validated.status != "success"
+                or validated.output_revision != result.output_revision
+                or validated.output_fingerprint != result.output_fingerprint
+                or validated.validation_proof != result.validation_proof
+            ):
+                raise ValueError("scene bridge candidate validation proof changed")
+            published_root = (
+                self.projects_root
+                / current.project_id
+                / "scene_bridges"
+                / current.clip_id
+                / result.output_revision
+            )
+            if published_root.exists():
+                existing = validate_scene_bridge_candidate(published_root, identity)
+                if (
+                    existing.status != "success"
+                    or existing.output_fingerprint != result.output_fingerprint
+                ):
+                    raise ValueError("scene bridge immutable revision collision")
+            else:
+                published_root.parent.mkdir(parents=True, exist_ok=True)
+                temporary = published_root.with_name(
+                    f".{published_root.name}.{uuid4().hex}.tmp"
+                )
+                try:
+                    shutil.copytree(candidate, temporary)
+                    for path in temporary.rglob("*"):
+                        if path.is_file():
+                            _fsync_regular_file(path)
+                    os.replace(temporary, published_root)
+                    _fsync_parent_directory(published_root.parent)
+                finally:
+                    if temporary.exists():
+                        shutil.rmtree(temporary)
+                copied = validate_scene_bridge_candidate(published_root, identity)
+                if (
+                    copied.status != "success"
+                    or copied.output_fingerprint != result.output_fingerprint
+                ):
+                    raise ValueError("published scene bridge revision is invalid")
+            manifest_path = published_root / "scene_bridge_manifest.json"
+            reference = StateReference(
+                owner="clips",
+                key=f"scene_bridge:{current.clip_id}",
+                operation_id=current.operation_id,
+                value={
+                    "status": "awaiting_route_refinement",
+                    "bridge_revision": result.output_revision,
+                    "output_fingerprint": result.output_fingerprint,
+                    "job_id": current.job_id,
+                    "source_clip_id": str(identity["source_clip_id"]),
+                    "target_clip_id": current.clip_id,
+                    "direction": str(identity["direction"]),
+                    "manifest_path": str(manifest_path),
+                    "camera_track_path": str(
+                        published_root / "camera_track_seed.json"
+                    ),
+                    "alignment_path": str(
+                        published_root / "core_alignment/03_alignment/alignment.json"
+                    ),
+                    "camera_path": str(
+                        published_root
+                        / "core_alignment/03_alignment/sfm_camera_path.csv"
+                    ),
+                    "viewer_scene_path": str(
+                        published_root
+                        / "core_alignment/05_viewer_scene/sfm_viewer_scene.json"
+                    ),
+                    "source_workbench_output_revision": identity.get(
+                        "source_workbench_output_revision"
+                    ),
+                    "source_workbench_output_fingerprint": identity.get(
+                        "source_workbench_output_fingerprint"
+                    ),
+                },
+            )
+            clips = self.repositories.clips.load(current.project_id)
+            if not any(clip.clip_id == current.clip_id for clip in clips.clips):
+                raise ValueError("scene bridge target clip no longer exists")
+            self.repositories.clips.update(
+                current.project_id,
+                expected_revision=clips.revision,
+                mutate=lambda value: replace(
+                    value,
+                    updated_at=self.now(),
+                    clips=tuple(
+                        replace(
+                            clip,
+                            references=tuple(
+                                item
+                                for item in clip.references
+                                if item.key != f"scene_bridge:{current.clip_id}"
+                            )
+                            + (reference,),
+                        )
+                        if clip.clip_id == current.clip_id
+                        else clip
+                        for clip in value.clips
+                    ),
+                ),
+            )
+            published_outputs = {
+                name: str(
+                    published_root
+                    / Path(path).resolve(strict=True).relative_to(candidate)
+                )
+                for name, path in validated.outputs.items()
+                if name != "candidate_root"
+            }
+            published_outputs["candidate_root"] = str(published_root)
+            finished = self.queue.mark_success(
+                current.job_id,
+                output_revision=result.output_revision,
+                output_fingerprint=result.output_fingerprint,
+                output_validated=True,
+                published_outputs=published_outputs,
+                validation_proof=result.validation_proof,
+                **kwargs,
+            )
+        except Exception as exc:
+            finished = self.queue.mark_failed(
+                current.job_id,
+                f"scene bridge publication failed: {exc}",
+                **kwargs,
+            )
+        self._publish_queue_locked(current.project_id)
+        return finished
 
     def _finish_cad_replacement_job_locked(
         self,
@@ -3492,6 +3896,8 @@ class ProjectService:
             return self._prepare_clip_render(job)
         if job.job_type == "project_merge":
             return self._prepare_project_merge(job)
+        if job.job_type == "scene_bridge":
+            return self._prepare_scene_bridge(job)
         if job.job_type != "trajectory":
             raise ValueError(f"unsupported executable job type: {job.job_type}")
         clips_manifest = self.repositories.clips.load(project_id)
@@ -5097,6 +5503,54 @@ class ProjectService:
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 return None
+        if job.job_type == "scene_bridge":
+            try:
+                request = self._load_scene_bridge_request(job)
+                clips_manifest = self.repositories.clips.load(job.project_id)
+                source = next(
+                    (
+                        clip
+                        for clip in clips_manifest.clips
+                        if clip.clip_id == request["runner_identity"]["source_clip_id"]
+                    ),
+                    None,
+                )
+                target = next(
+                    (
+                        clip
+                        for clip in clips_manifest.clips
+                        if clip.clip_id == request["runner_identity"]["target_clip_id"]
+                    ),
+                    None,
+                )
+                if source is None or target is None or target.clip_id != job.clip_id:
+                    return None
+                source_workbench = _saved_workbench_reference(source)
+                if source_workbench is None or source_workbench.value.get("status") != "saved":
+                    return None
+                source_job = self.queue.get(str(request["source_trajectory_job_id"]))
+                target_job = self.queue.get(str(request["target_trajectory_job_id"]))
+                if (
+                    self._current_trajectory_for_render(source, (source_job,))
+                    != source_job
+                    or target_job.job_type != "trajectory"
+                    or target_job.clip_id != target.clip_id
+                    or self._current_input_fingerprint(target_job)
+                    != target_job.input_fingerprint
+                ):
+                    return None
+                current_identity = _scene_bridge_identity_payload(
+                    project=project,
+                    source=source,
+                    target=target,
+                    source_workbench=source_workbench,
+                    source_trajectory=source_job,
+                    target_trajectory=target_job,
+                    direction=str(request["runner_identity"]["direction"]),
+                )
+                return _fingerprint(current_identity)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                return None
         clips_manifest = self.repositories.clips.load(job.project_id)
         if job.job_type == "clip_export":
             clip = next(
@@ -5209,6 +5663,132 @@ class ProjectService:
                 adapter_name=adapter_name,
                 adapter_version=adapter_version,
             )
+        )
+
+    def _load_scene_bridge_request(self, job: QueueJob) -> Mapping[str, object]:
+        path = (
+            self.projects_root
+            / job.project_id
+            / "scene_bridge_requests"
+            / f"{job.operation_id}.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema_version") != 1
+            or payload.get("operation_id") != job.operation_id
+            or not isinstance(payload.get("identity"), Mapping)
+            or not isinstance(payload.get("runner_identity"), Mapping)
+            or payload["identity"].get("target_clip_id") != job.clip_id
+        ):
+            raise ValueError("scene bridge request identity is invalid")
+        return payload
+
+    def _prepare_scene_bridge(self, job: QueueJob) -> JobExecutionPlan:
+        request = self._load_scene_bridge_request(job)
+        runner_identity = request["runner_identity"]
+        if not isinstance(runner_identity, Mapping):
+            raise ValueError("scene bridge runner identity is invalid")
+        project = self.repositories.project.load(job.project_id)
+        clips_manifest = self.repositories.clips.load(job.project_id)
+        source = next(
+            (
+                clip
+                for clip in clips_manifest.clips
+                if clip.clip_id == runner_identity.get("source_clip_id")
+            ),
+            None,
+        )
+        target = next(
+            (
+                clip
+                for clip in clips_manifest.clips
+                if clip.clip_id == runner_identity.get("target_clip_id")
+            ),
+            None,
+        )
+        if source is None or target is None or target.clip_id != job.clip_id:
+            raise ValueError("scene bridge clips are unavailable")
+        source_workbench = _saved_workbench_reference(source)
+        if source_workbench is None or source_workbench.value.get("status") != "saved":
+            raise ValueError("source saved route is unavailable")
+        source_trajectory = self.queue.get(str(request["source_trajectory_job_id"]))
+        target_trajectory = self.queue.get(str(request["target_trajectory_job_id"]))
+        if (
+            self._current_trajectory_for_render(source, (source_trajectory,))
+            != source_trajectory
+            or self._current_trajectory_for_render(target, (target_trajectory,))
+            != target_trajectory
+        ):
+            raise ValueError("scene bridge trajectory dependency is not current")
+        jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(job.project_id).jobs
+        )
+        source_core_video, source_core_map = _render_physical_inputs(source, jobs)
+        target_core_video, target_core_map = _render_physical_inputs(target, jobs)
+        source_video = _clip_asset_path(target, project.source_assets, "video")
+        if source_video is None or not source_video.is_file():
+            raise FileNotFoundError("scene bridge source video is missing")
+        source_track = _workbench_artifact_path(
+            self.projects_root, job.project_id, source_workbench
+        )
+        render_parameters = _workbench_render_parameters(
+            self.storage_root,
+            job.project_id,
+            target,
+            project.source_assets,
+        )
+        cad_dataset = render_parameters.get("cad_dataset_path")
+        if not isinstance(cad_dataset, str) or not cad_dataset:
+            raise FileNotFoundError("scene bridge CAD dataset is missing")
+        cad_dir = Path(cad_dataset)
+        if not (cad_dir / "design.json").is_file():
+            raise FileNotFoundError("scene bridge CAD design is missing")
+        source_trajectory_path = Path(source_trajectory.published_outputs["trajectory"])
+        target_trajectory_path = Path(target_trajectory.published_outputs["trajectory"])
+        source_sparse = source_trajectory_path.with_name("sparse_points.ply")
+        target_sparse = target_trajectory_path.with_name("sparse_points.ply")
+        if not source_sparse.is_file() or not target_sparse.is_file():
+            raise FileNotFoundError("scene bridge SfM sparse point cloud is missing")
+        origin = render_parameters.get("origin_xy", [0.0, 0.0])
+        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+            raise ValueError("scene bridge origin_xy is invalid")
+        inputs = SceneBridgeInputs(
+            identity=dict(runner_identity),
+            application_root=application_root(),
+            attempt_directory=Path(job.attempts[-1].directory),
+            source_video_path=source_video,
+            source_core_video_path=source_core_video,
+            source_core_frame_map_path=source_core_map,
+            source_manual_track_path=source_track,
+            source_trajectory_path=source_trajectory_path,
+            source_sparse_ply_path=source_sparse,
+            target_core_video_path=target_core_video,
+            target_core_frame_map_path=target_core_map,
+            target_core_trajectory_path=target_trajectory_path,
+            target_core_sparse_ply_path=target_sparse,
+            cad_dir=cad_dir,
+            cad_scale=float(render_parameters.get("cad_scale", 0.06)),
+            origin_xy=(float(origin[0]), float(origin[1])),
+            overlap_seconds=Fraction(4, 1),
+        )
+        inputs_path = Path(job.attempts[-1].directory) / "scene_bridge_inputs.json"
+        inputs.write_json(inputs_path)
+        return JobExecutionPlan(
+            commands=(
+                (
+                    sys.executable,
+                    "-m",
+                    "cadscene.cli.run_scene_bridge",
+                    "--inputs",
+                    str(inputs_path),
+                ),
+            ),
+            validate=lambda: validate_scene_bridge_candidate(
+                Path(job.attempts[-1].directory) / "candidate",
+                runner_identity,
+            ),
         )
 
     def _prepare_clip_export(self, job: QueueJob) -> JobExecutionPlan:
@@ -6021,6 +6601,94 @@ def _job_identity_payload(
             }
         )
     return payload
+
+
+def _same_scene_adjacent_clip(
+    clips: Sequence[ClipDefinition], source: ClipDefinition, direction: str
+) -> ClipDefinition | None:
+    scene_index = int(source.analysis.get("scene_index", 1))
+    same_scene = sorted(
+        (
+            clip
+            for clip in clips
+            if int(clip.analysis.get("scene_index", 1)) == scene_index
+        ),
+        key=lambda clip: (
+            int(clip.analysis.get("segment_index", 1)),
+            int(clip.analysis.get("render_order", 0)),
+            clip.clip_id,
+        ),
+    )
+    source_index = next(
+        (
+            index
+            for index, candidate in enumerate(same_scene)
+            if candidate.clip_id == source.clip_id
+        ),
+        None,
+    )
+    if source_index is None:
+        return None
+    target_index = source_index - 1 if direction == "up" else source_index + 1
+    return same_scene[target_index] if 0 <= target_index < len(same_scene) else None
+
+
+def _scene_bridge_identity_payload(
+    *,
+    project: ProjectManifest,
+    source: ClipDefinition,
+    target: ClipDefinition,
+    source_workbench: StateReference,
+    source_trajectory: QueueJob,
+    target_trajectory: QueueJob,
+    direction: str,
+) -> dict[str, object]:
+    return {
+        "identity_schema": 1,
+        "algorithm_version": BRIDGE_ALGORITHM_VERSION,
+        "project_id": project.project_id,
+        "source_clip_id": source.clip_id,
+        "target_clip_id": target.clip_id,
+        "direction": direction,
+        "overlap_seconds": "4",
+        "source_analysis_revision": source.analysis_revision,
+        "target_analysis_revision": target.analysis_revision,
+        "source_interval": _authoritative_interval(source),
+        "target_interval": _authoritative_interval(target),
+        "source_assets": _clip_input_identity(source, project.source_assets),
+        "target_assets": _clip_input_identity(target, project.source_assets),
+        "active_cad": _active_cad_render_identity(project.source_assets, target),
+        "source_workbench_output_revision": source_workbench.value.get(
+            "workbench_output_revision"
+        ),
+        "source_workbench_output_fingerprint": source_workbench.value.get(
+            "workbench_output_fingerprint"
+        ),
+        "source_trajectory": {
+            "job_id": source_trajectory.job_id,
+            "input_fingerprint": source_trajectory.input_fingerprint,
+            "output_revision": source_trajectory.output_revision,
+            "output_fingerprint": source_trajectory.output_fingerprint,
+        },
+        "target_trajectory": {
+            "job_id": target_trajectory.job_id,
+            "input_fingerprint": target_trajectory.input_fingerprint,
+        },
+    }
+
+
+def _atomic_write_json_file(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _analysis_identity_assets(

@@ -70,6 +70,9 @@ _WORKBENCH_CREATE = re.compile(
 _ADJACENT_LOCATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/locate-adjacent$"
 )
+_SCENE_BRIDGE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/scene-bridges$"
+)
 _WORKBENCH_SESSION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready))?$"
 )
@@ -223,6 +226,11 @@ class ProjectApi:
             match = _ADJACENT_LOCATE.fullmatch(path)
             if method == "POST" and match:
                 return self._locate_adjacent_clip(
+                    match["project"], match["clip"], payload
+                )
+            match = _SCENE_BRIDGE.fullmatch(path)
+            if method == "POST" and match:
+                return self._enqueue_scene_bridge(
                     match["project"], match["clip"], payload
                 )
             match = _WORKBENCH_CREATE.fullmatch(path)
@@ -1089,6 +1097,38 @@ class ProjectApi:
                 "direction": direction,
                 "workbench_url": self.workbench.workbench_url(session),
                 "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
+
+    def _enqueue_scene_bridge(
+        self, project_id: str, source_clip_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        direction = payload.get("direction")
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be up or down")
+        expected_jobs_revision = payload.get("expected_jobs_revision")
+        if not isinstance(expected_jobs_revision, int) or isinstance(
+            expected_jobs_revision, bool
+        ):
+            raise ValueError("expected_jobs_revision is required")
+        result = self.service.enqueue_scene_bridge(
+            project_id,
+            source_clip_id,
+            direction=str(direction),
+            expected_jobs_revision=expected_jobs_revision,
+            expected_clips_revision=_required_revision(payload),
+        )
+        return ApiResponse(
+            202,
+            {
+                "state": "scene_bridge_queued",
+                "message": "正在使用重叠帧打通相邻片段路线",
+                "job_id": result.job.job_id,
+                "source_clip_id": result.source_clip_id,
+                "target_clip_id": result.target_clip_id,
+                "direction": result.direction,
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+                "jobs_revision": self.repositories.jobs.load(project_id).revision,
             },
         )
 
