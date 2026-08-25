@@ -1,0 +1,11 @@
+CADScene Workbench Windows 离线测试包
+
+1. 请先完整解压 ZIP，不要直接在压缩软件中运行。
+2. 双击“启动CAD视频工作台.cmd”。首次启动会整理包内环境，通常需要几十秒。
+3. 浏览器会自动打开“项目文件”页面，可新建项目并上传 MP4、DXF 和可选 SRT。
+4. 用户项目和运行结果只保存在当前目录的 workspace 文件夹中。
+5. 使用结束后双击“关闭CAD视频工作台.cmd”。
+
+如启动失败，请保留整个目录，并将 logs 文件夹中的 doctor.txt、service-stdout.log 和
+service-stderr.log 一并反馈。请勿同时启动本包的多个副本访问同一个 workspace。
+
