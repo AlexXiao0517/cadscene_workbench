@@ -79,12 +79,15 @@ def test_backend_runtime_files_are_an_explicit_allowlist(tmp_path: Path) -> None
         Path("src/pair_estimation.py"),
         Path("scripts/run_full_video_exploration.py"),
         Path("outputs/build_opengv_cli/opengv_rotation_cli.exe"),
+        Path("outputs/toolchains/llvm-mingw-20260616-ucrt-x86_64/bin/libc++.dll"),
+        Path("outputs/toolchains/llvm-mingw-20260616-ucrt-x86_64/bin/libunwind.dll"),
         Path("backend_version.json"),
     )
     unwanted = (
         Path("tests/test_real_video.py"),
         Path("outputs/real-video/summary.json"),
         Path("reports/full_report.md"),
+        Path("outputs/toolchains/llvm-mingw-20260616-ucrt-x86_64/bin/libLLVM-22.dll"),
         Path(".git/config"),
     )
     for relative in (*wanted, *unwanted):
@@ -246,6 +249,8 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
         Path("src/pair_estimation.py"),
         Path("scripts/run_full_video_exploration.py"),
         Path("outputs/build_opengv_cli/opengv_rotation_cli.exe"),
+        Path("outputs/toolchains/llvm-mingw-20260616-ucrt-x86_64/bin/libc++.dll"),
+        Path("outputs/toolchains/llvm-mingw-20260616-ucrt-x86_64/bin/libunwind.dll"),
         Path("outputs/real-video/private-result.json"),
         Path("tests/test_backend.py"),
     ):
@@ -266,6 +271,24 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
     assert (bundle / "runtime" / "python.exe").is_file()
     assert (bundle / "启动CAD视频工作台.cmd").is_file()
     assert (bundle / "pure_rotation_backend" / "src" / "pair_estimation.py").is_file()
+    assert (
+        bundle
+        / "pure_rotation_backend"
+        / "outputs"
+        / "toolchains"
+        / "llvm-mingw-20260616-ucrt-x86_64"
+        / "bin"
+        / "libc++.dll"
+    ).is_file()
+    assert (
+        bundle
+        / "pure_rotation_backend"
+        / "outputs"
+        / "toolchains"
+        / "llvm-mingw-20260616-ucrt-x86_64"
+        / "bin"
+        / "libunwind.dll"
+    ).is_file()
     assert not (bundle / "pure_rotation_backend" / "tests").exists()
     assert not (bundle / "pure_rotation_backend" / "outputs" / "real-video").exists()
     backend_version = json.loads(
@@ -277,6 +300,8 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
     }
     release = json.loads((bundle / "launcher" / "release.json").read_text(encoding="utf-8"))
     assert release["source_commit"] == "52c605f"
+    assert any(path.endswith("/libc++.dll") for path in release["critical_sha256"])
+    assert any(path.endswith("/libunwind.dll") for path in release["critical_sha256"])
     verify_bundle(bundle, config=config)
 
 

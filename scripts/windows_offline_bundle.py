@@ -62,6 +62,7 @@ class ReleaseConfig:
 
 
 _FORBIDDEN_TOP_LEVEL = {".git", "projects", "data", "runs", "tests"}
+_NATIVE_RUNTIME_NAMES = ("libc++.dll", "libunwind.dll")
 
 
 def validate_staging_tree(root: str | Path) -> None:
@@ -98,6 +99,17 @@ def backend_runtime_files(root: str | Path) -> tuple[Path, ...]:
     ):
         if (backend / relative).is_file():
             selected.add(relative)
+    toolchain_bins = sorted(
+        (backend / "outputs" / "toolchains").glob(
+            "llvm-mingw-*-ucrt-x86_64/bin"
+        ),
+        reverse=True,
+    )
+    if toolchain_bins:
+        for name in _NATIVE_RUNTIME_NAMES:
+            runtime = toolchain_bins[0] / name
+            if runtime.is_file():
+                selected.add(runtime.relative_to(backend))
     return tuple(sorted(selected, key=lambda value: value.as_posix()))
 
 
@@ -242,11 +254,17 @@ def assemble_bundle(
     )
 
     layout.launcher.mkdir(parents=True, exist_ok=True)
+    native_runtime = tuple(
+        layout.backend / relative
+        for relative in backend_runtime_files(layout.backend)
+        if relative.name in _NATIVE_RUNTIME_NAMES
+    )
     critical = (
         layout.runtime / "python.exe",
         layout.runtime / "Scripts" / "conda-unpack.exe",
         layout.backend / "scripts" / "run_full_video_exploration.py",
         layout.backend / "outputs" / "build_opengv_cli" / "opengv_rotation_cli.exe",
+        *native_runtime,
     )
     manifest = {
         "bundle_name": config.bundle_name,
@@ -287,6 +305,18 @@ def verify_bundle(root: str | Path, *, config: ReleaseConfig) -> None:
     for path in required:
         if not path.is_file():
             raise ValueError(f"required bundle file is missing: {path.relative_to(layout.root)}")
+    toolchain_bins = sorted(
+        (layout.backend / "outputs" / "toolchains").glob(
+            "llvm-mingw-*-ucrt-x86_64/bin"
+        ),
+        reverse=True,
+    )
+    if not toolchain_bins:
+        raise ValueError("required bundle file is missing: pure_rotation_backend native runtime")
+    for name in _NATIVE_RUNTIME_NAMES:
+        path = toolchain_bins[0] / name
+        if not path.is_file():
+            raise ValueError(f"required bundle file is missing: {name}")
     version_path = layout.backend / "backend_version.json"
     if not version_path.is_file():
         raise ValueError("required bundle file is missing: pure_rotation_backend/backend_version.json")
