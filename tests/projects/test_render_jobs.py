@@ -1242,6 +1242,9 @@ def test_render_publication_recovery_revalidates_durable_success(
     assert claimed is not None and claimed.job_id == render_id
     lease = claimed.attempts[-1]
     result = _validated_render_result(service, claimed)
+    publication_revision = service._validate_render_result(
+        claimed, result
+    ).output_revision
     publish = service_module.publish_manifests
 
     def publish_tamper_then_interrupt(*args, **kwargs):
@@ -1251,7 +1254,7 @@ def test_render_publication_recovery_revalidates_durable_success(
             / "p1"
             / "render_outputs"
             / "ready"
-            / str(result.output_revision)
+            / publication_revision
             / "rendered.mp4"
         )
         target.write_bytes(b"tampered-after-durable-publication")
@@ -1575,8 +1578,37 @@ def test_attempt_media_changed_after_validation_is_not_published(
         / "p1"
         / "render_outputs"
         / "ready"
-        / str(result.output_revision)
+        / str(validated.output_revision)
     ).exists()
+
+
+def test_render_publication_revision_separates_identical_bytes_from_new_job_input(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue, _adapter, _trajectories, render_id = (
+        _enqueue_ready_render(tmp_path)
+    )
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None and claimed.job_id == render_id
+    result = _validated_render_result(service, claimed)
+    first = service._validate_render_result(claimed, result)
+    first_outputs = service._publish_render_artifacts(claimed, first)
+
+    second_job = replace(
+        claimed,
+        job_id="render-second-input",
+        input_revision="analysis-second",
+        input_fingerprint="f" * 64,
+        idempotency_key="render-second-input",
+    )
+    second = service._validate_render_result(second_job, result)
+    second_outputs = service._publish_render_artifacts(second_job, second)
+
+    assert first.output_fingerprint == second.output_fingerprint
+    assert first.output_revision != second.output_revision
+    assert Path(first_outputs["video"]).is_file()
+    assert Path(second_outputs["video"]).is_file()
+    assert Path(first_outputs["video"]).parent != Path(second_outputs["video"]).parent
 
 
 def test_cancel_clip_render_preserves_attempt_and_publishes_no_render(
@@ -1619,7 +1651,7 @@ def _publish_successful_render(
         / "p1"
         / "render_outputs"
         / "ready"
-        / str(result.output_revision)
+        / str(finished.output_revision)
     )
     return claimed, result, target
 
