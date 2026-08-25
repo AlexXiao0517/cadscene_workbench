@@ -1138,6 +1138,44 @@ def test_repeated_current_scene_bridge_request_is_idempotent(tmp_path: Path) -> 
     assert len(requests) == 1
 
 
+def test_repeated_failed_scene_bridge_request_retries_same_job(tmp_path: Path) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    endpoint = "/api/projects/project-1/clips/clip-2/scene-bridges"
+
+    def enqueue():
+        return api.handle(
+            "POST",
+            endpoint,
+            json_body={
+                "direction": "down",
+                "expected_revision": repositories.clips.load("project-1").revision,
+                "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            },
+        )
+
+    first = enqueue()
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == first.body["job_id"]
+    lease = running.attempts[-1]
+    api.service.fail_job(
+        "project-1",
+        running.job_id,
+        "simulated solve export duration rejection",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    retried = enqueue()
+
+    assert retried.status == 202
+    assert retried.body["job_id"] == first.body["job_id"]
+    retry_job = api.service.queue.get(first.body["job_id"])
+    assert retry_job.status in {"queued", "preparing", "running"}
+    assert [attempt.number for attempt in retry_job.attempts] == [1, 2]
+
+
 def test_scene_bridge_execution_plan_binds_saved_route_and_current_core_inputs(
     tmp_path: Path,
 ) -> None:

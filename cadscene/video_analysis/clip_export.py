@@ -29,7 +29,6 @@ _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
-_MAX_DURATION = Fraction(60, 1)
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 X264_PRESETS = (
@@ -66,7 +65,16 @@ class ExportClip:
         return self.end_pts_sec - self.start_pts_sec
 
 
-def load_export_clips(manifest_path: Path) -> list[ExportClip]:
+def load_export_clips(
+    manifest_path: Path, *, max_duration_seconds: int = 60
+) -> list[ExportClip]:
+    if (
+        isinstance(max_duration_seconds, bool)
+        or not isinstance(max_duration_seconds, int)
+        or max_duration_seconds <= 0
+    ):
+        raise ValueError("max_duration_seconds must be a positive integer")
+    max_duration = Fraction(max_duration_seconds, 1)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("clip manifest must be a JSON object")
@@ -118,8 +126,11 @@ def load_export_clips(manifest_path: Path) -> list[ExportClip]:
         )
         if duration <= 0:
             raise ValueError(f"clip {clip_id} must have a positive duration")
-        if duration >= _MAX_DURATION:
-            raise ValueError(f"clip {clip_id} must be shorter than 60 seconds")
+        if duration >= max_duration:
+            raise ValueError(
+                f"clip {clip_id} must be shorter than "
+                f"{max_duration_seconds} seconds"
+            )
         if previous_end is not None and clip.source_start_pts < previous_end:
             raise ValueError(f"clip {clip_id} overlaps the previous clip")
 
@@ -137,6 +148,7 @@ def export_video_clips(
     preset: str = "fast",
     crf: int = 18,
     require_full_source_partition: bool = True,
+    max_duration_seconds: int = 60,
     progress_callback: Callable[[str, str, float], None] | None = None,
 ) -> list[Path]:
     source = Path(video_path)
@@ -161,7 +173,9 @@ def export_video_clips(
 
     report("indexing_source", "正在读取源视频帧索引", 0.0)
     strategy = _publication_strategy()
-    clips = load_export_clips(manifest)
+    clips = load_export_clips(
+        manifest, max_duration_seconds=max_duration_seconds
+    )
     ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
     frame_index = _probe_source_frame_index(source, ffmpeg)
     frame_map = build_clip_frame_map(

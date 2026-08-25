@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ffmpeg", type=Path)
     parser.add_argument("--preset", choices=X264_PRESETS, default="fast")
     parser.add_argument("--crf", type=int, default=18)
+    parser.add_argument("--max-duration-seconds", type=int, default=60)
     parser.add_argument("--progress-file", type=Path)
     parser.add_argument(
         "--allow-subset",
@@ -36,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         "preset": args.preset,
         "crf": args.crf,
         "require_full_source_partition": not args.allow_subset,
+        "max_duration_seconds": args.max_duration_seconds,
     }
     if args.progress_file is not None:
         options["progress_callback"] = lambda stage, message, fraction: (

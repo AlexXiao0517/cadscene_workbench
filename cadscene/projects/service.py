@@ -2024,12 +2024,22 @@ class ProjectService:
                     and job.clip_id == target.clip_id
                     and job.job_type == "scene_bridge"
                     and job.idempotency_key == idempotency_key
-                    and job.status
-                    in {"queued", "preparing", "running", "validating", "success"}
                 ),
                 None,
             )
             if existing is not None:
+                if existing.status in {
+                    "failed",
+                    "interrupted",
+                    "cancelled",
+                    "stale_input",
+                    "superseded",
+                }:
+                    existing = self.retry_job(
+                        project_id,
+                        existing.job_id,
+                        expected_jobs_revision=expected_jobs_revision,
+                    )
                 return EnqueueSceneBridgeResult(
                     existing, source.clip_id, target.clip_id, direction
                 )

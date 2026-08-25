@@ -230,6 +230,11 @@ def run_scene_bridge(
         },
     )
     solve_export_progress = work / "solve_export_progress.json"
+    solve_duration = (
+        Fraction(solve_interval.end_pts_exclusive - solve_interval.start_pts)
+        * source_index.time_base
+    )
+    max_solve_duration_seconds = math.floor(solve_duration) + 1
     runner(
         "solve_export",
         (
@@ -246,6 +251,8 @@ def run_scene_bridge(
             str(solve_export_progress),
             "--preset",
             "veryfast",
+            "--max-duration-seconds",
+            str(max_solve_duration_seconds),
             "--allow-subset",
         ),
     )

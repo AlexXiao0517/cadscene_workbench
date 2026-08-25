@@ -89,9 +89,11 @@ def _flag(command: tuple[str, ...], name: str) -> str:
 class FakeCommands:
     def __init__(self) -> None:
         self.stage_names: list[str] = []
+        self.commands: dict[str, tuple[str, ...]] = {}
 
     def __call__(self, phase: str, command: tuple[str, ...]) -> None:
         self.stage_names.append(phase)
+        self.commands[phase] = command
         if phase == "source_alignment":
             run = (
                 Path(_flag(command, "--output-root"))
@@ -264,6 +266,7 @@ def test_bridge_runner_reuses_alignment_and_stops_at_route_refinement(
         "solve_alignment",
         "core_alignment",
     ]
+    assert _flag(commands.commands["solve_export"], "--max-duration-seconds") == "8"
     assert [row["source_pts"] for row in seed["keyframes"]] == [4000, 8000]
     assert (candidate / "core_alignment/03_alignment/alignment.json").is_file()
     assert (

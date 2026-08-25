@@ -114,6 +114,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
         preset: str = "fast",
         crf: int = 18,
         require_full_source_partition: bool = True,
+        max_duration_seconds: int = 60,
     ) -> list[Path]:
         received.update(
             video_path=video_path,
@@ -123,6 +124,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
             preset=preset,
             crf=crf,
             require_full_source_partition=require_full_source_partition,
+            max_duration_seconds=max_duration_seconds,
         )
         return [output_dir / "clip-0001.mp4"]
 
@@ -149,6 +151,7 @@ def test_export_video_clips_cli_forwards_typed_default_arguments(
         "preset": "fast",
         "crf": 18,
         "require_full_source_partition": True,
+        "max_duration_seconds": 60,
     }
     assert capsys.readouterr().out.splitlines() == [
         str(output_dir.resolve()),
@@ -170,6 +173,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
         preset: str = "fast",
         crf: int = 18,
         require_full_source_partition: bool = True,
+        max_duration_seconds: int = 60,
     ) -> list[Path]:
         received.update(
             video_path=video_path,
@@ -179,6 +183,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
             preset=preset,
             crf=crf,
             require_full_source_partition=require_full_source_partition,
+            max_duration_seconds=max_duration_seconds,
         )
         return [output_dir / "clip-0001.mp4", output_dir / "clip-0002.mp4"]
 
@@ -200,6 +205,8 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
             "--crf",
             "20",
             "--allow-subset",
+            "--max-duration-seconds",
+            "90",
         ]
     )
 
@@ -212,6 +219,7 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
         "preset": "veryfast",
         "crf": 20,
         "require_full_source_partition": False,
+        "max_duration_seconds": 90,
     }
     assert capsys.readouterr().out.splitlines() == [
         str(output_dir.resolve()),
