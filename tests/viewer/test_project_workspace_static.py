@@ -352,6 +352,9 @@ def test_completed_route_can_locate_previous_or_next_clip_from_source_row() -> N
     assert "/locate-adjacent`" in script
     assert 'direction: direction' in script
     assert "async function locateAdjacent" in script
+    assert "expected_jobs_revision: state.snapshot.component_revisions.jobs" in script
+    assert "async function waitForAdjacentPreparation" in script
+    assert "response.status === 202" in script
     assert ".row-actions" in css and "flex-wrap: wrap" in css
 
 

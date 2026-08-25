@@ -1058,7 +1058,9 @@ class ProjectWorkbenchService:
             return result
         for direction in ("up", "down"):
             target = self._adjacent_clip(clips.clips, source, direction)
-            if target is None or not self._target_accepts_seed(project_id, target):
+            if target is None or not self._target_accepts_seed(
+                project_id, source, target, direction
+            ):
                 continue
             result[f"can_locate_{direction}"] = True
             result[f"locate_{direction}_target_clip_id"] = target.clip_id
@@ -1072,7 +1074,7 @@ class ProjectWorkbenchService:
         direction: str,
         return_to: str,
         expected_clips_revision: int,
-    ) -> tuple[WorkbenchSession, str]:
+    ) -> tuple[WorkbenchSession | None, str]:
         if direction not in {"up", "down"}:
             raise ValueError("direction must be up or down")
         with self.project_service._state_guard(project_id):
@@ -1091,7 +1093,9 @@ class ProjectWorkbenchService:
             target = self._adjacent_clip(current.clips, source, direction)
             if target is None:
                 raise WorkbenchPermissionDenied("同场景没有可定位的相邻片段")
-            if not self._target_accepts_seed(project_id, target):
+            if not self._target_accepts_seed(
+                project_id, source, target, direction
+            ):
                 raise WorkbenchPermissionDenied("目标片段已有工作台会话或保存成果，不能覆盖")
             reference = self._workbench_reference(source)
             if reference is None or reference.value.get("status") != "saved":
@@ -1119,6 +1123,11 @@ class ProjectWorkbenchService:
             anchors = confirmed_keyframes(source_track)
             if len(anchors) < 2:
                 raise InvalidWorkbenchOutput("源片段没有完整的路线起点和终点")
+            target_context = self.resolve_context(project_id, target.clip_id)
+            if not target_context.can_open_workbench:
+                if self.can_prepare(project_id, target.clip_id):
+                    return None, target.clip_id
+                raise WorkbenchPermissionDenied("目标片段视频或 CAD 尚未准备完成")
             source_anchor = anchors[0] if direction == "up" else anchors[-1]
             target_frame = self._target_boundary_frame(project_id, target, direction)
             fps = float(source_track.get("fps", 0.0))
@@ -1136,8 +1145,9 @@ class ProjectWorkbenchService:
                 ],
             }
             _validate_manual_camera_track(seed_track)
+            existing_seed = self._workbench_seed_reference(target)
             operation_id = uuid4().hex
-            seed_reference = self._publish_workbench_seed(
+            seed_reference = existing_seed or self._publish_workbench_seed(
                 project_id=project_id,
                 source=source,
                 target=target,
@@ -1176,10 +1186,14 @@ class ProjectWorkbenchService:
                     operation_id=operation_id,
                 )
 
-            seeded = self.repositories.clips.update(
-                project_id,
-                expected_revision=current.revision,
-                mutate=publish_seed,
+            seeded = (
+                current
+                if existing_seed is not None
+                else self.repositories.clips.update(
+                    project_id,
+                    expected_revision=current.revision,
+                    mutate=publish_seed,
+                )
             )
             session = self.open(
                 project_id,
@@ -1704,7 +1718,13 @@ class ProjectWorkbenchService:
         target_index = source_index - 1 if direction == "up" else source_index + 1
         return same_scene[target_index] if 0 <= target_index < len(same_scene) else None
 
-    def _target_accepts_seed(self, project_id: str, target: ClipDefinition) -> bool:
+    def _target_accepts_seed(
+        self,
+        project_id: str,
+        source: ClipDefinition,
+        target: ClipDefinition,
+        direction: str,
+    ) -> bool:
         reference = self._workbench_reference(target)
         if reference is not None and (
             reference.value.get("status") in {"editing", "pending_save", "saved"}
@@ -1712,6 +1732,25 @@ class ProjectWorkbenchService:
         ):
             return False
         context = self.resolve_context(project_id, target.clip_id)
+        if self._saved_resume_baseline(context) is not None:
+            return False
+        seed = self._workbench_seed_reference(target)
+        if seed is not None:
+            source_reference = self._workbench_reference(source)
+            if (
+                source_reference is None
+                or seed.value.get("source_clip_id") != source.clip_id
+                or seed.value.get("direction") != direction
+                or seed.value.get("source_workbench_output_revision")
+                != source_reference.value.get("workbench_output_revision")
+                or seed.value.get("source_workbench_output_fingerprint")
+                != source_reference.value.get("workbench_output_fingerprint")
+            ):
+                return False
+            try:
+                self._validated_workbench_seed(project_id, target, seed)
+            except (InvalidWorkbenchOutput, OSError, ValueError, TypeError):
+                return False
         return context.can_open_workbench or self.can_prepare(
             project_id, target.clip_id
         )
@@ -1875,6 +1914,22 @@ class ProjectWorkbenchService:
         reference = self._workbench_seed_reference(clip)
         if reference is None:
             return
+        track_bytes = self._validated_workbench_seed(project_id, clip, reference)
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        destination = (
+            self.viewer_runs_root
+            / dataset
+            / clip.clip_id
+            / "01_keyframes/camera_track_manual.json"
+        )
+        _atomic_write_bytes(destination, track_bytes)
+
+    def _validated_workbench_seed(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        reference: StateReference,
+    ) -> bytes:
         revision = reference.value.get("seed_revision")
         if not isinstance(revision, str) or not revision.startswith("seed-"):
             raise InvalidWorkbenchOutput("工作台定位种子 revision 无效")
@@ -1917,14 +1972,7 @@ class ProjectWorkbenchService:
         if sha256(track_bytes).hexdigest() != reference.value.get("track_sha256"):
             raise InvalidWorkbenchOutput("工作台定位种子内容校验失败")
         _validate_manual_camera_track(track)
-        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
-        destination = (
-            self.viewer_runs_root
-            / dataset
-            / clip.clip_id
-            / "01_keyframes/camera_track_manual.json"
-        )
-        _atomic_write_bytes(destination, track_bytes)
+        return track_bytes
 
     def _physical_clip_for_context(
         self,

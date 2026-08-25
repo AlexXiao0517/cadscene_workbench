@@ -975,6 +975,7 @@ def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(
         json_body={
             "direction": "down",
             "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
             "return_to": "/apps/project_workspace/?projectId=project-1",
         },
     )
@@ -997,6 +998,7 @@ def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(
         json_body={
             "direction": "down",
             "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
             "return_to": "/apps/project_workspace/?projectId=project-1",
         },
     )
@@ -1018,6 +1020,7 @@ def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(
         json_body={
             "direction": "up",
             "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
             "return_to": "/apps/project_workspace/?projectId=project-1",
         },
     )
@@ -1043,6 +1046,164 @@ def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(
     assert (
         seed["source_workbench_output_revision"]
         == saved.body["workbench_output_revision"]
+    )
+
+
+def test_adjacent_location_prepares_unexported_target_without_leaving_seed(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    current = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(
+                    clip,
+                    analysis={
+                        key: item
+                        for key, item in clip.analysis.items()
+                        if key not in {"physical_mp4_path", "frame_map_path"}
+                    },
+                )
+                if clip.clip_id == "clip-3"
+                else clip
+                for clip in value.clips
+            ),
+        ),
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    track = {
+        "version": 1,
+        "fps": 25.0,
+        "keyframes": [
+            {
+                "frame": frame,
+                "time": frame / 25.0,
+                "source": "manual_anchor",
+                "camera": {
+                    "x": float(frame),
+                    "y": 2.0,
+                    "z": 3.0,
+                    "yaw": 4.0,
+                    "pitch": -20.0,
+                    "roll": 0.0,
+                    "fov": 70.0,
+                },
+            }
+            for frame in (0, 3)
+        ],
+    }
+    manual = runs_root / "project-1-clip-2/clip-2/01_keyframes/camera_track_manual.json"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(json.dumps(track), encoding="utf-8")
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+
+    payload = {
+        "direction": "down",
+        "expected_revision": repositories.clips.load("project-1").revision,
+        "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        "return_to": "/apps/project_workspace/?projectId=project-1",
+    }
+    preparing = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/locate-adjacent",
+        json_body=payload,
+    )
+
+    assert preparing.status == 202
+    assert preparing.body["state"] == "preparing_clip"
+    assert preparing.body["target_clip_id"] == "clip-3"
+    job = api.service.queue.get(preparing.body["job_id"])
+    assert job.job_type == "clip_export"
+    seed_root = api.service.projects_root / "project-1/workbench_seeds/clip-3"
+    assert len(list(seed_root.glob("*/workbench_seed_manifest.json"))) == 0
+
+    payload["expected_revision"] = repositories.clips.load("project-1").revision
+    payload["expected_jobs_revision"] = repositories.jobs.load("project-1").revision
+    repeated = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/locate-adjacent",
+        json_body=payload,
+    )
+    assert repeated.status == 202
+    assert repeated.body["job_id"] == preparing.body["job_id"]
+    assert len(list(seed_root.glob("*/workbench_seed_manifest.json"))) == 0
+
+
+def test_adjacent_location_rejects_recoverable_saved_target_without_reference(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-3/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    manual = runs_root / "project-1-clip-3/clip-3/01_keyframes/camera_track_manual.json"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(json.dumps(_manual_track()), encoding="utf-8")
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+    clips = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(
+                    clip,
+                    references=tuple(
+                        reference
+                        for reference in clip.references
+                        if reference.key != "workbench:clip-3"
+                    ),
+                )
+                if clip.clip_id == "clip-3"
+                else clip
+                for clip in value.clips
+            ),
+        ),
+    )
+    current = repositories.clips.load("project-1")
+    source = next(clip for clip in current.clips if clip.clip_id == "clip-2")
+    target = next(clip for clip in current.clips if clip.clip_id == "clip-3")
+
+    assert api.workbench._saved_resume_baseline(
+        api.workbench.resolve_context("project-1", "clip-3")
+    ) is not None
+    assert not api.workbench._target_accepts_seed(
+        "project-1", source, target, "down"
     )
 
 

@@ -949,7 +949,10 @@ def test_viewer_honors_authoritative_initial_frame_from_workbench_url() -> None:
 
     assert 'get("initialFrame")' in viewer
     assert "Number.parseInt" in viewer
-    assert 'video.addEventListener("loadedmetadata", resolve, { once: true })' in viewer
+    assert "function waitForVideoMetadata" in viewer
+    assert 'video.addEventListener("error", onError, { once: true })' in viewer
+    assert "初始定位失败：视频元数据无法加载" in viewer
+    assert "await waitForVideoMetadata()" in viewer
     assert "await goToFrame(initialFrame)" in viewer
 
 

@@ -761,24 +761,64 @@
       focusClip: targetClipId,
     });
     try {
-      const { body } = await request(
+      const { response, body } = await request(
         `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/locate-adjacent`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expected_revision: state.snapshot.component_revisions.clips,
+            expected_jobs_revision: state.snapshot.component_revisions.jobs,
             direction: direction,
             return_to: `/apps/project_workspace/?${returnParams.toString()}`,
           }),
         },
       );
+      if (response.status === 202) {
+        state.snapshot.component_revisions.jobs = body.jobs_revision;
+        await waitForAdjacentPreparation(clip.clip_id, targetClipId, direction);
+        return;
+      }
       state.snapshot.component_revisions.clips = body.clips_revision;
       window.location.assign(body.workbench_url);
     } catch (error) {
       $(".row-error", row).textContent = error.message;
       state.etag = null;
       await pollSnapshot();
+    }
+  }
+
+  async function waitForAdjacentPreparation(sourceClipId, targetClipId, direction) {
+    const dialog = $("#workbenchPreparationDialog");
+    if (!dialog.open) dialog.showModal();
+    while (true) {
+      state.etag = null;
+      await pollSnapshot();
+      const target = state.snapshot?.clips.find((item) => item.clip_id === targetClipId);
+      if (!target) throw new Error("目标片段已不存在，无法继续定位");
+      const preparation = target.workbench?.preparation;
+      const fraction = preparation?.progress?.fraction;
+      const percent = typeof fraction === "number"
+        ? Math.max(0, Math.min(100, Math.round(fraction * 100)))
+        : null;
+      $("#workbenchPreparationMessage").textContent = preparation?.stage
+        ? (STATUS_LABELS[preparation.stage] || preparation.stage)
+        : "正在准备相邻片段，完成后将自动应用定位…";
+      $("#workbenchPreparationFill").style.width = percent == null ? "0%" : `${percent}%`;
+      $("#workbenchPreparationPercent").textContent = percent == null ? "—" : `${percent}%`;
+      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(preparation?.status)) {
+        dialog.close();
+        throw new Error(preparation?.error || "相邻片段准备失败，请重试");
+      }
+      if (target.capabilities?.can_open_workbench) {
+        dialog.close();
+        const source = state.snapshot.clips.find((item) => item.clip_id === sourceClipId);
+        if (!source) throw new Error("源片段已不存在，无法继续定位");
+        const row = document.querySelector(`[data-clip-id="${CSS.escape(sourceClipId)}"]`);
+        await locateAdjacent(source, direction, row);
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
     }
   }
 

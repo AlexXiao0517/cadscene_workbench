@@ -2923,6 +2923,22 @@
     });
   }
 
+  function waitForVideoMetadata() {
+    if (video.readyState >= 1) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const onLoaded = () => {
+        video.removeEventListener("error", onError);
+        resolve();
+      };
+      const onError = () => {
+        video.removeEventListener("loadedmetadata", onLoaded);
+        reject(new Error("初始定位失败：视频元数据无法加载"));
+      };
+      video.addEventListener("loadedmetadata", onLoaded, { once: true });
+      video.addEventListener("error", onError, { once: true });
+    });
+  }
+
   async function boot() {
     cameraTrack = createInitialTrack({ x: 0, y: 0, z: 120, yaw: 0, pitch: -45, roll: 0, fov: 70 });
     bindVideo();
@@ -2964,9 +2980,7 @@
     updateViews({ forceOverlay: true });
     const initialFrame = Number.parseInt(INITIAL_FRAME_VALUE || "", 10);
     if (Number.isInteger(initialFrame) && initialFrame >= 0) {
-      if (video.readyState < 1) {
-        await new Promise((resolve) => video.addEventListener("loadedmetadata", resolve, { once: true }));
-      }
+      await waitForVideoMetadata();
       await goToFrame(initialFrame);
     }
   }

@@ -1047,6 +1047,11 @@ class ProjectApi:
         return_to = payload.get("return_to")
         if not isinstance(return_to, str):
             raise InvalidWorkbenchReturnPath("return_to is required")
+        expected_jobs_revision = payload.get("expected_jobs_revision")
+        if not isinstance(expected_jobs_revision, int) or isinstance(
+            expected_jobs_revision, bool
+        ):
+            raise ValueError("expected_jobs_revision is required")
         session, target_clip_id = self.workbench.locate_adjacent(
             project_id,
             source_clip_id,
@@ -1054,6 +1059,27 @@ class ProjectApi:
             return_to=return_to,
             expected_clips_revision=_required_revision(payload),
         )
+        if session is None:
+            job = self.service.enqueue_workbench_clip_export(
+                project_id,
+                target_clip_id,
+                expected_jobs_revision=expected_jobs_revision,
+            )
+            return ApiResponse(
+                202,
+                {
+                    "state": "preparing_clip",
+                    "message": "正在准备相邻片段，完成后将自动应用定位",
+                    "job_id": job.job_id,
+                    "source_clip_id": source_clip_id,
+                    "target_clip_id": target_clip_id,
+                    "direction": direction,
+                    "clips_revision": self.repositories.clips.load(
+                        project_id
+                    ).revision,
+                    "jobs_revision": self.repositories.jobs.load(project_id).revision,
+                },
+            )
         return ApiResponse(
             201,
             {
