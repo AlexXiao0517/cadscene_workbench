@@ -1577,8 +1577,9 @@ class ProjectWorkbenchService:
             (
                 item
                 for item in reversed(clip.references)
-                if item.owner == "clips"
-                and item.key == f"scene_bridge:{clip.clip_id}"
+                if item.owner == "jobs"
+                and item.value.get("reference_type") == "scene_bridge"
+                and item.value.get("target_clip_id") == clip.clip_id
                 and item.value.get("status") == "awaiting_route_refinement"
             ),
             None,

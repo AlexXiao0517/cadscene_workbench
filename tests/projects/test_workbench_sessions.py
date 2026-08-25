@@ -1005,6 +1005,7 @@ def _scene_bridge_result(api: ProjectApi, bridge) -> object:
     artifacts = {
         "camera_track": "camera_track_seed.json",
         "alignment": "core_alignment/03_alignment/alignment.json",
+        "fitted_track": "core_alignment/03_alignment/camera_track_pred.json",
         "camera_path": "core_alignment/03_alignment/sfm_camera_path.csv",
         "viewer_scene": "core_alignment/05_viewer_scene/sfm_viewer_scene.json",
     }
@@ -1205,7 +1206,7 @@ def test_scene_bridge_success_publishes_immutable_route_refinement(
     active = next(
         reference
         for reference in target.references
-        if reference.key == "scene_bridge:clip-3"
+        if reference.value.get("reference_type") == "scene_bridge"
     )
     assert active.value["status"] == "awaiting_route_refinement"
     assert active.value["source_clip_id"] == "clip-2"
@@ -1220,6 +1221,17 @@ def test_scene_bridge_success_publishes_immutable_route_refinement(
     )
     assert (published_root / "camera_track_seed.json").is_file()
     assert not (published_root / "core_alignment/04_quality").exists()
+    repeated = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    assert repeated.status == 400
+    assert "awaiting route refinement" in str(repeated.body["error"])
     opened = api.handle(
         "POST",
         "/api/projects/project-1/clips/clip-3/workbench-sessions",
@@ -1300,12 +1312,163 @@ def test_scene_bridge_does_not_publish_when_source_route_changes(
 
     assert finished.status == "stale_input"
     target = repositories.clips.load("project-1").clips[2]
-    assert not any(reference.key == "scene_bridge:clip-3" for reference in target.references)
+    assert not any(
+        reference.value.get("reference_type") == "scene_bridge"
+        for reference in target.references
+    )
     assert not (
         api.service.projects_root
         / "project-1/scene_bridges/clip-3"
         / str(result.output_revision)
     ).exists()
+
+
+def test_scene_bridge_does_not_publish_when_target_frame_map_changes(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == response.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    target_map = tmp_path / "clip-3-frame-map.json"
+    target_map.write_text(
+        target_map.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+    )
+    attempt = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    assert finished.status == "stale_input"
+    target = repositories.clips.load("project-1").clips[2]
+    assert not any(
+        reference.value.get("reference_type") == "scene_bridge"
+        for reference in target.references
+    )
+
+
+def test_scene_bridge_recovers_atomic_clip_and_job_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == response.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    original = api.service.queue.commit_prepared_candidate
+    calls = [0]
+
+    def interrupt_once(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("simulated crash after manifest publication")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        api.service.queue, "commit_prepared_candidate", interrupt_once
+    )
+    attempt = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    assert calls[0] == 2
+    assert finished.status == "success"
+    persisted = next(
+        item
+        for item in repositories.jobs.load("project-1").jobs
+        if item["job_id"] == running.job_id
+    )
+    assert persisted["status"] == "success"
+    target = repositories.clips.load("project-1").clips[2]
+    assert any(
+        reference.value.get("reference_type") == "scene_bridge"
+        for reference in target.references
+    )
+    from cadscene.projects.recovery import reconcile_project
+
+    reconcile_project("project-1", repositories=repositories)
+    recovered_target = repositories.clips.load("project-1").clips[2]
+    assert any(
+        reference.value.get("reference_type") == "scene_bridge"
+        for reference in recovered_target.references
+    )
+
+
+def test_scene_bridge_rejects_recoverable_saved_target_without_reference(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    assert api.workbench is not None
+    api.workbench.coordinator.revision_factory = lambda: "workbench-output-clip3"
+    _save_completed_sfm_route(api, repositories, runs_root, clip_id="clip-3")
+    clips = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(
+                    clip,
+                    references=tuple(
+                        reference
+                        for reference in clip.references
+                        if reference.key != "workbench:clip-3"
+                    ),
+                )
+                if clip.clip_id == "clip-3"
+                else clip
+                for clip in value.clips
+            ),
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+
+    assert response.status == 400
+    assert "recoverable" in str(response.body["error"])
 
 
 def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(

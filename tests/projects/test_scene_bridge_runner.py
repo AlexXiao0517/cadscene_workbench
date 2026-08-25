@@ -144,6 +144,10 @@ class FakeCommands:
             )
             _write_camera_path(run / "03_alignment/sfm_camera_path.csv", 5)
             _write_json(run / "03_alignment/alignment.json", {"sim3": {}})
+            _write_json(
+                run / "03_alignment/camera_track_pred.json",
+                {"keyframes": [{"frame": 0}, {"frame": 4}]},
+            )
             _write_json(run / "05_viewer_scene/sfm_viewer_scene.json", {})
             return
         raise AssertionError(f"unexpected phase: {phase}")
@@ -262,6 +266,9 @@ def test_bridge_runner_reuses_alignment_and_stops_at_route_refinement(
     ]
     assert [row["source_pts"] for row in seed["keyframes"]] == [4000, 8000]
     assert (candidate / "core_alignment/03_alignment/alignment.json").is_file()
+    assert (
+        candidate / "core_alignment/03_alignment/camera_track_pred.json"
+    ).is_file()
     assert not (candidate / "core_alignment/04_quality").exists()
 
 
@@ -296,6 +303,25 @@ def test_candidate_validation_rejects_missing_core_alignment(tmp_path: Path) -> 
 
     assert result.status == "failed"
     assert "missing" in str(result.error)
+
+
+def test_candidate_validation_rejects_changed_fitted_camera_track(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    candidate = run_scene_bridge(
+        inputs,
+        command_runner=FakeCommands(),
+        source_frame_probe=lambda _path: _source_index(),
+    )
+    (candidate / "core_alignment/03_alignment/camera_track_pred.json").write_text(
+        '{"keyframes": []}', encoding="utf-8"
+    )
+
+    result = validate_scene_bridge_candidate(candidate, inputs.identity)
+
+    assert result.status == "failed"
+    assert "hash mismatch" in str(result.error)
 
 
 def test_scene_bridge_inputs_round_trip_exact_fraction_and_paths(tmp_path: Path) -> None:

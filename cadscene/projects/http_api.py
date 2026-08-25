@@ -1697,8 +1697,9 @@ def _scene_bridge_reference(clip: ClipDefinition) -> StateReference | None:
         (
             reference
             for reference in reversed(clip.references)
-            if reference.owner == "clips"
-            and reference.key == f"scene_bridge:{clip.clip_id}"
+            if reference.owner == "jobs"
+            and reference.value.get("reference_type") == "scene_bridge"
+            and reference.value.get("target_clip_id") == clip.clip_id
         ),
         None,
     )

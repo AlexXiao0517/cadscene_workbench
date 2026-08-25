@@ -402,7 +402,13 @@ def validate_scene_bridge_candidate(
             raise ValueError("scene bridge candidate artifacts are missing")
         paths: dict[str, Path] = {}
         artifact_identity: dict[str, dict[str, object]] = {}
-        for name in ("camera_track", "alignment", "camera_path", "viewer_scene"):
+        for name in (
+            "camera_track",
+            "alignment",
+            "fitted_track",
+            "camera_path",
+            "viewer_scene",
+        ):
             item = artifacts.get(name)
             if not isinstance(item, Mapping):
                 raise ValueError(f"scene bridge artifact metadata is missing: {name}")
@@ -628,6 +634,7 @@ def _publish_candidate(
     viewer_source = core_run / "05_viewer_scene"
     required = (
         alignment_source / "alignment.json",
+        alignment_source / "camera_track_pred.json",
         alignment_source / "sfm_camera_path.csv",
         viewer_source / "sfm_viewer_scene.json",
     )
@@ -649,6 +656,8 @@ def _publish_candidate(
         artifact_paths = {
             "camera_track": temporary / "camera_track_seed.json",
             "alignment": target_core / "03_alignment/alignment.json",
+            "fitted_track": target_core
+            / "03_alignment/camera_track_pred.json",
             "camera_path": target_core / "03_alignment/sfm_camera_path.csv",
             "viewer_scene": target_core / "05_viewer_scene/sfm_viewer_scene.json",
         }
