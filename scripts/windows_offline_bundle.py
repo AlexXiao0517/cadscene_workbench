@@ -237,7 +237,14 @@ def assemble_bundle(
     backend = Path(backend_root)
     for relative in backend_runtime_files(backend):
         source = backend / relative
-        destination = layout.backend / relative
+        if relative.name in _NATIVE_RUNTIME_NAMES:
+            # Windows 先从可执行文件目录加载依赖 DLL；与 CLI 同目录可避免
+            # 启动器 PATH 变化或系统中同名运行库导致的加载失败。
+            destination = (
+                layout.backend / "outputs" / "build_opengv_cli" / relative.name
+            )
+        else:
+            destination = layout.backend / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
     layout.backend.mkdir(parents=True, exist_ok=True)
@@ -255,9 +262,8 @@ def assemble_bundle(
 
     layout.launcher.mkdir(parents=True, exist_ok=True)
     native_runtime = tuple(
-        layout.backend / relative
-        for relative in backend_runtime_files(layout.backend)
-        if relative.name in _NATIVE_RUNTIME_NAMES
+        layout.backend / "outputs" / "build_opengv_cli" / name
+        for name in _NATIVE_RUNTIME_NAMES
     )
     critical = (
         layout.runtime / "python.exe",
@@ -305,16 +311,8 @@ def verify_bundle(root: str | Path, *, config: ReleaseConfig) -> None:
     for path in required:
         if not path.is_file():
             raise ValueError(f"required bundle file is missing: {path.relative_to(layout.root)}")
-    toolchain_bins = sorted(
-        (layout.backend / "outputs" / "toolchains").glob(
-            "llvm-mingw-*-ucrt-x86_64/bin"
-        ),
-        reverse=True,
-    )
-    if not toolchain_bins:
-        raise ValueError("required bundle file is missing: pure_rotation_backend native runtime")
     for name in _NATIVE_RUNTIME_NAMES:
-        path = toolchain_bins[0] / name
+        path = layout.backend / "outputs" / "build_opengv_cli" / name
         if not path.is_file():
             raise ValueError(f"required bundle file is missing: {name}")
     version_path = layout.backend / "backend_version.json"

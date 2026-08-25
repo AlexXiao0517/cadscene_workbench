@@ -275,20 +275,17 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
         bundle
         / "pure_rotation_backend"
         / "outputs"
-        / "toolchains"
-        / "llvm-mingw-20260616-ucrt-x86_64"
-        / "bin"
+        / "build_opengv_cli"
         / "libc++.dll"
     ).is_file()
     assert (
         bundle
         / "pure_rotation_backend"
         / "outputs"
-        / "toolchains"
-        / "llvm-mingw-20260616-ucrt-x86_64"
-        / "bin"
+        / "build_opengv_cli"
         / "libunwind.dll"
     ).is_file()
+    assert not (bundle / "pure_rotation_backend" / "outputs" / "toolchains").exists()
     assert not (bundle / "pure_rotation_backend" / "tests").exists()
     assert not (bundle / "pure_rotation_backend" / "outputs" / "real-video").exists()
     backend_version = json.loads(
