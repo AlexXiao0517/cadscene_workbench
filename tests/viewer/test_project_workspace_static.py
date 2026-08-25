@@ -337,6 +337,24 @@ def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     assert '.open-workbench", row).addEventListener' in script
 
 
+def test_completed_route_can_locate_previous_or_next_clip_from_source_row() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="button compact locate-up"' in html
+    assert 'class="button compact locate-down"' in html
+    assert "向上定位" in html and "向下定位" in html
+    assert "capabilities.can_locate_up" in script
+    assert "capabilities.can_locate_down" in script
+    assert "locate_up_target_clip_id" in script
+    assert "locate_down_target_clip_id" in script
+    assert "/locate-adjacent`" in script
+    assert 'direction: direction' in script
+    assert "async function locateAdjacent" in script
+    assert ".row-actions" in css and "flex-wrap: wrap" in css
+
+
 def test_ready_clip_prepares_inputs_then_opens_workbench_with_chinese_status() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

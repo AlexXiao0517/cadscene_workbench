@@ -107,6 +107,18 @@
     open.title = capabilities.can_open_workbench
       ? "进入片段工作台"
       : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪");
+    const locateUp = $(".locate-up", row);
+    locateUp.hidden = capabilities.can_locate_up !== true;
+    locateUp.disabled = capabilities.can_locate_up !== true;
+    locateUp.title = capabilities.can_locate_up
+      ? `将路线起点定位到 ${capabilities.locate_up_target_clip_id}`
+      : "没有可安全定位的同场景上一片段";
+    const locateDown = $(".locate-down", row);
+    locateDown.hidden = capabilities.can_locate_down !== true;
+    locateDown.disabled = capabilities.can_locate_down !== true;
+    locateDown.title = capabilities.can_locate_down
+      ? `将路线终点定位到 ${capabilities.locate_down_target_clip_id}`
+      : "没有可安全定位的同场景下一片段";
     $(".retry-job", row).disabled = !capabilities.can_retry;
     $(".cancel-job", row).disabled = !capabilities.can_cancel;
     $(".workflow-select", row).title = capabilities.reason || "";
@@ -158,6 +170,8 @@
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
+    $(".locate-up", row).addEventListener("click", () => locateAdjacent(clip, "up", row));
+    $(".locate-down", row).addEventListener("click", () => locateAdjacent(clip, "down", row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
     $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
@@ -733,6 +747,38 @@
       window.location.assign(body.workbench_url);
     } catch (error) {
       $(".row-error", row).textContent = error.message;
+    }
+  }
+
+  async function locateAdjacent(clip, direction, row) {
+    const capability = clip.capabilities || {};
+    const targetClipId = direction === "up"
+      ? capability.locate_up_target_clip_id
+      : capability.locate_down_target_clip_id;
+    if (!targetClipId) return;
+    const returnParams = new URLSearchParams({
+      projectId,
+      focusClip: targetClipId,
+    });
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/locate-adjacent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.clips,
+            direction: direction,
+            return_to: `/apps/project_workspace/?${returnParams.toString()}`,
+          }),
+        },
+      );
+      state.snapshot.component_revisions.clips = body.clips_revision;
+      window.location.assign(body.workbench_url);
+    } catch (error) {
+      $(".row-error", row).textContent = error.message;
+      state.etag = null;
+      await pollSnapshot();
     }
   }
 

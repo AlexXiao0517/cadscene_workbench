@@ -14,6 +14,7 @@
     "confirmed",
     "manual_anchor",
     "manual_corrected",
+    "scene_boundary_anchor",
   ]);
 
   function isConfirmedManualKeyframe(item) {

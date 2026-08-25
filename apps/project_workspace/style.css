@@ -192,7 +192,7 @@ tbody tr:hover { background: var(--row-hover-background); }
 .progress-track.progress-indeterminate .progress-fill { width: 38%; animation: progress-sweep 1.15s ease-in-out infinite; }
 @keyframes progress-sweep { from { transform: translateX(-115%); } to { transform: translateX(275%); } }
 .progress-percent { min-width: 36px; color: var(--progress-color); font-variant-numeric: tabular-nums; font-size: 12px; text-align: right; }
-.row-actions { display: flex; gap: 5px; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 .row-error { display: block; max-width: 170px; color: var(--danger); margin-top: 5px; font-size: 11px; }
 .merge-preview { margin-top: 18px; align-items: flex-start; }
 .merge-timeline { display: flex; gap: 7px; min-width: 50%; overflow-x: auto; }

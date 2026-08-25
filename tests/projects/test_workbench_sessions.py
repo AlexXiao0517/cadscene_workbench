@@ -805,6 +805,247 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
     return api, repositories, runs_root, job
 
 
+def _add_same_scene_adjacent_clips(
+    api: ProjectApi,
+    repositories,
+    tmp_path: Path,
+) -> None:
+    current = repositories.clips.load("project-1")
+    first = current.clips[0]
+    clips = []
+    for index in range(1, 4):
+        physical = tmp_path / f"clip-{index}.mp4"
+        physical.write_bytes(f"physical-{index}".encode("ascii"))
+        frame_map = tmp_path / f"clip-{index}-frame-map.json"
+        frame_map.write_text(
+            json.dumps(
+                {
+                    "frames": [
+                        {
+                            "output_frame_ordinal": ordinal,
+                            "source_decoded_frame_ordinal": ordinal,
+                            "source_pts": (index - 1) * 100 + ordinal * 25,
+                        }
+                        for ordinal in range(4)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        analysis = {
+            **dict(first.analysis),
+            "clip_id": f"clip-{index}",
+            "scene_index": 1,
+            "segment_index": index,
+            "render_order": index - 1,
+            "source_start_pts": (index - 1) * 100,
+            "source_end_pts_exclusive": index * 100,
+            "physical_mp4_path": str(physical),
+            "frame_map_path": str(frame_map),
+        }
+        clips.append(
+            ClipDefinition.from_analysis(
+                analysis,
+                generated_display_name=f"场景 01 · 第 {index} 段",
+            )
+        )
+    published = repositories.clips.update(
+        "project-1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(value, clips=tuple(clips)),
+    )
+    project = repositories.project.load("project-1")
+    adapter = api.service.adapters.for_workflow("sfm_only")
+    jobs = list(repositories.jobs.load("project-1").jobs)
+    for clip in clips[1:]:
+        job = api.service._new_job(
+            "project-1",
+            clip,
+            job_type="trajectory",
+            resource_class="heavy_compute",
+            adapter_name=adapter.name,
+            adapter_version=adapter.version,
+            exclusive_key=f"trajectory:project-1:{clip.clip_id}",
+            dependency_ids=(),
+            project_assets=project.source_assets,
+            project_revision=project.revision,
+            clips_revision=published.revision,
+        )
+        trajectory = (
+            Path(job.attempts[-1].directory)
+            / "project-1"
+            / clip.clip_id
+            / "02_sfm/camera_trajectory.json"
+        )
+        trajectory.parent.mkdir(parents=True, exist_ok=True)
+        trajectory.write_text(
+            json.dumps({"poses": [{"frame_index": 0}]}), encoding="utf-8"
+        )
+        jobs.append(
+            replace(
+                job,
+                status="success",
+                stage="success",
+                output_revision=f"trajectory-{clip.clip_id}",
+                output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
+                output_validated=True,
+                validated_input_fingerprint=job.input_fingerprint,
+                published_outputs={"trajectory": str(trajectory)},
+            ).to_dict()
+        )
+    manifest = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(value, jobs=tuple(jobs)),
+    )
+
+
+def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    track = {
+        "version": 1,
+        "fps": 25.0,
+        "keyframes": [
+            {
+                "frame": 0,
+                "time": 0.0,
+                "source": "manual_anchor",
+                "camera": {
+                    "x": 10.0,
+                    "y": 20.0,
+                    "z": 30.0,
+                    "yaw": 40.0,
+                    "pitch": -20.0,
+                    "roll": 0.0,
+                    "fov": 70.0,
+                },
+            },
+            {
+                "frame": 3,
+                "time": 0.12,
+                "source": "manual_anchor",
+                "camera": {
+                    "x": 110.0,
+                    "y": 120.0,
+                    "z": 130.0,
+                    "yaw": 140.0,
+                    "pitch": -10.0,
+                    "roll": 1.0,
+                    "fov": 72.0,
+                },
+            },
+        ],
+    }
+    manual = runs_root / "project-1-clip-2/clip-2/01_keyframes/camera_track_manual.json"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(json.dumps(track), encoding="utf-8")
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(
+        item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2"
+    )
+    assert source["capabilities"]["locate_up_target_clip_id"] == "clip-1"
+    assert source["capabilities"]["locate_down_target_clip_id"] == "clip-3"
+
+    downward = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/locate-adjacent",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert downward.status == 201
+    assert downward.body["target_clip_id"] == "clip-3"
+    assert parse_qs(urlsplit(downward.body["workbench_url"]).query)["initialFrame"] == [
+        "0"
+    ]
+    down_track = json.loads(
+        (
+            runs_root / "project-1-clip-3/clip-3/01_keyframes/camera_track_manual.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert down_track["keyframes"][0]["frame"] == 0
+    assert down_track["keyframes"][0]["source"] == "scene_boundary_anchor"
+    assert down_track["keyframes"][0]["camera"] == track["keyframes"][-1]["camera"]
+    repeated_downward = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/locate-adjacent",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert repeated_downward.status == 403
+    assert (
+        len(
+            list(
+                (api.service.projects_root / "project-1/workbench_seeds/clip-3").glob(
+                    "*/workbench_seed_manifest.json"
+                )
+            )
+        )
+        == 1
+    )
+
+    upward = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/locate-adjacent",
+        json_body={
+            "direction": "up",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert upward.status == 201
+    assert upward.body["target_clip_id"] == "clip-1"
+    assert parse_qs(urlsplit(upward.body["workbench_url"]).query)["initialFrame"] == [
+        "3"
+    ]
+    up_track = json.loads(
+        (
+            runs_root / "project-1-clip-1/clip-1/01_keyframes/camera_track_manual.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert up_track["keyframes"][0]["frame"] == 3
+    assert up_track["keyframes"][0]["camera"] == track["keyframes"][0]["camera"]
+    seed_manifest = next(
+        (api.service.projects_root / "project-1/workbench_seeds/clip-1").glob(
+            "*/workbench_seed_manifest.json"
+        )
+    )
+    seed = json.loads(seed_manifest.read_text(encoding="utf-8"))
+    assert seed["source_clip_id"] == "clip-2"
+    assert (
+        seed["source_workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+
+
 def test_snapshot_exposes_server_derived_workbench_capability_and_state(
     tmp_path: Path,
 ) -> None:

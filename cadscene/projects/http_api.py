@@ -67,6 +67,9 @@ _JOB_RUNTIME = re.compile(
 _WORKBENCH_CREATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workbench-sessions$"
 )
+_ADJACENT_LOCATE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/locate-adjacent$"
+)
 _WORKBENCH_SESSION = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready))?$"
 )
@@ -216,6 +219,11 @@ class ProjectApi:
             if method == "POST" and match:
                 return self._job_action(
                     match["project"], match["job"], match["action"], payload
+                )
+            match = _ADJACENT_LOCATE.fullmatch(path)
+            if method == "POST" and match:
+                return self._locate_adjacent_clip(
+                    match["project"], match["clip"], payload
                 )
             match = _WORKBENCH_CREATE.fullmatch(path)
             if method == "POST" and match:
@@ -988,6 +996,18 @@ class ProjectApi:
             if self.workbench is None
             else self.workbench.can_prepare(project_id, clip.clip_id)
         )
+        location = (
+            {
+                "can_locate_up": False,
+                "can_locate_down": False,
+                "locate_up_target_clip_id": None,
+                "locate_down_target_clip_id": None,
+            }
+            if self.workbench is None
+            else self.workbench.adjacent_location_capabilities(
+                project_id, clip.clip_id
+            )
+        )
         return {
             "can_start_trajectory": can_start,
             "trajectory_needs_confirmation": needs_confirmation,
@@ -1011,7 +1031,40 @@ class ProjectApi:
             "can_retry": status
             in {"failed", "interrupted", "cancelled", "stale_input", "superseded"},
             "can_cancel": status in {"queued", "preparing", "running", "validating"},
+            **location,
         }
+
+    def _locate_adjacent_clip(
+        self, project_id: str, source_clip_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
+        direction = payload.get("direction")
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be up or down")
+        return_to = payload.get("return_to")
+        if not isinstance(return_to, str):
+            raise InvalidWorkbenchReturnPath("return_to is required")
+        session, target_clip_id = self.workbench.locate_adjacent(
+            project_id,
+            source_clip_id,
+            direction=str(direction),
+            return_to=return_to,
+            expected_clips_revision=_required_revision(payload),
+        )
+        return ApiResponse(
+            201,
+            {
+                **self.workbench.session_payload(session),
+                "source_clip_id": source_clip_id,
+                "target_clip_id": target_clip_id,
+                "direction": direction,
+                "workbench_url": self.workbench.workbench_url(session),
+                "clips_revision": self.repositories.clips.load(project_id).revision,
+            },
+        )
 
     def _create_workbench_session(
         self, project_id: str, clip_id: str, payload: Mapping[str, object]

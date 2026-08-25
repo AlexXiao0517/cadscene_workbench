@@ -12,6 +12,7 @@
   const TRACK_FALLBACKS = VIEWER_PATHS.trackFallbacks || [];
   const CAMERA_PATH = VIEWER_PATHS.camera;
   const REVIEW_PATH = VIEWER_PATHS.review;
+  const INITIAL_FRAME_VALUE = new URLSearchParams(window.location.search).get("initialFrame");
   const DEFAULT_FPS = 23.976;
   const NEAR_PLANE = 0.1;
   const MAX_ACTIVE_CAD_TEXT_LABELS = 240;
@@ -2961,6 +2962,13 @@
     if (trackLoaded) threeScene.focusInspectOnCamera(camera);
     else threeScene.focusInspectOnCad();
     updateViews({ forceOverlay: true });
+    const initialFrame = Number.parseInt(INITIAL_FRAME_VALUE || "", 10);
+    if (Number.isInteger(initialFrame) && initialFrame >= 0) {
+      if (video.readyState < 1) {
+        await new Promise((resolve) => video.addEventListener("loadedmetadata", resolve, { once: true }));
+      }
+      await goToFrame(initialFrame);
+    }
   }
 
   function tick() {
