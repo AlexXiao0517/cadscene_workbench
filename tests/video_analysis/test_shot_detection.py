@@ -3,6 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from cadscene.video_analysis.models import BoundaryEvidence
 from cadscene.video_analysis.pts import DecodedFrame
 from cadscene.video_analysis.shot_detection import (
     FramePairEvidence,
@@ -10,7 +11,50 @@ from cadscene.video_analysis.shot_detection import (
     analyze_frame_pair,
     coalesce_boundaries,
     detect_shot_boundaries,
+    is_confirmed_dense_boundary,
+    verify_candidate_boundaries,
 )
+
+
+def test_dense_verification_rejects_smooth_motion_and_keeps_an_abrupt_cut() -> None:
+    base = _textured_frame()
+    smooth = [
+        _frame(10.0 + index * 0.1, np.roll(base, shift=index * 2, axis=1))
+        for index in range(6)
+    ]
+    abrupt = [
+        _frame(20.0, _textured_frame(4)),
+        _frame(20.1, _textured_frame(4)),
+        _frame(20.2, _textured_frame(99)),
+        _frame(20.3, _textured_frame(99)),
+    ]
+
+    confirmed = verify_candidate_boundaries(
+        [smooth, abrupt], expected_interval_sec=0.1
+    )
+
+    assert len(confirmed) == 1
+    assert confirmed[0].pts_sec == 20.2
+    assert "image_discontinuity" in confirmed[0].reasons
+
+
+def test_dense_verification_rejects_geometric_jump_without_strong_image_change() -> None:
+    evidence = FramePairEvidence(
+        from_pts_sec=275.542,
+        to_pts_sec=275.609,
+        image_change_score=0.165,
+        black_frame_score=0.0,
+        exposure_jump_score=0.0,
+        feature_match_count=20,
+        feature_spatial_coverage=0.135,
+        homography_inlier_ratio=0.8,
+        flow_magnitude_px=40.0,
+        flow_residual_px=41.44,
+        clarity_score=0.8,
+    )
+    boundary = BoundaryEvidence(275.609, ("image_discontinuity",), 0.9)
+
+    assert is_confirmed_dense_boundary(boundary, evidence) is False
 
 
 def _textured_frame(seed: int = 4) -> np.ndarray:

@@ -284,3 +284,58 @@ def detect_shot_boundaries(
                 )
             )
     return boundaries
+
+
+def verify_candidate_boundaries(
+    frame_groups: list[list[DecodedFrame]],
+    *,
+    expected_interval_sec: float,
+    config: ShotDetectionConfig | None = None,
+) -> list[BoundaryEvidence]:
+    """Promote coarse candidates only when dense adjacent frames confirm a cut."""
+
+    settings = config or ShotDetectionConfig()
+    confirmed: list[BoundaryEvidence] = []
+    for frames in frame_groups:
+        if len(frames) < 2:
+            continue
+        for before, after in zip(frames, frames[1:]):
+            evidence = analyze_frame_pair(before, after)
+            boundaries = detect_shot_boundaries(
+                [before, after],
+                expected_interval_sec=expected_interval_sec,
+                config=settings,
+                pair_evidence=[evidence],
+            )
+            confirmed.extend(
+                boundary
+                for boundary in boundaries
+                if is_confirmed_dense_boundary(
+                    boundary,
+                    evidence,
+                    config=settings,
+                )
+            )
+    return coalesce_boundaries(
+        confirmed,
+        within_sec=expected_interval_sec * 2.0,
+    )
+
+
+def is_confirmed_dense_boundary(
+    boundary: BoundaryEvidence,
+    evidence: FramePairEvidence,
+    *,
+    config: ShotDetectionConfig | None = None,
+) -> bool:
+    """Require a strong per-frame appearance break for geometry-only candidates."""
+
+    settings = config or ShotDetectionConfig()
+    non_geometric_reasons = {
+        "black_frame",
+        "exposure_discontinuity",
+        "pts_or_decode_anomaly",
+    }
+    if any(reason in non_geometric_reasons for reason in boundary.reasons):
+        return True
+    return evidence.image_change_score >= settings.image_change_threshold

@@ -12,6 +12,7 @@ from cadscene.video_analysis.pts import (
     PacketTimestamp,
     choose_sparse_samples,
     decode_sparse_frames,
+    decode_sparse_frame_ranges,
     iter_sparse_frames,
     parse_debug_packet_timestamps,
     parse_selected_video_time_base,
@@ -534,6 +535,46 @@ def test_sparse_decode_preserves_nonzero_absolute_frame_pts(tmp_path: Path) -> N
 
     assert frame_index.source_start_pts == 5000
     assert [frame.pts for frame in frames] == [5000, 5200]
+
+
+def test_dense_range_decode_keeps_candidate_windows_separate(tmp_path: Path) -> None:
+    ffmpeg = resolve_ffmpeg_executable()
+    video = _make_range_test_video(tmp_path / "ranges.mkv", ffmpeg)
+    frame_index = pts.probe_decoded_frame_index(video, ffmpeg_executable=ffmpeg)
+
+    groups = decode_sparse_frame_ranges(
+        video,
+        index=frame_index,
+        ranges=[(0.8, 1.2), (2.8, 3.2)],
+        interval_sec=0.1,
+        output_size=(64, 48),
+        ffmpeg_executable=ffmpeg,
+    )
+
+    assert len(groups) == 2
+    assert all(0.8 <= frame.pts_sec <= 1.2 for frame in groups[0])
+    assert all(2.8 <= frame.pts_sec <= 3.2 for frame in groups[1])
+    assert all(len(group) >= 3 for group in groups)
+
+
+def _make_range_test_video(path: Path, ffmpeg: Path) -> Path:
+    subprocess.run(
+        [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10:duration=4",
+            "-c:v",
+            "ffv1",
+            str(path),
+        ],
+        check=True,
+    )
+    return path
 
 
 def test_time_base_is_bound_to_selected_video_not_first_video_or_container_stream() -> None:
