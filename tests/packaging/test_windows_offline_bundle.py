@@ -146,6 +146,15 @@ def test_start_launcher_uses_only_bundle_local_runtime_and_storage() -> None:
     assert "service-state.json" in source
 
 
+def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert "function Assert-PathBudget" in source
+    assert "Windows 路径过长" in source
+    assert "D:\\CADScene" in source
+    assert source.index("Assert-PathBudget") < source.index("conda-unpack.exe")
+
+
 def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
@@ -199,7 +208,7 @@ def test_powershell_launchers_parse_without_errors(script_name: str) -> None:
 def test_release_config_pins_bundle_and_backend_versions() -> None:
     config = ReleaseConfig.load(WINDOWS_PACKAGING / "release-config.json")
 
-    assert config.bundle_name == "CADSceneWorkbench-0.1.0-win64-offline"
+    assert config.bundle_name == "CADScene-0.1.0"
     assert config.application_version == "0.1.0"
     assert config.poc_commit == "85ab6404bfb5a07da8cdaaba0a1e5c4da10dc250"
     assert config.opengv_commit == "91f4b19c73450833a40e463ad3648aae80b3a7f3"
@@ -224,7 +233,7 @@ def test_prepare_runtime_commands_clone_install_check_and_pack(tmp_path: Path) -
     assert "--clone" in commands[0]
     assert commands[1][1:4] == ("-m", "pip", "install")
     assert commands[2][1:] == ("-m", "pip", "check")
-    assert commands[3][1:3] == ("-c", "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap")
+    assert commands[3][1:3] == ("-c", "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap, psutil")
     assert commands[4][1:] == ("-m", "pip", "install", "conda-pack==0.9.2")
     assert commands[5][0].endswith("build env\\Scripts\\conda-pack.exe")
     assert "--force" in commands[5]

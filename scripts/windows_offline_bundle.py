@@ -165,7 +165,7 @@ def prepare_runtime_commands(
         (
             str(python),
             "-c",
-            "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap",
+            "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap, psutil",
         ),
         (
             str(python),

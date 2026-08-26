@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$PreferredPort = 8300,
     [switch]$NoBrowser
 )
@@ -12,6 +12,22 @@ $backend = Join-Path $bundleRoot "pure_rotation_backend"
 $logs = Join-Path $bundleRoot "logs"
 $statePath = Join-Path $PSScriptRoot "service-state.json"
 $relocatedMarker = Join-Path $runtime ".cadscene-relocated"
+
+function Assert-PathBudget() {
+    # Windows 部分原生工具仍受旧式路径上限影响，按最深的任务临时目录预留空间。
+    $probeProject = "dataset-00000000-0000-0000-0000-000000000000"
+    $probeJob = "00000000000000000000000000000000"
+    $probeRelative = "projects\$probeProject\jobs\$probeJob\attempt-1\scratch\data\$probeProject"
+    $probePath = Join-Path $workspace $probeRelative
+    $maxSafePathLength = 230
+    if ($probePath.Length -gt $maxSafePathLength) {
+        throw (
+            "Windows 路径过长，后续上传任务将无法创建临时目录。" +
+            "请把整个解压目录移动到较短位置，例如 D:\CADScene，然后重新启动。" +
+            "当前预计任务路径长度：$($probePath.Length)，安全上限：$maxSafePathLength。"
+        )
+    }
+}
 
 function Test-ManagedService([object]$state) {
     if ($null -eq $state -or $null -eq $state.pid -or $null -eq $state.process_start_time) {
@@ -75,6 +91,7 @@ try {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Bundled Python runtime is missing: $python"
     }
+    Assert-PathBudget
     New-Item -ItemType Directory -Force -Path $workspace, $logs | Out-Null
 
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
