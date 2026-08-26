@@ -265,10 +265,19 @@ class ProjectApi:
             return ApiResponse(400, {"error": str(exc)})
 
     def _create_project(self, payload: Mapping[str, object]) -> ApiResponse:
-        project_id = validate_project_id(
-            str(payload.get("project_id") or f"project-{self._identity()}")
-        )
-        self.repositories.create_project(project_id, updated_at=self.now())
+        requested_project_id = payload.get("project_id")
+        if requested_project_id:
+            project_id = validate_project_id(str(requested_project_id))
+            self.repositories.create_project(project_id, updated_at=self.now())
+        else:
+            for attempt in range(8):
+                project_id = self._new_project_id()
+                try:
+                    self.repositories.create_project(project_id, updated_at=self.now())
+                    break
+                except RevisionConflict:
+                    if attempt == 7:
+                        raise
         display_name = str(payload.get("display_name") or "").strip()
         project_revision = 0
         if display_name:
@@ -294,6 +303,12 @@ class ProjectApi:
                 "workspace_url": f"/apps/project_workspace/?projectId={project_id}",
             },
         )
+
+    def _new_project_id(self) -> str:
+        identity = str(self._identity()).lower()
+        if not re.fullmatch(r"[0-9a-f]{16,}", identity):
+            identity = sha256(identity.encode("utf-8")).hexdigest()
+        return validate_project_id(f"p-{identity[:16]}")
 
     def _update_project_name(
         self, project_id: str, payload: Mapping[str, object]
