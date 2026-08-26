@@ -151,12 +151,23 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
 
     assert "function Assert-PathBudget" in source
     assert '".va-00000000\\r"' in source
-    assert '"02_video_analysis\\analysis_revisions\\analysis-$probeJob\\video_analysis_manifest.json"' in source
+    assert '"02_video_analysis\\analysis_revisions\\r-0000000000000000\\video_analysis_manifest.json"' in source
     assert "$probePaths" in source
     assert "$maxSafePathLength = 240" in source
     assert "Windows 路径过长" in source
     assert "请把包含启动文件的程序目录直接移动到较短位置，例如 D:\\CADScene" in source
     assert source.index("Assert-PathBudget") < source.index("conda-unpack.exe")
+
+    previous_workspace = Path(
+        r"D:\CADWORK\CADScene-0.1.1\CADScene-0.1.0\workspace"
+    )
+    previous_probe = previous_workspace / (
+        "projects/dataset-00000000-0000-0000-0000-000000000000/"
+        "jobs/00000000000000000000000000000000/attempt-1/"
+        "02_video_analysis/analysis_revisions/r-0000000000000000/"
+        "video_analysis_manifest.json"
+    )
+    assert len(str(previous_probe)) <= 240
 
 
 def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor() -> None:

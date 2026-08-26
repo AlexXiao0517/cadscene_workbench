@@ -40,9 +40,18 @@ def test_publish_writes_required_root_artifacts_and_immutable_revision(tmp_path:
 
     published = publish_analysis_revision(output, "analysis-0001", _valid_payloads("analysis-0001"))
 
-    assert published == output / "analysis_revisions" / "analysis-0001"
+    assert published.parent == output / "analysis_revisions"
+    assert published.name.startswith("r-")
+    assert len(published.name) == 18
     assert set(REQUIRED_ARTIFACTS) == {path.name for path in published.iterdir()}
     assert all((output / name).is_file() for name in REQUIRED_ARTIFACTS)
+    pointer = json.loads(
+        (output / "current_analysis_revision.json").read_text(encoding="utf-8")
+    )
+    assert pointer == {
+        "analysis_revision": "analysis-0001",
+        "revision_directory": f"analysis_revisions/{published.name}",
+    }
 
 
 def test_publication_staging_path_does_not_repeat_revision_name(
@@ -62,7 +71,7 @@ def test_publication_staging_path_does_not_repeat_revision_name(
     def record_replace(source: Path, destination: Path) -> None:
         source_path = Path(source)
         destination_path = Path(destination)
-        if destination_path.name == revision:
+        if destination_path.parent.name == "analysis_revisions":
             revision_moves.append((source_path, destination_path))
         original_replace(source_path, destination_path)
 
@@ -74,6 +83,7 @@ def test_publication_staging_path_does_not_repeat_revision_name(
     assert temp_prefixes == [".va-"]
     assert len(revision_moves) == 1
     assert revision_moves[0][0].name == "r"
+    assert revision_moves[0][1].name.startswith("r-")
 
 
 def test_reanalysis_keeps_old_revision_and_manual_overrides(tmp_path: Path) -> None:
@@ -138,5 +148,6 @@ def test_copy_failure_rolls_back_revision_and_root_artifacts(
     with pytest.raises(OSError, match="injected publication failure"):
         publish_analysis_revision(output, "analysis-0001", _valid_payloads("analysis-0001"))
 
-    assert not (output / "analysis_revisions" / "analysis-0001").exists()
+    revisions = output / "analysis_revisions"
+    assert not revisions.exists() or not any(revisions.iterdir())
     assert not any((output / name).exists() for name in REQUIRED_ARTIFACTS)

@@ -999,6 +999,35 @@ def test_video_analysis_validation_accepts_revision_indexed_output(
     assert result.outputs["analysis_output"] == str(indexed_root / revision)
 
 
+def test_video_analysis_validation_resolves_short_revision_directory_from_pointer(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    root = output.parent
+    short_output = root / "analysis_revisions" / "r-0123456789abcdef"
+    short_output.parent.mkdir()
+    output.rename(short_output)
+    (root / "current_analysis_revision.json").write_text(
+        json.dumps(
+            {
+                "analysis_revision": revision,
+                "revision_directory": "analysis_revisions/r-0123456789abcdef",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_video_outputs(video_job, revision)
+
+    assert result.status == "success"
+    assert result.outputs["analysis_output"] == str(short_output)
+
+
 def _add_srt_asset(repositories, tmp_path: Path) -> None:
     srt = tmp_path / "source.srt"
     srt.write_text(

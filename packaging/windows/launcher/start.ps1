@@ -20,7 +20,7 @@ function Assert-PathBudget() {
     $probeJobRoot = Join-Path $workspace "projects\$probeProject\jobs\$probeJob\attempt-1"
     $probePaths = @(
         (Join-Path $probeJobRoot ".va-00000000\r"),
-        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\analysis-$probeJob\video_analysis_manifest.json")
+        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\r-0000000000000000\video_analysis_manifest.json")
     )
     $probePath = $probePaths | Sort-Object { $_.Length } -Descending | Select-Object -First 1
     $maxSafePathLength = 240

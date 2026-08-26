@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 from typing import Mapping
 
+from cadscene.video_analysis.artifacts import CURRENT_REVISION_POINTER
+
 from .adapters import AdapterResult
 from .executor import JobExecutionPlan
 from .queue import QueueJob
@@ -165,6 +167,23 @@ def _video_analysis_output_dir(job: QueueJob, revision: str) -> Path:
     indexed = root / "analysis_revisions" / revision
     if (flat / "clip_manifest.json").is_file():
         return flat
+    if (indexed / "clip_manifest.json").is_file():
+        return indexed
+    pointer = root / CURRENT_REVISION_POINTER
+    if pointer.is_file():
+        try:
+            payload = json.loads(pointer.read_text(encoding="utf-8-sig"))
+            if str(payload.get("analysis_revision")) == revision:
+                relative = Path(str(payload.get("revision_directory", "")))
+                candidate = (root / relative).resolve()
+                resolved_root = root.resolve()
+                if (
+                    candidate.is_relative_to(resolved_root)
+                    and (candidate / "clip_manifest.json").is_file()
+                ):
+                    return candidate
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
     return indexed
 
 
