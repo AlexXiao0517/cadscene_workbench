@@ -14,16 +14,20 @@ $statePath = Join-Path $PSScriptRoot "service-state.json"
 $relocatedMarker = Join-Path $runtime ".cadscene-relocated"
 
 function Assert-PathBudget() {
-    # Windows 部分原生工具仍受旧式路径上限影响，按最深的任务临时目录预留空间。
+    # Windows 部分原生工具仍受旧式路径上限影响，按视频分析发布阶段的真实最长路径预留空间。
     $probeProject = "dataset-00000000-0000-0000-0000-000000000000"
     $probeJob = "00000000000000000000000000000000"
-    $probeRelative = "projects\$probeProject\jobs\$probeJob\attempt-1\scratch\data\$probeProject"
-    $probePath = Join-Path $workspace $probeRelative
-    $maxSafePathLength = 230
+    $probeJobRoot = Join-Path $workspace "projects\$probeProject\jobs\$probeJob\attempt-1"
+    $probePaths = @(
+        (Join-Path $probeJobRoot ".va-00000000\r"),
+        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\analysis-$probeJob\video_analysis_manifest.json")
+    )
+    $probePath = $probePaths | Sort-Object { $_.Length } -Descending | Select-Object -First 1
+    $maxSafePathLength = 240
     if ($probePath.Length -gt $maxSafePathLength) {
         throw (
             "Windows 路径过长，后续上传任务将无法创建临时目录。" +
-            "请把整个解压目录移动到较短位置，例如 D:\CADScene，然后重新启动。" +
+            "请把包含启动文件的程序目录直接移动到较短位置，例如 D:\CADScene，然后重新启动。" +
             "当前预计任务路径长度：$($probePath.Length)，安全上限：$maxSafePathLength。"
         )
     }

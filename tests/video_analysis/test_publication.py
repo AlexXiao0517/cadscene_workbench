@@ -45,6 +45,37 @@ def test_publish_writes_required_root_artifacts_and_immutable_revision(tmp_path:
     assert all((output / name).is_file() for name in REQUIRED_ARTIFACTS)
 
 
+def test_publication_staging_path_does_not_repeat_revision_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "02_video_analysis"
+    revision = "analysis-00000000000000000000000000000000"
+    original_mkdtemp = artifacts_module.tempfile.mkdtemp
+    original_replace = artifacts_module.os.replace
+    temp_prefixes: list[str] = []
+    revision_moves: list[tuple[Path, Path]] = []
+
+    def record_mkdtemp(*, prefix: str, dir: Path) -> str:
+        temp_prefixes.append(prefix)
+        return original_mkdtemp(prefix=prefix, dir=dir)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if destination_path.name == revision:
+            revision_moves.append((source_path, destination_path))
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(artifacts_module.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(artifacts_module.os, "replace", record_replace)
+
+    publish_analysis_revision(output, revision, _valid_payloads(revision))
+
+    assert temp_prefixes == [".va-"]
+    assert len(revision_moves) == 1
+    assert revision_moves[0][0].name == "r"
+
+
 def test_reanalysis_keeps_old_revision_and_manual_overrides(tmp_path: Path) -> None:
     output = tmp_path / "02_video_analysis"
     first = publish_analysis_revision(output, "analysis-0001", _valid_payloads("analysis-0001"))

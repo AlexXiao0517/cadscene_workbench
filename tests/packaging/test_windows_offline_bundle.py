@@ -150,8 +150,12 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
     assert "function Assert-PathBudget" in source
+    assert '".va-00000000\\r"' in source
+    assert '"02_video_analysis\\analysis_revisions\\analysis-$probeJob\\video_analysis_manifest.json"' in source
+    assert "$probePaths" in source
+    assert "$maxSafePathLength = 240" in source
     assert "Windows 路径过长" in source
-    assert "D:\\CADScene" in source
+    assert "请把包含启动文件的程序目录直接移动到较短位置，例如 D:\\CADScene" in source
     assert source.index("Assert-PathBudget") < source.index("conda-unpack.exe")
 
 

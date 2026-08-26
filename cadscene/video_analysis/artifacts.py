@@ -50,10 +50,8 @@ def publish_analysis_revision(
         raise FileExistsError(f"analysis revision already exists: {revision}")
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(
-        tempfile.mkdtemp(prefix=f".{output_dir.name}-{revision}-", dir=output_dir.parent)
-    )
-    staged_revision = staging_root / revision
+    staging_root = Path(tempfile.mkdtemp(prefix=".va-", dir=output_dir.parent))
+    staged_revision = staging_root / "r"
     previous_files = {
         name: (output_dir / name).read_bytes() if (output_dir / name).is_file() else None
         for name in REQUIRED_ARTIFACTS
