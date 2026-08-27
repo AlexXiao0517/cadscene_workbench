@@ -150,9 +150,11 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
     assert "function Assert-PathBudget" in source
-    assert '$probeProject = "p-0000000000000000"' in source
+    assert '$probeProject = "dataset-00000000-0000-0000-0000-000000000000"' in source
     assert '".va-00000000\\r"' in source
     assert '"02_video_analysis\\analysis_revisions\\r-0000000000000000\\video_analysis_manifest.json"' in source
+    assert '"analysis_artifacts\\.pub-00000000\\a\\02_video_analysis\\video_analysis_manifest.json"' in source
+    assert '"analysis_artifacts\\va-0000000000000000\\02_video_analysis\\video_analysis_manifest.json"' in source
     assert "$probePaths" in source
     assert "$maxSafePathLength = 240" in source
     assert "Windows 路径过长" in source
@@ -163,7 +165,7 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
         r"D:\CADWORK\CADScene-0.1.1\CADScene-0.1.0\workspace"
     )
     previous_probe = previous_workspace / (
-        "projects/p-0000000000000000/"
+        "projects/dataset-00000000-0000-0000-0000-000000000000/"
         "jobs/00000000000000000000000000000000/attempt-1/"
         "02_video_analysis/analysis_revisions/r-0000000000000000/"
         "video_analysis_manifest.json"

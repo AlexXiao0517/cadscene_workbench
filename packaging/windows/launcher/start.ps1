@@ -15,12 +15,15 @@ $relocatedMarker = Join-Path $runtime ".cadscene-relocated"
 
 function Assert-PathBudget() {
     # Windows 部分原生工具仍受旧式路径上限影响，按视频分析发布阶段的真实最长路径预留空间。
-    $probeProject = "p-0000000000000000"
+    $probeProject = "dataset-00000000-0000-0000-0000-000000000000"
     $probeJob = "00000000000000000000000000000000"
     $probeJobRoot = Join-Path $workspace "projects\$probeProject\jobs\$probeJob\attempt-1"
+    $probeProjectRoot = Join-Path $workspace "projects\$probeProject"
     $probePaths = @(
         (Join-Path $probeJobRoot ".va-00000000\r"),
-        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\r-0000000000000000\video_analysis_manifest.json")
+        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\r-0000000000000000\video_analysis_manifest.json"),
+        (Join-Path $probeProjectRoot "analysis_artifacts\.pub-00000000\a\02_video_analysis\video_analysis_manifest.json"),
+        (Join-Path $probeProjectRoot "analysis_artifacts\va-0000000000000000\02_video_analysis\video_analysis_manifest.json")
     )
     $probePath = $probePaths | Sort-Object { $_.Length } -Descending | Select-Object -First 1
     $maxSafePathLength = 240
