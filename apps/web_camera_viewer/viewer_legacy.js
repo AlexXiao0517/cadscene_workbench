@@ -90,6 +90,7 @@
   let defaultCamera = null;
   let threeScene = null;
   let cameraTrack = null;
+  let loadedCameraTrack = false;
   let reviewPacket = null;
   let manualFrameOverride = null;
   let lastOverlayDrawAt = 0;
@@ -1927,6 +1928,10 @@
     return JSON.parse(JSON.stringify(cameraTrack));
   };
 
+  window.cadsceneHasLoadedCameraTrack = function () {
+    return loadedCameraTrack;
+  };
+
   window.cadsceneSetKeyframePlan = function (plan) {
     keyframePlanFrames = Array.isArray(plan?.frames) ? plan.frames.slice() : [];
     renderQualityTimeline();
@@ -2120,6 +2125,7 @@
       // 质量评估附加字段（evaluate_sfm_alignment_quality 产出，可选；向后兼容，仅展示不影响对齐）
       quality: keyframe.quality || null,
     }));
+    loadedCameraTrack = cameraTrack.keyframes.length > 0;
     sortKeyframes();
     summarizeQualitySuggestions();
     if (cameraTrack.keyframes.length > 0) {
