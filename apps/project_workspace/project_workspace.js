@@ -98,6 +98,10 @@
     return workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";
   }
 
+  function trajectoryDisplayStatus(clip) {
+    return clip.status === "cancelled" ? "ready" : clip.status;
+  }
+
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
     const open = $(".open-workbench", row);
@@ -147,7 +151,10 @@
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
-    $(".status-pill", row).textContent = STATUS_LABELS[clip.status] || clip.status || STATUS_LABELS.ready;
+    const displayStatus = trajectoryDisplayStatus(clip);
+    $(".status-pill", row).textContent = STATUS_LABELS[trajectoryDisplayStatus(clip)]
+      || displayStatus
+      || STATUS_LABELS.ready;
     const thumbnail = $(".clip-thumbnail img", row);
     thumbnail.src = clip.thumbnail_url || "";
     thumbnail.hidden = !clip.thumbnail_url;
@@ -203,7 +210,8 @@
     sourceThumb.hidden = !assets.video?.thumbnail_url;
     renderCadReplacement(snapshot);
     $("#clipCount").textContent = snapshot.clips.length;
-    $("#pendingCount").textContent = snapshot.clips.filter((clip) => ["ready", "queued"].includes(clip.status)).length;
+    $("#pendingCount").textContent = snapshot.clips.filter((clip) =>
+      ["ready", "queued"].includes(trajectoryDisplayStatus(clip))).length;
     $("#runningCount").textContent = snapshot.clips.filter((clip) => ["preparing", "running", "validating"].includes(clip.status)).length;
     const reanalyzeButton = $("#reanalyzeButton");
     const analysisActive = ["queued", "preparing", "running", "validating"]

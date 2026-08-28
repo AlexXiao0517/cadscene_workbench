@@ -267,6 +267,15 @@ def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> Non
     assert '#reanalyzeButton").addEventListener' in script
 
 
+def test_cancelled_trajectory_returns_to_pending_presentation() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert "function trajectoryDisplayStatus(clip)" in script
+    assert 'clip.status === "cancelled" ? "ready" : clip.status' in script
+    assert "STATUS_LABELS[trajectoryDisplayStatus(clip)]" in script
+    assert '["ready", "queued"].includes(trajectoryDisplayStatus(clip))' in script
+
+
 def test_cad_card_reveals_coordinate_preserving_replacement_with_real_progress() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
