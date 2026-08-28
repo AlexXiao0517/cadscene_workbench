@@ -1964,6 +1964,57 @@ def test_snapshot_keeps_completed_trajectory_as_primary_when_old_render_is_super
     assert clip["render"]["status"] == "superseded"
 
 
+def test_snapshot_shows_new_queued_trajectory_over_old_terminal_outputs(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, trajectory = _project_api_with_workbench(tmp_path)
+    jobs = repositories.jobs.load("project-1")
+    old_render = {
+        **trajectory.to_dict(),
+        "job_id": "render-old",
+        "job_type": "clip_render",
+        "status": "superseded",
+        "stage": "superseded",
+    }
+    old_bridge = {
+        **trajectory.to_dict(),
+        "job_id": "bridge-old",
+        "job_type": "scene_bridge",
+        "status": "superseded",
+        "stage": "superseded",
+    }
+    queued_trajectory = {
+        **trajectory.to_dict(),
+        "job_id": "trajectory-new",
+        "status": "queued",
+        "stage": "queued",
+        "progress": None,
+    }
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=(
+                *value.jobs,
+                old_render,
+                old_bridge,
+                queued_trajectory,
+            ),
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+
+    clip = snapshot.body["clips"][0]
+    assert clip["job_id"] == "trajectory-new"
+    assert clip["status"] == "queued"
+    assert clip["stage"] == "queued"
+    assert clip["capabilities"]["can_cancel"] is True
+    assert clip["render"]["status"] == "superseded"
+    assert clip["scene_bridge"]["status"] == "superseded"
+
+
 def test_workbench_uses_project_active_cad_after_global_replacement(
     tmp_path: Path,
 ) -> None:
