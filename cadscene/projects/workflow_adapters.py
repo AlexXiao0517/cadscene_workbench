@@ -133,6 +133,7 @@ class ExistingWorkflowAdapter:
             outputs.update(
                 {
                     "solve_trajectory": str(solve_output),
+                    "solve_video": str(inputs.video_path),
                     "solve_frame_map": str(inputs.frame_map_path),
                     "core_frame_map": str(inputs.core_frame_map_path),
                 }

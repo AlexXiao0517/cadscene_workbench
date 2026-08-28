@@ -876,12 +876,8 @@ def _add_same_scene_adjacent_clips(
     )
     project = repositories.project.load("project-1")
     adapter = api.service.adapters.for_workflow("sfm_only")
-    jobs = (
-        list(repositories.jobs.load("project-1").jobs)
-        if restore_trajectory_jobs
-        else []
-    )
-    for clip in clips[1:] if restore_trajectory_jobs else ():
+    jobs: list[dict[str, object]] = []
+    for clip in clips if restore_trajectory_jobs else ():
         job = api.service._new_job(
             "project-1",
             clip,
@@ -916,6 +912,49 @@ def _add_same_scene_adjacent_clips(
         )
         sparse = trajectory.with_name("sparse_points.ply")
         sparse.write_bytes(b"ply")
+        clip_number = int(clip.analysis["segment_index"])
+        solve_start = max(0, (clip_number - 2) * 100)
+        solve_end = min(300, (clip_number + 1) * 100)
+        solve_points = tuple(range(solve_start, solve_end, 25))
+        solve_map = tmp_path / f"{clip.clip_id}-solve-frame-map.json"
+        solve_map.write_text(
+            json.dumps(
+                {
+                    "source_time_base": {"numerator": 1, "denominator": 1000},
+                    "clips": [
+                        {
+                            "clip_id": clip.clip_id,
+                            "source_start_pts": solve_start,
+                            "source_end_pts_exclusive": solve_end,
+                            "frames": [
+                                {
+                                    "output_frame_ordinal": ordinal,
+                                    "source_decoded_frame_ordinal": pts // 25,
+                                    "source_pts": pts,
+                                }
+                                for ordinal, pts in enumerate(solve_points)
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        solve_video = tmp_path / f"{clip.clip_id}-solve.mp4"
+        solve_video.write_bytes(b"solve-video")
+        solve_trajectory = trajectory.with_name("camera_trajectory_solve.json")
+        solve_trajectory.write_text(
+            json.dumps(
+                {
+                    "fps": 40.0,
+                    "poses": [
+                        {"frame_index": frame, "registered": True}
+                        for frame in range(len(solve_points))
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         jobs.append(
             replace(
                 job,
@@ -925,7 +964,13 @@ def _add_same_scene_adjacent_clips(
                 output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
                 output_validated=True,
                 validated_input_fingerprint=job.input_fingerprint,
-                published_outputs={"trajectory": str(trajectory)},
+                published_outputs={
+                    "trajectory": str(trajectory),
+                    "solve_trajectory": str(solve_trajectory),
+                    "solve_frame_map": str(solve_map),
+                    "core_frame_map": str(tmp_path / f"{clip.clip_id}-frame-map.json"),
+                    "solve_video": str(solve_video),
+                },
             ).to_dict()
         )
     manifest = repositories.jobs.load("project-1")
@@ -1114,6 +1159,42 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert target["scene_bridge"]["direction"] == "down"
 
 
+def test_scene_bridge_capability_requires_current_precomputed_solve_artifacts(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    manifest = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=manifest.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "published_outputs": {
+                        "trajectory": item["published_outputs"]["trajectory"]
+                    },
+                }
+                if item["clip_id"] == "clip-2"
+                and item["job_type"] == "trajectory"
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(
+        item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2"
+    )
+
+    assert source["capabilities"]["can_bridge_down"] is False
+    assert "重新轨迹反算" in source["capabilities"]["bridge_down_reason"]
+
+
 def test_repeated_current_scene_bridge_request_is_idempotent(tmp_path: Path) -> None:
     api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
     _add_same_scene_adjacent_clips(api, repositories, tmp_path)
@@ -1212,6 +1293,12 @@ def test_scene_bridge_execution_plan_binds_saved_route_and_current_core_inputs(
     ]
     assert inputs.source_manual_track_path.is_file()
     assert inputs.source_core_frame_map_path.name.endswith("frame-map.json")
+    assert inputs.source_solve_video_path.is_file()
+    assert inputs.source_solve_frame_map_path.is_file()
+    assert inputs.source_solve_trajectory_path.is_file()
+    assert inputs.target_solve_video_path.is_file()
+    assert inputs.target_solve_frame_map_path.is_file()
+    assert inputs.target_solve_trajectory_path.is_file()
     assert inputs.target_core_frame_map_path.name.endswith("frame-map.json")
     assert inputs.target_core_trajectory_path.is_file()
     assert inputs.target_core_sparse_ply_path.is_file()

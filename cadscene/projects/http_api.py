@@ -1047,6 +1047,8 @@ class ProjectApi:
         bridge = {
             "can_bridge_up": bool(location.get("can_locate_up")),
             "can_bridge_down": bool(location.get("can_locate_down")),
+            "bridge_up_reason": location.get("locate_up_reason"),
+            "bridge_down_reason": location.get("locate_down_reason"),
             "bridge_up_target_clip_id": location.get("locate_up_target_clip_id"),
             "bridge_down_target_clip_id": location.get(
                 "locate_down_target_clip_id"

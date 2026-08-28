@@ -18,22 +18,19 @@ from uuid import uuid4
 
 from cadscene.core.camera import CameraState
 from cadscene.core.coordinates import python_state_to_web_camera
-from cadscene.video_analysis.pts import DecodedFrameIndex, probe_decoded_frame_index
-from cadscene.workflow.job_runner import resolve_sfm_python
-
 from .adapters import AdapterProgress, AdapterResult
 from .scene_bridges import (
     FrameMap,
     SceneBridgeAnchor,
+    SolveInterval,
     build_core_seed,
-    derive_solve_interval,
+    remap_core_track_to_solve,
     select_overlap_anchors,
 )
 
 
 CommandRunner = Callable[[str, tuple[str, ...]], None]
-SourceFrameProbe = Callable[[Path], DecodedFrameIndex]
-BRIDGE_ALGORITHM_VERSION = "scene-overlap-v1"
+BRIDGE_ALGORITHM_VERSION = "scene-overlap-precomputed-v2"
 
 
 @dataclass(frozen=True)
@@ -41,12 +38,16 @@ class SceneBridgeInputs:
     identity: Mapping[str, object]
     application_root: Path
     attempt_directory: Path
-    source_video_path: Path
-    source_core_video_path: Path
     source_core_frame_map_path: Path
     source_manual_track_path: Path
-    source_trajectory_path: Path
+    source_solve_video_path: Path
+    source_solve_frame_map_path: Path
+    source_solve_trajectory_path: Path
     source_sparse_ply_path: Path
+    target_solve_video_path: Path
+    target_solve_frame_map_path: Path
+    target_solve_trajectory_path: Path
+    target_solve_sparse_ply_path: Path
     target_core_video_path: Path
     target_core_frame_map_path: Path
     target_core_trajectory_path: Path
@@ -85,12 +86,16 @@ class SceneBridgeInputs:
         path_fields = (
             "application_root",
             "attempt_directory",
-            "source_video_path",
-            "source_core_video_path",
             "source_core_frame_map_path",
             "source_manual_track_path",
-            "source_trajectory_path",
+            "source_solve_video_path",
+            "source_solve_frame_map_path",
+            "source_solve_trajectory_path",
             "source_sparse_ply_path",
+            "target_solve_video_path",
+            "target_solve_frame_map_path",
+            "target_solve_trajectory_path",
+            "target_solve_sparse_ply_path",
             "target_core_video_path",
             "target_core_frame_map_path",
             "target_core_trajectory_path",
@@ -128,12 +133,16 @@ class SceneBridgeInputs:
         path_fields = (
             "application_root",
             "attempt_directory",
-            "source_video_path",
-            "source_core_video_path",
             "source_core_frame_map_path",
             "source_manual_track_path",
-            "source_trajectory_path",
+            "source_solve_video_path",
+            "source_solve_frame_map_path",
+            "source_solve_trajectory_path",
             "source_sparse_ply_path",
+            "target_solve_video_path",
+            "target_solve_frame_map_path",
+            "target_solve_trajectory_path",
+            "target_solve_sparse_ply_path",
             "target_core_video_path",
             "target_core_frame_map_path",
             "target_core_trajectory_path",
@@ -162,7 +171,6 @@ def run_scene_bridge(
     inputs: SceneBridgeInputs,
     *,
     command_runner: CommandRunner | None = None,
-    source_frame_probe: SourceFrameProbe = probe_decoded_frame_index,
 ) -> Path:
     _require_input_files(inputs)
     attempt = inputs.attempt_directory
@@ -179,6 +187,31 @@ def run_scene_bridge(
     target_clip_id = str(inputs.identity["target_clip_id"])
     direction = str(inputs.identity["direction"])
 
+    source_core_map = _load_frame_map(
+        inputs.source_core_frame_map_path, source_clip_id
+    )
+    source_solve_map = _load_frame_map(
+        inputs.source_solve_frame_map_path, source_clip_id
+    )
+    target_solve_map = _load_frame_map(
+        inputs.target_solve_frame_map_path, target_clip_id
+    )
+    target_core_map = _load_frame_map(
+        inputs.target_core_frame_map_path, target_clip_id
+    )
+    source_manual_track = json.loads(
+        inputs.source_manual_track_path.read_text(encoding="utf-8-sig")
+    )
+    if not isinstance(source_manual_track, Mapping):
+        raise ValueError("source manual camera track must be an object")
+    source_solve_track = work / "source_solve_camera_track.json"
+    _atomic_write_json(
+        source_solve_track,
+        remap_core_track_to_solve(
+            source_manual_track, source_core_map, source_solve_map
+        ),
+    )
+
     source_alignment_root = work / "source_alignment"
     runner(
         "source_alignment",
@@ -187,10 +220,10 @@ def run_scene_bridge(
             dataset="source-bridge",
             run_id="source",
             output_root=source_alignment_root,
-            trajectory=inputs.source_trajectory_path,
+            trajectory=inputs.source_solve_trajectory_path,
             sparse_ply=inputs.source_sparse_ply_path,
-            manual_track=inputs.source_manual_track_path,
-            video=inputs.source_core_video_path,
+            manual_track=source_solve_track,
+            video=inputs.source_solve_video_path,
         ),
     )
     source_run = source_alignment_root / "source-bridge/source"
@@ -198,110 +231,15 @@ def run_scene_bridge(
     if not source_path.is_file():
         raise FileNotFoundError("source alignment camera path is missing")
 
-    source_index = source_frame_probe(inputs.source_video_path)
-    target_core_map = _load_frame_map(
-        inputs.target_core_frame_map_path, target_clip_id
-    )
-    if source_index.time_base != target_core_map.time_base:
-        raise ValueError("source probe and target core frame map time bases differ")
-    solve_interval = derive_solve_interval(
-        core_start_pts=target_core_map.source_start_pts,
-        core_end_pts_exclusive=target_core_map.source_end_pts_exclusive,
-        source_frame_index=source_index,
-        overlap_seconds=inputs.overlap_seconds,
-    )
-    solve_export_root = work / "solve_export"
-    solve_manifest = work / "solve_export_manifest.json"
-    _atomic_write_json(
-        solve_manifest,
-        {
-            "clips": [
-                {
-                    "clip_id": "target-solve",
-                    "source_start_pts": solve_interval.start_pts,
-                    "source_end_pts_exclusive": solve_interval.end_pts_exclusive,
-                    "source_time_base": {
-                        "numerator": source_index.time_base.numerator,
-                        "denominator": source_index.time_base.denominator,
-                    },
-                    "interval_semantics": "half_open",
-                }
-            ]
-        },
-    )
-    solve_export_progress = work / "solve_export_progress.json"
-    solve_duration = (
-        Fraction(solve_interval.end_pts_exclusive - solve_interval.start_pts)
-        * source_index.time_base
-    )
-    max_solve_duration_seconds = math.floor(solve_duration) + 1
-    runner(
-        "solve_export",
-        (
-            sys.executable,
-            "-m",
-            "cadscene.cli.export_video_clips",
-            "--video",
-            str(inputs.source_video_path),
-            "--manifest",
-            str(solve_manifest),
-            "--output-dir",
-            str(solve_export_root),
-            "--progress-file",
-            str(solve_export_progress),
-            "--preset",
-            "veryfast",
-            "--max-duration-seconds",
-            str(max_solve_duration_seconds),
-            "--allow-subset",
-        ),
-    )
-    solve_video = solve_export_root / "target-solve.mp4"
-    solve_frame_map_path = solve_export_root / "clip_frame_map.json"
-    if not solve_video.is_file() or not solve_frame_map_path.is_file():
-        raise FileNotFoundError("target solve media or frame map is missing")
-    target_solve_map = _load_frame_map(solve_frame_map_path, "target-solve")
-
-    target_sfm_root = work / "target_sfm"
-    target_sfm_progress = work / "target_sfm_progress.json"
-    runner(
-        "target_sfm",
-        (
-            str(resolve_sfm_python()),
-            "-m",
-            "cadscene.cli.run_sfm",
-            "--dataset",
-            "target-bridge",
-            "--run-id",
-            "solve",
-            "--output-root",
-            str(target_sfm_root),
-            "--video",
-            str(solve_video),
-            "--progress-file",
-            str(target_sfm_progress),
-            "--start-frame",
-            "0",
-            "--frame-step",
-            "5",
-            "--init-min-tri-angle",
-            "2",
-            "--no-mask",
-        ),
-    )
-    target_sfm_run = target_sfm_root / "target-bridge/solve"
-    solve_trajectory = target_sfm_run / "02_sfm/camera_trajectory.json"
-    solve_sparse = target_sfm_run / "02_sfm/sparse_points.ply"
-    solve_registered, solve_fps = _trajectory_identity(solve_trajectory)
-    source_core_map = _load_frame_map(
-        inputs.source_core_frame_map_path, source_clip_id
+    solve_registered, solve_fps = _trajectory_identity(
+        inputs.target_solve_trajectory_path
     )
     source_cameras = _load_web_camera_path(
         source_path, cad_scale=inputs.cad_scale, origin_xy=inputs.origin_xy
     )
     anchors = select_overlap_anchors(
         direction=direction,
-        source_core_map=source_core_map,
+        source_core_map=source_solve_map,
         source_camera_path=source_cameras,
         target_solve_map=target_solve_map,
         target_registered_frames=solve_registered,
@@ -328,10 +266,10 @@ def run_scene_bridge(
             dataset="target-bridge",
             run_id="solve",
             output_root=solve_alignment_root,
-            trajectory=solve_trajectory,
-            sparse_ply=solve_sparse,
+            trajectory=inputs.target_solve_trajectory_path,
+            sparse_ply=inputs.target_solve_sparse_ply_path,
             manual_track=solve_track,
-            video=solve_video,
+            video=inputs.target_solve_video_path,
         ),
     )
     solve_alignment_run = solve_alignment_root / "target-bridge/solve"
@@ -371,6 +309,7 @@ def run_scene_bridge(
         ),
     )
     core_run = core_alignment_root / "target-bridge/core"
+    solve_interval = _solve_interval_from_maps(target_solve_map, target_core_map)
     return _publish_candidate(
         inputs,
         candidate=candidate,
@@ -488,12 +427,16 @@ def validate_scene_bridge_candidate(
 
 def _require_input_files(inputs: SceneBridgeInputs) -> None:
     paths = (
-        inputs.source_video_path,
-        inputs.source_core_video_path,
         inputs.source_core_frame_map_path,
         inputs.source_manual_track_path,
-        inputs.source_trajectory_path,
+        inputs.source_solve_video_path,
+        inputs.source_solve_frame_map_path,
+        inputs.source_solve_trajectory_path,
         inputs.source_sparse_ply_path,
+        inputs.target_solve_video_path,
+        inputs.target_solve_frame_map_path,
+        inputs.target_solve_trajectory_path,
+        inputs.target_solve_sparse_ply_path,
         inputs.target_core_video_path,
         inputs.target_core_frame_map_path,
         inputs.target_core_trajectory_path,
@@ -577,6 +520,31 @@ def _trajectory_identity(path: Path) -> tuple[set[int], float]:
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("trajectory fps must be positive")
     return registered, fps
+
+
+def _solve_interval_from_maps(
+    solve_map: FrameMap, core_map: FrameMap
+) -> SolveInterval:
+    if solve_map.time_base != core_map.time_base:
+        raise ValueError("target solve/core frame maps use different time bases")
+    solve_index_by_pts = {
+        entry.source_pts: entry.local_ordinal for entry in solve_map.frames
+    }
+    core_indices = [
+        solve_index_by_pts.get(entry.source_pts) for entry in core_map.frames
+    ]
+    if any(index is None for index in core_indices):
+        raise ValueError("target core PTS is missing from solve frame map")
+    integer_indices = [int(index) for index in core_indices if index is not None]
+    return SolveInterval(
+        start_pts=solve_map.source_start_pts,
+        end_pts_exclusive=solve_map.source_end_pts_exclusive,
+        core_start_pts=core_map.source_start_pts,
+        core_end_pts_exclusive=core_map.source_end_pts_exclusive,
+        core_start_index=integer_indices[0],
+        core_end_index_exclusive=integer_indices[-1] + 1,
+        frame_pts=tuple(entry.source_pts for entry in solve_map.frames),
+    )
 
 
 def _load_web_camera_path(
@@ -716,11 +684,9 @@ def _run_external_command(
     inputs: SceneBridgeInputs, phase: str, command: tuple[str, ...]
 ) -> None:
     spans = {
-        "source_alignment": (0.02, 0.10, "正在验证源片段路线"),
-        "solve_export": (0.10, 0.22, "正在准备重叠求解视频"),
-        "target_sfm": (0.22, 0.68, "正在重建目标片段重叠区"),
-        "solve_alignment": (0.74, 0.84, "正在用共同 PTS 拟合目标路线"),
-        "core_alignment": (0.86, 0.97, "正在生成核心片段微调路线"),
+        "source_alignment": (0.02, 0.32, "正在验证源片段路线"),
+        "solve_alignment": (0.38, 0.70, "正在用共同 PTS 拟合目标路线"),
+        "core_alignment": (0.74, 0.97, "正在生成核心片段微调路线"),
     }
     start, end, message = spans[phase]
     _write_progress(inputs, phase, message, start)

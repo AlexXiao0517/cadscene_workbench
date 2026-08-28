@@ -76,6 +76,7 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
     assert result.outputs == {
         "trajectory": str(output),
         "solve_trajectory": str(solve_output),
+        "solve_video": str(video),
         "solve_frame_map": str(solve_map),
         "core_frame_map": str(core_map),
     }

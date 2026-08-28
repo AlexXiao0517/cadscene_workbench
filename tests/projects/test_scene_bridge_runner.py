@@ -10,7 +10,6 @@ from cadscene.projects.scene_bridge_runner import (
     run_scene_bridge,
     validate_scene_bridge_candidate,
 )
-from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 
 
 PTS = tuple(range(0, 9000, 1000))
@@ -100,33 +99,9 @@ class FakeCommands:
                 / _flag(command, "--dataset")
                 / _flag(command, "--run-id")
             )
-            _write_camera_path(run / "03_alignment/sfm_camera_path.csv", 5)
+            _write_camera_path(run / "03_alignment/sfm_camera_path.csv", 7)
             _write_json(run / "03_alignment/alignment.json", {"sim3": {}})
             _write_json(run / "05_viewer_scene/sfm_viewer_scene.json", {})
-            return
-        if phase == "solve_export":
-            output = Path(_flag(command, "--output-dir"))
-            manifest = json.loads(Path(_flag(command, "--manifest")).read_text())
-            clip = manifest["clips"][0]
-            points = tuple(
-                pts
-                for pts in PTS
-                if clip["source_start_pts"] <= pts < clip["source_end_pts_exclusive"]
-            )
-            output.mkdir(parents=True, exist_ok=True)
-            (output / "target-solve.mp4").write_bytes(b"solve-video")
-            _write_frame_map(output / "clip_frame_map.json", "target-solve", points)
-            return
-        if phase == "target_sfm":
-            run = (
-                Path(_flag(command, "--output-root"))
-                / _flag(command, "--dataset")
-                / _flag(command, "--run-id")
-            )
-            _trajectory(run / "02_sfm/camera_trajectory.json", 7)
-            sparse = run / "02_sfm/sparse_points.ply"
-            sparse.parent.mkdir(parents=True, exist_ok=True)
-            sparse.write_bytes(b"ply")
             return
         if phase == "solve_alignment":
             run = (
@@ -155,34 +130,38 @@ class FakeCommands:
         raise AssertionError(f"unexpected phase: {phase}")
 
 
-def _source_index() -> DecodedFrameIndex:
-    return DecodedFrameIndex(
-        Fraction(1, 1000),
-        tuple(
-            DecodedFrameTimestamp(index, pts, 1000, "pts")
-            for index, pts in enumerate(PTS)
-        ),
-    )
-
-
 def _inputs(tmp_path: Path) -> SceneBridgeInputs:
-    source_video = tmp_path / "source.mp4"
-    source_core_video = tmp_path / "source-core.mp4"
+    source_solve_video = tmp_path / "source-solve.mp4"
+    target_solve_video = tmp_path / "target-solve.mp4"
     target_core_video = tmp_path / "target-core.mp4"
-    for path in (source_video, source_core_video, target_core_video):
+    for path in (source_solve_video, target_solve_video, target_core_video):
         path.write_bytes(b"video")
-    source_map = tmp_path / "source-map.json"
-    target_map = tmp_path / "target-map.json"
-    _write_frame_map(source_map, "source", (0, 1000, 2000, 3000, 4000))
-    _write_frame_map(target_map, "target", (4000, 5000, 6000, 7000, 8000))
-    source_trajectory = tmp_path / "source-trajectory.json"
-    target_trajectory = tmp_path / "target-trajectory.json"
-    _trajectory(source_trajectory, 5)
-    _trajectory(target_trajectory, 5)
+    source_core_map = tmp_path / "source-core-map.json"
+    source_solve_map = tmp_path / "source-solve-map.json"
+    target_solve_map = tmp_path / "target-solve-map.json"
+    target_core_map = tmp_path / "target-core-map.json"
+    _write_frame_map(source_core_map, "source", (0, 1000, 2000, 3000, 4000))
+    _write_frame_map(
+        source_solve_map, "source", (0, 1000, 2000, 3000, 4000, 5000, 6000)
+    )
+    _write_frame_map(
+        target_solve_map, "target", (2000, 3000, 4000, 5000, 6000, 7000, 8000)
+    )
+    _write_frame_map(
+        target_core_map, "target", (4000, 5000, 6000, 7000, 8000)
+    )
+    source_solve_trajectory = tmp_path / "source-solve-trajectory.json"
+    target_solve_trajectory = tmp_path / "target-solve-trajectory.json"
+    target_core_trajectory = tmp_path / "target-core-trajectory.json"
+    _trajectory(source_solve_trajectory, 7)
+    _trajectory(target_solve_trajectory, 7)
+    _trajectory(target_core_trajectory, 5)
     source_sparse = tmp_path / "source.ply"
-    target_sparse = tmp_path / "target.ply"
+    target_solve_sparse = tmp_path / "target-solve.ply"
+    target_core_sparse = tmp_path / "target-core.ply"
     source_sparse.write_bytes(b"ply")
-    target_sparse.write_bytes(b"ply")
+    target_solve_sparse.write_bytes(b"ply")
+    target_core_sparse.write_bytes(b"ply")
     source_track = tmp_path / "source-track.json"
     _write_json(
         source_track,
@@ -218,7 +197,7 @@ def _inputs(tmp_path: Path) -> SceneBridgeInputs:
     return SceneBridgeInputs(
         identity={
             "schema_version": 1,
-            "algorithm_version": "scene-overlap-v1",
+            "algorithm_version": "scene-overlap-precomputed-v2",
             "project_id": "project-1",
             "source_clip_id": "source",
             "target_clip_id": "target",
@@ -227,16 +206,20 @@ def _inputs(tmp_path: Path) -> SceneBridgeInputs:
         },
         application_root=application_root,
         attempt_directory=tmp_path / "attempt",
-        source_video_path=source_video,
-        source_core_video_path=source_core_video,
-        source_core_frame_map_path=source_map,
+        source_core_frame_map_path=source_core_map,
         source_manual_track_path=source_track,
-        source_trajectory_path=source_trajectory,
+        source_solve_video_path=source_solve_video,
+        source_solve_frame_map_path=source_solve_map,
+        source_solve_trajectory_path=source_solve_trajectory,
         source_sparse_ply_path=source_sparse,
+        target_solve_video_path=target_solve_video,
+        target_solve_frame_map_path=target_solve_map,
+        target_solve_trajectory_path=target_solve_trajectory,
+        target_solve_sparse_ply_path=target_solve_sparse,
         target_core_video_path=target_core_video,
-        target_core_frame_map_path=target_map,
-        target_core_trajectory_path=target_trajectory,
-        target_core_sparse_ply_path=target_sparse,
+        target_core_frame_map_path=target_core_map,
+        target_core_trajectory_path=target_core_trajectory,
+        target_core_sparse_ply_path=target_core_sparse,
         cad_dir=cad_dir,
         cad_scale=1.0,
         origin_xy=(0.0, 0.0),
@@ -249,24 +232,20 @@ def test_bridge_runner_reuses_alignment_and_stops_at_route_refinement(
 ) -> None:
     commands = FakeCommands()
 
-    candidate = run_scene_bridge(
-        _inputs(tmp_path),
-        command_runner=commands,
-        source_frame_probe=lambda _path: _source_index(),
-    )
+    candidate = run_scene_bridge(_inputs(tmp_path), command_runner=commands)
 
     manifest = json.loads((candidate / "scene_bridge_manifest.json").read_text())
     seed = json.loads((candidate / "camera_track_seed.json").read_text())
     assert manifest["status"] == "awaiting_route_refinement"
-    assert manifest["anchor_source_pts"] == [2000, 4000]
+    assert manifest["anchor_source_pts"] == [2000, 6000]
     assert commands.stage_names == [
         "source_alignment",
-        "solve_export",
-        "target_sfm",
         "solve_alignment",
         "core_alignment",
     ]
-    assert _flag(commands.commands["solve_export"], "--max-duration-seconds") == "8"
+    flat = [token for command in commands.commands.values() for token in command]
+    assert "cadscene.cli.run_sfm" not in flat
+    assert "cadscene.cli.export_video_clips" not in flat
     assert [row["source_pts"] for row in seed["keyframes"]] == [4000, 8000]
     assert (candidate / "core_alignment/03_alignment/alignment.json").is_file()
     assert (
@@ -277,11 +256,7 @@ def test_bridge_runner_reuses_alignment_and_stops_at_route_refinement(
 
 def test_candidate_validation_rejects_duplicate_anchor_pts(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
-    candidate = run_scene_bridge(
-        inputs,
-        command_runner=FakeCommands(),
-        source_frame_probe=lambda _path: _source_index(),
-    )
+    candidate = run_scene_bridge(inputs, command_runner=FakeCommands())
     manifest_path = candidate / "scene_bridge_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["anchor_source_pts"] = [2000, 2000]
@@ -295,11 +270,7 @@ def test_candidate_validation_rejects_duplicate_anchor_pts(tmp_path: Path) -> No
 
 def test_candidate_validation_rejects_missing_core_alignment(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
-    candidate = run_scene_bridge(
-        inputs,
-        command_runner=FakeCommands(),
-        source_frame_probe=lambda _path: _source_index(),
-    )
+    candidate = run_scene_bridge(inputs, command_runner=FakeCommands())
     (candidate / "core_alignment/03_alignment/alignment.json").unlink()
 
     result = validate_scene_bridge_candidate(candidate, inputs.identity)
@@ -312,11 +283,7 @@ def test_candidate_validation_rejects_changed_fitted_camera_track(
     tmp_path: Path,
 ) -> None:
     inputs = _inputs(tmp_path)
-    candidate = run_scene_bridge(
-        inputs,
-        command_runner=FakeCommands(),
-        source_frame_probe=lambda _path: _source_index(),
-    )
+    candidate = run_scene_bridge(inputs, command_runner=FakeCommands())
     (candidate / "core_alignment/03_alignment/camera_track_pred.json").write_text(
         '{"keyframes": []}', encoding="utf-8"
     )
@@ -340,11 +307,7 @@ def test_scene_bridge_inputs_round_trip_exact_fraction_and_paths(tmp_path: Path)
 
 def test_runner_returns_failed_validation_for_changed_identity(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
-    candidate = run_scene_bridge(
-        inputs,
-        command_runner=FakeCommands(),
-        source_frame_probe=lambda _path: _source_index(),
-    )
+    candidate = run_scene_bridge(inputs, command_runner=FakeCommands())
 
     result = validate_scene_bridge_candidate(
         candidate,
@@ -359,18 +322,14 @@ def test_runner_rejects_command_failure_without_candidate(tmp_path: Path) -> Non
     inputs = _inputs(tmp_path)
 
     def fail_sfm(phase: str, command: tuple[str, ...]) -> None:
-        if phase == "target_sfm":
-            raise RuntimeError("sfm failed")
+        if phase == "solve_alignment":
+            raise RuntimeError("alignment failed")
         FakeCommands()(phase, command)
 
     try:
-        run_scene_bridge(
-            inputs,
-            command_runner=fail_sfm,
-            source_frame_probe=lambda _path: _source_index(),
-        )
+        run_scene_bridge(inputs, command_runner=fail_sfm)
     except RuntimeError as exc:
-        assert "sfm failed" in str(exc)
+        assert "alignment failed" in str(exc)
     else:  # pragma: no cover - explicit assertion keeps failure readable
-        raise AssertionError("target SfM failure must escape")
+        raise AssertionError("target solve alignment failure must escape")
     assert not (inputs.attempt_directory / "candidate").exists()

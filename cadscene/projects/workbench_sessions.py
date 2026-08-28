@@ -1050,6 +1050,8 @@ class ProjectWorkbenchService:
             "can_locate_down": False,
             "locate_up_target_clip_id": None,
             "locate_down_target_clip_id": None,
+            "locate_up_reason": None,
+            "locate_down_reason": None,
         }
         if source is None or source.resolved_workflow != "sfm_only":
             return result
@@ -1060,11 +1062,31 @@ class ProjectWorkbenchService:
             or not reference.value.get("workbench_output_revision")
         ):
             return result
+        jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(project_id).jobs
+        )
+        source_trajectory = self.project_service._current_trajectory_for_render(
+            source, jobs
+        )
+        if not _precomputed_scene_solve_ready(source_trajectory):
+            message = "需重新轨迹反算以生成同场景重叠 SfM"
+            result["locate_up_reason"] = message
+            result["locate_down_reason"] = message
+            return result
         for direction in ("up", "down"):
             target = self._adjacent_clip(clips.clips, source, direction)
             if target is None or not self._target_accepts_seed(
                 project_id, source, target, direction
             ):
+                continue
+            target_trajectory = self.project_service._current_trajectory_for_render(
+                target, jobs
+            )
+            if not _precomputed_scene_solve_ready(target_trajectory):
+                result[f"locate_{direction}_reason"] = (
+                    "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                )
                 continue
             result[f"can_locate_{direction}"] = True
             result[f"locate_{direction}_target_clip_id"] = target.clip_id
@@ -2753,6 +2775,25 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _precomputed_scene_solve_ready(job: QueueJob | None) -> bool:
+    if job is None or job.adapter_name != "sfm_only" or job.adapter_version != "2":
+        return False
+    try:
+        return all(
+            isinstance(job.published_outputs.get(key), str)
+            and Path(str(job.published_outputs[key])).is_file()
+            for key in (
+                "trajectory",
+                "solve_trajectory",
+                "solve_video",
+                "solve_frame_map",
+                "core_frame_map",
+            )
+        )
+    except OSError:
+        return False
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:

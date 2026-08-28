@@ -10,6 +10,7 @@ from cadscene.projects.scene_bridges import (
     build_core_seed,
     derive_scene_solve_interval,
     derive_solve_interval,
+    remap_core_track_to_solve,
     scene_bridge_neighbor,
     select_overlap_anchors,
 )
@@ -218,6 +219,38 @@ def test_scene_contract_rejects_duplicate_segment_indices() -> None:
             clips=clips,
             clip_id="a",
             source_frame_index=_second_index(12_000),
+        )
+
+
+def test_manual_core_track_remaps_to_solve_ordinals_by_exact_source_pts() -> None:
+    core_map = _map("core", (4_000, 5_000, 6_000))
+    solve_map = _map("solve", (2_000, 3_000, 4_000, 5_000, 6_000, 7_000))
+    track = {
+        "fps": 1.0,
+        "keyframes": [
+            {"frame": 0, "time": 0.0, "camera": _camera(1.0)},
+            {"frame": 2, "time": 2.0, "camera": _camera(2.0)},
+        ],
+    }
+
+    remapped = remap_core_track_to_solve(track, core_map, solve_map)
+
+    assert [item["frame"] for item in remapped["keyframes"]] == [2, 4]
+    assert [item["source_pts"] for item in remapped["keyframes"]] == [4_000, 6_000]
+    assert [item["time"] for item in remapped["keyframes"]] == [2.0, 4.0]
+
+
+def test_manual_core_track_rejects_pts_missing_from_solve_map() -> None:
+    with pytest.raises(SceneBridgeUnavailable, match="missing from solve frame map"):
+        remap_core_track_to_solve(
+            {
+                "fps": 1.0,
+                "keyframes": [
+                    {"frame": 1, "time": 1.0, "camera": _camera(1.0)}
+                ],
+            },
+            _map("core", (4_000, 5_000, 6_000)),
+            _map("solve", (4_000, 6_000)),
         )
 
 

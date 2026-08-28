@@ -1969,39 +1969,26 @@ class ProjectService:
             source_trajectory = self._current_trajectory_for_render(
                 source, stored_jobs
             )
-            if source_trajectory is None:
-                raise ValueError("source clip trajectory is not current")
+            if source_trajectory is None or not _has_precomputed_solve_outputs(
+                source_trajectory
+            ):
+                raise ValueError(
+                    "source clip requires current precomputed overlap SfM; rerun trajectory solve"
+                )
             target_trajectory = self._current_trajectory_for_render(
                 target, stored_jobs
             )
-            dependency_ids: tuple[str, ...]
-            if target_trajectory is None:
-                adapter = self.adapters.for_workflow(str(target.resolved_workflow))
-                solve = self._new_job(
-                    project_id,
-                    target,
-                    job_type="trajectory",
-                    resource_class="heavy_compute",
-                    adapter_name=adapter.name,
-                    adapter_version=adapter.version,
-                    exclusive_key=f"trajectory:{project_id}:{target.clip_id}",
-                    dependency_ids=(),
-                    project_assets=project.source_assets,
-                    project_revision=project.revision,
-                    clips_revision=clips_manifest.revision,
+            if target_trajectory is None or not _has_precomputed_solve_outputs(
+                target_trajectory
+            ):
+                raise ValueError(
+                    "target clip requires current precomputed overlap SfM; rerun trajectory solve"
                 )
-                target_trajectory = self.queue.submit(solve)
-                if target_trajectory.job_id == solve.job_id:
-                    Path(target_trajectory.attempts[-1].directory).mkdir(
-                        parents=True, exist_ok=False
-                    )
-                dependency_ids = (target_trajectory.job_id,)
-            else:
-                if target_trajectory.job_id not in {
-                    job.job_id for job in self.queue.jobs()
-                }:
-                    raise RuntimeError("current target trajectory is not in the live queue")
-                dependency_ids = (target_trajectory.job_id,)
+            if target_trajectory.job_id not in {
+                job.job_id for job in self.queue.jobs()
+            }:
+                raise RuntimeError("current target trajectory is not in the live queue")
+            dependency_ids = (target_trajectory.job_id,)
             semantic_identity = _scene_bridge_identity_payload(
                 project=project,
                 source=source,
@@ -6036,11 +6023,8 @@ class ProjectService:
             QueueJob.from_dict(item)
             for item in self.repositories.jobs.load(job.project_id).jobs
         )
-        source_core_video, source_core_map = _render_physical_inputs(source, jobs)
+        _source_core_video, source_core_map = _render_physical_inputs(source, jobs)
         target_core_video, target_core_map = _render_physical_inputs(target, jobs)
-        source_video = _clip_asset_path(target, project.source_assets, "video")
-        if source_video is None or not source_video.is_file():
-            raise FileNotFoundError("scene bridge source video is missing")
         source_track = _workbench_artifact_path(
             self.projects_root, job.project_id, source_workbench
         )
@@ -6058,6 +6042,20 @@ class ProjectService:
             raise FileNotFoundError("scene bridge CAD design is missing")
         source_trajectory_path = Path(source_trajectory.published_outputs["trajectory"])
         target_trajectory_path = Path(target_trajectory.published_outputs["trajectory"])
+        source_solve_video = Path(source_trajectory.published_outputs["solve_video"])
+        source_solve_map = Path(
+            source_trajectory.published_outputs["solve_frame_map"]
+        )
+        source_solve_trajectory = Path(
+            source_trajectory.published_outputs["solve_trajectory"]
+        )
+        target_solve_video = Path(target_trajectory.published_outputs["solve_video"])
+        target_solve_map = Path(
+            target_trajectory.published_outputs["solve_frame_map"]
+        )
+        target_solve_trajectory = Path(
+            target_trajectory.published_outputs["solve_trajectory"]
+        )
         source_sparse = source_trajectory_path.with_name("sparse_points.ply")
         target_sparse = target_trajectory_path.with_name("sparse_points.ply")
         if not source_sparse.is_file() or not target_sparse.is_file():
@@ -6069,12 +6067,16 @@ class ProjectService:
             identity=dict(runner_identity),
             application_root=application_root(),
             attempt_directory=Path(job.attempts[-1].directory),
-            source_video_path=source_video,
-            source_core_video_path=source_core_video,
             source_core_frame_map_path=source_core_map,
             source_manual_track_path=source_track,
-            source_trajectory_path=source_trajectory_path,
+            source_solve_video_path=source_solve_video,
+            source_solve_frame_map_path=source_solve_map,
+            source_solve_trajectory_path=source_solve_trajectory,
             source_sparse_ply_path=source_sparse,
+            target_solve_video_path=target_solve_video,
+            target_solve_frame_map_path=target_solve_map,
+            target_solve_trajectory_path=target_solve_trajectory,
+            target_solve_sparse_ply_path=target_sparse,
             target_core_video_path=target_core_video,
             target_core_frame_map_path=target_core_map,
             target_core_trajectory_path=target_trajectory_path,
@@ -6742,6 +6744,25 @@ def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
                 return False
         return True
     except (OSError, ValueError):
+        return False
+
+
+def _has_precomputed_solve_outputs(job: QueueJob) -> bool:
+    if job.adapter_name != "sfm_only" or job.adapter_version != "2":
+        return False
+    try:
+        return all(
+            isinstance(job.published_outputs.get(key), str)
+            and Path(str(job.published_outputs[key])).is_file()
+            for key in (
+                "trajectory",
+                "solve_trajectory",
+                "solve_video",
+                "solve_frame_map",
+                "core_frame_map",
+            )
+        )
+    except OSError:
         return False
 
 

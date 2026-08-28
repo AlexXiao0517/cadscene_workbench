@@ -303,6 +303,53 @@ def scene_bridge_neighbor(
     return same_scene[target] if 0 <= target < len(same_scene) else None
 
 
+def remap_core_track_to_solve(
+    track: Mapping[str, object],
+    core_map: FrameMap,
+    solve_map: FrameMap,
+) -> dict[str, object]:
+    """把人工核心关键帧按精确 source PTS 映射到 solve 局部帧序号。"""
+
+    if core_map.time_base != solve_map.time_base:
+        raise SceneBridgeUnavailable("core and solve frame maps use different time bases")
+    raw_keyframes = track.get("keyframes")
+    if not isinstance(raw_keyframes, list) or not raw_keyframes:
+        raise SceneBridgeUnavailable("manual track contains no keyframes")
+    solve_frame_by_pts = {
+        entry.source_pts: entry.local_ordinal for entry in solve_map.frames
+    }
+    remapped: list[dict[str, object]] = []
+    for raw in raw_keyframes:
+        if not isinstance(raw, Mapping):
+            raise SceneBridgeUnavailable("manual track keyframe must be an object")
+        frame = raw.get("frame")
+        if isinstance(frame, bool) or not isinstance(frame, int):
+            raise SceneBridgeUnavailable("manual track frame must be an integer")
+        core_entry = core_map.entry_for_local_frame(frame)
+        if core_entry is None:
+            raise SceneBridgeUnavailable("manual track frame is outside core frame map")
+        solve_frame = solve_frame_by_pts.get(core_entry.source_pts)
+        if solve_frame is None:
+            raise SceneBridgeUnavailable(
+                "manual track source PTS is missing from solve frame map"
+            )
+        remapped.append(
+            {
+                **dict(raw),
+                "frame": solve_frame,
+                "time": float(
+                    Fraction(core_entry.source_pts - solve_map.source_start_pts)
+                    * solve_map.time_base
+                ),
+                "source_pts": core_entry.source_pts,
+            }
+        )
+    frames = [int(item["frame"]) for item in remapped]
+    if any(current <= previous for previous, current in zip(frames, frames[1:])):
+        raise SceneBridgeUnavailable("remapped solve keyframes must be increasing")
+    return {**dict(track), "keyframes": remapped}
+
+
 def select_overlap_anchors(
     *,
     direction: str,
