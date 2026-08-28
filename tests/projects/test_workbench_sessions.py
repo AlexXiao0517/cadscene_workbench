@@ -2008,6 +2008,7 @@ def test_snapshot_shows_new_queued_trajectory_over_old_terminal_outputs(
 
     clip = snapshot.body["clips"][0]
     assert clip["job_id"] == "trajectory-new"
+    assert clip["job_type"] == "trajectory"
     assert clip["status"] == "queued"
     assert clip["stage"] == "queued"
     assert clip["capabilities"]["can_cancel"] is True

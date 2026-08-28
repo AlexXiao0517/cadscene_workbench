@@ -848,6 +848,7 @@ class ProjectApi:
                 {
                     "clip_id": clip.clip_id,
                     "job_id": None if job is None else job.get("job_id"),
+                    "job_type": None if job is None else job.get("job_type"),
                     "display_name": clip.display_name,
                     "thumbnail_url": (
                         f"/api/projects/{project_id}/thumbnails/clips/{clip.clip_id}"
