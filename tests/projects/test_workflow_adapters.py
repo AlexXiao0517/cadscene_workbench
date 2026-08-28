@@ -39,6 +39,10 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
 ) -> None:
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"mp4")
+    solve_map = tmp_path / "solve-map.json"
+    core_map = tmp_path / "core-map.json"
+    solve_map.write_text("{}", encoding="utf-8")
+    core_map.write_text("{}", encoding="utf-8")
     attempt = tmp_path / "attempt-1"
     adapter = default_workflow_adapters().for_workflow("sfm_only")
     inputs = AdapterInputs(
@@ -47,11 +51,15 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
         video_path=video,
         srt_path=None,
         attempt_directory=attempt,
+        frame_map_path=solve_map,
+        core_frame_map_path=core_map,
     )
 
-    command = adapter.build_command(adapter.prepare_inputs(inputs))
+    commands = adapter.build_commands(adapter.prepare_inputs(inputs))
+    command = commands[0]
 
     assert command[1:3] == ("-m", "cadscene.cli.run_sfm")
+    assert commands[1][1:3] == ("-m", "cadscene.cli.partition_sfm_trajectory")
     assert str(video) in command
     assert command[command.index("--progress-file") + 1] == str(
         attempt / "adapter_progress.json"
@@ -59,12 +67,52 @@ def test_sfm_adapter_wraps_existing_cli_and_validates_attempt_output(
     output = attempt / "02_sfm/camera_trajectory.json"
     output.parent.mkdir(parents=True)
     output.write_text(json.dumps({"poses": [{}]}), encoding="utf-8")
+    solve_output = output.with_name("camera_trajectory_solve.json")
+    solve_output.write_text(json.dumps({"poses": [{}]}), encoding="utf-8")
     result = adapter.validate_outputs(inputs)
     assert result.status == "success"
     assert result.output_revision is not None
     assert result.output_fingerprint is not None
-    assert result.outputs == {"trajectory": str(output)}
+    assert result.outputs == {
+        "trajectory": str(output),
+        "solve_trajectory": str(solve_output),
+        "solve_frame_map": str(solve_map),
+        "core_frame_map": str(core_map),
+    }
     assert result.progress[0].fraction == 1.0
+
+
+def test_sfm_adapter_runs_one_sfm_then_partitions_trajectory(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "solve.mp4"
+    video.write_bytes(b"mp4")
+    solve_map = tmp_path / "solve-map.json"
+    core_map = tmp_path / "core-map.json"
+    solve_map.write_text("{}", encoding="utf-8")
+    core_map.write_text("{}", encoding="utf-8")
+    inputs = AdapterInputs(
+        project_id="p1",
+        clip_id="c1",
+        video_path=video,
+        srt_path=None,
+        attempt_directory=tmp_path / "attempt",
+        frame_map_path=solve_map,
+        core_frame_map_path=core_map,
+    )
+    adapter = default_workflow_adapters().for_workflow("sfm_only")
+
+    commands = adapter.build_commands(adapter.prepare_inputs(inputs))
+    modules = [
+        command[index + 1]
+        for command in commands
+        for index, token in enumerate(command[:-1])
+        if token == "-m"
+    ]
+
+    assert modules.count("cadscene.cli.run_sfm") == 1
+    assert modules.count("cadscene.cli.partition_sfm_trajectory") == 1
+    assert adapter.version == "2"
 
 
 def test_pure_rotation_adapter_forwards_structured_progress_sidecar(
@@ -94,11 +142,23 @@ def test_sfm_adapter_uses_existing_sfm_interpreter_resolver(
     )
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"mp4")
-    inputs = AdapterInputs("p1", "c1", video, None, tmp_path / "attempt")
-
-    command = default_workflow_adapters().for_workflow("sfm_only").build_command(
-        inputs
+    solve_map = tmp_path / "solve-map.json"
+    core_map = tmp_path / "core-map.json"
+    solve_map.write_text("{}", encoding="utf-8")
+    core_map.write_text("{}", encoding="utf-8")
+    inputs = AdapterInputs(
+        "p1",
+        "c1",
+        video,
+        None,
+        tmp_path / "attempt",
+        frame_map_path=solve_map,
+        core_frame_map_path=core_map,
     )
+
+    command = default_workflow_adapters().for_workflow("sfm_only").build_commands(
+        inputs
+    )[0]
 
     assert command[0] == str(resolved_python)
 

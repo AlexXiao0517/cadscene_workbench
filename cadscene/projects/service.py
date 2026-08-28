@@ -2290,6 +2290,13 @@ class ProjectService:
             if (
                 _clip_output_path(by_id[clip_id]) is None
                 or not _clip_output_path(by_id[clip_id]).is_file()
+                or (
+                    by_id[clip_id].resolved_workflow == "sfm_only"
+                    and (
+                        _clip_frame_map_path(by_id[clip_id]) is None
+                        or not _clip_frame_map_path(by_id[clip_id]).is_file()
+                    )
+                )
             )
         ]
         export_dependencies: dict[str, tuple[str, ...]] = {}
@@ -2349,7 +2356,7 @@ class ProjectService:
             dependency_ids = (
                 *(
                     export_dependencies[clip.clip_id]
-                    if physical_clip is None or not physical_clip.is_file()
+                    if clip.clip_id in export_dependencies
                     else ()
                 ),
                 *solve_export_dependencies.get(clip.clip_id, ()),
@@ -2473,6 +2480,7 @@ class ProjectService:
                         output_fingerprint=result.output_fingerprint,
                         output_validated=True,
                         published_outputs=result.outputs,
+                        validation_proof=result.validation_proof,
                         **lease,
                     )
             self._publish_queue_locked(project_id)
@@ -4111,6 +4119,7 @@ class ProjectService:
         adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
         video_path = _clip_output_path(clip)
         frame_map_path = _clip_frame_map_path(clip)
+        core_frame_map_path = frame_map_path
         for dependency_id in job.depends_on_job_ids:
             dependency = self.queue.get(dependency_id)
             if dependency.status != "success" or not dependency.output_validated:
@@ -4124,6 +4133,7 @@ class ProjectService:
                 )
                 video_path = None if video_value is None else Path(video_value)
                 frame_map_path = None if map_value is None else Path(map_value)
+                core_frame_map_path = frame_map_path
             elif dependency.job_type == "sfm_solve_export":
                 video_value = dependency.published_outputs.get(
                     f"solve_video:{clip.clip_id}"
@@ -4149,6 +4159,11 @@ class ProjectService:
             source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
             source_time_base=time_base,
             frame_map_path=frame_map_path,
+            core_frame_map_path=(
+                core_frame_map_path
+                if adapter.name == "sfm_only"
+                else None
+            ),
         )
         prepared = adapter.prepare_inputs(inputs)
         return JobExecutionPlan(
@@ -6706,10 +6721,26 @@ def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
         attempt_root = Path(job.attempts[-1].directory).resolve(strict=True)
         path = Path(trajectory_path).resolve(strict=True)
         path.relative_to(attempt_root)
-        return (
-            path.is_file()
-            and sha256(path.read_bytes()).hexdigest() == job.output_fingerprint
-        )
+        if not path.is_file():
+            return False
+        proof = job.validation_proof
+        if not isinstance(proof, Mapping) or "trajectory_sha256" not in proof:
+            return sha256(path.read_bytes()).hexdigest() == job.output_fingerprint
+        bindings = {
+            "trajectory": "trajectory_sha256",
+            "solve_trajectory": "solve_trajectory_sha256",
+            "solve_frame_map": "solve_frame_map_sha256",
+            "core_frame_map": "core_frame_map_sha256",
+        }
+        for output_key, proof_key in bindings.items():
+            raw = job.published_outputs.get(output_key)
+            expected = proof.get(proof_key)
+            if not isinstance(raw, str) or not isinstance(expected, str):
+                return False
+            artifact = Path(raw).resolve(strict=True)
+            if not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != expected:
+                return False
+        return True
     except (OSError, ValueError):
         return False
 
