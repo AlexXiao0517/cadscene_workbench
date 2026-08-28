@@ -69,6 +69,7 @@ from .scene_bridge_runner import (
     SceneBridgeInputs,
     validate_scene_bridge_candidate,
 )
+from .scene_bridges import SolveInterval, derive_scene_solve_interval
 from .repositories import ManifestMutation, RevisionConflict, publish_manifests
 from .uploads import PublishedUpload
 from .queue import (
@@ -2306,14 +2307,52 @@ class ProjectService:
                     parents=True, exist_ok=False
                 )
             export_dependencies[export_clip.clip_id] = (submitted_export.job_id,)
+        stored_jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(project_id).jobs
+        )
+        source_frame_index: DecodedFrameIndex | None = None
+        solve_export_dependencies: dict[str, tuple[str, ...]] = {}
+        for clip_id in accepted_ids:
+            solve_clip = by_id[clip_id]
+            if not _uses_scene_solve_export(solve_clip, clips_manifest.clips):
+                continue
+            if source_frame_index is None:
+                source_frame_index = _project_source_frame_index(
+                    clips_manifest.clips, stored_jobs
+                )
+            solve_interval = derive_scene_solve_interval(
+                clips=clips_manifest.clips,
+                clip_id=solve_clip.clip_id,
+                source_frame_index=source_frame_index,
+            )
+            export = self._new_solve_export_job(
+                project_id,
+                solve_clip,
+                solve_interval=solve_interval,
+                project_assets=project.source_assets,
+                project_revision=project.revision,
+                clips_revision=clips_manifest.revision,
+            )
+            submitted_export = self.queue.submit(export)
+            if submitted_export.job_id == export.job_id:
+                Path(submitted_export.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+            solve_export_dependencies[solve_clip.clip_id] = (
+                submitted_export.job_id,
+            )
         for clip_id in accepted_ids:
             clip = by_id[clip_id]
             adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
             physical_clip = _clip_output_path(clip)
             dependency_ids = (
-                export_dependencies[clip.clip_id]
-                if physical_clip is None or not physical_clip.is_file()
-                else ()
+                *(
+                    export_dependencies[clip.clip_id]
+                    if physical_clip is None or not physical_clip.is_file()
+                    else ()
+                ),
+                *solve_export_dependencies.get(clip.clip_id, ()),
             )
             solve = self._new_job(
                 project_id,
@@ -4052,6 +4091,8 @@ class ProjectService:
         project_id = job.project_id
         if job.job_type == "clip_export":
             return self._prepare_clip_export(job)
+        if job.job_type == "sfm_solve_export":
+            return self._prepare_solve_export(job)
         if job.job_type in {"cad_analysis", "video_analysis", "cad_replacement"}:
             return self._prepare_analysis(job)
         if job.job_type == "clip_render":
@@ -4070,14 +4111,30 @@ class ProjectService:
         adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
         video_path = _clip_output_path(clip)
         frame_map_path = _clip_frame_map_path(clip)
-        if job.depends_on_job_ids:
-            dependency = self.queue.get(job.depends_on_job_ids[0])
+        for dependency_id in job.depends_on_job_ids:
+            dependency = self.queue.get(dependency_id)
             if dependency.status != "success" or not dependency.output_validated:
-                raise RuntimeError("clip export dependency is not validated")
-            video_value = dependency.published_outputs.get(f"video:{clip.clip_id}")
-            map_value = dependency.published_outputs.get(f"frame_map:{clip.clip_id}")
-            video_path = None if video_value is None else Path(video_value)
-            frame_map_path = None if map_value is None else Path(map_value)
+                raise RuntimeError("trajectory media dependency is not validated")
+            if dependency.job_type == "clip_export":
+                video_value = dependency.published_outputs.get(
+                    f"video:{clip.clip_id}"
+                )
+                map_value = dependency.published_outputs.get(
+                    f"frame_map:{clip.clip_id}"
+                )
+                video_path = None if video_value is None else Path(video_value)
+                frame_map_path = None if map_value is None else Path(map_value)
+            elif dependency.job_type == "sfm_solve_export":
+                video_value = dependency.published_outputs.get(
+                    f"solve_video:{clip.clip_id}"
+                )
+                map_value = dependency.published_outputs.get(
+                    f"solve_frame_map:{clip.clip_id}"
+                )
+                video_path = None if video_value is None else Path(video_value)
+                frame_map_path = None if map_value is None else Path(map_value)
+            else:
+                raise RuntimeError("unsupported trajectory media dependency")
         if video_path is None:
             raise FileNotFoundError("physical clip MP4 is unavailable")
         time_base = _fraction_time_base(clip)
@@ -5395,6 +5452,49 @@ class ProjectService:
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
         )
 
+    def _new_solve_export_job(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        *,
+        solve_interval: SolveInterval,
+        project_assets: Mapping[str, object],
+        project_revision: int,
+        clips_revision: int,
+    ) -> QueueJob:
+        identity_payload = _solve_export_identity_payload(
+            clip=clip,
+            solve_interval=solve_interval,
+            project_assets=project_assets,
+            project_revision=project_revision,
+            clips_revision=clips_revision,
+        )
+        input_fingerprint = _fingerprint(identity_payload)
+        job_id = self._identity()
+        attempt_dir = self._attempt_directory(project_id, job_id, 1)
+        return QueueJob(
+            job_id=job_id,
+            project_id=project_id,
+            clip_id=clip.clip_id,
+            job_type="sfm_solve_export",
+            resource_class="media_io",
+            status="queued",
+            stage="queued",
+            priority=0,
+            depends_on_job_ids=(),
+            exclusive_key=f"sfm_solve_export:{project_id}:{clip.clip_id}",
+            idempotency_key=_fingerprint(
+                {**identity_payload, "purpose": "idempotency"}
+            ),
+            input_revision=clip.analysis_revision,
+            input_fingerprint=input_fingerprint,
+            adapter_name="sfm_solve_export",
+            adapter_version="1",
+            output_revision=None,
+            operation_id=self._identity(),
+            attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+        )
+
     def _new_render_job(
         self,
         project_id: str,
@@ -5724,13 +5824,37 @@ class ProjectService:
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 return None
         clips_manifest = self.repositories.clips.load(job.project_id)
-        if job.job_type == "clip_export":
+        if job.job_type in {"clip_export", "sfm_solve_export"}:
             clip = next(
                 (item for item in clips_manifest.clips if item.clip_id == job.clip_id),
                 None,
             )
             if clip is None:
                 return None
+            if job.job_type == "sfm_solve_export":
+                try:
+                    stored_jobs = tuple(
+                        QueueJob.from_dict(item)
+                        for item in self.repositories.jobs.load(job.project_id).jobs
+                    )
+                    solve_interval = derive_scene_solve_interval(
+                        clips=clips_manifest.clips,
+                        clip_id=clip.clip_id,
+                        source_frame_index=_project_source_frame_index(
+                            clips_manifest.clips, stored_jobs
+                        ),
+                    )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    return None
+                return _fingerprint(
+                    _solve_export_identity_payload(
+                        clip=clip,
+                        solve_interval=solve_interval,
+                        project_assets=project.source_assets,
+                        project_revision=project.revision,
+                        clips_revision=clips_manifest.revision,
+                    )
+                )
             return _fingerprint(
                 _export_identity_payload(
                     clip=clip,
@@ -6015,6 +6139,67 @@ class ProjectService:
             validate=lambda: _validate_clip_export_outputs((clip,), output_dir),
         )
 
+    def _prepare_solve_export(self, job: QueueJob) -> JobExecutionPlan:
+        project = self.repositories.project.load(job.project_id)
+        clips_manifest = self.repositories.clips.load(job.project_id)
+        clip = next(
+            (item for item in clips_manifest.clips if item.clip_id == job.clip_id),
+            None,
+        )
+        if clip is None:
+            raise KeyError(f"clip no longer exists: {job.clip_id}")
+        stored_jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(job.project_id).jobs
+        )
+        solve_interval = derive_scene_solve_interval(
+            clips=clips_manifest.clips,
+            clip_id=clip.clip_id,
+            source_frame_index=_project_source_frame_index(
+                clips_manifest.clips, stored_jobs
+            ),
+        )
+        video_path = _clip_asset_path(clip, project.source_assets, "video")
+        if video_path is None or not video_path.is_file():
+            raise FileNotFoundError("physical MP4 source is missing")
+        attempt = Path(job.attempts[-1].directory)
+        attempt.mkdir(parents=True, exist_ok=True)
+        manifest_path = attempt / "solve_export_manifest.json"
+        output_dir = attempt / "solve_inputs"
+        interval = _solve_interval_payload(clip, solve_interval)
+        manifest_path.write_text(
+            json.dumps(
+                {"clips": [{"clip_id": clip.clip_id, **interval}]},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        command = (
+            sys.executable,
+            "-m",
+            "cadscene.cli.export_video_clips",
+            "--video",
+            str(video_path),
+            "--manifest",
+            str(manifest_path),
+            "--output-dir",
+            str(output_dir),
+            "--progress-file",
+            str(attempt / "adapter_progress.json"),
+            "--preset",
+            "veryfast",
+            "--max-duration-seconds",
+            "120",
+            "--allow-subset",
+        )
+        return JobExecutionPlan(
+            commands=(command,),
+            validate=lambda: _validate_solve_export_outputs(
+                clip, solve_interval, output_dir
+            ),
+        )
+
     def _prepare_analysis(self, job: QueueJob) -> JobExecutionPlan:
         project = self.repositories.project.load(job.project_id)
         if job.job_type == "cad_replacement":
@@ -6144,6 +6329,69 @@ def _render_physical_inputs(
         if isinstance(video, str) and video and isinstance(frame_map, str) and frame_map:
             return Path(video), Path(frame_map)
     raise ValueError("clip render physical inputs are unavailable")
+
+
+def _uses_scene_solve_export(
+    clip: ClipDefinition, clips: Sequence[ClipDefinition]
+) -> bool:
+    if clip.resolved_workflow != "sfm_only":
+        return False
+    scene_index = clip.analysis.get("scene_index")
+    return (
+        isinstance(scene_index, int)
+        and not isinstance(scene_index, bool)
+        and sum(
+            1
+            for candidate in clips
+            if candidate.analysis.get("scene_index") == scene_index
+        )
+        > 1
+    )
+
+
+def _project_source_frame_index(
+    clips: Sequence[ClipDefinition], jobs: Sequence[QueueJob]
+) -> DecodedFrameIndex:
+    """由核心 frame map 重建整段视频的权威 decoded-frame PTS 索引。"""
+
+    if not clips:
+        raise ValueError("project has no clips")
+    ordered = sorted(
+        clips,
+        key=lambda clip: (
+            int(clip.analysis.get("render_order", 0)),
+            int(clip.analysis.get("source_start_pts", 0)),
+            clip.clip_id,
+        ),
+    )
+    time_base = _fraction_time_base(ordered[0])
+    by_ordinal: dict[int, int] = {}
+    for clip in ordered:
+        if _fraction_time_base(clip) != time_base:
+            raise ValueError("project clips use different source time bases")
+        _video, frame_map = _render_physical_inputs(clip, jobs)
+        for frame in _load_authoritative_source_frames(clip, frame_map):
+            previous = by_ordinal.setdefault(frame.ordinal, frame.pts)
+            if previous != frame.pts:
+                raise ValueError("project frame maps disagree on source PTS")
+    ordinals = sorted(by_ordinal)
+    if ordinals != list(range(len(ordinals))):
+        raise ValueError("project frame maps do not cover contiguous source ordinals")
+    final_end = int(ordered[-1].analysis["source_end_pts_exclusive"])
+    frames = tuple(
+        DecodedFrameTimestamp(
+            ordinal=ordinal,
+            pts=by_ordinal[ordinal],
+            duration_pts=(
+                by_ordinal[ordinal + 1] - by_ordinal[ordinal]
+                if ordinal + 1 < len(ordinals)
+                else final_end - by_ordinal[ordinal]
+            ),
+            timestamp_source="pts",
+        )
+        for ordinal in ordinals
+    )
+    return DecodedFrameIndex(time_base, frames)
 
 
 def _core_frame_map_identity(
@@ -7165,6 +7413,55 @@ def _export_identity_payload(
     return payload
 
 
+def _solve_interval_payload(
+    clip: ClipDefinition, solve_interval: SolveInterval
+) -> dict[str, object]:
+    time_base = _fraction_time_base(clip)
+    return {
+        "source_start_pts": solve_interval.start_pts,
+        "source_end_pts_exclusive": solve_interval.end_pts_exclusive,
+        "source_time_base": {
+            "numerator": time_base.numerator,
+            "denominator": time_base.denominator,
+        },
+        "interval_semantics": "half_open",
+        "core_start_pts": solve_interval.core_start_pts,
+        "core_end_pts_exclusive": solve_interval.core_end_pts_exclusive,
+        "core_start_index": solve_interval.core_start_index,
+        "core_end_index_exclusive": solve_interval.core_end_index_exclusive,
+        "frame_pts": list(solve_interval.frame_pts),
+    }
+
+
+def _solve_export_identity_payload(
+    *,
+    clip: ClipDefinition,
+    solve_interval: SolveInterval,
+    project_assets: Mapping[str, object],
+    project_revision: int,
+    clips_revision: int,
+) -> Mapping[str, object]:
+    payload: dict[str, object] = {
+        "job_type": "sfm_solve_export",
+        "clip_id": clip.clip_id,
+        "analysis_revision": clip.analysis_revision,
+        "core_interval": _authoritative_interval(clip),
+        "solve_interval": _solve_interval_payload(clip, solve_interval),
+        "source_assets": _clip_input_identity(clip, project_assets),
+        "algorithm_version": "same-scene-overlap-4s-v1",
+        "adapter_name": "sfm_solve_export",
+        "adapter_version": "1",
+    }
+    if _clip_input_snapshot(clip) is None:
+        payload.update(
+            {
+                "project_manifest_revision": project_revision,
+                "clips_manifest_revision": clips_revision,
+            }
+        )
+    return payload
+
+
 def _validate_clip_export_outputs(
     clips: Sequence[ClipDefinition], output_dir: Path
 ) -> AdapterResult:
@@ -7199,4 +7496,49 @@ def _validate_clip_export_outputs(
         output_revision=f"clip_export:{fingerprint[:16]}",
         output_fingerprint=fingerprint,
         outputs=outputs,
+    )
+
+
+def _validate_solve_export_outputs(
+    clip: ClipDefinition,
+    solve_interval: SolveInterval,
+    output_dir: Path,
+) -> AdapterResult:
+    frame_map_path = output_dir / "clip_frame_map.json"
+    video_path = output_dir / f"{clip.clip_id}.mp4"
+    if not frame_map_path.is_file():
+        return AdapterResult.failed("solve export frame map is missing")
+    if not video_path.is_file() or video_path.stat().st_size == 0:
+        return AdapterResult.failed("solve export video is missing")
+    try:
+        payload = json.loads(frame_map_path.read_text(encoding="utf-8"))
+        raw_clips = payload.get("clips") if isinstance(payload, Mapping) else None
+        item = next(
+            (
+                value
+                for value in raw_clips or ()
+                if isinstance(value, Mapping)
+                and value.get("clip_id") == clip.clip_id
+            ),
+            None,
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return AdapterResult.failed(f"invalid solve export frame map: {exc}")
+    if (
+        item is None
+        or item.get("source_start_pts") != solve_interval.start_pts
+        or item.get("source_end_pts_exclusive")
+        != solve_interval.end_pts_exclusive
+    ):
+        return AdapterResult.failed("solve export frame map interval mismatch")
+    digest = sha256(frame_map_path.read_bytes())
+    digest.update(video_path.read_bytes())
+    fingerprint = digest.hexdigest()
+    return AdapterResult.success(
+        output_revision=f"sfm_solve_export:{fingerprint[:16]}",
+        output_fingerprint=fingerprint,
+        outputs={
+            f"solve_video:{clip.clip_id}": str(video_path),
+            f"solve_frame_map:{clip.clip_id}": str(frame_map_path),
+        },
     )

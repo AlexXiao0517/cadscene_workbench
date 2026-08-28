@@ -813,6 +813,8 @@ def _add_same_scene_adjacent_clips(
     api: ProjectApi,
     repositories,
     tmp_path: Path,
+    *,
+    restore_trajectory_jobs: bool = True,
 ) -> None:
     current = repositories.clips.load("project-1")
     first = current.clips[0]
@@ -874,8 +876,12 @@ def _add_same_scene_adjacent_clips(
     )
     project = repositories.project.load("project-1")
     adapter = api.service.adapters.for_workflow("sfm_only")
-    jobs = list(repositories.jobs.load("project-1").jobs)
-    for clip in clips[1:]:
+    jobs = (
+        list(repositories.jobs.load("project-1").jobs)
+        if restore_trajectory_jobs
+        else []
+    )
+    for clip in clips[1:] if restore_trajectory_jobs else ():
         job = api.service._new_job(
             "project-1",
             clip,
@@ -928,11 +934,12 @@ def _add_same_scene_adjacent_clips(
         expected_revision=manifest.revision,
         mutate=lambda value: replace(value, jobs=tuple(jobs)),
     )
-    api.service.queue.merge_restored(
-        jobs,
-        project_id="project-1",
-        queue_order=[str(item["job_id"]) for item in jobs],
-    )
+    if restore_trajectory_jobs:
+        api.service.queue.merge_restored(
+            jobs,
+            project_id="project-1",
+            queue_order=[str(item["job_id"]) for item in jobs],
+        )
 
 
 def _save_completed_sfm_route(
@@ -2315,6 +2322,118 @@ def test_snapshot_projects_active_clip_export_as_batch_trajectory_progress(
     assert payload["status"] == "running"
     assert payload["stage"] == "running"
     assert payload["progress"]["fraction"] == 0.0
+
+
+def test_multi_segment_sfm_trajectory_depends_on_one_solve_export(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(
+        api,
+        repositories,
+        tmp_path,
+        restore_trajectory_jobs=False,
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-2"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+
+    assert response.status == 202
+    manifest = repositories.jobs.load("project-1")
+    trajectory = next(
+        item for item in manifest.jobs if item["job_type"] == "trajectory"
+    )
+    dependencies = [
+        next(item for item in manifest.jobs if item["job_id"] == job_id)
+        for job_id in trajectory["depends_on_job_ids"]
+    ]
+    assert [item["job_type"] for item in dependencies].count(
+        "sfm_solve_export"
+    ) == 1
+
+
+def test_solve_export_manifest_is_clamped_to_same_scene_and_keeps_core_map(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(
+        api,
+        repositories,
+        tmp_path,
+        restore_trajectory_jobs=False,
+    )
+    core_map = tmp_path / "clip-3-frame-map.json"
+    original_core_map = core_map.read_bytes()
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-3"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+    assert response.status == 202
+    solve_export = next(
+        job
+        for job in api.service.queue.jobs()
+        if job.job_type == "sfm_solve_export"
+    )
+
+    api.service._prepare_solve_export(solve_export)
+
+    manifest = json.loads(
+        (
+            Path(solve_export.attempts[-1].directory)
+            / "solve_export_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    interval = manifest["clips"][0]
+    assert interval["source_start_pts"] == 100
+    assert interval["source_end_pts_exclusive"] == 300
+    assert interval["core_start_pts"] == 200
+    assert interval["core_end_pts_exclusive"] == 300
+    assert core_map.read_bytes() == original_core_map
+
+
+@pytest.mark.parametrize("workflow", ("sfm_only", "pure_rotation"))
+def test_single_segment_and_pure_rotation_do_not_queue_solve_export(
+    tmp_path: Path, workflow: str
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow=workflow
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-1"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+
+    assert response.status == 202
+    assert all(
+        job.job_type != "sfm_solve_export" for job in api.service.queue.jobs()
+    )
 
 
 def test_snapshot_combines_export_and_pure_rotation_into_monotonic_progress(
