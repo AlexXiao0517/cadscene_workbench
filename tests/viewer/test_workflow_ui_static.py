@@ -295,7 +295,8 @@ def test_project_workbench_applies_session_workflow_before_selecting_pending_sta
     )
     select_stage = bootstrap.index("setWorkflowStage(\"sfm\")")
     assert apply_workflow < select_stage
-    assert 'isPureRotationWorkflow()\n        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"' in bootstrap
+    assert "isPureRotationWorkflow()" in bootstrap
+    assert "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复" in bootstrap
 
 
 def test_saved_project_pure_rotation_stage_is_not_overwritten_by_artifact_detection() -> None:
@@ -362,12 +363,22 @@ def test_project_trajectory_polling_has_one_status_owner_and_terminal_cleanup() 
     assert "if (projectWorkbenchTrajectoryOwnsStatus()) return;" in log_poll
     assert "projectWorkbenchTrajectoryJobId = null" in wait
     assert 'querySelector("#workflowCancel").hidden = true' in wait
-    assert "clip.progress?.message ||" not in wait
+    assert "renderProjectTrajectorySnapshot(clip)" in wait
     assert "if (projectWorkbenchToken)" in cancel
     assert "if (!projectWorkbenchTrajectoryJobId) return null" in cancel
 
 
-def test_project_trajectory_polling_reuses_workflow_progress_and_log_panels() -> None:
+def test_workflow_start_session_auto_binds_an_active_project_trajectory() -> None:
+    script = _read("workflow.js")
+
+    assert "async function attachActiveProjectWorkbenchTrajectory" in script
+    assert '!clip.job_type || clip.job_type === "trajectory"' in script
+    assert "activeStatuses.has(clip.status)" in script
+    assert "projectWorkbenchTrajectoryJobId = clip.job_id" in script
+    assert "waitForProjectWorkbenchTrajectory(clip.job_id)" in script
+
+
+def test_project_trajectory_progress_uses_snapshot_and_runtime_only_updates_log() -> None:
     script = _read("workflow.js")
     wait = script[
         script.index("async function waitForProjectWorkbenchTrajectory") :
@@ -375,7 +386,8 @@ def test_project_trajectory_polling_reuses_workflow_progress_and_log_panels() ->
     ]
 
     assert "/jobs/${encodeURIComponent(jobId)}/runtime" in wait
-    assert "await renderStatus(runtime.workflow_status)" in wait
+    assert "renderProjectTrajectorySnapshot(clip)" in wait
+    assert "await renderStatus(runtime.workflow_status)" not in wait
     assert 'document.querySelector("#workflowLogContent")' in wait
     assert 'runtime.lines.join("\\n")' in wait
 

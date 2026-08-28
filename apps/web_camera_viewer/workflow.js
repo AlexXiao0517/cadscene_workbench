@@ -1441,10 +1441,13 @@
     if (projectWorkbenchTrajectoryIsPending()) {
       document.querySelector('#workflowSteps li[data-stage="upload"]')?.classList.add("is-success");
       setWorkflowStage("sfm");
-      stateLabel.textContent = "待启动";
-      message.textContent = isPureRotationWorkflow()
-        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
-        : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      const attached = await attachActiveProjectWorkbenchTrajectory();
+      if (!attached) {
+        stateLabel.textContent = "待启动";
+        message.textContent = isPureRotationWorkflow()
+          ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
+          : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      }
     } else {
       await heartbeatProjectWorkbenchEditingSession();
       startProjectWorkbenchEditingHeartbeat();
@@ -1548,6 +1551,66 @@
     return labels[status] || stage || "等待轨迹任务";
   }
 
+  function renderProjectTrajectorySnapshot(clip) {
+    const fraction = clip.progress?.fraction;
+    if (typeof fraction === "number") {
+      progress.value = Math.max(0, Math.min(1, fraction));
+    }
+    stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
+    message.textContent = clip.progress?.message
+      || projectTrajectoryStatusCopy(clip.status, clip.stage);
+  }
+
+  async function attachActiveProjectWorkbenchTrajectory() {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/snapshot`,
+      { cache: "no-store" },
+    );
+    const snapshot = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(snapshot.error || `HTTP ${response.status}`);
+    projectWorkbenchSession.jobs_revision = snapshot.component_revisions.jobs;
+    projectWorkbenchSession.clips_revision = snapshot.component_revisions.clips;
+    const clip = (snapshot.clips || []).find(
+      (item) => item.clip_id === projectWorkbenchSession.clip_id,
+    );
+    const activeStatuses = new Set(["queued", "preparing", "running", "validating"]);
+    if (!clip?.job_id) return false;
+    const trajectoryJobCompatible = !clip.job_type || clip.job_type === "trajectory";
+    if (
+      !trajectoryJobCompatible
+      || !activeStatuses.has(clip.status)
+    ) return false;
+
+    projectWorkbenchTrajectoryJobId = clip.job_id;
+    projectWorkbenchTrajectoryStatus = clip.status;
+    runningStage = isPureRotationWorkflow() ? "pure_rotation" : "sfm";
+    renderProjectTrajectorySnapshot(clip);
+    document.querySelector("#workflowCancel").hidden = false;
+    document.querySelectorAll("[data-job-action]").forEach((button) => {
+      button.disabled = true;
+    });
+
+    let managedWatcher = null;
+    managedWatcher = waitForProjectWorkbenchTrajectory(clip.job_id)
+      .catch((error) => {
+        projectWorkbenchTrajectoryJobId = null;
+        projectWorkbenchTrajectoryStatus = null;
+        runningStage = null;
+        stateLabel.textContent = "轨迹任务异常";
+        message.textContent = error.message;
+      })
+      .finally(() => {
+        if (projectWorkbenchTrajectoryStartPromise === managedWatcher) {
+          projectWorkbenchTrajectoryStartPromise = null;
+        }
+        if (!projectWorkbenchTrajectoryJobId) {
+          refreshSupplementalWorkflowActionAvailability(false);
+        }
+      });
+    projectWorkbenchTrajectoryStartPromise = managedWatcher;
+    return true;
+  }
+
   async function waitForProjectWorkbenchTrajectory(jobId) {
     const terminal = new Set(["success", "failed", "interrupted", "cancelled", "stale_input", "superseded"]);
     let lastHeartbeatAt = 0;
@@ -1563,10 +1626,19 @@
       const clip = (snapshot.clips || []).find((item) => item.clip_id === projectWorkbenchSession.clip_id);
       if (!clip || clip.job_id !== jobId) throw new Error("无法读取当前片段的轨迹任务状态");
       projectWorkbenchTrajectoryStatus = String(clip.status || clip.stage || "queued");
+      renderProjectTrajectorySnapshot(clip);
       if (terminal.has(clip.status)) {
         projectWorkbenchTrajectoryJobId = null;
         document.querySelector("#workflowCancel").hidden = true;
         refreshSupplementalWorkflowActionAvailability(false);
+        if (clip.status === "cancelled") {
+          projectWorkbenchTrajectoryStatus = null;
+          runningStage = null;
+          progress.value = 0;
+          stateLabel.textContent = "待处理";
+          message.textContent = "任务已取消，片段已返回待处理";
+          return null;
+        }
         if (clip.status !== "success") {
           throw new Error(projectTrajectoryStatusCopy(clip.status, clip.stage));
         }
@@ -1592,7 +1664,6 @@
         await renewProjectWorkbenchSession(snapshot.component_revisions.clips);
         lastHeartbeatAt = now;
       }
-      let renderedRuntime = false;
       try {
         const runtimeResponse = await fetch(
           `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/jobs/${encodeURIComponent(jobId)}/runtime`,
@@ -1600,21 +1671,11 @@
         );
         if (runtimeResponse.ok) {
           const runtime = await runtimeResponse.json();
-          if (runtime.workflow_status) {
-            await renderStatus(runtime.workflow_status);
-            renderedRuntime = true;
-          }
           const content = document.querySelector("#workflowLogContent");
           if (content) content.textContent = runtime.lines.join("\n") || "暂无日志";
         }
       } catch (error) {
         // 实时详情读取失败时继续使用项目 snapshot，不能中断任务状态跟踪。
-      }
-      if (!renderedRuntime) {
-        const fraction = clip.progress?.fraction;
-        if (typeof fraction === "number") progress.value = Math.max(0, Math.min(1, fraction));
-        stateLabel.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
-        message.textContent = projectTrajectoryStatusCopy(clip.status, clip.stage);
       }
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
