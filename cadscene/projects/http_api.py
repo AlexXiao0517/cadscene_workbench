@@ -775,6 +775,12 @@ class ProjectApi:
             job = render_job or trajectory_job
             if (
                 trajectory_job is not None
+                and trajectory_job.get("status")
+                in {"queued", "preparing", "running", "validating"}
+            ):
+                job = trajectory_job
+            elif (
+                trajectory_job is not None
                 and trajectory_job.get("status") == "success"
                 and render_job is not None
                 and render_job.get("status") in {"stale_input", "superseded"}
