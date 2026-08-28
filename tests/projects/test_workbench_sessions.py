@@ -1448,6 +1448,12 @@ def test_scene_bridge_does_not_publish_when_source_route_changes(
         reference.value.get("reference_type") == "scene_bridge"
         for reference in target.references
     )
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    target_payload = next(
+        item for item in snapshot.body["clips"] if item["clip_id"] == "clip-3"
+    )
+    assert target_payload["status"] == "success"
+    assert target_payload["scene_bridge"]["status"] == "stale_input"
     assert not (
         api.service.projects_root
         / "project-1/scene_bridges/clip-3"

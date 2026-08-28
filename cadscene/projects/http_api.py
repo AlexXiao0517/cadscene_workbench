@@ -785,6 +785,15 @@ class ProjectApi:
                 and render_job.get("status") in {"stale_input", "superseded"}
             ):
                 job = trajectory_job
+            elif (
+                trajectory_job is not None
+                and trajectory_job.get("status") == "success"
+                and render_job is None
+                and scene_bridge_job is not None
+                and scene_bridge_job.get("status")
+                in {"stale_input", "superseded"}
+            ):
+                job = trajectory_job
             display_job = job
             if job is not None and job.get("status") == "queued":
                 display_job = next(

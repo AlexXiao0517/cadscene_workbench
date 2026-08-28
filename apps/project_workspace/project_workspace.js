@@ -112,13 +112,13 @@
     bridgeUp.disabled = capabilities.can_bridge_up !== true;
     bridgeUp.title = capabilities.can_bridge_up
       ? `用重叠帧打通 ${capabilities.bridge_up_target_clip_id} 的路线，完成后进入微调`
-      : "没有可安全打通的同场景上一片段";
+      : (capabilities.bridge_up_reason || "没有可安全打通的同场景上一片段");
     const bridgeDown = $(".bridge-down", row);
     bridgeDown.hidden = capabilities.can_bridge_down !== true;
     bridgeDown.disabled = capabilities.can_bridge_down !== true;
     bridgeDown.title = capabilities.can_bridge_down
       ? `用重叠帧打通 ${capabilities.bridge_down_target_clip_id} 的路线，完成后进入微调`
-      : "没有可安全打通的同场景下一片段";
+      : (capabilities.bridge_down_reason || "没有可安全打通的同场景下一片段");
     $(".retry-job", row).disabled = !capabilities.can_retry;
     $(".cancel-job", row).disabled = !capabilities.can_cancel;
     $(".workflow-select", row).title = capabilities.reason || "";
@@ -169,6 +169,14 @@
     if (hasPercentage) progressPercent.textContent = `${percent}%`;
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
+    const bridgeStatus = clip.scene_bridge?.status;
+    const bridgeReason = clip.capabilities?.bridge_up_reason
+      || clip.capabilities?.bridge_down_reason;
+    if (["stale_input", "superseded"].includes(bridgeStatus)) {
+      $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
+    } else if (bridgeReason) {
+      $(".row-error", row).textContent = bridgeReason;
+    }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
     $(".bridge-down", row).addEventListener("click", () => bridgeAdjacent(clip, "down", row));
