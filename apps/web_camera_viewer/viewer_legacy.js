@@ -90,7 +90,7 @@
   let defaultCamera = null;
   let threeScene = null;
   let cameraTrack = null;
-  let loadedCameraTrack = false;
+  let loadedAuthoritativeCameraTrack = false;
   let reviewPacket = null;
   let manualFrameOverride = null;
   let lastOverlayDrawAt = 0;
@@ -1929,7 +1929,7 @@
   };
 
   window.cadsceneHasLoadedCameraTrack = function () {
-    return loadedCameraTrack;
+    return loadedAuthoritativeCameraTrack;
   };
 
   window.cadsceneSetKeyframePlan = function (plan) {
@@ -2125,7 +2125,11 @@
       // 质量评估附加字段（evaluate_sfm_alignment_quality 产出，可选；向后兼容，仅展示不影响对齐）
       quality: keyframe.quality || null,
     }));
-    loadedCameraTrack = cameraTrack.keyframes.length > 0;
+    // 单个 frame=0 且无 source 的轨迹只是默认占位，可安全用 SfM 内参修复 FOV。
+    loadedAuthoritativeCameraTrack = cameraTrack.keyframes.length > 1
+      || cameraTrack.keyframes.some(
+        (keyframe) => Boolean(keyframe.source) || Number(keyframe.frame) !== 0,
+      );
     sortKeyframes();
     summarizeQualitySuggestions();
     if (cameraTrack.keyframes.length > 0) {

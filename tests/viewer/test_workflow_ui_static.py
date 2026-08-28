@@ -641,7 +641,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260827-sfm-fov-refresh-v1' in index
+    assert 'workflow.js?v=20260828-sfm-fov-refresh-v2' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:
@@ -654,17 +654,21 @@ def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() 
     assert "sessionStorage.setItem(key" not in workflow
 
 
-def test_sfm_fov_initialization_preserves_a_loaded_camera_track() -> None:
+def test_sfm_fov_preserves_authoritative_track_but_repairs_default_placeholder() -> None:
     workflow = _read("workflow.js")
     viewer = _read("viewer_legacy.js")
 
     sfm_init = workflow[
         workflow.index("async function applySfmCameraInitializationOnce") :
-        workflow.index("function currentFrame", workflow.index("async function applySfmCameraInitializationOnce"))
+        workflow.index(
+            "function currentFrame",
+            workflow.index("async function applySfmCameraInitializationOnce"),
+        )
     ]
     assert "window.cadsceneHasLoadedCameraTrack?.()" in sfm_init
-    assert "let loadedCameraTrack = false;" in viewer
-    assert "loadedCameraTrack = cameraTrack.keyframes.length > 0;" in viewer
+    assert "let loadedAuthoritativeCameraTrack = false;" in viewer
+    assert "cameraTrack.keyframes.length > 1" in viewer
+    assert "Boolean(keyframe.source)" in viewer
     assert "window.cadsceneHasLoadedCameraTrack = function ()" in viewer
 
 
