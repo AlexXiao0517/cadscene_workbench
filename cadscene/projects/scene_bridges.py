@@ -5,6 +5,7 @@ from fractions import Fraction
 import math
 from typing import Collection, Mapping, Sequence
 
+from cadscene.projects.models import ClipDefinition
 from cadscene.video_analysis.pts import DecodedFrameIndex
 
 
@@ -193,6 +194,115 @@ def derive_solve_interval(
     )
 
 
+def derive_scene_solve_interval(
+    *,
+    clips: Sequence[ClipDefinition],
+    clip_id: str,
+    source_frame_index: DecodedFrameIndex,
+    overlap_seconds: Fraction = Fraction(4, 1),
+) -> SolveInterval:
+    """按同一场景边界生成隐藏 SfM 求解区间，不跨场景取帧。"""
+
+    if overlap_seconds < 0:
+        raise SceneBridgeUnavailable("solve overlap must not be negative")
+    current, same_scene = _same_scene_clips(clips, clip_id)
+    core_start_pts = _clip_pts(current, "source_start_pts")
+    core_end_pts_exclusive = _clip_pts(current, "source_end_pts_exclusive")
+    if core_end_pts_exclusive <= core_start_pts:
+        raise SceneBridgeUnavailable("core interval must use increasing integer PTS")
+    if len(same_scene) == 1:
+        return derive_solve_interval(
+            core_start_pts=core_start_pts,
+            core_end_pts_exclusive=core_end_pts_exclusive,
+            source_frame_index=source_frame_index,
+            overlap_seconds=Fraction(0, 1),
+        )
+
+    scene_start_pts = _clip_pts(same_scene[0], "source_start_pts")
+    scene_end_pts_exclusive = _clip_pts(
+        same_scene[-1], "source_end_pts_exclusive"
+    )
+    frames = source_frame_index.frames
+    if not any(frame.pts == core_start_pts for frame in frames):
+        raise SceneBridgeUnavailable("core start PTS is not a decoded source frame")
+    if (
+        scene_start_pts < source_frame_index.source_start_pts
+        or scene_end_pts_exclusive > source_frame_index.source_end_pts_exclusive
+    ):
+        raise SceneBridgeUnavailable("scene interval escapes the source video")
+
+    overlap_pts = overlap_seconds / source_frame_index.time_base
+    requested_start = max(Fraction(scene_start_pts), Fraction(core_start_pts) - overlap_pts)
+    requested_end = min(
+        Fraction(scene_end_pts_exclusive),
+        Fraction(core_end_pts_exclusive) + overlap_pts,
+    )
+    scene_indices = [
+        index
+        for index, frame in enumerate(frames)
+        if scene_start_pts <= frame.pts < scene_end_pts_exclusive
+    ]
+    if not scene_indices:
+        raise SceneBridgeUnavailable("scene interval contains no decoded source frames")
+
+    before_or_at_start = [
+        index for index in scene_indices if Fraction(frames[index].pts) <= requested_start
+    ]
+    first_index = (
+        before_or_at_start[-1]
+        if before_or_at_start
+        else scene_indices[0]
+    )
+    selected_indices = [
+        index
+        for index in scene_indices
+        if index >= first_index and Fraction(frames[index].pts) < requested_end
+    ]
+    if not selected_indices:
+        raise SceneBridgeUnavailable("solve interval contains no decoded source frames")
+    last_index = selected_indices[-1]
+    selected = frames[first_index : last_index + 1]
+    next_pts = (
+        frames[last_index + 1].pts
+        if last_index + 1 < len(frames)
+        else source_frame_index.source_end_pts_exclusive
+    )
+    end_pts_exclusive = min(next_pts, scene_end_pts_exclusive)
+    core_indices = [
+        index
+        for index, frame in enumerate(selected)
+        if core_start_pts <= frame.pts < core_end_pts_exclusive
+    ]
+    if not core_indices:
+        raise SceneBridgeUnavailable("core interval contains no decoded source frames")
+    return SolveInterval(
+        start_pts=selected[0].pts,
+        end_pts_exclusive=end_pts_exclusive,
+        core_start_pts=core_start_pts,
+        core_end_pts_exclusive=core_end_pts_exclusive,
+        core_start_index=core_indices[0],
+        core_end_index_exclusive=core_indices[-1] + 1,
+        frame_pts=tuple(frame.pts for frame in selected),
+    )
+
+
+def scene_bridge_neighbor(
+    clips: Sequence[ClipDefinition],
+    clip_id: str,
+    direction: str,
+) -> ClipDefinition | None:
+    """返回同场景紧邻片段；单片段场景和场景边界返回 ``None``。"""
+
+    if direction not in {"up", "down"}:
+        raise ValueError("scene bridge direction must be up or down")
+    current, same_scene = _same_scene_clips(clips, clip_id)
+    if len(same_scene) < 2:
+        return None
+    position = same_scene.index(current)
+    target = position - 1 if direction == "up" else position + 1
+    return same_scene[target] if 0 <= target < len(same_scene) else None
+
+
 def select_overlap_anchors(
     *,
     direction: str,
@@ -323,6 +433,53 @@ def build_core_seed(
 def _integer(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} must be an integer")
+    return value
+
+
+def _clip_pts(clip: ClipDefinition, field: str) -> int:
+    value = clip.analysis.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SceneBridgeUnavailable(f"clip {field} must be an integer")
+    return value
+
+
+def _same_scene_clips(
+    clips: Sequence[ClipDefinition], clip_id: str
+) -> tuple[ClipDefinition, tuple[ClipDefinition, ...]]:
+    matches = [clip for clip in clips if clip.clip_id == clip_id]
+    if len(matches) != 1:
+        raise SceneBridgeUnavailable("clip must exist exactly once")
+    current = matches[0]
+    scene_index = _clip_order_value(current, "scene_index")
+    same_scene = tuple(
+        sorted(
+            (
+                clip
+                for clip in clips
+                if _clip_order_value(clip, "scene_index") == scene_index
+            ),
+            key=lambda clip: _clip_order_value(clip, "segment_index"),
+        )
+    )
+    segment_indices = [
+        _clip_order_value(clip, "segment_index") for clip in same_scene
+    ]
+    if len(segment_indices) != len(set(segment_indices)):
+        raise SceneBridgeUnavailable("scene segment indices must be unique")
+    for previous, following in zip(same_scene, same_scene[1:], strict=False):
+        if _clip_pts(previous, "source_end_pts_exclusive") != _clip_pts(
+            following, "source_start_pts"
+        ):
+            raise SceneBridgeUnavailable(
+                "same-scene core intervals must be contiguous and increasing"
+            )
+    return current, same_scene
+
+
+def _clip_order_value(clip: ClipDefinition, field: str) -> int:
+    value = clip.analysis.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SceneBridgeUnavailable(f"clip {field} must be a positive integer")
     return value
 
 

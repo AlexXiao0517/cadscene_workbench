@@ -8,9 +8,12 @@ from cadscene.projects.scene_bridges import (
     FrameMap,
     SceneBridgeUnavailable,
     build_core_seed,
+    derive_scene_solve_interval,
     derive_solve_interval,
+    scene_bridge_neighbor,
     select_overlap_anchors,
 )
+from cadscene.projects.models import ClipDefinition
 from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 
 
@@ -67,6 +70,155 @@ def _camera(value: float) -> dict[str, float]:
         "roll": 1.0,
         "fov": 70.0,
     }
+
+
+def _clip(
+    clip_id: str,
+    *,
+    scene_index: int,
+    segment_index: int,
+    start_pts: int,
+    end_pts_exclusive: int,
+    render_order: int,
+) -> ClipDefinition:
+    return ClipDefinition.from_analysis(
+        {
+            "clip_id": clip_id,
+            "analysis_revision": "analysis-1",
+            "scene_index": scene_index,
+            "segment_index": segment_index,
+            "render_order": render_order,
+            "source_start_pts": start_pts,
+            "source_end_pts_exclusive": end_pts_exclusive,
+            "recommended_workflow": "sfm_only",
+        }
+    )
+
+
+def _second_index(end_pts_exclusive: int) -> DecodedFrameIndex:
+    return _index(tuple(range(0, end_pts_exclusive, 1000)), duration=1000)
+
+
+def test_middle_clip_expands_four_seconds_each_side_inside_its_scene() -> None:
+    clips = (
+        _clip("clip-1", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=60_000, render_order=0),
+        _clip("clip-2", scene_index=1, segment_index=2, start_pts=60_000, end_pts_exclusive=120_000, render_order=1),
+        _clip("clip-3", scene_index=1, segment_index=3, start_pts=120_000, end_pts_exclusive=180_000, render_order=2),
+        _clip("clip-4", scene_index=2, segment_index=1, start_pts=180_000, end_pts_exclusive=240_000, render_order=3),
+    )
+
+    interval = derive_scene_solve_interval(
+        clips=clips,
+        clip_id="clip-2",
+        source_frame_index=_second_index(240_000),
+    )
+
+    assert interval.start_pts == 56_000
+    assert interval.end_pts_exclusive == 124_000
+    assert interval.core_start_index == 4
+    assert interval.core_end_index_exclusive == 64
+
+
+def test_scene_edge_never_uses_frames_from_the_next_scene() -> None:
+    clips = (
+        _clip("scene-1-a", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=6_000, render_order=0),
+        _clip("scene-1-b", scene_index=1, segment_index=2, start_pts=6_000, end_pts_exclusive=12_000, render_order=1),
+        _clip("scene-2-a", scene_index=2, segment_index=1, start_pts=12_000, end_pts_exclusive=18_000, render_order=2),
+        _clip("scene-2-b", scene_index=2, segment_index=2, start_pts=18_000, end_pts_exclusive=24_000, render_order=3),
+    )
+
+    interval = derive_scene_solve_interval(
+        clips=clips,
+        clip_id="scene-1-b",
+        source_frame_index=_second_index(24_000),
+    )
+
+    assert interval.start_pts == 2_000
+    assert interval.end_pts_exclusive == 12_000
+    assert 12_000 not in interval.frame_pts
+
+
+def test_single_segment_scene_has_core_only_and_no_neighbors() -> None:
+    clips = (
+        _clip("single", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=6_000, render_order=0),
+        _clip("next-a", scene_index=2, segment_index=1, start_pts=6_000, end_pts_exclusive=12_000, render_order=1),
+        _clip("next-b", scene_index=2, segment_index=2, start_pts=12_000, end_pts_exclusive=18_000, render_order=2),
+    )
+
+    interval = derive_scene_solve_interval(
+        clips=clips,
+        clip_id="single",
+        source_frame_index=_second_index(18_000),
+    )
+
+    assert interval.start_pts == interval.core_start_pts == 0
+    assert interval.end_pts_exclusive == interval.core_end_pts_exclusive == 6_000
+    assert scene_bridge_neighbor(clips, "single", "up") is None
+    assert scene_bridge_neighbor(clips, "single", "down") is None
+
+
+def test_scene_bridge_neighbors_are_only_same_scene_adjacent_segments() -> None:
+    clips = (
+        _clip("a", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=6_000, render_order=0),
+        _clip("b", scene_index=1, segment_index=2, start_pts=6_000, end_pts_exclusive=12_000, render_order=1),
+        _clip("c", scene_index=2, segment_index=1, start_pts=12_000, end_pts_exclusive=18_000, render_order=2),
+    )
+
+    assert scene_bridge_neighbor(clips, "a", "down") == clips[1]
+    assert scene_bridge_neighbor(clips, "b", "up") == clips[0]
+    assert scene_bridge_neighbor(clips, "b", "down") is None
+    with pytest.raises(ValueError, match="direction must be up or down"):
+        scene_bridge_neighbor(clips, "a", "left")
+
+
+def test_vfr_scene_expansion_snaps_outward_to_real_decoded_pts() -> None:
+    clips = (
+        _clip("a", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=5_200, render_order=0),
+        _clip("b", scene_index=1, segment_index=2, start_pts=5_200, end_pts_exclusive=8_000, render_order=1),
+        _clip("c", scene_index=1, segment_index=3, start_pts=8_000, end_pts_exclusive=15_000, render_order=2),
+    )
+    points = (
+        0,
+        700,
+        1_000,
+        1_300,
+        5_200,
+        5_850,
+        6_600,
+        7_300,
+        7_950,
+        8_000,
+        9_100,
+        10_250,
+        11_950,
+        12_200,
+        14_900,
+    )
+
+    interval = derive_scene_solve_interval(
+        clips=clips,
+        clip_id="b",
+        source_frame_index=_index(points, duration=100),
+    )
+
+    assert interval.start_pts == 1_000
+    assert interval.end_pts_exclusive == 12_200
+    assert interval.frame_pts[0] == 1_000
+    assert interval.frame_pts[-1] == 11_950
+
+
+def test_scene_contract_rejects_duplicate_segment_indices() -> None:
+    clips = (
+        _clip("a", scene_index=1, segment_index=1, start_pts=0, end_pts_exclusive=6_000, render_order=0),
+        _clip("b", scene_index=1, segment_index=1, start_pts=6_000, end_pts_exclusive=12_000, render_order=1),
+    )
+
+    with pytest.raises(SceneBridgeUnavailable, match="segment indices must be unique"):
+        derive_scene_solve_interval(
+            clips=clips,
+            clip_id="a",
+            source_frame_index=_second_index(12_000),
+        )
 
 
 def test_solve_interval_uses_exact_vfr_pts_and_clamps_to_source_bounds() -> None:
