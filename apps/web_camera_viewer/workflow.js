@@ -28,6 +28,8 @@
   let trajectoryWorkflow = null;
   let trajectoryWorkflowLoaded = !dataset;
   let viewerReadyForSfmCameraInit = false;
+  let sfmCameraInitializationPromise = null;
+  let sfmCameraInitializationComplete = false;
   let selectedWorkflowStage = null;
   let latestJobStatus = null;
   let workflowSuggestions = [];
@@ -2217,26 +2219,38 @@
   }
 
   async function applySfmCameraInitializationOnce() {
-    const key = `cadsceneSfmCameraInit:v5:${dataset}:${runId}`;
-    if (sessionStorage.getItem(key) === "1") return;
-    const response = await fetch(
-      `/api/workflow/sfm-camera-init?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}`,
-      { cache: "no-store" },
-    );
-    const params = await response.json();
-    if (!response.ok) throw new Error(params.error || `HTTP ${response.status}`);
-    if (typeof window.cadsceneApplyCameraParameters !== "function") {
-      throw new Error("viewer 相机尚未初始化");
+    if (sfmCameraInitializationComplete) return false;
+    if (sfmCameraInitializationPromise) return sfmCameraInitializationPromise;
+    sfmCameraInitializationPromise = (async () => {
+      // 已保存的人工/拟合轨迹是权威结果，不能被 SfM 初值覆盖。
+      if (window.cadsceneHasLoadedCameraTrack?.()) {
+        sfmCameraInitializationComplete = true;
+        return false;
+      }
+      const response = await fetch(
+        `/api/workflow/sfm-camera-init?dataset=${encodeURIComponent(dataset)}&runId=${encodeURIComponent(runId)}`,
+        { cache: "no-store" },
+      );
+      const params = await response.json();
+      if (!response.ok) throw new Error(params.error || `HTTP ${response.status}`);
+      if (typeof window.cadsceneApplyCameraParameters !== "function") {
+        throw new Error("viewer 相机尚未初始化");
+      }
+      const appliedFields = window.cadsceneApplyCameraParameters(params);
+      if (!Array.isArray(appliedFields) || appliedFields.length === 0) {
+        return false;
+      }
+      sfmCameraInitializationComplete = true;
+      message.textContent = params.orientation_safe_to_apply
+        ? `已使用 SfM 第 ${params.frame_index} 帧初始化 ${appliedFields.join("/")}；位置坐标保持不变。`
+        : `已使用 SfM 初始化 FOV=${params.fov.toFixed(1)}°；yaw/pitch/roll 将在首个人工锚点后确定。`;
+      return true;
+    })();
+    try {
+      return await sfmCameraInitializationPromise;
+    } finally {
+      sfmCameraInitializationPromise = null;
     }
-    const appliedFields = window.cadsceneApplyCameraParameters(params);
-    if (!Array.isArray(appliedFields) || appliedFields.length === 0) {
-      return false;
-    }
-    sessionStorage.setItem(key, "1");
-    message.textContent = params.orientation_safe_to_apply
-      ? `已使用 SfM 第 ${params.frame_index} 帧初始化 ${appliedFields.join("/")}；位置坐标保持不变。`
-      : `已使用 SfM 初始化 FOV=${params.fov.toFixed(1)}°；yaw/pitch/roll 将在首个人工锚点后确定。`;
-    return true;
   }
 
   function currentFrame() {
