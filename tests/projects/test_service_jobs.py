@@ -394,6 +394,23 @@ def test_attempt_directories_are_immutable_and_input_scoped(tmp_path: Path) -> N
     assert len(repositories.jobs.load("p1").jobs) == 2
 
 
+def test_batch_enqueue_retries_cancelled_trajectory_as_a_new_attempt(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    first = service.enqueue_trajectory_jobs("p1")
+    trajectory_job_id = first.job_ids[0]
+    service.cancel_job("p1", trajectory_job_id)
+
+    repeated = service.enqueue_trajectory_jobs("p1")
+
+    retried = queue.get(trajectory_job_id)
+    assert repeated.job_ids == (trajectory_job_id,)
+    assert retried.status in {"queued", "preparing", "running"}
+    assert [attempt.number for attempt in retried.attempts] == [1, 2]
+    assert len(repositories.jobs.load("p1").jobs) == 2
+
+
 def test_repeated_enqueue_reuses_jobs_without_orphan_attempt_directories(
     tmp_path: Path,
 ) -> None:

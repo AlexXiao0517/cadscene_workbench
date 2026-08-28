@@ -2366,6 +2366,20 @@ class ProjectService:
                 Path(submitted_solve.attempts[-1].directory).mkdir(
                     parents=True, exist_ok=False
                 )
+            elif submitted_solve.status == "cancelled":
+                number = len(submitted_solve.attempts) + 1
+                directory = self._attempt_directory(
+                    project_id, submitted_solve.job_id, number
+                )
+                directory.mkdir(parents=True, exist_ok=False)
+                try:
+                    submitted_solve = self.queue.retry(
+                        submitted_solve.job_id,
+                        AttemptRecord(number=number, directory=str(directory)),
+                    )
+                except Exception:
+                    directory.rmdir()
+                    raise
             trajectory_ids.append(submitted_solve.job_id)
         self._publish_queue_locked(project_id)
         return EnqueueTrajectoryResult(
