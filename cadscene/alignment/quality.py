@@ -4,7 +4,7 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -341,6 +341,7 @@ def evaluate_quality(
     web_camera_track: Mapping[str, object],
     trajectory_json: Mapping[str, object] | None,
     config: QualityConfig,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> QualityResult:
     mode = config.quality_mode
     if mode not in {"bootstrap", "qa"}:
@@ -425,6 +426,8 @@ def evaluate_quality(
                 "unavailable_signals": "|".join(unavailable_names),
             }
         )
+        if progress_callback is not None:
+            progress_callback(i + 1, len(rows))
     suggestions_rows = select_suggestions(timeline, config.suggestion_config())
     suggestions = [_suggestion_entry(row, fps) for row in suggestions_rows]
     meta = {

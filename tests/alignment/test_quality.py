@@ -91,6 +91,21 @@ def test_qa_allows_correction_and_risk_scores_stay_in_range() -> None:
     assert any(row["correction_risk"] != "unavailable" for row in result.timeline)
 
 
+def test_quality_reports_measured_progress_for_each_authoritative_path_row() -> None:
+    measured: list[tuple[int, int]] = []
+
+    evaluate_quality(
+        sfm_camera_path_rows=_path_rows(),
+        alignment_json=_alignment(),
+        web_camera_track=_track(),
+        trajectory_json=None,
+        config=QualityConfig(quality_mode="qa"),
+        progress_callback=lambda completed, total: measured.append((completed, total)),
+    )
+
+    assert measured == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
 def test_suggestion_nms_gap_and_max_count() -> None:
     timeline = [
         {"frame_index": 10, "risk_score": 0.9, "risk_level": "high", "reason_codes": "a", "nearest_anchor_frame": 0, "suggest_action": "检查"},
