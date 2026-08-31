@@ -629,6 +629,33 @@ def test_project_workbench_resume_uses_durable_stage_and_authoritative_pts() -> 
     assert "sourceTimeBase?.()" in script
 
 
+def test_unsaved_camera_draft_warns_on_close_and_clears_after_durable_save() -> None:
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "let cameraDraftDirty = false;" in viewer
+    notify = viewer[
+        viewer.index("function notifyManualCameraChanged") :
+        viewer.index("function worldToCamera")
+    ]
+    assert "cameraDraftDirty = true;" in notify
+    assert "window.cadsceneHasUnsavedCameraDraft" in viewer
+    assert "window.cadsceneClearUnsavedCameraDraft" in viewer
+    assert 'window.addEventListener("beforeunload"' in workflow
+    assert "window.cadsceneHasUnsavedCameraDraft?.()" in workflow
+    assert "pureRotationCorrectionDraftDirty" in workflow
+    persist = workflow[
+        workflow.index("async function persistEditedCameraTrack") :
+        workflow.index("function projectRenderStatusCopy")
+    ]
+    assert "window.cadsceneClearUnsavedCameraDraft?.();" in persist
+    pagehide = workflow[
+        workflow.index('window.addEventListener("pagehide"') :
+        workflow.index("function updateKeyframePlanUi")
+    ]
+    assert "saveCurrentCameraTrack" not in pagehide
+
+
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
     script = _read("workflow.js")
 

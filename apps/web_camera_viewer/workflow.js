@@ -570,6 +570,7 @@
     pureRotationTrajectoryKind = "base";
     applyPureRotationPose();
     refreshPureRotationCorrectionDraftBase();
+    window.cadsceneClearUnsavedCameraDraft?.();
     message.textContent = "固定相机放置已保存；播放时位置保持不变。";
   }
 
@@ -577,6 +578,7 @@
     pureRotationDraftPlacement = null;
     pureRotationCorrectionDraftBase = null;
     pureRotationCorrectionDraftDirty = false;
+    window.cadsceneClearUnsavedCameraDraft?.();
     if (!pureRotationSavedPlacement) {
       seedPureRotationDraftPlacement();
       pureRotationFovSource = "unverified_candidate_intrinsics";
@@ -614,6 +616,7 @@
     pureRotationCorrections.push(correction);
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
     pureRotationCorrectionDraftDirty = false;
+    window.cadsceneClearUnsavedCameraDraft?.();
     await refreshPureRotationFittedPreview();
     message.textContent = `已保存姿态关键帧 ${correction.decoded_frame_index}。`;
   }
@@ -624,6 +627,7 @@
     pureRotationCorrections = pureRotationCorrections.filter((item) => item.decoded_frame_index !== Number(active.decoded_frame_index) || item.segment_id !== Number(active.segment_id));
     await apiPost("/api/pure-rotation/corrections", { dataset, runId, corrections: pureRotationCorrections });
     pureRotationCorrectionDraftDirty = false;
+    window.cadsceneClearUnsavedCameraDraft?.();
     await refreshPureRotationFittedPreview();
     message.textContent = `已删除姿态关键帧 ${active.decoded_frame_index}。`;
   }
@@ -1994,6 +1998,17 @@
     ).catch(() => {});
   });
 
+  window.addEventListener("beforeunload", (event) => {
+    if (projectWorkbenchInternalNavigation) return;
+    const hasUnsavedCameraDraft = Boolean(
+      window.cadsceneHasUnsavedCameraDraft?.()
+      || pureRotationCorrectionDraftDirty,
+    );
+    if (!hasUnsavedCameraDraft) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+
   function updateKeyframePlanUi() {
     const alignmentButton = document.querySelector("#workflowRunAlignment");
     const continueButton = document.querySelector("#workflowContinueKeyframes");
@@ -2126,6 +2141,7 @@
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     try {
       await saveCurrentCameraTrack();
+      window.cadsceneClearUnsavedCameraDraft?.();
       const plannedFrame = (keyframePlan?.frames || []).find(
         (item) => Number(item.frame_index) === editedFrame,
       );
