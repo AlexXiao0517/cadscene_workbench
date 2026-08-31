@@ -226,8 +226,8 @@ def test_powershell_launchers_parse_without_errors(script_name: str) -> None:
 def test_release_config_pins_bundle_and_backend_versions() -> None:
     config = ReleaseConfig.load(WINDOWS_PACKAGING / "release-config.json")
 
-    assert config.bundle_name == "CADScene-0.1.0"
-    assert config.application_version == "0.1.0"
+    assert config.bundle_name == "CADScene-0.1.2"
+    assert config.application_version == "0.1.2"
     assert config.poc_commit == "85ab6404bfb5a07da8cdaaba0a1e5c4da10dc250"
     assert config.opengv_commit == "91f4b19c73450833a40e463ad3648aae80b3a7f3"
 
