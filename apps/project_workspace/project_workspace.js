@@ -771,6 +771,14 @@
       ? capability.bridge_up_target_clip_id
       : capability.bridge_down_target_clip_id;
     if (!targetClipId) return;
+    const dialog = $("#workbenchPreparationDialog");
+    const directionLabel = direction === "up" ? "向上" : "向下";
+    $("#workbenchPreparationTitle").textContent = "正在提交路线打通任务";
+    $("#workbenchPreparationMessage").textContent = `正在提交${directionLabel}打通任务…`;
+    $("#workbenchPreparationFill").style.width = "0%";
+    $("#workbenchPreparationPercent").textContent = "—";
+    if (!dialog.open) dialog.showModal();
+    setMessage(`正在提交${directionLabel}打通任务…`);
     try {
       const { response, body } = await request(
         `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/scene-bridges`,
@@ -789,7 +797,9 @@
       state.snapshot.component_revisions.jobs = body.jobs_revision;
       await waitForSceneBridge(body.job_id, targetClipId);
     } catch (error) {
+      if (dialog.open) dialog.close();
       $(".row-error", row).textContent = error.message;
+      setMessage(`路线打通失败：${error.message}`, true);
       state.etag = null;
       await pollSnapshot();
     }
@@ -797,6 +807,7 @@
 
   async function waitForSceneBridge(jobId, targetClipId) {
     const dialog = $("#workbenchPreparationDialog");
+    $("#workbenchPreparationTitle").textContent = "正在打通相邻片段路线";
     if (!dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;
@@ -832,6 +843,7 @@
 
   async function waitForWorkbenchPreparation(clipId) {
     const dialog = $("#workbenchPreparationDialog");
+    $("#workbenchPreparationTitle").textContent = "正在准备片段工作台";
     if (!dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;

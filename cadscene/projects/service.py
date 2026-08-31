@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -1935,10 +1936,19 @@ class ProjectService:
                 ),
                 None,
             )
-            if target_workbench is not None:
+            if target_workbench is not None and _workbench_reference_blocks_scene_bridge(
+                target_workbench, self.now()
+            ):
                 raise ValueError("target clip already has a workbench result")
+            stored_jobs = tuple(
+                QueueJob.from_dict(item)
+                for item in self.repositories.jobs.load(project_id).jobs
+            )
+            target_trajectory = self._current_trajectory_for_render(
+                target, stored_jobs
+            )
             if _has_recoverable_saved_workbench_output(
-                self.projects_root, project_id, target
+                self.projects_root, project_id, target, target_trajectory
             ):
                 raise ValueError(
                     "target clip has a recoverable saved workbench output"
@@ -1960,10 +1970,6 @@ class ProjectService:
                 raise ValueError(
                     "target clip has a scene bridge awaiting route refinement"
                 )
-            stored_jobs = tuple(
-                QueueJob.from_dict(item)
-                for item in self.repositories.jobs.load(project_id).jobs
-            )
             source_frame_map = _core_frame_map_identity(source, stored_jobs)
             target_frame_map = _core_frame_map_identity(target, stored_jobs)
             source_trajectory = self._current_trajectory_for_render(
@@ -1975,9 +1981,6 @@ class ProjectService:
                 raise ValueError(
                     "source clip requires current precomputed overlap SfM; rerun trajectory solve"
                 )
-            target_trajectory = self._current_trajectory_for_render(
-                target, stored_jobs
-            )
             if target_trajectory is None or not _has_precomputed_solve_outputs(
                 target_trajectory
             ):
@@ -6795,8 +6798,13 @@ def _saved_workbench_reference(clip: ClipDefinition) -> StateReference | None:
 
 
 def _has_recoverable_saved_workbench_output(
-    projects_root: Path, project_id: str, clip: ClipDefinition
+    projects_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    trajectory: QueueJob | None,
 ) -> bool:
+    if trajectory is None:
+        return False
     sessions = projects_root / project_id / "workbench_sessions"
     if not sessions.is_dir():
         return False
@@ -6846,11 +6854,29 @@ def _has_recoverable_saved_workbench_output(
                 "workbench_output_operation_id": operation_id,
             },
         )
-        if _validate_workbench_immutable_output(
+        if _workbench_binds_trajectory(
+            clip, trajectory, reference.value
+        ) and _validate_workbench_immutable_output(
             projects_root, project_id, clip, reference
         ):
             return True
     return False
+
+
+def _workbench_reference_blocks_scene_bridge(
+    reference: StateReference, now: str
+) -> bool:
+    if reference.value.get("status") != "editing":
+        return True
+    expires_at = reference.value.get("expires_at")
+    if not isinstance(expires_at, str):
+        return True
+    try:
+        current = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return current < expiry
 
 
 def _validate_scene_bridge_reference(

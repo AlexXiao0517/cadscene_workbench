@@ -1181,10 +1181,23 @@ def test_expired_unsaved_target_session_no_longer_blocks_scene_bridge(
     assert source["capabilities"]["can_bridge_down"] is False
 
     api.workbench.now.value += timedelta(minutes=31)
+    api.service.now = lambda: api.workbench.now().isoformat().replace("+00:00", "Z")
     expired = api.handle("GET", "/api/projects/project-1/snapshot")
     source = next(item for item in expired.body["clips"] if item["clip_id"] == "clip-2")
     assert source["capabilities"]["can_bridge_down"] is True
     assert source["capabilities"]["bridge_down_target_clip_id"] == "clip-3"
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+
+    assert response.status == 202
 
 
 def test_scene_bridge_capability_requires_current_precomputed_solve_artifacts(
@@ -1635,6 +1648,67 @@ def test_scene_bridge_rejects_recoverable_saved_target_without_reference(
 
     assert response.status == 400
     assert "recoverable" in str(response.body["error"])
+
+
+def test_scene_bridge_ignores_saved_target_from_historical_trajectory(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    assert api.workbench is not None
+    api.workbench.coordinator.revision_factory = lambda: "workbench-output-clip3"
+    _save_completed_sfm_route(api, repositories, runs_root, clip_id="clip-3")
+    clips = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(
+                    clip,
+                    references=tuple(
+                        reference
+                        for reference in clip.references
+                        if reference.key != "workbench:clip-3"
+                    ),
+                )
+                if clip.clip_id == "clip-3"
+                else clip
+                for clip in value.clips
+            ),
+        ),
+    )
+    sessions_root = api.service.projects_root / "project-1" / "workbench_sessions"
+    saved_session = next(
+        path
+        for path in sessions_root.glob("*.json")
+        if (
+            (payload := json.loads(path.read_text(encoding="utf-8-sig"))).get("state")
+            == "saved"
+            and payload.get("clip_id") == "clip-3"
+        )
+    )
+    payload = json.loads(saved_session.read_text(encoding="utf-8-sig"))
+    payload["trajectory_job_id"] = "historical-trajectory-job"
+    saved_session.write_text(json.dumps(payload), encoding="utf-8")
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2")
+    assert source["capabilities"]["can_bridge_down"] is True
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+
+    assert response.status == 202
 
 
 def test_saved_route_can_push_boundary_pose_to_previous_and_next_clip(

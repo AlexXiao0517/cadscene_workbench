@@ -375,6 +375,9 @@ def test_completed_route_can_bridge_previous_or_next_clip_from_source_row() -> N
     assert "async function waitForSceneBridge" in script
     assert "response.status === 202" in script
     assert "await openWorkbench(target, targetRow)" in script
+    assert 'const directionLabel = direction === "up" ? "向上" : "向下";' in script
+    assert "正在提交${directionLabel}打通任务" in script
+    assert "路线打通失败：${error.message}" in script
     assert ".row-actions" in css and "flex-wrap: wrap" in css
 
 
