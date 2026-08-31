@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -101,6 +102,50 @@ def test_runner_failed_command_records_error_and_log(tmp_path: Path) -> None:
     assert job_status["log_file"] == failed["log_file"]
     assert job_status["stages"]["quality"]["log_file"] == failed["log_file"]
     assert job_status["stages"]["quality"]["error"] == "bad-job"
+
+
+def test_runner_publishes_terminal_process_only_after_terminal_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_stage_started = threading.Event()
+    release_terminal_stage = threading.Event()
+    original = job_runner_module.JobStatusStore.update_stage
+
+    def delay_terminal_stage(store, stage, **kwargs):
+        if kwargs.get("status") == "failed":
+            terminal_stage_started.set()
+            assert release_terminal_stage.wait(timeout=5)
+        return original(store, stage, **kwargs)
+
+    monkeypatch.setattr(
+        job_runner_module.JobStatusStore,
+        "update_stage",
+        delay_terminal_stage,
+    )
+    runner = JobRunner(tmp_path)
+    runner.start(
+        "demo",
+        "terminal-order",
+        "quality",
+        [sys.executable, "-c", "import sys; print('ordered'); sys.exit(2)"],
+    )
+
+    try:
+        assert terminal_stage_started.wait(timeout=5)
+        assert runner.query("demo", "terminal-order")["status"] == "running"
+    finally:
+        release_terminal_stage.set()
+
+    failed = _wait_for_status(runner, "demo", "terminal-order", "failed")
+    status = json.loads(
+        (tmp_path / "runs/demo/terminal-order/job_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert failed["detail"] == "ordered"
+    assert status["stages"]["quality"]["status"] == "failed"
+    assert status["stages"]["quality"]["error"] == "ordered"
 
 
 def test_runner_mirrors_quality_sidecar_progress_before_success(tmp_path: Path) -> None:

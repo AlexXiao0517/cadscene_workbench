@@ -787,7 +787,6 @@ class JobRunner:
             if not cancelled and returncode != 0:
                 payload["error"] = f"command failed with return code {returncode}"
                 payload["detail"] = _last_log_line(payload.get("log_file")) or payload["error"]
-            _atomic_json(self._process_path(*key), payload)
             status_store = JobStatusStore(self._run_dir(*key) / "job_status.json", run_id=key[1])
             if cancelled:
                 status_store.update_stage(
@@ -844,6 +843,9 @@ class JobRunner:
                     log_file=payload.get("log_file"),
                     operation=stage,
                 )
+            # `job_process.json` 是外部观察 terminal 状态的发布屏障；
+            # 必须在对应 stage 已持久化后再切换，避免读到半发布结果。
+            _atomic_json(self._process_path(*key), payload)
             self._processes.pop(key, None)
             self._cancelled.discard(key)
 
