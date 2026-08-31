@@ -81,16 +81,24 @@ def test_workspace_light_theme_covers_the_full_application_shell() -> None:
 
 def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
 
     assert "场景 01 · 第 1 段" in html
     assert "时间范围" in html and "时长" in html
+    assert "检测模式" not in html
+    assert 'class="motion-mode"' not in html
+    assert 'class="confidence"' not in html
     assert "推荐工作流" in html and "最终工作流" in html
     assert "当前状态" in html and "进度" in html
     assert "源 PTS" not in html
     assert html.count('data-action="merge-project"') == 1
     assert ".workflow-recommendation" in css
     assert "font-size: var(--font-size-body)" in css
+    assert 'sfm_only: "三维重建"' in script
+    assert 'pure_rotation: "旋转估计"' in script
+    assert 'WORKFLOW_LABELS[clip.recommended_workflow]' in script
+    assert 'clip.recommended_workflow || "需人工确认"' not in script
 
 
 def test_polling_uses_etag_and_preserves_dirty_edits_and_selection() -> None:

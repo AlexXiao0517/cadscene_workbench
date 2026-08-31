@@ -1865,11 +1865,17 @@ class ProjectWorkbenchService:
         direction: str,
     ) -> bool:
         reference = self._workbench_reference(target)
-        if reference is not None and (
-            reference.value.get("status") in {"editing", "pending_save", "saved"}
-            or reference.value.get("workbench_output_revision")
-        ):
-            return False
+        if reference is not None:
+            status = reference.value.get("status")
+            if (
+                status in {"pending_save", "saved"}
+                or reference.value.get("workbench_output_revision")
+            ):
+                return False
+            if status == "editing" and self.snapshot_for_clip(
+                project_id, target
+            ).get("state") != "ready":
+                return False
         context = self.resolve_context(project_id, target.clip_id)
         if self._saved_resume_baseline(context) is not None:
             return False

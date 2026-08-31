@@ -1159,6 +1159,34 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert target["scene_bridge"]["direction"] == "down"
 
 
+def test_expired_unsaved_target_session_no_longer_blocks_scene_bridge(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-3/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+
+    active = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in active.body["clips"] if item["clip_id"] == "clip-2")
+    assert source["capabilities"]["can_bridge_down"] is False
+
+    api.workbench.now.value += timedelta(minutes=31)
+    expired = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in expired.body["clips"] if item["clip_id"] == "clip-2")
+    assert source["capabilities"]["can_bridge_down"] is True
+    assert source["capabilities"]["bridge_down_target_clip_id"] == "clip-3"
+
+
 def test_scene_bridge_capability_requires_current_precomputed_solve_artifacts(
     tmp_path: Path,
 ) -> None:

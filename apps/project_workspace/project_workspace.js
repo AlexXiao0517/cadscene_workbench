@@ -144,9 +144,8 @@
     $(".review-badge", row).hidden = !clip.needs_review;
     $(".time-range", row).textContent = clip.time_range;
     $(".duration", row).textContent = clip.duration;
-    $(".motion-mode", row).textContent = clip.detected_motion_mode;
-    $(".confidence", row).textContent = clip.confidence == null ? "" : `置信度 ${Math.round(clip.confidence * 100)}%`;
-    $(".workflow-recommendation", row).textContent = clip.recommended_workflow || "需人工确认";
+    $(".workflow-recommendation", row).textContent = WORKFLOW_LABELS[clip.recommended_workflow]
+      || "需人工确认";
     const workflow = $(".workflow-select", row);
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
