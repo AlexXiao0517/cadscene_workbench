@@ -1069,8 +1069,22 @@ def test_suggestion_actions_live_in_bottom_uav_controls() -> None:
     assert "查看当前建议帧" not in html[:workflow_end]
     assert 'id="viewCurrentSuggestion"' in controls
     assert 'id="ignoreCurrentSuggestion"' in controls
-    assert "查看当前建议帧" in controls
+    assert "查看下一建议帧" in controls
     assert "忽略当前建议" in controls
+
+
+def test_quality_suggestions_browse_chronologically_and_cycle_after_ignore() -> None:
+    html = _read("index.html")
+    script = _read("workflow.js")
+
+    assert html.index("suggestion_sequence.js") < html.index("workflow.js")
+    assert "window.CadsceneSuggestionSequence" in script
+    assert "suggestionSequence.ordered(list)" in script
+    assert "suggestionSequence.next(available, selectedSuggestionFrame)" in script
+    assert "suggestionSequence.firstAfter(availableSuggestions(), frameIndex)" in script
+    assert "jumpToSuggestion(nextSuggestion)" in script
+    assert "查看下一建议帧（${nextIndex + 1}/${available.length}）" in script
+    assert "scoreB - scoreA" not in script
 
 
 def test_development_import_buttons_are_hidden_without_debug_mode() -> None:
