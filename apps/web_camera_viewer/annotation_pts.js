@@ -22,6 +22,25 @@
     return Number.isInteger(selected.source_pts) ? selected.source_pts : null;
   }
 
+  function clipTimeAtSourcePts(frames, sourcePts) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const target = Number(sourcePts);
+    if (!Number.isFinite(target)) return null;
+    let low = 0;
+    let high = frames.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(frames[middle].source_pts) < target) low = middle + 1;
+      else high = middle;
+    }
+    const after = frames[low];
+    const before = low > 0 ? frames[low - 1] : after;
+    const selected = Math.abs(Number(before.source_pts) - target)
+      <= Math.abs(Number(after.source_pts) - target) ? before : after;
+    const clipTime = Number(selected.clip_time_sec);
+    return Number.isFinite(clipTime) ? clipTime : null;
+  }
+
   function hidden(reason, extra = {}) {
     return { visible: false, reason, ...extra };
   }
@@ -154,6 +173,7 @@
     let projectId = "";
     let clipId = "";
     let frames = [];
+    let sourceTimeBase = null;
     const tracking = new Map();
 
     function sourceToDisplay(point) {
@@ -181,11 +201,31 @@
           throw new Error("标签 PTS 映射不是权威解码帧数据");
         }
         frames = payload.frames || [];
+        const numerator = Number(payload.time_base?.numerator);
+        const denominator = Number(payload.time_base?.denominator);
+        sourceTimeBase = Number.isInteger(numerator) && numerator > 0
+          && Number.isInteger(denominator) && denominator > 0
+          ? { numerator, denominator }
+          : null;
+        browser.dispatchEvent(new browser.CustomEvent("cadscenePtsAuthorityReady", {
+          detail: { projectId, clipId },
+        }));
         return payload;
       },
 
       currentSourcePts() {
         return sourcePtsAtTime(frames, Number(video?.currentTime || 0));
+      },
+
+      sourceTimeBase() {
+        return sourceTimeBase ? { ...sourceTimeBase } : null;
+      },
+
+      seekSourcePts(sourcePts) {
+        const clipTime = clipTimeAtSourcePts(frames, sourcePts);
+        if (clipTime === null || !video) return null;
+        video.currentTime = clipTime;
+        return clipTime;
       },
 
       async loadTrackingRevisions(annotations) {
@@ -257,6 +297,7 @@
 
   return {
     sourcePtsAtTime,
+    clipTimeAtSourcePts,
     videoTrackVisual,
     cadAnchorVisual,
     cadAnchorCreationDecision,

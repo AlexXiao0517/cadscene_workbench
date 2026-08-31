@@ -605,11 +605,28 @@ def test_finishing_sfm_quality_keeps_project_workbench_on_render_stage() -> None
     end = script.index("async function persistWorkbenchDraftForReturn", start)
     finish = script[start:end]
 
-    assert 'sessionStorage.setItem(restoredWorkflowStageKey(), "render")' in finish
     assert finish.index('setWorkflowStage("render")') < finish.index("await persistQualityCompletion()")
     assert "async function persistQualityCompletion" in finish
     assert "await saveCurrentCameraTrack()" in finish
     assert "await finalizeProjectWorkbenchSave" in finish
+    finalize = script[
+        script.index("async function finalizeProjectWorkbenchSave") :
+        script.index("async function finishQualityStage")
+    ]
+    assert "await persistProjectWorkbenchResumeNow" in finalize
+
+
+def test_project_workbench_resume_uses_durable_stage_and_authoritative_pts() -> None:
+    script = _read("workflow.js")
+
+    assert "/resume`" in script
+    assert "expected_resume_revision" in script
+    assert "projectWorkbenchSession?.resume_state?.workflow_stage" in script
+    assert "window.CadsceneAnnotationPts?.seekSourcePts" in script
+    assert 'window.addEventListener("cadscenePtsAuthorityReady"' in script
+    assert 'resumeVideo?.addEventListener("pause"' in script
+    assert 'resumeVideo?.addEventListener("seeked"' in script
+    assert "sourceTimeBase?.()" in script
 
 
 def test_alignment_operation_is_shown_and_polled_under_the_keyframe_stage() -> None:
@@ -653,7 +670,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260828-sfm-fov-refresh-v2' in index
+    assert 'workflow.js?v=20260831-workbench-resume-v1' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:

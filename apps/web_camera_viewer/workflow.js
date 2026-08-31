@@ -9,6 +9,7 @@
   const requestedWorkflowStage = params.get("workflowStage") || "";
   const THEME_STORAGE_KEY = "mediaflow-theme";
   const PROJECT_WORKBENCH_HEARTBEAT_MS = 60_000;
+  const PROJECT_WORKBENCH_RESUME_DEBOUNCE_MS = 300;
   const debugEnabled = params.get("debug") === "1" || window.VIEWER_DEBUG === true; // debug=1
   const stageOrder = ["upload", "sfm", "keyframes", "quality", "render"];
   const stageTitles = {
@@ -70,6 +71,9 @@
   let projectWorkbenchRenderStatus = null;
   let projectWorkbenchTrajectoryStartPromise = null;
   let projectWorkbenchInternalNavigation = false;
+  let projectWorkbenchResumeTimer = null;
+  let projectWorkbenchResumePromise = null;
+  let projectWorkbenchResumePositionApplied = false;
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
 
@@ -106,6 +110,12 @@
     if (mode === "pure_rotation") {
       window.setTimeout(async () => {
         await initializePureRotationViewer();
+        const resumeStage = projectWorkbenchSession?.resume_state?.workflow_stage;
+        if (stageOrder.includes(resumeStage)) {
+          setWorkflowStage(resumeStage);
+          await refreshRenderOutputState();
+          return;
+        }
         if (
           projectWorkbenchToken
           && projectWorkbenchSession?.workbench_output_revision
@@ -977,6 +987,7 @@
         console.warn("[cadscene workflow] 已发布渲染结果恢复失败", error);
       });
     }
+    scheduleProjectWorkbenchResume();
   }
 
   async function refreshQualityArtifactsAfterSuccess(payload) {
@@ -1073,9 +1084,11 @@
         const postAlignmentStage = sessionStorage.getItem(postAlignmentStageKey());
         if (stageOrder.includes(postAlignmentStage)) {
           sessionStorage.setItem(restoredWorkflowStageKey(), postAlignmentStage);
+          setWorkflowStage(postAlignmentStage);
         }
         sessionStorage.removeItem(postAlignmentStageKey());
       }
+      await persistProjectWorkbenchResumeNow();
       projectWorkbenchInternalNavigation = true;
       window.location.reload();
     } else if (pendingReload && ["failed", "cancelled"].includes(payload.status)) {
@@ -1490,9 +1503,106 @@
     );
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+      const error = new Error(payload.message || payload.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
     }
     return payload;
+  }
+
+  async function refreshProjectWorkbenchSession() {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectWorkbenchProjectId)}/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}`,
+      { cache: "no-store" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
+    return projectWorkbenchSession;
+  }
+
+  function resumeOperationId() {
+    return window.crypto?.randomUUID?.() || `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  async function writeProjectWorkbenchResume({ retryConflict = true } = {}) {
+    if (!projectWorkbenchToken || !projectWorkbenchSession) return null;
+    const sourcePts = window.CadsceneAnnotationPts?.currentSourcePts?.();
+    const sourceTimeBase = window.CadsceneAnnotationPts?.sourceTimeBase?.();
+    if (!Number.isInteger(sourcePts) || !sourceTimeBase) return null;
+    const workflowStage = selectedWorkflowStage === "upload"
+      ? "sfm"
+      : (selectedWorkflowStage || "sfm");
+    try {
+      const payload = await projectWorkbenchRequest(
+        `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/resume`,
+        {
+          expected_resume_revision: projectWorkbenchSession.resume_state?.revision ?? null,
+          operation_id: resumeOperationId(),
+          workflow_stage: workflowStage,
+          source_pts: sourcePts,
+          source_time_base: sourceTimeBase,
+          quality_revision: null,
+          render_revision: null,
+        },
+      );
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
+      return payload.resume_state;
+    } catch (error) {
+      if (
+        retryConflict
+        && error.status === 409
+        && error.payload?.error === "revision_conflict"
+      ) {
+        await refreshProjectWorkbenchSession();
+        return writeProjectWorkbenchResume({ retryConflict: false });
+      }
+      throw error;
+    }
+  }
+
+  async function persistProjectWorkbenchResumeNow() {
+    if (projectWorkbenchResumeTimer !== null) {
+      window.clearTimeout(projectWorkbenchResumeTimer);
+      projectWorkbenchResumeTimer = null;
+    }
+    const previous = projectWorkbenchResumePromise;
+    const current = (async () => {
+      if (previous) await previous.catch(() => null);
+      return writeProjectWorkbenchResume();
+    })();
+    projectWorkbenchResumePromise = current;
+    try {
+      return await current;
+    } finally {
+      if (projectWorkbenchResumePromise === current) {
+        projectWorkbenchResumePromise = null;
+      }
+    }
+  }
+
+  function scheduleProjectWorkbenchResume() {
+    if (!projectWorkbenchToken) return;
+    if (projectWorkbenchResumeTimer !== null) {
+      window.clearTimeout(projectWorkbenchResumeTimer);
+    }
+    projectWorkbenchResumeTimer = window.setTimeout(() => {
+      projectWorkbenchResumeTimer = null;
+      persistProjectWorkbenchResumeNow().catch((error) => {
+        console.warn("[cadscene workflow] 工作台恢复状态保存失败", error);
+      });
+    }, PROJECT_WORKBENCH_RESUME_DEBOUNCE_MS);
+  }
+
+  function applyProjectWorkbenchResumePosition() {
+    if (projectWorkbenchResumePositionApplied) return true;
+    const sourcePts = projectWorkbenchSession?.resume_state?.source_pts;
+    if (!Number.isInteger(sourcePts)) return false;
+    const clipTime = window.CadsceneAnnotationPts?.seekSourcePts?.(sourcePts);
+    if (clipTime === null || clipTime === undefined) return false;
+    projectWorkbenchResumePositionApplied = true;
+    return true;
   }
 
   async function renewProjectWorkbenchSession(expectedRevision) {
@@ -1787,6 +1897,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
       projectWorkbenchSession = { ...projectWorkbenchSession, ...payload };
+      await persistProjectWorkbenchResumeNow();
       if (navigate) window.location.assign(projectWorkbenchSession.return_to);
       return payload;
     } finally {
@@ -1798,7 +1909,6 @@
   }
 
   async function finishQualityStage() {
-    sessionStorage.setItem(restoredWorkflowStageKey(), "render");
     setWorkflowStage("render");
     message.textContent = "已进入渲染导出；可以添加标签后渲染视频。";
     await persistQualityCompletion();
@@ -1850,6 +1960,7 @@
     }
     await ensureProjectWorkbenchSession();
     await persistWorkbenchDraftForReturn();
+    await persistProjectWorkbenchResumeNow();
     if (
       projectWorkbenchSession.state === "editing"
       || projectWorkbenchSession.state === "pending_save"
@@ -2566,7 +2677,11 @@
   function selectInitialWorkflowStage() {
     if (projectWorkbenchBootstrapFailed) return;
     const restoredWorkflowStage = sessionStorage.getItem(restoredWorkflowStageKey());
-    if (stageOrder.includes(restoredWorkflowStage)) {
+    const durableWorkflowStage = projectWorkbenchSession?.resume_state?.workflow_stage;
+    if (stageOrder.includes(durableWorkflowStage)) {
+      sessionStorage.removeItem(restoredWorkflowStageKey());
+      setWorkflowStage(durableWorkflowStage);
+    } else if (stageOrder.includes(restoredWorkflowStage)) {
       sessionStorage.removeItem(restoredWorkflowStageKey());
       setWorkflowStage(restoredWorkflowStage);
     } else if (stageOrder.includes(requestedWorkflowStage)) {
@@ -2580,7 +2695,10 @@
   if (projectWorkbenchToken) {
     projectWorkbenchBootstrapPromise = bootstrapProjectWorkbenchSession();
     projectWorkbenchBootstrapPromise
-      .then(selectInitialWorkflowStage)
+      .then(() => {
+        selectInitialWorkflowStage();
+        applyProjectWorkbenchResumePosition();
+      })
       .catch((error) => {
         projectWorkbenchBootstrapFailed = true;
         stateLabel.textContent = "会话不可用";
@@ -2593,6 +2711,13 @@
   blockTrajectoryWorkflowActionsUntilResolved();
   loadManifestBackedTrajectoryWorkflow();
   loadKeyframePlan();
+  const resumeVideo = document.querySelector("#sourceVideo");
+  resumeVideo?.addEventListener("pause", scheduleProjectWorkbenchResume);
+  resumeVideo?.addEventListener("seeked", scheduleProjectWorkbenchResume);
+  window.addEventListener("cadscenePtsAuthorityReady", () => {
+    applyProjectWorkbenchResumePosition();
+    scheduleProjectWorkbenchResume();
+  });
   window.addEventListener("cadsceneViewerReady", () => {
     viewerReadyForSfmCameraInit = true;
     maybeAutoApplySfmCameraInit();
