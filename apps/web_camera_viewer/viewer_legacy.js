@@ -91,6 +91,7 @@
   let threeScene = null;
   let cameraTrack = null;
   let loadedAuthoritativeCameraTrack = false;
+  let cameraDraftDirty = false;
   let reviewPacket = null;
   let manualFrameOverride = null;
   let lastOverlayDrawAt = 0;
@@ -266,6 +267,7 @@
   }
 
   function notifyManualCameraChanged(source) {
+    cameraDraftDirty = true;
     window.dispatchEvent(new CustomEvent("cadsceneManualCameraChanged", {
       detail: { source },
     }));
@@ -1771,6 +1773,7 @@
     upsertKeyframe(makeKeyframe(frame, camera, source));
     syncSfmAnchoredTrackFromCurrentTrack();
     updateTrackStatus();
+    notifyManualCameraChanged("keyframe");
   }
 
   function deleteCurrentKeyframe() {
@@ -1778,6 +1781,7 @@
     cameraTrack.keyframes = cameraTrack.keyframes.filter((keyframe) => keyframe.frame !== frame);
     syncSfmAnchoredTrackFromCurrentTrack();
     updateTrackStatus();
+    notifyManualCameraChanged("keyframe_delete");
   }
 
   function goToKeyframe(direction) {
@@ -1930,6 +1934,14 @@
 
   window.cadsceneHasLoadedCameraTrack = function () {
     return loadedAuthoritativeCameraTrack;
+  };
+
+  window.cadsceneHasUnsavedCameraDraft = function () {
+    return cameraDraftDirty;
+  };
+
+  window.cadsceneClearUnsavedCameraDraft = function () {
+    cameraDraftDirty = false;
   };
 
   window.cadsceneSetKeyframePlan = function (plan) {
@@ -2137,6 +2149,7 @@
       syncControls();
     }
     syncSfmAnchoredTrackFromCurrentTrack();
+    cameraDraftDirty = false;
     updateViews({ forceOverlay: true });
   }
 
@@ -2826,6 +2839,7 @@
       syncControls();
       updateViews();
       if (threeScene) threeScene.focusInspectOnCamera(camera);
+      notifyManualCameraChanged("reset");
     });
     document.querySelector("#addKeyframe").addEventListener("click", addOrUpdateKeyframe);
     document.querySelector("#deleteKeyframe").addEventListener("click", deleteCurrentKeyframe);
