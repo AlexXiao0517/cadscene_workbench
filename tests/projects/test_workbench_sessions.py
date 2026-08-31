@@ -1436,6 +1436,91 @@ def test_scene_bridge_success_publishes_immutable_route_refinement(
     assert target_payload["workbench"]["bridge_revision"] == result.output_revision
 
 
+def test_superseded_scene_bridge_reference_does_not_block_retry(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    endpoint = "/api/projects/project-1/clips/clip-2/scene-bridges"
+    queued = api.handle(
+        "POST",
+        endpoint,
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == queued.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    attempt = running.attempts[-1]
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    assert finished.status == "success"
+    request_path = (
+        api.service.projects_root
+        / "project-1"
+        / "scene_bridge_requests"
+        / f"{finished.operation_id}.json"
+    )
+    assert not request_path.exists()
+
+    jobs = repositories.jobs.load("project-1")
+    superseded_jobs = tuple(
+        {
+            **item,
+            "status": "superseded",
+            "stage": "superseded",
+            "output_revision": None,
+            "output_fingerprint": None,
+            "output_validated": False,
+            "validated_input_fingerprint": None,
+        }
+        if item["job_id"] == finished.job_id
+        else item
+        for item in jobs.jobs
+    )
+    published = repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=superseded_jobs),
+    )
+    api.service.queue.merge_restored(
+        published.jobs,
+        project_id="project-1",
+        queue_order=[str(item["job_id"]) for item in published.jobs],
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2")
+    assert source["capabilities"]["can_bridge_down"] is True
+    retried = api.handle(
+        "POST",
+        endpoint,
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+
+    assert retried.status == 202
+    assert retried.body["job_id"] == finished.job_id
+    assert request_path.is_file()
+    retrying = api.service.queue.claim_next_unstarted()
+    assert retrying is not None
+    assert retrying.job_id == finished.job_id
+    assert retrying.attempts[-1].number == 2
+    assert _scene_bridge_result(api, retrying).status == "success"
+
+
 def test_scene_bridge_does_not_publish_when_source_route_changes(
     tmp_path: Path,
 ) -> None:

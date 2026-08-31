@@ -1953,19 +1953,30 @@ class ProjectService:
                 raise ValueError(
                     "target clip has a recoverable saved workbench output"
                 )
-            active_bridge = next(
-                (
-                    reference
-                    for reference in reversed(target.references)
-                    if reference.owner == "jobs"
-                    and reference.value.get("reference_type") == "scene_bridge"
-                    and reference.value.get("target_clip_id") == target.clip_id
-                    and _validate_scene_bridge_reference(
+            jobs_by_id = {job.job_id: job for job in stored_jobs}
+            active_bridge = None
+            for reference in reversed(target.references):
+                if (
+                    reference.owner != "jobs"
+                    or reference.value.get("reference_type") != "scene_bridge"
+                    or reference.value.get("target_clip_id") != target.clip_id
+                ):
+                    continue
+                bridge_job = jobs_by_id.get(str(reference.value.get("job_id")))
+                if (
+                    bridge_job is None
+                    or not _has_exact_success_proof(bridge_job)
+                    or bridge_job.output_revision
+                    != reference.value.get("bridge_revision")
+                    or bridge_job.output_fingerprint
+                    != reference.value.get("output_fingerprint")
+                    or not _validate_scene_bridge_reference(
                         self.projects_root, project_id, target, reference
                     )
-                ),
-                None,
-            )
+                ):
+                    continue
+                active_bridge = reference
+                break
             if active_bridge is not None:
                 raise ValueError(
                     "target clip has a scene bridge awaiting route refinement"
@@ -2007,6 +2018,34 @@ class ProjectService:
             idempotency_key = _fingerprint(
                 {**semantic_identity, "purpose": "idempotency"}
             )
+
+            def bridge_request(operation_id: str) -> dict[str, object]:
+                return {
+                    "schema_version": 1,
+                    "operation_id": operation_id,
+                    "identity": semantic_identity,
+                    "runner_identity": {
+                        **semantic_identity,
+                        "schema_version": 1,
+                        "algorithm_version": BRIDGE_ALGORITHM_VERSION,
+                        "project_id": project_id,
+                        "source_clip_id": source.clip_id,
+                        "target_clip_id": target.clip_id,
+                        "direction": direction,
+                        "operation_id": operation_id,
+                    },
+                    "source_trajectory_job_id": source_trajectory.job_id,
+                    "target_trajectory_job_id": target_trajectory.job_id,
+                }
+
+            def bridge_request_path(operation_id: str) -> Path:
+                return (
+                    self.projects_root
+                    / project_id
+                    / "scene_bridge_requests"
+                    / f"{operation_id}.json"
+                )
+
             existing = next(
                 (
                     job
@@ -2026,6 +2065,10 @@ class ProjectService:
                     "stale_input",
                     "superseded",
                 }:
+                    _atomic_write_json_file(
+                        bridge_request_path(existing.operation_id),
+                        bridge_request(existing.operation_id),
+                    )
                     existing = self.retry_job(
                         project_id,
                         existing.job_id,
@@ -2035,30 +2078,9 @@ class ProjectService:
                     existing, source.clip_id, target.clip_id, direction
                 )
             operation_id = self._identity()
-            request = {
-                "schema_version": 1,
-                "operation_id": operation_id,
-                "identity": semantic_identity,
-                "runner_identity": {
-                    **semantic_identity,
-                    "schema_version": 1,
-                    "algorithm_version": BRIDGE_ALGORITHM_VERSION,
-                    "project_id": project_id,
-                    "source_clip_id": source.clip_id,
-                    "target_clip_id": target.clip_id,
-                    "direction": direction,
-                    "operation_id": operation_id,
-                },
-                "source_trajectory_job_id": source_trajectory.job_id,
-                "target_trajectory_job_id": target_trajectory.job_id,
-            }
-            request_path = (
-                self.projects_root
-                / project_id
-                / "scene_bridge_requests"
-                / f"{operation_id}.json"
+            _atomic_write_json_file(
+                bridge_request_path(operation_id), bridge_request(operation_id)
             )
-            _atomic_write_json_file(request_path, request)
             job_id = self._identity()
             attempt_dir = self._attempt_directory(project_id, job_id, 1)
             bridge = QueueJob(
