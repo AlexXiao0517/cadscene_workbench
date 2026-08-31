@@ -253,8 +253,12 @@ def test_prepare_runtime_commands_clone_install_check_and_pack(tmp_path: Path) -
     assert commands[2][1:] == ("-m", "pip", "check")
     assert commands[3][1:3] == ("-c", "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap, psutil")
     assert commands[4][1:] == ("-m", "pip", "install", "conda-pack==0.9.2")
-    assert commands[5][0].endswith("build env\\Scripts\\conda-pack.exe")
-    assert "--force" in commands[5]
+    assert commands[5][0].endswith("build env\\python.exe")
+    assert commands[5][1] == "-c"
+    assert ".cadscene-relocated" in commands[5][2]
+    assert "unlink(missing_ok=True)" in commands[5][2]
+    assert commands[6][0].endswith("build env\\Scripts\\conda-pack.exe")
+    assert "--force" in commands[6]
 
 
 def _write_fake_runtime_archive(path: Path) -> None:

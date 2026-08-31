@@ -175,6 +175,15 @@ def prepare_runtime_commands(
             "conda-pack==0.9.2",
         ),
         (
+            str(python),
+            "-c",
+            (
+                "from pathlib import Path; "
+                f"Path({json.dumps(str(build_prefix / '.cadscene-relocated'))})"
+                ".unlink(missing_ok=True)"
+            ),
+        ),
+        (
             str(build_prefix / "Scripts" / "conda-pack.exe"),
             "--prefix",
             str(build_prefix),
