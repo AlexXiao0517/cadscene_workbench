@@ -14,7 +14,12 @@ from .json_repositories import ProjectRepositories
 from .identifiers import is_safe_stable_id, validate_project_id
 from .models import ClipDefinition, ProjectManifest, StateReference
 from .repositories import RevisionConflict
-from .service import ProjectService, RenderPreflight, TrajectoryPreflight
+from .service import (
+    ProjectDeletionBlocked,
+    ProjectService,
+    RenderPreflight,
+    TrajectoryPreflight,
+)
 from .uploads import UploadValidationError, ValidatedUploadStore
 from .workbench_sessions import (
     InvalidWorkbenchOutput,
@@ -145,6 +150,8 @@ class ProjectApi:
             match = _PROJECT.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_project_name(match["project"], payload)
+            if method == "DELETE" and match:
+                return self._delete_project(match["project"], payload)
             match = _SNAPSHOT.fullmatch(path)
             if method == "GET" and match:
                 return self._snapshot(match["project"], headers)
@@ -267,6 +274,15 @@ class ProjectApi:
                     "current_revision": exc.current_revision,
                 },
             )
+        except ProjectDeletionBlocked as exc:
+            return ApiResponse(
+                409,
+                {
+                    "error": exc.code,
+                    "reason": exc.reason,
+                    "message": str(exc),
+                },
+            )
         except FileNotFoundError as exc:
             return ApiResponse(404, {"error": str(exc)})
         except WorkbenchPermissionDenied as exc:
@@ -333,6 +349,17 @@ class ProjectApi:
                 "display_name": str(updated.source_assets["display_name"]),
             },
         )
+
+    def _delete_project(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if payload.get("confirmation") != project_id:
+            raise ValueError("confirmation must exactly match project_id")
+        self.service.delete_project_workspace(
+            project_id,
+            expected_revision=_required_revision(payload),
+        )
+        return ApiResponse(200, {"project_id": project_id, "state": "deleted"})
 
     def _publish_upload(
         self,

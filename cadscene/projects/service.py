@@ -167,6 +167,16 @@ class EnqueueCadReplacementResult:
     candidate_revision: str
 
 
+class ProjectDeletionBlocked(RuntimeError):
+    """Raised when deleting a project would race active project work."""
+
+    code = "project_deletion_blocked"
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class _AnalysisPublicationPending(RuntimeError):
     def __init__(self, project_id: str, job_id: str, cause: Exception) -> None:
         super().__init__(str(cause))
@@ -300,6 +310,103 @@ class ProjectService:
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 summaries.append(unavailable_project_summary(project_id))
         return sort_project_summaries(summaries)
+
+    def delete_project_workspace(
+        self,
+        project_id: str,
+        *,
+        expected_revision: int,
+    ) -> None:
+        """永久删除项目自有工作空间，不跟随 manifest 中的外部源文件路径。"""
+
+        with self._publication_lock:
+            with ExitStack() as stack:
+                for repository in self.repositories.in_lock_order():
+                    stack.enter_context(repository.lock_for(project_id))
+                stack.enter_context(self.queue.process_lock)
+                project = self.repositories.project.load(project_id)
+                if project.revision != expected_revision:
+                    raise RevisionConflict(
+                        project_id=project_id,
+                        expected_revision=expected_revision,
+                        current_revision=project.revision,
+                    )
+                active_jobs = tuple(
+                    job.job_id
+                    for job in self.queue.jobs()
+                    if job.project_id == project_id
+                    and job.status
+                    in {
+                        "queued",
+                        "preparing",
+                        "running",
+                        "validating",
+                        "publishing",
+                        "cancelling",
+                    }
+                )
+                if active_jobs:
+                    raise ProjectDeletionBlocked(
+                        "active_jobs",
+                        "project has active jobs; cancel them before deletion",
+                    )
+                if _has_active_workbench_session(
+                    self.projects_root / project_id / "workbench_sessions",
+                    project_id=project_id,
+                    now=self.now(),
+                ):
+                    raise ProjectDeletionBlocked(
+                        "active_workbench_session",
+                        "project has an active workbench session; close it before deletion",
+                    )
+                clips = self.repositories.clips.load(project_id)
+                self._delete_project_owned_paths(
+                    project_id,
+                    tuple(clip.clip_id for clip in clips.clips),
+                )
+
+    def _delete_project_owned_paths(
+        self, project_id: str, clip_ids: tuple[str, ...]
+    ) -> None:
+        storage_root = self.storage_root.resolve(strict=True)
+        projects_root = self.projects_root.resolve(strict=True)
+        project_path = self.projects_root / project_id
+        targets: list[tuple[str, Path]] = []
+        for clip_id in clip_ids:
+            if not is_safe_stable_id(clip_id):
+                raise ValueError(f"unsafe clip_id in project manifest: {clip_id}")
+            for owner in ("data", "runs"):
+                path = self.storage_root / owner / f"{project_id}-{clip_id}"
+                if path.exists():
+                    _require_owned_deletion_target(path, storage_root)
+                    targets.append((f"{owner}-{clip_id}", path))
+        _require_owned_deletion_target(project_path, projects_root)
+        targets.append(("project", project_path))
+
+        deletion_root = self.storage_root / ".project-deletions"
+        _require_owned_deletion_target(deletion_root, storage_root)
+        operation = sha256(
+            f"{project_id}:{self._identity()}".encode("utf-8")
+        ).hexdigest()[:20]
+        staging = deletion_root / operation
+        staging.mkdir(parents=True, exist_ok=False)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for name, source in targets:
+                destination = staging / name
+                os.replace(source, destination)
+                moved.append((source, destination))
+        except Exception:
+            for source, destination in reversed(moved):
+                if destination.exists() and not source.exists():
+                    os.replace(destination, source)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        shutil.rmtree(staging)
+        try:
+            deletion_root.rmdir()
+        except OSError:
+            pass
 
     def track_video_annotation(
         self,
@@ -6322,6 +6429,48 @@ def _select_clips(
     if missing:
         raise KeyError(f"unknown clip IDs: {sorted(missing)}")
     return tuple(clip for clip in clips if clip.clip_id in selected)
+
+
+def _require_owned_deletion_target(path: Path, root: Path) -> None:
+    resolved = path.resolve(strict=False)
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ValueError(f"refusing to delete path outside owned workspace: {path}")
+
+
+def _has_active_workbench_session(
+    sessions_root: Path,
+    *,
+    project_id: str,
+    now: str,
+) -> bool:
+    if not sessions_root.is_dir():
+        return False
+    try:
+        current = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    except ValueError:
+        current = None
+    for path in sessions_root.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping) or payload.get("project_id") != project_id:
+            continue
+        state = payload.get("state")
+        if state in {"pending_save", "recovery_required"}:
+            return True
+        if state != "editing":
+            continue
+        expires_at = payload.get("expires_at")
+        if current is None or not isinstance(expires_at, str):
+            return True
+        try:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if current < expiry:
+            return True
+    return False
 
 
 def _asset_path(assets: Mapping[str, object], name: str) -> Path | None:
