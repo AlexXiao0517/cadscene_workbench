@@ -103,6 +103,55 @@ def test_runner_failed_command_records_error_and_log(tmp_path: Path) -> None:
     assert job_status["stages"]["quality"]["error"] == "bad-job"
 
 
+def test_runner_mirrors_quality_sidecar_progress_before_success(tmp_path: Path) -> None:
+    runner = JobRunner(tmp_path)
+    progress_file = tmp_path / "runs/demo/r-progress/logs/workflow/quality_progress.json"
+    script = (
+        "import json,sys,time; from pathlib import Path; "
+        "p=Path(sys.argv[sys.argv.index('--progress-file')+1]); "
+        "p.parent.mkdir(parents=True,exist_ok=True); "
+        "p.write_text(json.dumps({'schema_version':'1.0','stage':'quality_frames',"
+        "'message':'正在分析质量帧 42/100','fraction':0.42}),encoding='utf-8'); "
+        "time.sleep(0.8)"
+    )
+
+    runner.start(
+        "demo",
+        "r-progress",
+        "quality",
+        [sys.executable, "-c", script, "--progress-file", str(progress_file)],
+    )
+
+    deadline = time.time() + 3.0
+    observed = None
+    status_path = tmp_path / "runs/demo/r-progress/job_status.json"
+    while time.time() < deadline:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        quality = status["stages"]["quality"]
+        if quality["status"] == "running" and quality["progress"] >= 0.42:
+            observed = quality
+            break
+        time.sleep(0.05)
+
+    assert observed is not None
+    assert observed["message"] == "正在分析质量帧 42/100"
+    _wait_for_status(runner, "demo", "r-progress", "success")
+    deadline = time.time() + 2.0
+    finished = None
+    while time.time() < deadline:
+        try:
+            candidate = json.loads(status_path.read_text(encoding="utf-8"))
+        except OSError:
+            time.sleep(0.02)
+            continue
+        if candidate["stages"]["quality"]["status"] == "success":
+            finished = candidate
+            break
+        time.sleep(0.02)
+    assert finished is not None
+    assert finished["stages"]["quality"]["progress"] == 1.0
+
+
 def test_resolve_sfm_python_prefers_configured_interpreter_with_pycolmap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -271,6 +320,8 @@ def test_quality_command_uses_saved_manual_track(tmp_path: Path) -> None:
     stages_index = command.index("--stages") + 1
     assert command[stages_index] == "quality,viewer_scene,road_surface"
     assert "--skip-render" not in command
+    progress_index = command.index("--progress-file") + 1
+    assert Path(command[progress_index]) == run_dir / "logs/workflow/quality_progress.json"
 
 
 def test_alignment_command_uses_manual_track_and_exports_viewer_scene(tmp_path: Path) -> None:

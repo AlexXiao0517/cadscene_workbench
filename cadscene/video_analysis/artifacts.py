@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base64 import b32encode
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,11 @@ REQUIRED_ARTIFACTS = (
     "video_analysis_report.md",
 )
 CURRENT_REVISION_POINTER = "current_analysis_revision.json"
+
+
+def analysis_revision_directory_name(revision: str) -> str:
+    digest = sha256(revision.encode("utf-8")).digest()[:10]
+    return f"r-{b32encode(digest).decode('ascii').lower()}"
 
 
 def _validate_payloads(revision: str, payloads: Mapping[str, str]) -> None:
@@ -45,15 +52,13 @@ def publish_analysis_revision(
 ) -> Path:
     _validate_payloads(revision, payloads)
     revisions_dir = output_dir / "analysis_revisions"
-    destination = revisions_dir / revision
+    destination = revisions_dir / analysis_revision_directory_name(revision)
     if destination.exists():
         raise FileExistsError(f"analysis revision already exists: {revision}")
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(
-        tempfile.mkdtemp(prefix=f".{output_dir.name}-{revision}-", dir=output_dir.parent)
-    )
-    staged_revision = staging_root / revision
+    staging_root = Path(tempfile.mkdtemp(prefix=".va-", dir=output_dir.parent))
+    staged_revision = staging_root / "r"
     previous_files = {
         name: (output_dir / name).read_bytes() if (output_dir / name).is_file() else None
         for name in REQUIRED_ARTIFACTS
@@ -81,7 +86,7 @@ def publish_analysis_revision(
             json.dumps(
                 {
                     "analysis_revision": revision,
-                    "revision_directory": f"analysis_revisions/{revision}",
+                    "revision_directory": f"analysis_revisions/{destination.name}",
                 },
                 indent=2,
             )

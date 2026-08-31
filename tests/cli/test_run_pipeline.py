@@ -271,6 +271,65 @@ def test_run_pipeline_synthetic_full_pipeline_and_viewer_url(tmp_path: Path) -> 
     assert "dataset=synthetic&runId=full" in (run_dir / "reports" / "viewer_url.txt").read_text(encoding="utf-8")
 
 
+def test_quality_pipeline_reports_real_substage_progress_without_publishing_100(tmp_path: Path) -> None:
+    dataset, pipeline = _write_inputs(tmp_path)
+    output_root = tmp_path / "runs"
+    alignment = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "cadscene.cli.run_pipeline",
+            "--dataset",
+            str(dataset),
+            "--config",
+            str(pipeline),
+            "--run-id",
+            "quality-progress",
+            "--output-root",
+            str(output_root),
+            "--stages",
+            "alignment",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert alignment.returncode == 0, alignment.stderr
+    progress_file = tmp_path / "quality-progress.json"
+
+    quality = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "cadscene.cli.run_pipeline",
+            "--dataset",
+            str(dataset),
+            "--config",
+            str(pipeline),
+            "--run-id",
+            "quality-progress",
+            "--output-root",
+            str(output_root),
+            "--stages",
+            "quality,viewer_scene,road_surface",
+            "--progress-file",
+            str(progress_file),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert quality.returncode == 0, quality.stderr
+    progress = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert progress == {
+        "schema_version": "1.0",
+        "stage": "road_surface",
+        "message": "道路表面诊断已完成，正在校验发布结果",
+        "fraction": 0.95,
+    }
+
+
 def test_pipeline_without_road_centerline_skips_diagnostics_but_keeps_main_flow(tmp_path: Path) -> None:
     dataset, pipeline = _write_inputs(tmp_path)
     cad_dir = tmp_path / "data" / "cad"

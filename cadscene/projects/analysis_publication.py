@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from base64 import b32encode
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Callable, Mapping
 
 from cadscene.workflow.data_import import load_dataset_manifest
@@ -66,7 +68,7 @@ class AnalysisArtifactPublisher:
             self.projects_root
             / project_id
             / "analysis_artifacts"
-            / analysis_artifact_id
+            / analysis_artifact_directory_name(analysis_fingerprint)
         )
         self._publish_cad_dataset(
             cad_source,
@@ -74,9 +76,8 @@ class AnalysisArtifactPublisher:
             dataset_id=cad_dataset_id,
             source_fingerprint=cad_fingerprint,
         )
-        wrapper = analysis_source.parent / f".publish-{self.identity()}"
-        (wrapper / "02_video_analysis").parent.mkdir(
-            parents=True, exist_ok=False
+        wrapper = Path(
+            tempfile.mkdtemp(prefix=".pub-", dir=analysis_source.parent)
         )
         shutil.copytree(analysis_source, wrapper / "02_video_analysis")
         try:
@@ -135,7 +136,8 @@ class AnalysisArtifactPublisher:
                 )
             return
         target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.parent / f".{target.name}.tmp-{self.identity()}"
+        staging_root = Path(tempfile.mkdtemp(prefix=".pub-", dir=target.parent))
+        staging = staging_root / "a"
         shutil.copytree(source, staging)
         try:
             _require_fingerprint(
@@ -145,8 +147,8 @@ class AnalysisArtifactPublisher:
             )
             os.replace(staging, target)
         finally:
-            if staging.exists():
-                shutil.rmtree(staging)
+            if staging_root.exists():
+                shutil.rmtree(staging_root)
 
     def _publish_cad_dataset(
         self,
@@ -157,7 +159,9 @@ class AnalysisArtifactPublisher:
         source_fingerprint: str,
     ) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        staging_root = self.storage_root / f".cad-publish-{self.identity()}"
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=".pub-", dir=self.storage_root)
+        )
         staging = staging_root / "data" / dataset_id
         shutil.copytree(source, staging)
         try:
@@ -264,6 +268,15 @@ def _content_id(prefix: str, fingerprint: str) -> str:
     if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
         raise ValueError(f"{prefix} fingerprint must be a SHA-256 digest")
     return f"{prefix}-{normalized}"
+
+
+def analysis_artifact_directory_name(fingerprint: str) -> str:
+    """返回有界物理目录名，完整 SHA 身份仍保存在 manifest 中。"""
+
+    normalized = str(fingerprint).lower()
+    _content_id("video-analysis", normalized)
+    digest = bytes.fromhex(normalized)[:10]
+    return f"va-{b32encode(digest).decode('ascii').lower()}"
 
 
 def _require_fingerprint(

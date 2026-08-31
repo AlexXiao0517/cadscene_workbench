@@ -75,6 +75,22 @@ def test_new_project_button_starts_analysis_after_both_uploads_finish() -> None:
     assert submit.index("await startAnalysis") < submit.index("waitForAnalysisCompletion")
 
 
+def test_portal_lets_the_server_allocate_the_compact_project_id() -> None:
+    api, script = _read("portal_api.js"), _read("workflow_portal.js")
+    create_start = api.index("export async function createProject")
+    create_end = api.index("export function uploadAsset", create_start)
+    create = api[create_start:create_end]
+    ensure_start = script.index("function ensureProject")
+    ensure_end = script.index("function validateFile", ensure_start)
+    ensure = script[ensure_start:ensure_end]
+
+    assert "project_id" not in create
+    assert "JSON.stringify({ display_name: displayName })" in create
+    assert "function generatedId" not in script
+    assert "state.projectId = result.project_id" in ensure
+    assert "state.dataset = result.project_id" in ensure
+
+
 def test_new_project_flow_explicitly_activates_a_completed_candidate_analysis() -> None:
     api, script, html = (
         _read("portal_api.js"),
@@ -89,7 +105,7 @@ def test_new_project_flow_explicitly_activates_a_completed_candidate_analysis() 
     assert "snapshot.component_revisions.project" in script
     assert "snapshot.component_revisions.clips" in script
     assert "await activateCandidateAnalysis(" in script
-    assert "workflow_portal.js?v=20260807-upload-v10" in html
+    assert "workflow_portal.js?v=20260827-upload-v11" in html
 
 
 def test_portal_uses_real_upload_bytes_and_never_timer_drives_upload_progress() -> None:
@@ -277,7 +293,7 @@ def test_reselected_cad_preview_uses_the_published_asset_fingerprint() -> None:
 
     assert "result.fingerprint" in cad_success
     assert "?asset=${encodeURIComponent(result.fingerprint)}" in cad_success
-    assert "workflow_portal.js?v=20260807-upload-v10" in html
+    assert "workflow_portal.js?v=20260827-upload-v11" in html
 
 
 def test_preview_keeps_the_drop_zone_as_its_containing_block_across_upload_states() -> None:
@@ -311,7 +327,7 @@ def test_upload_layout_uses_one_card_layer_only() -> None:
 def test_portal_busts_cached_assets_for_the_stable_preview_layout() -> None:
     html = _read("index.html")
 
-    assert "20260807-upload-v10" in html
+    assert "20260827-upload-v11" in html
 
 
 def test_existing_viewer_has_manifest_backed_interface_only_copy() -> None:

@@ -11,7 +11,10 @@ import pytest
 
 from cadscene.projects.adapters import AdapterResult
 from cadscene.projects.analysis_adapters import tree_fingerprint, validate_video_outputs
-from cadscene.projects.analysis_publication import AnalysisArtifactPublisher
+from cadscene.projects.analysis_publication import (
+    AnalysisArtifactPublisher,
+    analysis_artifact_directory_name,
+)
 from cadscene.projects.analysis_worker import (
     AttemptProgressReporter,
     _cad_progress,
@@ -999,6 +1002,35 @@ def test_video_analysis_validation_accepts_revision_indexed_output(
     assert result.outputs["analysis_output"] == str(indexed_root / revision)
 
 
+def test_video_analysis_validation_resolves_short_revision_directory_from_pointer(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    root = output.parent
+    short_output = root / "analysis_revisions" / "r-0123456789abcdef"
+    short_output.parent.mkdir()
+    output.rename(short_output)
+    (root / "current_analysis_revision.json").write_text(
+        json.dumps(
+            {
+                "analysis_revision": revision,
+                "revision_directory": "analysis_revisions/r-0123456789abcdef",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_video_outputs(video_job, revision)
+
+    assert result.status == "success"
+    assert result.outputs["analysis_output"] == str(short_output)
+
+
 def _add_srt_asset(repositories, tmp_path: Path) -> None:
     srt = tmp_path / "source.srt"
     srt.write_text(
@@ -1183,7 +1215,7 @@ def test_video_finish_is_only_owner_that_publishes_cad_and_analysis(
         / "projects"
         / "p1"
         / "analysis_artifacts"
-        / f"video-analysis-{tree_fingerprint(output)}"
+        / analysis_artifact_directory_name(tree_fingerprint(output))
         / "02_video_analysis"
         / "clip_manifest.json"
     ).is_file()
@@ -1932,7 +1964,7 @@ def test_retry_reuses_valid_orphan_publications_after_manifest_failure(
         / "projects"
         / "p1"
         / "analysis_artifacts"
-        / f"video-analysis-{tree_fingerprint(output)}"
+        / analysis_artifact_directory_name(tree_fingerprint(output))
     ).is_dir()
     queue.release_execution_claim(
         video_job.job_id,
@@ -2243,7 +2275,12 @@ def test_candidate_new_video_does_not_change_active_clip_export_input(
     assert project.candidate_analysis_revision == candidate_revision
     descriptor = project.source_assets["_analysis_revisions"][candidate_revision]
     candidate_artifact = Path(descriptor["analysis_artifact_path"])
-    assert descriptor["analysis_artifact_id"] == candidate_artifact.name
+    assert descriptor["analysis_artifact_id"] == (
+        f"video-analysis-{tree_fingerprint(candidate_output)}"
+    )
+    assert candidate_artifact.name == analysis_artifact_directory_name(
+        tree_fingerprint(candidate_output)
+    )
     assert (candidate_artifact / "02_video_analysis" / "clip_manifest.json").is_file()
     assert descriptor["input_snapshot"]["video"]["path"] == str(replacement)
     project = repositories.project.update(
@@ -2415,6 +2452,60 @@ def test_analysis_publisher_rejects_fingerprint_that_does_not_match_content(
 
     assert not (tmp_path / "data").exists()
     assert not (tmp_path / "projects" / "p1" / "analysis_artifacts").exists()
+
+
+def test_analysis_publisher_uses_compact_physical_paths_for_legacy_project_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cad_source = tmp_path / "attempt" / "data" / "legacy-source"
+    cad_source.mkdir(parents=True)
+    (cad_source / "dataset_manifest.json").write_text(
+        json.dumps({"dataset": "legacy-source", "cad": {"status": "ready"}}),
+        encoding="utf-8",
+    )
+    analysis_source = tmp_path / "attempt" / "02_video_analysis" / "revision"
+    analysis_source.mkdir(parents=True)
+    (analysis_source / "clip_manifest.json").write_text(
+        json.dumps({"analysis_revision": "analysis-1", "clips": []}),
+        encoding="utf-8",
+    )
+    copied_destinations: list[Path] = []
+    from cadscene.projects import analysis_publication as publication_module
+
+    real_copytree = publication_module.shutil.copytree
+
+    def record_copytree(source_path, target_path, *args, **kwargs):
+        copied_destinations.append(Path(target_path))
+        return real_copytree(source_path, target_path, *args, **kwargs)
+
+    monkeypatch.setattr(publication_module.shutil, "copytree", record_copytree)
+    publisher = AnalysisArtifactPublisher(
+        storage_root=tmp_path,
+        projects_root=tmp_path / "projects",
+        identity=lambda: "331aced1d81a4a4fbbb8e1f5d4777811",
+    )
+    analysis_fingerprint = tree_fingerprint(analysis_source)
+
+    published = publisher.publish(
+        project_id="dataset-9b15b7c0-9309-4848-b63e-4409bd6da38f",
+        cad_source=cad_source,
+        cad_fingerprint=tree_fingerprint(cad_source),
+        analysis_source=analysis_source,
+        analysis_fingerprint=analysis_fingerprint,
+    )
+
+    assert published.analysis_artifact_id == f"video-analysis-{analysis_fingerprint}"
+    assert published.analysis_artifact_path.name.startswith("va-")
+    assert len(published.analysis_artifact_path.name) == 19
+    assert (published.analysis_artifact_path / "02_video_analysis" / "clip_manifest.json").is_file()
+    generated_parts = {
+        part
+        for destination in copied_destinations
+        for part in destination.parts
+        if part.startswith(".")
+    }
+    assert generated_parts
+    assert all(part.startswith(".pub-") and len(part) <= 14 for part in generated_parts)
 
 
 def test_tree_fingerprint_frames_paths_and_content_without_ambiguity(

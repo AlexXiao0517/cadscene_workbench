@@ -62,6 +62,30 @@ def test_missing_pycolmap_is_a_supported_sfm_failure(tmp_path: Path) -> None:
     assert report.complete_capability is False
 
 
+def test_missing_psutil_is_a_supported_core_failure(tmp_path: Path) -> None:
+    from cadscene.cli.doctor import DoctorOptions, DoctorProbes, run_doctor
+
+    healthy = _healthy_probes()
+    probes = DoctorProbes(
+        module_available=lambda name: name != "psutil",
+        executable_path=healthy.executable_path,
+        resources_check=healthy.resources_check,
+        storage_check=healthy.storage_check,
+        pure_rotation_check=healthy.pure_rotation_check,
+    )
+
+    report = run_doctor(
+        DoctorOptions(application_root=tmp_path, storage_root=tmp_path),
+        probes=probes,
+    )
+
+    psutil = next(check for check in report.checks if check.name == "psutil")
+    assert psutil.group == "core"
+    assert psutil.status == "error"
+    assert psutil.required is True
+    assert report.complete_capability is False
+
+
 def test_missing_ffmpeg_and_ffprobe_are_reported_separately(tmp_path: Path) -> None:
     from cadscene.cli.doctor import DoctorOptions, DoctorProbes, run_doctor
 

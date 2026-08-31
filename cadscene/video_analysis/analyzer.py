@@ -20,10 +20,20 @@ from .motion import (
     build_motion_windows,
     stabilize_motion_windows,
 )
-from .pts import decode_indexed_sparse_frames, probe_video_pts
+from .pts import (
+    decode_indexed_sparse_frames,
+    decode_sparse_frame_ranges,
+    probe_video_pts,
+)
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
 from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
-from .shot_detection import analyze_frame_pair, coalesce_boundaries, detect_shot_boundaries
+from .shot_detection import (
+    FramePairEvidence,
+    analyze_frame_pair,
+    coalesce_boundaries,
+    detect_shot_boundaries,
+    verify_candidate_boundaries,
+)
 
 
 def _new_revision() -> str:
@@ -128,10 +138,12 @@ def _scene_boundaries_for_segmentation(
     source_end_pts_sec: float,
     recent_frame_lumas: list[float],
     terminal_guard_sec: float,
+    source_start_pts_sec: float = 0.0,
+    opening_guard_sec: float = 0.0,
 ) -> list[BoundaryEvidence]:
     """Keep terminal fade evidence without creating a meaningless black tail."""
-    if terminal_guard_sec < 0:
-        raise ValueError("terminal_guard_sec must be non-negative")
+    if terminal_guard_sec < 0 or opening_guard_sec < 0:
+        raise ValueError("boundary guard durations must be non-negative")
     tail = recent_frame_lumas[-3:]
     # A dark final sample alone may be a genuine hard cut. Suppress a terminal
     # boundary only when multiple samples establish a monotonic fade-to-black.
@@ -145,8 +157,16 @@ def _scene_boundaries_for_segmentation(
         boundary
         for boundary in boundaries
         if not (
-            terminal_fade
-            and 0.0 <= source_end_pts_sec - boundary.pts_sec <= terminal_guard_sec
+            (
+                terminal_fade
+                and 0.0 <= source_end_pts_sec - boundary.pts_sec <= terminal_guard_sec
+            )
+            or (
+                "black_frame" in boundary.reasons
+                and 0.0
+                <= boundary.pts_sec - source_start_pts_sec
+                <= opening_guard_sec
+            )
         )
     ]
     normalized: list[BoundaryEvidence] = []
@@ -170,6 +190,22 @@ def _scene_boundaries_for_segmentation(
             )
         )
     return normalized
+
+
+def _candidate_verification_ranges(
+    boundaries: list[BoundaryEvidence],
+    pair_evidence: list[FramePairEvidence],
+    *,
+    margin_sec: float,
+) -> list[tuple[float, float]]:
+    if margin_sec < 0:
+        raise ValueError("margin_sec must be non-negative")
+    candidate_pts = [boundary.pts_sec for boundary in boundaries]
+    return [
+        (evidence.from_pts_sec - margin_sec, evidence.to_pts_sec + margin_sec)
+        for evidence in pair_evidence
+        if any(abs(evidence.to_pts_sec - pts_sec) <= 1e-6 for pts_sec in candidate_pts)
+    ]
 
 
 def _windows_csv(windows: list[MotionWindow]) -> str:
@@ -276,7 +312,7 @@ def analyze_video(
     sampled_pts: list[float] = []
     sampled_lumas: list[float] = []
     pair_evidence = []
-    shot_boundaries: list[BoundaryEvidence] = []
+    coarse_shot_boundaries: list[BoundaryEvidence] = []
     previous_frame = None
     duration_sec = (
         frame_index.source_end_pts_exclusive_sec - frame_index.source_start_pts_sec
@@ -295,7 +331,7 @@ def analyze_video(
         if previous_frame is not None:
             evidence = analyze_frame_pair(previous_frame, frame)
             pair_evidence.append(evidence)
-            shot_boundaries.extend(
+            coarse_shot_boundaries.extend(
                 detect_shot_boundaries(
                     [previous_frame, frame],
                     expected_interval_sec=sample_interval_sec,
@@ -305,18 +341,43 @@ def analyze_video(
         previous_frame = frame
     if len(sampled_pts) < 2:
         raise ValueError("video analysis requires at least two decoded PTS samples")
-    report("segmenting", "正在检测场景边界与规划片段", 0.84)
     raw_windows = build_motion_windows(pair_evidence, MotionAnalysisConfig())
     stable_windows, motion_boundaries = stabilize_motion_windows(
         raw_windows, MotionAnalysisConfig()
     )
+    verification_interval_sec = min(0.1, sample_interval_sec / 2.0)
+    decode_pass_count = 1
+    shot_boundaries = coarse_shot_boundaries
+    if duration_sec >= 60.0 and coarse_shot_boundaries:
+        report("verifying_scenes", "正在复核候选场景边界", 0.82)
+        candidate_ranges = _candidate_verification_ranges(
+            coarse_shot_boundaries,
+            pair_evidence,
+            margin_sec=verification_interval_sec,
+        )
+        dense_groups = decode_sparse_frame_ranges(
+            source,
+            index=frame_index,
+            ranges=candidate_ranges,
+            interval_sec=verification_interval_sec,
+            ffmpeg_executable=ffmpeg_executable,
+        )
+        shot_boundaries = verify_candidate_boundaries(
+            dense_groups,
+            expected_interval_sec=verification_interval_sec,
+        )
+        decode_pass_count = 2
+
+    report("segmenting", "正在检测场景边界与规划片段", 0.84)
     # Scene discontinuities are mandatory. Motion changes remain explainable
     # analysis evidence, but do not create extra fragments by themselves.
     assert previous_frame is not None
     mandatory_boundaries = _scene_boundaries_for_segmentation(
         shot_boundaries,
+        source_start_pts_sec=frame_index.source_start_pts_sec,
         source_end_pts_sec=frame_index.source_end_pts_exclusive_sec,
         recent_frame_lumas=sampled_lumas,
+        opening_guard_sec=max(3.0, sample_interval_sec * 6.0),
         terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
     )
     mandatory_boundaries = _mandatory_boundaries_for_source(
@@ -440,13 +501,17 @@ def analyze_video(
         "packet_count": len(packet_index.packets),
         "sample_interval_sec": sample_interval_sec,
         "sampled_frame_count": len(sampled_pts),
-        "decode_pass_count": 1,
+        "decode_pass_count": decode_pass_count,
+        "coarse_scene_candidate_count": len(coarse_shot_boundaries),
+        "confirmed_scene_boundary_count": len(shot_boundaries),
     }
     configuration = {
         "sample_interval_sec": sample_interval_sec,
         "segmentation_strategy": "minimum_count_balanced_strict_lt_hard_max",
         "motion_boundaries_create_clips": False,
         "terminal_fade_guard_sec": max(1.0, sample_interval_sec * 2.0),
+        "opening_transition_guard_sec": max(3.0, sample_interval_sec * 6.0),
+        "shot_candidate_verification_interval_sec": verification_interval_sec,
         "motion_window_sec": MotionAnalysisConfig().window_sec,
         "motion_step_sec": MotionAnalysisConfig().step_sec,
         "motion_min_sustain_sec": MotionAnalysisConfig().min_sustain_sec,

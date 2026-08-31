@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -38,8 +39,18 @@ def _now_iso() -> str:
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(0.005 * (2**attempt), 0.05))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _background_process_options(*, new_process_group: bool = False) -> dict[str, int]:
@@ -174,6 +185,15 @@ def _last_log_line(path: str | Path | None) -> str | None:
     except OSError:
         return None
     return next((line.strip() for line in reversed(lines) if line.strip()), None)
+
+
+def _command_option(command: Sequence[str], flag: str) -> str | None:
+    values = [str(item) for item in command]
+    try:
+        index = values.index(flag)
+    except ValueError:
+        return None
+    return values[index + 1] if index + 1 < len(values) else None
 
 
 def _sfm_is_suitable_for_3d(stats_path: Path) -> bool | None:
@@ -556,7 +576,7 @@ def build_stage_command(
         if stage == "quality":
             validate_quality_plan(keyframe_plan_path(resolved["run_dir"]), resolved["sfm_camera_path"])
         selected_stages = "alignment,viewer_scene" if stage == "alignment" else "quality,viewer_scene,road_surface"
-        return [
+        command = [
             python,
             "-m",
             "cadscene.cli.run_pipeline",
@@ -581,6 +601,14 @@ def build_stage_command(
             str(resolved["origin_xy"][0]),
             str(resolved["origin_xy"][1]),
         ]
+        if stage == "quality":
+            command.extend(
+                [
+                    "--progress-file",
+                    str(resolved["run_dir"] / "logs/workflow/quality_progress.json"),
+                ]
+            )
+        return command
     required = ("trajectory", "sparse_ply", "manual_track")
     for label in required:
         if not resolved[label].exists():
@@ -671,6 +699,15 @@ class JobRunner:
             run_dir = self._run_dir(*key)
             log_file = run_dir / "logs" / "workflow" / f"{stage}.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
+            progress_value = _command_option(command, "--progress-file")
+            progress_file = Path(progress_value).resolve() if progress_value else None
+            if progress_file is not None:
+                try:
+                    progress_file.relative_to(run_dir.resolve())
+                except ValueError:
+                    pass
+                else:
+                    progress_file.unlink(missing_ok=True)
             log_handle = log_file.open("wb", buffering=0)
             process = subprocess.Popen(
                 [str(item) for item in command],
@@ -691,6 +728,7 @@ class JobRunner:
                 "started_at": _now_iso(),
                 "ended_at": None,
                 "returncode": None,
+                "progress_file": None if progress_file is None else str(progress_file),
             }
             _atomic_json(self._process_path(*key), payload)
             JobStatusStore(run_dir / "job_status.json", run_id=key[1]).update_stage(
@@ -729,6 +767,11 @@ class JobRunner:
         return self.start(dataset, run_id, stage, command)
 
     def _monitor(self, key: tuple[str, str], stage: str, process: subprocess.Popen, log_handle) -> None:
+        progress_file = (self.query(*key) or {}).get("progress_file")
+        while process.poll() is None:
+            self._sync_progress(key, stage, progress_file)
+            time.sleep(0.10)
+        self._sync_progress(key, stage, progress_file)
         returncode = process.wait()
         log_handle.close()
         with self._lock:
@@ -803,6 +846,47 @@ class JobRunner:
                 )
             self._processes.pop(key, None)
             self._cancelled.discard(key)
+
+    def _sync_progress(
+        self,
+        key: tuple[str, str],
+        stage: str,
+        progress_file: str | Path | None,
+    ) -> None:
+        if progress_file is None:
+            return
+        try:
+            progress = json.loads(Path(progress_file).read_text(encoding="utf-8-sig"))
+            fraction = float(progress["fraction"])
+            message = str(progress["message"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+        if not 0.0 <= fraction < 1.0:
+            return
+        status_store = JobStatusStore(
+            self._run_dir(*key) / "job_status.json", run_id=key[1]
+        )
+        try:
+            current = status_store.load()
+        except (OSError, json.JSONDecodeError):
+            return
+        stage_name = self._status_stage(stage)
+        current_stage = current["stages"][stage_name]
+        if current_stage.get("status") != "running":
+            return
+        if fraction <= float(current_stage.get("progress", 0.0)):
+            return
+        try:
+            status_store.update_stage(
+                stage_name,
+                status="running",
+                progress=min(fraction, 0.99),
+                message=message,
+                log_file=(self.query(*key) or {}).get("log_file"),
+                operation=stage,
+            )
+        except (OSError, json.JSONDecodeError):
+            return
 
     def cancel(self, dataset: str, run_id: str) -> dict[str, Any]:
         key = (_safe_name(dataset, "dataset"), _safe_name(run_id, "runId"))

@@ -2,6 +2,7 @@
   "use strict";
 
   const params = new URLSearchParams(window.location.search);
+  const suggestionSequence = window.CadsceneSuggestionSequence;
   const dataset = params.get("dataset") || "";
   const runId = params.get("runId") || "";
   const projectWorkbenchToken = params.get("projectWorkbenchToken") || "";
@@ -2463,8 +2464,14 @@
     localStorage.setItem(`cadsceneIgnored:${dataset}:${runId}:${frameIndex}`, "1");
     ignoredSuggestionFrames.add(frameIndex);
     window.cadsceneSetIgnoredSuggestions?.([...ignoredSuggestionFrames]);
-    message.textContent = `建议帧 ${frameIndex} 已标记为忽略。`;
-    selectedSuggestionFrame = null;
+    const nextSuggestion = suggestionSequence.firstAfter(availableSuggestions(), frameIndex);
+    if (nextSuggestion) {
+      jumpToSuggestion(nextSuggestion);
+      message.textContent = `建议帧 ${frameIndex} 已忽略，已继续到建议帧 ${selectedSuggestionFrame}。`;
+    } else {
+      selectedSuggestionFrame = null;
+      message.textContent = `建议帧 ${frameIndex} 已标记为忽略。`;
+    }
     updateSuggestionActions();
   }
 
@@ -2479,7 +2486,13 @@
     const hasSuggestion = available.length > 0;
     if (viewButton) {
       viewButton.disabled = !hasSuggestion;
-      viewButton.textContent = hasSuggestion ? "查看当前建议帧" : "暂无建议";
+      const nextSuggestion = suggestionSequence.next(available, selectedSuggestionFrame);
+      const nextIndex = available.findIndex(
+        (item) => Number(item.frame_index) === Number(nextSuggestion?.frame_index),
+      );
+      viewButton.textContent = hasSuggestion
+        ? `查看下一建议帧（${nextIndex + 1}/${available.length}）`
+        : "暂无建议";
     }
     if (ignoreButton) ignoreButton.disabled = !hasSuggestion;
   }
@@ -2493,12 +2506,7 @@
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       const list = Array.isArray(payload) ? payload : payload.suggestions || [];
-      const priorityRank = { high: 3, medium: 2, low: 1 };
-      workflowSuggestions = list.slice().sort((a, b) => {
-        const scoreA = Number(a.risk_score ?? priorityRank[a.priority] ?? 0);
-        const scoreB = Number(b.risk_score ?? priorityRank[b.priority] ?? 0);
-        return scoreB - scoreA || Number(a.frame_index) - Number(b.frame_index);
-      });
+      workflowSuggestions = suggestionSequence.ordered(list);
     } catch (error) {
       workflowSuggestions = [];
     }
@@ -2514,19 +2522,29 @@
         // ignored_suggestions.json 尚未生成时按空列表处理。
       }
     }
+    if (!availableSuggestions().some(
+      (item) => Number(item.frame_index) === Number(selectedSuggestionFrame),
+    )) {
+      selectedSuggestionFrame = null;
+    }
     window.cadsceneSetIgnoredSuggestions?.([...ignoredSuggestionFrames]);
+    updateSuggestionActions();
+  }
+
+  function jumpToSuggestion(suggestion) {
+    if (!suggestion) return updateSuggestionActions();
+    selectedSuggestionFrame = Number(suggestion.frame_index);
+    const frameInput = document.querySelector("#frameInput");
+    if (frameInput) frameInput.value = String(selectedSuggestionFrame);
+    document.querySelector("#goToFrame")?.click();
+    message.textContent = `已跳转到建议帧 ${selectedSuggestionFrame}。`;
     updateSuggestionActions();
   }
 
   function jumpToCurrentSuggestion() {
     const available = availableSuggestions();
     if (!available.length) return updateSuggestionActions();
-    const suggestion = available.find((item) => Number(item.frame_index) === selectedSuggestionFrame) || available[0];
-    selectedSuggestionFrame = Number(suggestion.frame_index);
-    const frameInput = document.querySelector("#frameInput");
-    if (frameInput) frameInput.value = String(selectedSuggestionFrame);
-    document.querySelector("#goToFrame")?.click();
-    message.textContent = `已跳转到建议帧 ${selectedSuggestionFrame}。`;
+    jumpToSuggestion(suggestionSequence.next(available, selectedSuggestionFrame));
   }
 
   document.querySelectorAll("#workflowSteps li").forEach((node) => {

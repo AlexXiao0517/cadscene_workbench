@@ -1,8 +1,8 @@
-export async function createProject(projectId, displayName) {
+export async function createProject(displayName) {
   const response = await fetch("/api/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project_id: projectId, display_name: displayName }),
+    body: JSON.stringify({ display_name: displayName }),
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || `创建项目失败（HTTP ${response.status}）`);

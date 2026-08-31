@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from cadscene.cli import align_to_cad, analyze_road_surface, evaluate_quality, export_viewer_scene, render_overlay, run_sfm
+from cadscene.cli._progress import write_progress_sidecar
 from cadscene.cad.loader import RoadCenterlineCapability, detect_road_centerline
 from cadscene.core.artifacts import ArtifactManager
 from cadscene.core.config import apply_cli_overrides, load_dataset_config, load_pipeline_config, resolve_pipeline_references, validate_config
@@ -15,6 +16,26 @@ from cadscene.workflow.job_status import JobStatusStore
 STAGE_ORDER = ["sfm", "alignment", "quality", "viewer_scene", "road_surface", "render"]
 OPTIONAL_STAGE_INPUTS = {"viewer_scene": {"quality_timeline", "suggestions"}}
 ROAD_SURFACE_SKIP_MESSAGE = "当前 CAD 未检测到道路中心线，已跳过道路表面诊断"
+
+
+def _is_quality_progress_run(requested: list[str], progress_file: Path | None) -> bool:
+    return bool(
+        progress_file is not None
+        and "quality" in requested
+        and set(requested).issubset({"quality", "viewer_scene", "road_surface"})
+    )
+
+
+def _write_quality_progress(
+    progress_file: Path | None,
+    *,
+    enabled: bool,
+    stage: str,
+    message: str,
+    fraction: float,
+) -> None:
+    if enabled and progress_file is not None:
+        write_progress_sidecar(progress_file, stage, message, fraction)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -217,6 +238,13 @@ def main(argv: list[str] | None = None) -> int:
                 None if args.progress_file is None else str(args.progress_file),
             )
         requested = _selected_stages(args, resolved)
+        quality_progress_run = _is_quality_progress_run(requested, args.progress_file)
+        if quality_progress_run:
+            quality_params = resolved["stages"]["quality"].setdefault("params", {})
+            quality_params["progress_file"] = str(args.progress_file)
+            quality_params["progress_start"] = 0.10
+            quality_params["progress_evaluation_end"] = 0.45
+            quality_params["progress_end"] = 0.55
         resolved["stages"] = {
             name: stage for name, stage in resolved.get("stages", {}).items() if name in requested
         }
@@ -261,20 +289,69 @@ def main(argv: list[str] | None = None) -> int:
             manager.record_stage(stage_name="dry_run", command=[sys.executable, "-m", "cadscene.cli.run_pipeline", *(argv or sys.argv[1:])], inputs={"config": args.config, "dataset": args.dataset}, outputs={"run_summary": str(manager.run_dir / "reports" / "run_summary.md")}, metrics={"stage_count": len(selected), "missing_input_count": len(validation["missing_inputs"])}, status="dry_run")
             print(summary)
             return 0
+        _write_quality_progress(
+            args.progress_file,
+            enabled=quality_progress_run,
+            stage="quality_prepare",
+            message="正在校验质量检测输入",
+            fraction=0.08,
+        )
         for name, stage_argv, func in plans:
+            if name == "viewer_scene":
+                _write_quality_progress(
+                    args.progress_file,
+                    enabled=quality_progress_run,
+                    stage="viewer_scene",
+                    message="正在生成工作台质量场景",
+                    fraction=0.60,
+                )
+            elif name == "road_surface":
+                _write_quality_progress(
+                    args.progress_file,
+                    enabled=quality_progress_run,
+                    stage="road_surface",
+                    message="正在分析道路表面",
+                    fraction=0.80,
+                )
             rc = int(func(stage_argv) or 0)
             statuses[name] = "success" if rc == 0 else "failed"
             if rc != 0:
                 raise RuntimeError(f"stage failed: {name}")
+            if name == "viewer_scene":
+                _write_quality_progress(
+                    args.progress_file,
+                    enabled=quality_progress_run,
+                    stage="viewer_scene",
+                    message="工作台质量场景已生成",
+                    fraction=0.75,
+                )
+            elif name == "road_surface":
+                _write_quality_progress(
+                    args.progress_file,
+                    enabled=quality_progress_run,
+                    stage="road_surface",
+                    message="道路表面诊断已完成，正在校验发布结果",
+                    fraction=0.95,
+                )
+        if road_surface_skipped:
+            _write_quality_progress(
+                args.progress_file,
+                enabled=quality_progress_run,
+                stage="road_surface_skipped",
+                message=f"{ROAD_SURFACE_SKIP_MESSAGE}；正在校验发布结果",
+                fraction=0.95,
+            )
         summary = _summary(args.dataset_name, args.run_id, requested, resolved, statuses, viewer_url, warnings)
         _write_pipeline_artifacts(manager, dataset, resolved, {k: v for k, v in overrides.items() if v is not None}, commands, viewer_url, summary)
         if road_surface_skipped:
+            skipped_status = "running" if quality_progress_run else "success"
+            skipped_progress = 0.95 if quality_progress_run else 1.0
             JobStatusStore(
                 manager.run_dir / "job_status.json", run_id=args.run_id
             ).update_stage(
                 "quality",
-                status="success",
-                progress=1.0,
+                status=skipped_status,
+                progress=skipped_progress,
                 message=ROAD_SURFACE_SKIP_MESSAGE,
                 operation="quality",
             )

@@ -112,7 +112,12 @@ def _clip(
     )
 
 
-def _api(tmp_path: Path, clips: tuple[ClipDefinition, ...]):
+def _api(
+    tmp_path: Path,
+    clips: tuple[ClipDefinition, ...],
+    *,
+    identity=None,
+):
     repositories = project_repositories(tmp_path / "projects")
     repositories.create_project("p1", updated_at="2026-08-04T00:00:00Z")
     video = tmp_path / "source.mp4"
@@ -156,6 +161,7 @@ def _api(tmp_path: Path, clips: tuple[ClipDefinition, ...]):
             tmp_path / "projects", validators={"video": lambda *_: {"ok": True}}
         ),
         now=lambda: "2026-08-04T00:00:01Z",
+        identity=identity,
     )
     return api, repositories, queue
 
@@ -1060,6 +1066,49 @@ def test_create_project_returns_the_revision_after_persisting_display_name(
     assert response.status == 201
     assert response.body["project_revision"] == 1
     assert repositories.project.load("new-project").source_assets["display_name"] == "金华项目"
+
+
+def test_generated_project_id_is_compact_and_stable_for_the_response(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(
+        tmp_path,
+        (_clip("clip-1"),),
+        identity=lambda: "0123456789abcdef0123456789abcdef",
+    )
+
+    response = api.handle("POST", "/api/projects", json_body={})
+
+    assert response.status == 201
+    assert response.body["project_id"] == "p-0123456789abcdef"
+    assert response.body["workspace_url"].endswith("projectId=p-0123456789abcdef")
+    assert repositories.project.load("p-0123456789abcdef").project_id == (
+        "p-0123456789abcdef"
+    )
+
+
+def test_generated_project_collision_retries_with_the_next_identity(
+    tmp_path: Path,
+) -> None:
+    identities = iter(
+        (
+            "00000000000000000000000000000000",
+            "11111111111111111111111111111111",
+        )
+    )
+    api, repositories, _queue = _api(
+        tmp_path,
+        (_clip("clip-1"),),
+        identity=lambda: next(identities),
+    )
+    repositories.create_project(
+        "p-0000000000000000", updated_at="2026-08-04T00:00:00Z"
+    )
+
+    response = api.handle("POST", "/api/projects", json_body={})
+
+    assert response.status == 201
+    assert response.body["project_id"] == "p-1111111111111111"
 
 
 def test_project_display_name_can_be_renamed_with_expected_revision(

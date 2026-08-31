@@ -68,6 +68,7 @@ def test_evaluate_quality_help_runs() -> None:
 def test_evaluate_quality_cli_synthetic_smoke_writes_outputs_and_manifest(tmp_path: Path) -> None:
     path_csv, alignment, track, trajectory, cad_dir = _write_inputs(tmp_path)
     output_root = tmp_path / "runs"
+    progress_file = tmp_path / "quality-progress.json"
     result = subprocess.run(
         [
             sys.executable,
@@ -97,6 +98,12 @@ def test_evaluate_quality_cli_synthetic_smoke_writes_outputs_and_manifest(tmp_pa
             "--quality-mode",
             "qa",
             "--no-suggestion-samples",
+            "--progress-file",
+            str(progress_file),
+            "--progress-start",
+            "0.1",
+            "--progress-end",
+            "0.55",
         ],
         text=True,
         capture_output=True,
@@ -115,3 +122,10 @@ def test_evaluate_quality_cli_synthetic_smoke_writes_outputs_and_manifest(tmp_pa
     manifest = json.loads((output_root / "synthetic" / "stage3b" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["stages"][-1]["stage_name"] == "quality"
     assert manifest["stages"][-1]["status"] == "success"
+    progress = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert progress == {
+        "schema_version": "1.0",
+        "stage": "quality_outputs",
+        "message": "质量评估产物已生成",
+        "fraction": 0.55,
+    }

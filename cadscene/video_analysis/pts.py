@@ -721,6 +721,116 @@ def decode_sparse_frames(
     )
 
 
+def decode_sparse_frame_ranges(
+    video_path: Path,
+    *,
+    index: DecodedFrameIndex,
+    ranges: list[tuple[float, float]],
+    interval_sec: float,
+    output_size: tuple[int, int] = (320, 180),
+    ffmpeg_executable: str | Path | None = None,
+) -> list[list[DecodedFrame]]:
+    """Decode dense samples only inside merged candidate time ranges."""
+
+    if interval_sec <= 0:
+        raise ValueError("interval_sec must be positive")
+    width, height = output_size
+    if width <= 0 or height <= 0:
+        raise ValueError("output dimensions must be positive")
+    normalized: list[tuple[float, float]] = []
+    source_start = index.source_start_pts_sec
+    source_end = index.source_end_pts_exclusive_sec
+    for raw_start, raw_end in sorted(ranges):
+        start = max(source_start, float(raw_start))
+        end = min(source_end, float(raw_end))
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        if normalized and start <= normalized[-1][1]:
+            normalized[-1] = (normalized[-1][0], max(normalized[-1][1], end))
+        else:
+            normalized.append((start, end))
+    if not normalized:
+        return []
+
+    ffmpeg = resolve_ffmpeg_executable(ffmpeg_executable)
+    range_expression = "+".join(
+        f"between(t\\,{start:.9f}\\,{end:.9f})" for start, end in normalized
+    )
+    escaped_interval = f"{interval_sec:.9f}"
+    video_filter = (
+        f"select=({range_expression})*"
+        f"(isnan(prev_selected_t)+gte(t-prev_selected_t\\,{escaped_interval})),"
+        f"scale={width}:{height}:flags=area,format=gray,showinfo"
+    )
+    temporary_dir = Path(tempfile.mkdtemp(prefix="cadscene-shot-verification-"))
+    raw_path = temporary_dir / "dense.gray"
+    try:
+        process = subprocess.run(
+            [
+                str(ffmpeg),
+                "-hide_banner",
+                "-copyts",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:v:0",
+                "-vf",
+                video_filter,
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gray",
+                "-y",
+                str(raw_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        stderr = process.stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg candidate-range decode failed: {stderr[-1000:]}"
+            )
+        selected_pts = [
+            int(match.group("pts")) for match in _SHOWINFO_PTS_RE.finditer(stderr)
+        ]
+        frame_size = width * height
+        if raw_path.stat().st_size != len(selected_pts) * frame_size:
+            raise ValueError("candidate-range frame bytes and PTS metadata disagree")
+        exact_pts = {
+            frame.pts: float(frame.pts * index.time_base) for frame in index.frames
+        }
+        groups: list[list[DecodedFrame]] = [[] for _ in normalized]
+        with raw_path.open("rb") as stream:
+            for frame_pts in selected_pts:
+                if frame_pts not in exact_pts:
+                    raise ValueError(
+                        f"decoded frame PTS missing from source frame index: {frame_pts}"
+                    )
+                frame_bytes = stream.read(frame_size)
+                if len(frame_bytes) != frame_size:
+                    raise ValueError("candidate-range raw frame is truncated")
+                pts_sec = exact_pts[frame_pts]
+                for group_index, (start, end) in enumerate(normalized):
+                    if start - 1e-9 <= pts_sec <= end + 1e-9:
+                        groups[group_index].append(
+                            DecodedFrame(
+                                pts=frame_pts,
+                                pts_sec=pts_sec,
+                                image=np.frombuffer(frame_bytes, dtype=np.uint8)
+                                .reshape(height, width)
+                                .copy(),
+                            )
+                        )
+                        break
+        return groups
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+
+
 def iter_sparse_frames(
     video_path: Path,
     *,

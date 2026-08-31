@@ -67,6 +67,7 @@ _CORE_MODULES = (
     ("OpenCV", "cv2"),
     ("ezdxf", "ezdxf"),
     ("imageio-ffmpeg", "imageio_ffmpeg"),
+    ("psutil", "psutil"),
 )
 
 

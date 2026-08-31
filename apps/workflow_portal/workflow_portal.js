@@ -33,10 +33,6 @@ function initializeTheme() {
   applyTheme(saved === "light" || saved === "dark" ? saved : preferred);
 }
 
-function generatedId() {
-  const suffix = (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^a-z0-9-]/gi, "");
-  return `dataset-${suffix.toLowerCase()}`;
-}
 function fileSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -47,12 +43,14 @@ function setMessage(message, error = false) {
 }
 function ensureProject(file) {
   if (state.projectPromise) return state.projectPromise;
-  state.projectId = generatedId();
-  state.dataset = state.projectId;
   state.projectRevision = 0;
   state.manifest = null;
   const displayName = file.name.replace(/\.[^.]+$/, "") || "新建视频项目";
-  state.projectPromise = createProject(state.projectId, displayName);
+  state.projectPromise = createProject(displayName).then((result) => {
+    state.projectId = result.project_id;
+    state.dataset = result.project_id;
+    state.projectRevision = Number(result.project_revision || 0);
+  });
   return state.projectPromise;
 }
 function validateFile(kind, file) {

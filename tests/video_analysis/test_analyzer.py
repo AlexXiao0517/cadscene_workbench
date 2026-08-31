@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from cadscene.video_analysis.analyzer import (
+    _candidate_verification_ranges,
     _mandatory_boundaries_for_source,
     _rotation_evidence_verified,
     _scene_boundaries_for_segmentation,
@@ -15,6 +16,7 @@ from cadscene.video_analysis.models import MotionMode
 from cadscene.video_analysis.artifacts import REQUIRED_ARTIFACTS
 from cadscene.video_analysis.models import BoundaryEvidence
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
+from cadscene.video_analysis.shot_detection import FramePairEvidence
 
 
 def _make_short_video(path: Path) -> Path:
@@ -54,7 +56,9 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
     )
 
     output = tmp_path / "run" / "02_video_analysis"
-    assert published == output / "analysis_revisions" / "analysis-test-0001"
+    assert published.parent == output / "analysis_revisions"
+    assert published.name.startswith("r-")
+    assert len(published.name) == 18
     assert all((output / name).is_file() for name in REQUIRED_ARTIFACTS)
 
     metadata = json.loads((output / "video_metadata.json").read_text(encoding="utf-8"))
@@ -281,3 +285,47 @@ def test_short_black_transition_uses_first_stable_nonblack_boundary() -> None:
     )
 
     assert [boundary.pts_sec for boundary in selected] == [5.12, 20.0]
+
+
+def test_opening_black_transition_is_kept_as_diagnostic_but_not_a_scene_cut() -> None:
+    opening = BoundaryEvidence(
+        2.002, ("black_frame", "exposure_discontinuity"), 0.98
+    )
+    actual_cut = BoundaryEvidence(20.0, ("image_discontinuity",), 0.94)
+
+    selected = _scene_boundaries_for_segmentation(
+        [opening, actual_cut],
+        source_start_pts_sec=0.0,
+        source_end_pts_sec=100.0,
+        recent_frame_lumas=[90.0, 90.0, 90.0],
+        opening_guard_sec=3.0,
+        terminal_guard_sec=1.0,
+    )
+
+    assert selected == [actual_cut]
+
+
+def test_candidate_verification_ranges_cover_the_entire_coarse_pair() -> None:
+    evidence = [
+        FramePairEvidence(
+            from_pts_sec=53.5535,
+            to_pts_sec=54.054,
+            image_change_score=0.5,
+            black_frame_score=0.0,
+            exposure_jump_score=0.0,
+            feature_match_count=2,
+            feature_spatial_coverage=0.0,
+            homography_inlier_ratio=0.0,
+            flow_magnitude_px=10.0,
+            flow_residual_px=20.0,
+            clarity_score=0.8,
+        )
+    ]
+
+    ranges = _candidate_verification_ranges(
+        [BoundaryEvidence(54.054, ("image_discontinuity",), 0.9)],
+        evidence,
+        margin_sec=0.1,
+    )
+
+    assert ranges == [(53.4535, 54.154)]

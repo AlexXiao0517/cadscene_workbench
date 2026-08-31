@@ -12,6 +12,7 @@ from cadscene.alignment.quality import (
     load_sfm_camera_path,
     quality_report,
 )
+from cadscene.cli._progress import write_progress_sidecar
 from cadscene.core.artifacts import ArtifactManager
 from cadscene.core.io import read_json, write_csv_utf8_sig, write_json, write_text
 
@@ -38,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--suggestion-risk-threshold", type=float, default=0.65)
     parser.add_argument("--seg-dir", default=None)
     parser.add_argument("--no-suggestion-samples", action="store_true")
+    parser.add_argument("--progress-file", default=None)
+    parser.add_argument("--progress-start", type=float, default=0.10)
+    parser.add_argument("--progress-evaluation-end", type=float, default=0.45)
+    parser.add_argument("--progress-end", type=float, default=0.55)
     return parser
 
 
@@ -64,6 +69,11 @@ def _write_optional_plot(path: Path, timeline: list[dict]) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not 0.0 <= args.progress_start <= args.progress_evaluation_end <= args.progress_end < 1.0:
+        parser.error("quality progress bounds must satisfy 0 <= start <= evaluation-end <= end < 1")
+    progress_path = Path(args.progress_file) if args.progress_file else None
+    if progress_path is not None:
+        write_progress_sidecar(progress_path, "quality_prepare", "正在准备质量评估", args.progress_start)
     manager = ArtifactManager(output_root=args.output_root, dataset=args.dataset, run_id=args.run_id)
     stage_dir = manager.stage_dir("quality", "04_quality")
     sfm_rows = load_sfm_camera_path(args.sfm_camera_path)
@@ -80,12 +90,33 @@ def main(argv: list[str] | None = None) -> int:
         suggestion_risk_threshold=args.suggestion_risk_threshold,
         seg_dir=args.seg_dir,
     )
+    last_reported_fraction = args.progress_start
+
+    def report_evaluation_progress(completed: int, total: int) -> None:
+        nonlocal last_reported_fraction
+        if progress_path is None:
+            return
+        ratio = float(completed) / max(1, int(total))
+        fraction = args.progress_start + (
+            args.progress_evaluation_end - args.progress_start
+        ) * ratio
+        if completed < total and fraction - last_reported_fraction < 0.005:
+            return
+        write_progress_sidecar(
+            progress_path,
+            "quality_frames",
+            f"正在分析质量帧 {completed}/{total}",
+            fraction,
+        )
+        last_reported_fraction = fraction
+
     result = evaluate_quality(
         sfm_camera_path_rows=sfm_rows,
         alignment_json=alignment,
         web_camera_track=web_track,
         trajectory_json=trajectory,
         config=config,
+        progress_callback=report_evaluation_progress,
     )
     diag_warning = _write_optional_plot(stage_dir / "quality_diagnostics.png", result.timeline)
     if diag_warning:
@@ -146,6 +177,13 @@ def main(argv: list[str] | None = None) -> int:
         },
         status="success",
     )
+    if progress_path is not None:
+        write_progress_sidecar(
+            progress_path,
+            "quality_outputs",
+            "质量评估产物已生成",
+            args.progress_end,
+        )
     print(f"quality outputs written to {stage_dir}")
     return 0
 
