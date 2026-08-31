@@ -68,7 +68,7 @@ _WORKBENCH_CREATE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workbench-sessions$"
 )
 _WORKBENCH_SESSION = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready))?$"
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready|resume))?$"
 )
 
 
@@ -235,6 +235,10 @@ class ProjectApi:
                 )
             if match and method == "POST" and match["action"] == "trajectory-ready":
                 return self._attach_workbench_trajectory(
+                    match["project"], match["token"], payload
+                )
+            if match and method == "POST" and match["action"] == "resume":
+                return self._update_workbench_resume(
                     match["project"], match["token"], payload
                 )
             return ApiResponse(404, {"error": "project_api_not_found"})
@@ -1138,6 +1142,50 @@ class ProjectApi:
             },
         )
 
+    def _update_workbench_resume(
+        self, project_id: str, token: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
+        expected = payload.get("expected_resume_revision")
+        if expected is not None and (
+            not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
+        ):
+            raise ValueError("expected_resume_revision must be null or non-negative")
+        operation_id = payload.get("operation_id")
+        workflow_stage = payload.get("workflow_stage")
+        source_pts = payload.get("source_pts")
+        source_time_base = payload.get("source_time_base")
+        if not isinstance(operation_id, str):
+            raise ValueError("operation_id is required")
+        if not isinstance(workflow_stage, str):
+            raise ValueError("workflow_stage is required")
+        if not isinstance(source_pts, int) or isinstance(source_pts, bool):
+            raise ValueError("source_pts must be an integer")
+        if not isinstance(source_time_base, Mapping):
+            raise ValueError("source_time_base is required")
+        state = self.workbench.update_resume(
+            project_id,
+            token,
+            expected_resume_revision=expected,
+            operation_id=operation_id,
+            workflow_stage=workflow_stage,
+            source_pts=source_pts,
+            source_time_base=source_time_base,
+            quality_revision=_optional_revision(payload.get("quality_revision")),
+            render_revision=_optional_revision(payload.get("render_revision")),
+        )
+        session = self.workbench.inspect(project_id, token)
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "resume_state": state.to_dict(),
+            },
+        )
+
     def _mutate_workbench_session(
         self,
         project_id: str,
@@ -1631,3 +1679,11 @@ def _analysis_request_key(source_assets: Mapping[str, object]) -> str | None:
         fingerprints["srt"] = str(srt["sha256"])
     payload = json.dumps(fingerprints, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("ascii")).hexdigest()
+
+
+def _optional_revision(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ValueError("revision must be null or a non-empty trimmed string")
+    return value
