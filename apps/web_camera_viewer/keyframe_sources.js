@@ -37,5 +37,38 @@
     return legacy.length >= 2 ? legacy : [];
   }
 
-  return { confirmedManualKeyframes, isConfirmedManualKeyframe };
+  function mergeFittedTrackWithManual(fittedTrack, manualTrack) {
+    const fitted = fittedTrack && typeof fittedTrack === "object" ? fittedTrack : null;
+    const manual = manualTrack && typeof manualTrack === "object" ? manualTrack : null;
+    if (!fitted) return manual;
+    if (!manual) return fitted;
+
+    const fittedFrames = Array.isArray(fitted.keyframes) ? fitted.keyframes : [];
+    if (fittedFrames.length === 0) return manual;
+    const manualFrames = confirmedManualKeyframes(manual.keyframes);
+    const byFrame = new Map();
+    for (const keyframe of fittedFrames) {
+      const frame = Number(keyframe?.frame);
+      if (!Number.isFinite(frame) || !keyframe?.camera) continue;
+      byFrame.set(frame, keyframe);
+    }
+    for (const keyframe of manualFrames) {
+      const frame = Number(keyframe?.frame);
+      if (!Number.isFinite(frame)) continue;
+      // 同一源帧始终以用户最后确认的人工关键帧为准。
+      byFrame.set(frame, keyframe);
+    }
+    return {
+      ...fitted,
+      keyframes: [...byFrame.values()].sort(
+        (left, right) => Number(left.frame) - Number(right.frame),
+      ),
+    };
+  }
+
+  return {
+    confirmedManualKeyframes,
+    isConfirmedManualKeyframe,
+    mergeFittedTrackWithManual,
+  };
 });
