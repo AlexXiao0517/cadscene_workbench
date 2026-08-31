@@ -7,6 +7,8 @@ const state = {
   view: localStorage.getItem(VIEW_KEY) === "list" ? "list" : "cards",
   loading: false,
   editingProjectId: null,
+  selectedProjectIds: new Set(),
+  deleting: false,
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -49,6 +51,49 @@ function formatTime(value) {
 
 function statusLabel(status) {
   return ({new: "新建", ready: "待处理", processing: "处理中", completed: "已完成", failed: "需要处理", unavailable: "不可读取"})[status] || status;
+}
+
+function projectSelectable(project) {
+  return project.openable && Number.isInteger(project.revision) && Number(project.running_job_count || 0) === 0;
+}
+
+function selectedProjects() {
+  return state.projects.filter((project) => state.selectedProjectIds.has(project.project_id) && projectSelectable(project));
+}
+
+function updateSelectionUi() {
+  const selected = selectedProjects();
+  const selectable = state.projects.filter(projectSelectable);
+  const button = $("#deleteSelectedButton");
+  button.disabled = state.deleting || selected.length === 0;
+  $("#deleteButtonLabel").textContent = selected.length ? `删除项目 (${selected.length})` : "删除项目";
+  const selectAll = $("#selectAllProjects");
+  selectAll.disabled = state.deleting || selectable.length === 0;
+  selectAll.checked = selectable.length > 0 && selected.length === selectable.length;
+  selectAll.indeterminate = selected.length > 0 && selected.length < selectable.length;
+}
+
+function toggleProjectSelection(project, selected) {
+  if (!projectSelectable(project) || state.deleting) return;
+  if (selected) state.selectedProjectIds.add(project.project_id);
+  else state.selectedProjectIds.delete(project.project_id);
+  renderProjects();
+}
+
+function createSelectionControl(project, location) {
+  const holder = document.createElement("label");
+  holder.className = `selection-control ${location}-selection`;
+  const input = document.createElement("input");
+  input.className = "project-selection";
+  input.type = "checkbox";
+  input.checked = state.selectedProjectIds.has(project.project_id);
+  input.disabled = !projectSelectable(project) || state.deleting;
+  input.setAttribute("aria-label", `选择项目 ${project.display_name}`);
+  if (Number(project.running_job_count || 0) > 0) holder.title = "项目仍有运行任务，暂时不能删除";
+  else if (!project.openable) holder.title = "项目当前不可读取，暂时不能删除";
+  input.addEventListener("change", () => toggleProjectSelection(project, input.checked));
+  holder.append(input);
+  return holder;
 }
 
 function openProject(project) {
@@ -147,6 +192,7 @@ function renderCards() {
   for (const project of state.projects) {
     const card = document.createElement("article");
     card.className = `project-card ${project.openable ? "" : "unavailable"}`.trim();
+    card.classList.toggle("selected", state.selectedProjectIds.has(project.project_id));
     const open = document.createElement("button");
     open.type = "button";
     open.className = "folder-open";
@@ -160,7 +206,7 @@ function renderCards() {
     time.className = "project-time";
     time.dateTime = project.updated_at || "";
     time.textContent = formatTime(project.updated_at);
-    card.append(open, nameRow(project), time);
+    card.append(createSelectionControl(project, "card"), open, nameRow(project), time);
     grid.append(card);
   }
 }
@@ -170,6 +216,10 @@ function renderList() {
   body.replaceChildren();
   for (const project of state.projects) {
     const row = document.createElement("tr");
+    row.classList.toggle("selected", state.selectedProjectIds.has(project.project_id));
+    const selectionCell = document.createElement("td");
+    selectionCell.className = "selection-column";
+    selectionCell.append(createSelectionControl(project, "list"));
     const nameCell = document.createElement("td");
     nameCell.className = "table-name-cell";
     nameCell.append(nameRow(project));
@@ -192,7 +242,7 @@ function renderList() {
     status.append(pill);
     const updated = document.createElement("td");
     updated.textContent = formatTime(project.updated_at);
-    row.append(nameCell, assets, completion, status, updated);
+    row.append(selectionCell, nameCell, assets, completion, status, updated);
     body.append(row);
   }
 }
@@ -208,6 +258,7 @@ function renderProjects() {
   $("#listViewButton").classList.toggle("active", state.view === "list");
   $("#cardViewButton").setAttribute("aria-pressed", String(state.view === "cards"));
   $("#listViewButton").setAttribute("aria-pressed", String(state.view === "list"));
+  updateSelectionUi();
   if (!hasProjects) return;
   renderCards();
   renderList();
@@ -235,6 +286,8 @@ async function loadProjects() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "项目库读取失败");
     state.projects = Array.isArray(payload.projects) ? payload.projects : [];
+    const currentIds = new Set(state.projects.map((project) => project.project_id));
+    state.selectedProjectIds = new Set([...state.selectedProjectIds].filter((projectId) => currentIds.has(projectId)));
     setMessage(state.projects.length ? `共 ${state.projects.length} 个项目` : "");
   } catch (error) {
     state.projects = [];
@@ -247,10 +300,88 @@ async function loadProjects() {
   }
 }
 
+function openDeleteDialog() {
+  const projects = selectedProjects();
+  if (!projects.length || state.deleting) return;
+  const list = $("#deleteProjectList");
+  list.replaceChildren();
+  for (const project of projects) {
+    const item = document.createElement("li");
+    item.textContent = project.display_name;
+    list.append(item);
+  }
+  $("#deleteProjectDialog").showModal();
+}
+
+function deletionFailureMessage(project, payload) {
+  if (payload?.error === "revision_conflict") return `${project.display_name} 已被更新，请刷新后重试`;
+  if (payload?.error === "project_deletion_blocked") {
+    return payload.reason === "active_jobs"
+      ? `${project.display_name} 仍有任务运行，请先取消或等待完成`
+      : `${project.display_name} 仍在工作台中打开，请先关闭工作台`;
+  }
+  return `${project.display_name}：${payload?.message || payload?.error || "删除失败"}`;
+}
+
+async function deleteSelectedProjects() {
+  const projects = selectedProjects();
+  if (!projects.length || state.deleting) return;
+  state.deleting = true;
+  updateSelectionUi();
+  $("#confirmDeleteButton").disabled = true;
+  setMessage(`正在删除 ${projects.length} 个项目工作空间…`);
+  const failures = [];
+  let deleted = 0;
+  try {
+    for (const project of projects) {
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(project.project_id)}`, {
+          method: "DELETE",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            expected_revision: project.revision,
+            confirmation: project.project_id,
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          failures.push(deletionFailureMessage(project, payload));
+          continue;
+        }
+        state.selectedProjectIds.delete(project.project_id);
+        deleted += 1;
+      } catch (_error) {
+        failures.push(`${project.display_name}：无法连接服务`);
+      }
+    }
+    $("#deleteProjectDialog").close();
+    await loadProjects();
+    if (failures.length) {
+      setMessage(`已删除 ${deleted} 个项目；${failures.join("；")}`, true);
+    } else {
+      setMessage(`已永久删除 ${deleted} 个项目工作空间，外部源文件未删除`);
+    }
+  } finally {
+    state.deleting = false;
+    $("#confirmDeleteButton").disabled = false;
+    renderProjects();
+  }
+}
+
 $("#cardViewButton").addEventListener("click", () => setView("cards"));
 $("#listViewButton").addEventListener("click", () => setView("list"));
 $("#refreshButton").addEventListener("click", loadProjects);
 $("#retryButton").addEventListener("click", loadProjects);
+$("#deleteSelectedButton").addEventListener("click", openDeleteDialog);
+$("#confirmDeleteButton").addEventListener("click", deleteSelectedProjects);
+$("#selectAllProjects").addEventListener("change", (event) => {
+  const selected = event.currentTarget.checked;
+  for (const project of state.projects.filter(projectSelectable)) {
+    if (selected) state.selectedProjectIds.add(project.project_id);
+    else state.selectedProjectIds.delete(project.project_id);
+  }
+  renderProjects();
+});
 $("#sidebarThemeToggle").addEventListener("click", () => {
   const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
   window.localStorage.setItem(THEME_STORAGE_KEY, theme);
