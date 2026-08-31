@@ -2686,19 +2686,34 @@
   }
 
   async function loadTrackFromPaths(paths) {
-    // 优先使用对齐后的轨迹；未对齐时回读本 run 已保存的人工关键帧。
-    for (const path of paths.filter(Boolean)) {
+    const candidates = paths.filter(Boolean);
+    const loadPayload = async (path) => {
       try {
         const response = await fetch(path, { cache: "no-store" });
-        if (!response.ok) continue;
-        applyTrackPayload(await response.json());
+        if (!response.ok) return null;
+        const payload = await response.json();
         console.info(`[cadscene viewer] loaded camera track: ${path}`);
-        return true;
+        return payload;
       } catch (error) {
         console.warn(`[cadscene viewer] camera track load failed: ${path}`, error);
+        return null;
       }
+    };
+
+    // 拟合轨迹提供连续播放，人工轨迹提供拟合后新增或修改的最新锚点。
+    const fitted = candidates.length > 0 ? await loadPayload(candidates[0]) : null;
+    let manual = null;
+    for (const path of candidates.slice(1)) {
+      manual = await loadPayload(path);
+      if (manual) break;
     }
-    return false;
+    const merged = window.CadsceneKeyframes.mergeFittedTrackWithManual(
+      fitted,
+      manual,
+    );
+    if (!merged) return false;
+    applyTrackPayload(merged);
+    return true;
   }
 
   function setReviewStatus(message) {
