@@ -3832,3 +3832,151 @@ def test_pending_save_blocks_replacement_even_after_editing_expiry(
     )
     assert blocked.status == 403
     assert "pending workbench save" in blocked.body["error"]
+
+
+def test_workbench_resume_endpoint_persists_pts_and_is_returned_by_session(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    updated = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/resume",
+        json_body={
+            "expected_resume_revision": None,
+            "operation_id": "resume-operation-1",
+            "workflow_stage": "keyframes",
+            "source_pts": 37,
+            "source_time_base": {"numerator": 1, "denominator": 25},
+            "quality_revision": None,
+            "render_revision": None,
+        },
+    )
+
+    assert updated.status == 200
+    assert updated.body["resume_state"] == {
+        "schema_version": "1.0",
+        "revision": 0,
+        "operation_id": "resume-operation-1",
+        "updated_at": "2026-08-04T08:00:00Z",
+        "project_id": "project-1",
+        "clip_id": "clip-1",
+        "workflow_stage": "keyframes",
+        "source_pts": 37,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+        "trajectory_output_revision": "trajectory-output-1",
+        "workbench_output_revision": None,
+        "quality_revision": None,
+        "render_revision": None,
+    }
+    inspected = api.handle(
+        "GET",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}",
+    )
+    assert inspected.status == 200
+    assert inspected.body["resume_state"] == updated.body["resume_state"]
+
+
+def test_workbench_resume_endpoint_rejects_stale_resume_revision(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    path = (
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/resume"
+    )
+    payload = {
+        "expected_resume_revision": None,
+        "operation_id": "resume-operation-1",
+        "workflow_stage": "keyframes",
+        "source_pts": 37,
+        "source_time_base": {"numerator": 1, "denominator": 25},
+    }
+    assert api.handle("POST", path, json_body=payload).status == 200
+
+    conflict = api.handle(
+        "POST",
+        path,
+        json_body={**payload, "operation_id": "resume-operation-2"},
+    )
+
+    assert conflict.status == 409
+    assert conflict.body["error"] == "revision_conflict"
+    assert conflict.body["current_revision"] == 0
+
+
+def test_workbench_resume_stage_is_downgraded_when_required_artifact_is_missing(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    updated = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/resume",
+        json_body={
+            "expected_resume_revision": None,
+            "operation_id": "resume-operation-1",
+            "workflow_stage": "render",
+            "source_pts": 37,
+            "source_time_base": {"numerator": 1, "denominator": 25},
+            "render_revision": "render-1",
+        },
+    )
+
+    assert updated.status == 200
+    assert updated.body["resume_state"]["workflow_stage"] == "keyframes"
+    session = api.workbench.inspect("project-1", opened.body["token"])
+    assert parse_qs(urlsplit(api.workbench.workbench_url(session)).query)[
+        "workflowStage"
+    ] == ["keyframes"]
+
+
+def test_workbench_session_ignores_corrupt_resume_record(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    record = (
+        tmp_path
+        / "projects/project-1/workbench_resume/clip-1.json"
+    )
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("{", encoding="utf-8")
+
+    inspected = api.handle(
+        "GET",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}",
+    )
+
+    assert inspected.status == 200
+    assert inspected.body["resume_state"] is None

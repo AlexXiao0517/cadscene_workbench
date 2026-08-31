@@ -20,6 +20,7 @@ from .json_repositories import ProjectRepositories
 from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
+from .workbench_resume import AtomicWorkbenchResumeStore, WorkbenchResumeState
 from .scene_bridge_runner import validate_scene_bridge_candidate
 from .service import ProjectService
 from cadscene.alignment.keyframes import confirmed_keyframes
@@ -852,6 +853,7 @@ class ProjectWorkbenchService:
         self.projects_root = projects_root
         self.viewer_runs_root = viewer_runs_root.resolve(strict=False)
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.resume_store = AtomicWorkbenchResumeStore(projects_root, now=self.now)
         self.coordinator = WorkbenchSessionCoordinator(
             store=session_store,
             outputs_root=projects_root,
@@ -1255,6 +1257,43 @@ class ProjectWorkbenchService:
                 allow_saved_repair=session.state == "saved",
             )
             return self.coordinator.inspect(project_id, token)
+
+    def update_resume(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        expected_resume_revision: int | None,
+        operation_id: str,
+        workflow_stage: str,
+        source_pts: int,
+        source_time_base: Mapping[str, object],
+        quality_revision: str | None,
+        render_revision: str | None,
+    ) -> WorkbenchResumeState:
+        """Persist browser navigation state after validating the live session."""
+
+        session = self.inspect(project_id, token)
+        stage = self._validated_resume_stage(session, workflow_stage)
+        if stage not in {"quality", "render"}:
+            quality_revision = None
+        if stage != "render":
+            render_revision = None
+        return self.resume_store.update(
+            project_id,
+            session.clip_id,
+            expected_revision=expected_resume_revision,
+            operation_id=operation_id,
+            workflow_stage=stage,
+            source_pts=source_pts,
+            source_time_base=source_time_base,
+            trajectory_output_revision=(
+                session.trajectory_output_revision or None
+            ),
+            workbench_output_revision=session.workbench_output_revision,
+            quality_revision=quality_revision,
+            render_revision=render_revision,
+        )
 
     def attach_trajectory(
         self,
@@ -1679,14 +1718,7 @@ class ProjectWorkbenchService:
             "projectId": session.project_id,
             "runId": session.trajectory_run_id,
             "projectWorkbenchToken": session.token,
-            "workflowStage": (
-                "render"
-                if session.workbench_output_revision
-                and session.workbench_output_fingerprint
-                else (
-                    "keyframes" if session.launch_mode == "trajectory_ready" else "sfm"
-                )
-            ),
+            "workflowStage": self._resume_workflow_stage(session),
             "video": f"/data/{dataset}/video/{dataset}.mp4",
             "cad": f"/data/{dataset}/cad/design.json",
             "cadScale": "0.06",
@@ -1708,8 +1740,7 @@ class ProjectWorkbenchService:
                 parameters["initialFrame"] = target_frame
         return "/apps/web_camera_viewer/?" + urlencode(parameters)
 
-    @staticmethod
-    def session_payload(session: WorkbenchSession) -> dict[str, object]:
+    def session_payload(self, session: WorkbenchSession) -> dict[str, object]:
         return {
             "token": session.token,
             "project_id": session.project_id,
@@ -1724,7 +1755,75 @@ class ProjectWorkbenchService:
             "save_permissions": list(session.save_permissions),
             "session_revision": session.revision,
             "workbench_output_revision": session.workbench_output_revision,
+            "resume_state": self._resume_payload(session),
         }
+
+    def _resume_payload(self, session: WorkbenchSession) -> dict[str, object] | None:
+        state = self.resume_store.load_optional(session.project_id, session.clip_id)
+        if state is None:
+            return None
+        payload = state.to_dict()
+        payload["workflow_stage"] = self._validated_resume_stage(
+            session, state.workflow_stage, state=state
+        )
+        return payload
+
+    def _resume_workflow_stage(self, session: WorkbenchSession) -> str:
+        resume = self._resume_payload(session)
+        if resume is not None:
+            return str(resume["workflow_stage"])
+        if session.workbench_output_revision and session.workbench_output_fingerprint:
+            return "render"
+        return "keyframes" if session.launch_mode == "trajectory_ready" else "sfm"
+
+    def _validated_resume_stage(
+        self,
+        session: WorkbenchSession,
+        requested: str,
+        *,
+        state: WorkbenchResumeState | None = None,
+    ) -> str:
+        if requested not in {"sfm", "keyframes", "quality", "render"}:
+            raise ValueError(f"unsupported workflow_stage: {requested}")
+        trajectory_ready = bool(
+            session.launch_mode == "trajectory_ready"
+            and session.trajectory_output_revision
+            and session.trajectory_output_fingerprint
+        )
+        if state is not None and state.trajectory_output_revision != (
+            session.trajectory_output_revision or None
+        ):
+            requested = "keyframes" if trajectory_ready else "sfm"
+        if not trajectory_ready:
+            return "sfm"
+        if requested in {"sfm", "keyframes"}:
+            return "keyframes"
+        if not self._has_fitted_track(session):
+            return "keyframes"
+        if requested == "quality":
+            return "quality"
+        if (
+            session.workbench_output_revision
+            and session.workbench_output_fingerprint
+            and (
+                state is None
+                or state.workbench_output_revision
+                == session.workbench_output_revision
+            )
+        ):
+            return "render"
+        return "quality"
+
+    def _has_fitted_track(self, session: WorkbenchSession) -> bool:
+        relative_candidates = (
+            Path("03_alignment/camera_track_pred.json"),
+            Path("03_pure_rotation_placement/camera_track_cad_base.json"),
+        )
+        return any(
+            (root / relative).is_file()
+            for root in self._bound_workbench_run_roots(session)
+            for relative in relative_candidates
+        )
 
     @staticmethod
     def _adjacent_clip(
