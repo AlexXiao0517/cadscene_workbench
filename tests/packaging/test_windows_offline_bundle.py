@@ -134,7 +134,9 @@ def test_start_launcher_uses_only_bundle_local_runtime_and_storage() -> None:
     assert 'Join-Path $bundleRoot "workspace"' in source
     assert 'Join-Path $bundleRoot "pure_rotation_backend"' in source
     assert 'Join-Path $bundleRoot "logs"' in source
-    assert "conda-unpack.exe" in source
+    assert 'Join-Path $runtime "Scripts\\conda-unpack-script.py"' in source
+    assert "& $python $unpackScript" in source
+    assert "& $unpacker" not in source
     assert ".cadscene-relocated" in source
     assert '"doctor"' in source
     assert '"serve"' in source
@@ -159,7 +161,7 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
     assert "$maxSafePathLength = 240" in source
     assert "Windows 路径过长" in source
     assert "请把包含启动文件的程序目录直接移动到较短位置，例如 D:\\CADScene" in source
-    assert source.index("Assert-PathBudget") < source.index("conda-unpack.exe")
+    assert source.index("Assert-PathBudget") < source.index("conda-unpack-script.py")
 
     previous_workspace = Path(
         r"D:\CADWORK\CADScene-0.1.1\CADScene-0.1.0\workspace"
@@ -266,6 +268,9 @@ def _write_fake_runtime_archive(path: Path) -> None:
     (source / "Scripts").mkdir(parents=True)
     (source / "python.exe").write_bytes(b"python")
     (source / "Scripts" / "conda-unpack.exe").write_bytes(b"unpack")
+    (source / "Scripts" / "conda-unpack-script.py").write_text(
+        "# fake unpack script\n", encoding="utf-8"
+    )
     with tarfile.open(path, "w:gz") as archive:
         for item in sorted(source.rglob("*")):
             archive.add(item, arcname=item.relative_to(source).as_posix())
@@ -339,7 +344,7 @@ def test_verify_bundle_rejects_missing_runtime_tool(tmp_path: Path) -> None:
     layout.runtime.mkdir(parents=True)
     (layout.runtime / "python.exe").write_bytes(b"python")
 
-    with pytest.raises(ValueError, match="conda-unpack.exe"):
+    with pytest.raises(ValueError, match="conda-unpack-script.py"):
         verify_bundle(layout.root, config=config)
 
 

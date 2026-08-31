@@ -119,11 +119,11 @@ try {
     $env:PYTHONIOENCODING = "utf-8"
     Set-Location -LiteralPath $bundleRoot
     if (-not (Test-Path -LiteralPath $relocatedMarker -PathType Leaf)) {
-        $unpacker = Join-Path $runtime "Scripts\conda-unpack.exe"
-        if (-not (Test-Path -LiteralPath $unpacker -PathType Leaf)) {
-            throw "Bundled runtime relocation tool is missing: $unpacker"
+        $unpackScript = Join-Path $runtime "Scripts\conda-unpack-script.py"
+        if (-not (Test-Path -LiteralPath $unpackScript -PathType Leaf)) {
+            throw "Bundled runtime relocation tool is missing: $unpackScript"
         }
-        & $unpacker
+        & $python $unpackScript
         if ($LASTEXITCODE -ne 0) {
             throw "Bundled runtime relocation failed with exit code $LASTEXITCODE."
         }

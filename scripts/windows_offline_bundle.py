@@ -276,7 +276,7 @@ def assemble_bundle(
     )
     critical = (
         layout.runtime / "python.exe",
-        layout.runtime / "Scripts" / "conda-unpack.exe",
+        layout.runtime / "Scripts" / "conda-unpack-script.py",
         layout.backend / "scripts" / "run_full_video_exploration.py",
         layout.backend / "outputs" / "build_opengv_cli" / "opengv_rotation_cli.exe",
         *native_runtime,
@@ -308,7 +308,7 @@ def verify_bundle(root: str | Path, *, config: ReleaseConfig) -> None:
     layout = BundleLayout(Path(root))
     required = (
         layout.runtime / "python.exe",
-        layout.runtime / "Scripts" / "conda-unpack.exe",
+        layout.runtime / "Scripts" / "conda-unpack-script.py",
         layout.backend / "scripts" / "run_full_video_exploration.py",
         layout.backend / "outputs" / "build_opengv_cli" / "opengv_rotation_cli.exe",
         layout.root / "启动CAD视频工作台.cmd",
