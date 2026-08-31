@@ -1023,6 +1023,18 @@ def test_quality_can_finish_into_render_and_dormant_review_controls_are_hidden()
     assert html.count("workflow-hidden-control") >= 4
 
 
+def test_viewer_honors_authoritative_initial_frame_from_workbench_url() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert 'get("initialFrame")' in viewer
+    assert "Number.parseInt" in viewer
+    assert "function waitForVideoMetadata" in viewer
+    assert 'video.addEventListener("error", onError, { once: true })' in viewer
+    assert "初始定位失败：视频元数据无法加载" in viewer
+    assert "await waitForVideoMetadata()" in viewer
+    assert "await goToFrame(initialFrame)" in viewer
+
+
 def test_sfm_workflow_reenables_finish_quality_after_manifest_mode_is_confirmed() -> None:
     script = _read("workflow.js")
 

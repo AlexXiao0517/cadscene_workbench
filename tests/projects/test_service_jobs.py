@@ -647,9 +647,18 @@ def test_existing_physical_clip_skips_export_without_exporting_other_clips(
     tmp_path: Path,
 ) -> None:
     physical = tmp_path / "one.mp4"
+    frame_map = tmp_path / "one-frame-map.json"
     physical.write_bytes(b"clip")
+    frame_map.write_text("{}", encoding="utf-8")
     one = clip("one")
-    one = replace(one, analysis={**one.analysis, "physical_mp4_path": str(physical)})
+    one = replace(
+        one,
+        analysis={
+            **one.analysis,
+            "physical_mp4_path": str(physical),
+            "frame_map_path": str(frame_map),
+        },
+    )
     service, _repositories, queue = service_with_clips(tmp_path, (one, clip("two")))
 
     service.enqueue_trajectory_jobs("p1", clip_ids=("one",))

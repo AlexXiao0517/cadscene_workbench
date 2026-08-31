@@ -1143,6 +1143,14 @@ class LocalResourceQueue:
             self._jobs[job_id] = replace(
                 current.with_status("failed"), error=error, output_validated=False
             )
+            lease = (attempt_number, str(claim_token))
+            self._process_controllers.pop(
+                (job_id, attempt_number, str(claim_token)), None
+            )
+            if self._execution_claims.get(job_id) == lease:
+                self._execution_claims.pop(job_id, None)
+            if self._adopted_attempts.get(job_id) == lease:
+                self._adopted_attempts.pop(job_id, None)
             self._schedule_locked()
             return self._jobs[job_id]
 

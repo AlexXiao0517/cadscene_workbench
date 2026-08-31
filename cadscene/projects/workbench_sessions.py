@@ -21,7 +21,9 @@ from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
 from .workbench_resume import AtomicWorkbenchResumeStore, WorkbenchResumeState
+from .scene_bridge_runner import validate_scene_bridge_candidate
 from .service import ProjectService
+from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 from cadscene.workflow.data_import import slugify_dataset_name
 
@@ -1004,6 +1006,11 @@ class ProjectWorkbenchService:
                     self._restore_saved_output_to_run(
                         resume_baseline, clip, context.trajectory_job_id
                     )
+            if resume_baseline is None:
+                if self._scene_bridge_reference(clip) is not None:
+                    self._restore_scene_bridge_to_run(project_id, clip)
+                else:
+                    self._restore_workbench_seed_to_run(project_id, clip)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -1032,6 +1039,197 @@ class ProjectWorkbenchService:
                 expected_revision=expected_clips_revision,
             )
             return session
+
+    def adjacent_location_capabilities(
+        self, project_id: str, source_clip_id: str
+    ) -> dict[str, object]:
+        clips = self.repositories.clips.load(project_id)
+        source = next(
+            (item for item in clips.clips if item.clip_id == source_clip_id), None
+        )
+        result: dict[str, object] = {
+            "can_locate_up": False,
+            "can_locate_down": False,
+            "locate_up_target_clip_id": None,
+            "locate_down_target_clip_id": None,
+            "locate_up_reason": None,
+            "locate_down_reason": None,
+        }
+        if source is None or source.resolved_workflow != "sfm_only":
+            return result
+        reference = self._workbench_reference(source)
+        if (
+            reference is None
+            or reference.value.get("status") != "saved"
+            or not reference.value.get("workbench_output_revision")
+        ):
+            return result
+        jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(project_id).jobs
+        )
+        source_trajectory = self.project_service._current_trajectory_for_render(
+            source, jobs
+        )
+        if not _precomputed_scene_solve_ready(source_trajectory):
+            message = "需重新轨迹反算以生成同场景重叠 SfM"
+            result["locate_up_reason"] = message
+            result["locate_down_reason"] = message
+            return result
+        for direction in ("up", "down"):
+            target = self._adjacent_clip(clips.clips, source, direction)
+            if target is None or not self._target_accepts_seed(
+                project_id, source, target, direction
+            ):
+                continue
+            target_trajectory = self.project_service._current_trajectory_for_render(
+                target, jobs
+            )
+            if not _precomputed_scene_solve_ready(target_trajectory):
+                result[f"locate_{direction}_reason"] = (
+                    "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                )
+                continue
+            result[f"can_locate_{direction}"] = True
+            result[f"locate_{direction}_target_clip_id"] = target.clip_id
+        return result
+
+    def locate_adjacent(
+        self,
+        project_id: str,
+        source_clip_id: str,
+        *,
+        direction: str,
+        return_to: str,
+        expected_clips_revision: int,
+    ) -> tuple[WorkbenchSession | None, str]:
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be up or down")
+        with self.project_service._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            self._require_clips_revision(
+                current.revision, expected_clips_revision, project_id
+            )
+            source = next(
+                (item for item in current.clips if item.clip_id == source_clip_id),
+                None,
+            )
+            if source is None:
+                raise KeyError(f"unknown clip ID: {source_clip_id}")
+            if source.resolved_workflow != "sfm_only":
+                raise WorkbenchPermissionDenied("只有已完成路线拟合的 SfM 片段可定位相邻片段")
+            target = self._adjacent_clip(current.clips, source, direction)
+            if target is None:
+                raise WorkbenchPermissionDenied("同场景没有可定位的相邻片段")
+            if not self._target_accepts_seed(
+                project_id, source, target, direction
+            ):
+                raise WorkbenchPermissionDenied("目标片段已有工作台会话或保存成果，不能覆盖")
+            reference = self._workbench_reference(source)
+            if reference is None or reference.value.get("status") != "saved":
+                raise WorkbenchPermissionDenied("源片段尚未保存路线拟合成果")
+            token_hash = reference.value.get("session_token_hash")
+            if not isinstance(token_hash, str):
+                raise InvalidWorkbenchOutput("源片段工作台凭据不可用")
+            try:
+                source_session = self.coordinator.store.load_by_token_hash(
+                    project_id, token_hash
+                )
+            except FileNotFoundError as exc:
+                raise InvalidWorkbenchOutput("源片段工作台成果不可用") from exc
+            if source_session.state != "saved":
+                raise WorkbenchPermissionDenied("源片段工作台成果尚未完成保存")
+            source_manifest, source_artifact = self._validated_saved_output(
+                source_session
+            )
+            try:
+                source_track = json.loads(
+                    source_artifact.read_text(encoding="utf-8-sig")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise InvalidWorkbenchOutput("源片段相机路线不可读") from exc
+            anchors = confirmed_keyframes(source_track)
+            if len(anchors) < 2:
+                raise InvalidWorkbenchOutput("源片段没有完整的路线起点和终点")
+            target_context = self.resolve_context(project_id, target.clip_id)
+            if not target_context.can_open_workbench:
+                if self.can_prepare(project_id, target.clip_id):
+                    return None, target.clip_id
+                raise WorkbenchPermissionDenied("目标片段视频或 CAD 尚未准备完成")
+            source_anchor = anchors[0] if direction == "up" else anchors[-1]
+            target_frame = self._target_boundary_frame(project_id, target, direction)
+            fps = float(source_track.get("fps", 0.0))
+            seed_track = {
+                "version": int(source_track.get("version", 1)),
+                "video": "",
+                "fps": fps,
+                "keyframes": [
+                    {
+                        "frame": target_frame,
+                        "time": target_frame / fps,
+                        "source": "scene_boundary_anchor",
+                        "camera": dict(source_anchor["camera"]),
+                    }
+                ],
+            }
+            _validate_manual_camera_track(seed_track)
+            existing_seed = self._workbench_seed_reference(target)
+            operation_id = uuid4().hex
+            seed_reference = existing_seed or self._publish_workbench_seed(
+                project_id=project_id,
+                source=source,
+                target=target,
+                direction=direction,
+                target_frame=target_frame,
+                source_session=source_session,
+                source_manifest=source_manifest,
+                seed_track=seed_track,
+                operation_id=operation_id,
+            )
+
+            def publish_seed(manifest):
+                updated_clips = []
+                for clip in manifest.clips:
+                    if clip.clip_id != target.clip_id:
+                        updated_clips.append(clip)
+                        continue
+                    references = tuple(
+                        item
+                        for item in clip.references
+                        if not (
+                            item.owner == "clips"
+                            and item.key == f"workbench_seed:{target.clip_id}"
+                        )
+                    )
+                    updated_clips.append(
+                        replace(
+                            clip,
+                            references=(*references, seed_reference),
+                            operation_id=operation_id,
+                        )
+                    )
+                return replace(
+                    manifest,
+                    clips=tuple(updated_clips),
+                    operation_id=operation_id,
+                )
+
+            seeded = (
+                current
+                if existing_seed is not None
+                else self.repositories.clips.update(
+                    project_id,
+                    expected_revision=current.revision,
+                    mutate=publish_seed,
+                )
+            )
+            session = self.open(
+                project_id,
+                target.clip_id,
+                return_to=return_to,
+                expected_clips_revision=seeded.revision,
+            )
+            return session, target.clip_id
 
     def inspect(self, project_id: str, token: str) -> WorkbenchSession:
         with self.project_service._state_guard(project_id):
@@ -1423,6 +1621,32 @@ class ProjectWorkbenchService:
         )
 
     @staticmethod
+    def _workbench_seed_reference(clip: ClipDefinition) -> StateReference | None:
+        return next(
+            (
+                item
+                for item in reversed(clip.references)
+                if item.owner == "clips"
+                and item.key == f"workbench_seed:{clip.clip_id}"
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _scene_bridge_reference(clip: ClipDefinition) -> StateReference | None:
+        return next(
+            (
+                item
+                for item in reversed(clip.references)
+                if item.owner == "jobs"
+                and item.value.get("reference_type") == "scene_bridge"
+                and item.value.get("target_clip_id") == clip.clip_id
+                and item.value.get("status") == "awaiting_route_refinement"
+            ),
+            None,
+        )
+
+    @staticmethod
     def _require_session_reference(
         session: WorkbenchSession,
         reference: StateReference | None,
@@ -1489,19 +1713,32 @@ class ProjectWorkbenchService:
         from urllib.parse import urlencode
 
         dataset = self._workbench_dataset_id(session.project_id, session.clip_id)
-        return "/apps/web_camera_viewer/?" + urlencode(
-            {
-                "dataset": dataset,
-                "projectId": session.project_id,
-                "runId": session.trajectory_run_id,
-                "projectWorkbenchToken": session.token,
-                "workflowStage": self._resume_workflow_stage(session),
-                "video": f"/data/{dataset}/video/{dataset}.mp4",
-                "cad": f"/data/{dataset}/cad/design.json",
-                "cadScale": "0.06",
-                "originXY": "0,0",
-            }
-        )
+        parameters: dict[str, object] = {
+            "dataset": dataset,
+            "projectId": session.project_id,
+            "runId": session.trajectory_run_id,
+            "projectWorkbenchToken": session.token,
+            "workflowStage": self._resume_workflow_stage(session),
+            "video": f"/data/{dataset}/video/{dataset}.mp4",
+            "cad": f"/data/{dataset}/cad/design.json",
+            "cadScale": "0.06",
+            "originXY": "0,0",
+        }
+        if not session.workbench_output_revision:
+            clips = self.repositories.clips.load(session.project_id)
+            clip = next(
+                (item for item in clips.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            seed = None if clip is None else self._workbench_seed_reference(clip)
+            target_frame = None if seed is None else seed.value.get("target_frame")
+            if (
+                isinstance(target_frame, int)
+                and not isinstance(target_frame, bool)
+                and target_frame >= 0
+            ):
+                parameters["initialFrame"] = target_frame
+        return "/apps/web_camera_viewer/?" + urlencode(parameters)
 
     def session_payload(self, session: WorkbenchSession) -> dict[str, object]:
         return {
@@ -1587,6 +1824,366 @@ class ProjectWorkbenchService:
             for root in self._bound_workbench_run_roots(session)
             for relative in relative_candidates
         )
+
+    @staticmethod
+    def _adjacent_clip(
+        clips: tuple[ClipDefinition, ...],
+        source: ClipDefinition,
+        direction: str,
+    ) -> ClipDefinition | None:
+        scene_index = int(source.analysis.get("scene_index", 1))
+        same_scene = sorted(
+            (
+                clip
+                for clip in clips
+                if int(clip.analysis.get("scene_index", 1)) == scene_index
+            ),
+            key=lambda clip: (
+                int(clip.analysis.get("segment_index", 1)),
+                int(clip.analysis.get("render_order", 0)),
+                clip.clip_id,
+            ),
+        )
+        source_index = next(
+            (
+                index
+                for index, clip in enumerate(same_scene)
+                if clip.clip_id == source.clip_id
+            ),
+            None,
+        )
+        if source_index is None:
+            return None
+        target_index = source_index - 1 if direction == "up" else source_index + 1
+        return same_scene[target_index] if 0 <= target_index < len(same_scene) else None
+
+    def _target_accepts_seed(
+        self,
+        project_id: str,
+        source: ClipDefinition,
+        target: ClipDefinition,
+        direction: str,
+    ) -> bool:
+        reference = self._workbench_reference(target)
+        if reference is not None:
+            status = reference.value.get("status")
+            if (
+                status in {"pending_save", "saved"}
+                or reference.value.get("workbench_output_revision")
+            ):
+                return False
+            if status == "editing" and self.snapshot_for_clip(
+                project_id, target
+            ).get("state") != "ready":
+                return False
+        context = self.resolve_context(project_id, target.clip_id)
+        if self._saved_resume_baseline(context) is not None:
+            return False
+        seed = self._workbench_seed_reference(target)
+        if seed is not None:
+            source_reference = self._workbench_reference(source)
+            if (
+                source_reference is None
+                or seed.value.get("source_clip_id") != source.clip_id
+                or seed.value.get("direction") != direction
+                or seed.value.get("source_workbench_output_revision")
+                != source_reference.value.get("workbench_output_revision")
+                or seed.value.get("source_workbench_output_fingerprint")
+                != source_reference.value.get("workbench_output_fingerprint")
+            ):
+                return False
+            try:
+                self._validated_workbench_seed(project_id, target, seed)
+            except (InvalidWorkbenchOutput, OSError, ValueError, TypeError):
+                return False
+        return context.can_open_workbench or self.can_prepare(
+            project_id, target.clip_id
+        )
+
+    def _target_boundary_frame(
+        self, project_id: str, target: ClipDefinition, direction: str
+    ) -> int:
+        if direction == "down":
+            return 0
+        jobs = self.repositories.jobs.load(project_id)
+        frame_map = self._frame_map_for_context(project_id, target, jobs.jobs)
+        if frame_map is None:
+            raise WorkbenchPermissionDenied("上一片段缺少权威 frame map，无法定位末帧")
+        try:
+            payload = json.loads(frame_map.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InvalidWorkbenchOutput("目标片段 frame map 不可读") from exc
+        frames = payload.get("frames") if isinstance(payload, Mapping) else None
+        if not isinstance(frames, list) and isinstance(payload, Mapping):
+            clip_rows = payload.get("clips")
+            selected = (
+                next(
+                    (
+                        row
+                        for row in clip_rows
+                        if isinstance(row, Mapping)
+                        and row.get("clip_id") == target.clip_id
+                    ),
+                    None,
+                )
+                if isinstance(clip_rows, list)
+                else None
+            )
+            frames = selected.get("frames") if isinstance(selected, Mapping) else None
+        if (
+            not isinstance(frames, list)
+            or not frames
+            or not isinstance(frames[-1], Mapping)
+        ):
+            raise InvalidWorkbenchOutput("目标片段 frame map 没有帧记录")
+        frame = frames[-1].get(
+            "output_frame_ordinal",
+            frames[-1].get("ordinal", len(frames) - 1),
+        )
+        if isinstance(frame, bool) or not isinstance(frame, int) or frame < 0:
+            raise InvalidWorkbenchOutput("目标片段末帧序号无效")
+        return frame
+
+    def _frame_map_for_context(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        job_payloads: tuple[Mapping[str, object], ...],
+    ) -> Path | None:
+        for key in ("frame_map_path", "clip_frame_map_path"):
+            value = clip.analysis.get(key)
+            if value and Path(str(value)).is_file():
+                return Path(str(value))
+        for payload in reversed(job_payloads):
+            if (
+                payload.get("job_type") != "clip_export"
+                or payload.get("clip_id") != clip.clip_id
+            ):
+                continue
+            candidate = QueueJob.from_dict(payload)
+            frame_map = candidate.published_outputs.get(f"frame_map:{clip.clip_id}")
+            if (
+                candidate.status == "success"
+                and candidate.output_validated
+                and candidate.validated_input_fingerprint == candidate.input_fingerprint
+                and self.project_service._current_input_fingerprint(candidate)
+                == candidate.input_fingerprint
+                and isinstance(frame_map, str)
+                and Path(frame_map).is_file()
+            ):
+                return Path(frame_map)
+        return None
+
+    def _publish_workbench_seed(
+        self,
+        *,
+        project_id: str,
+        source: ClipDefinition,
+        target: ClipDefinition,
+        direction: str,
+        target_frame: int,
+        source_session: WorkbenchSession,
+        source_manifest: Mapping[str, object],
+        seed_track: Mapping[str, object],
+        operation_id: str,
+    ) -> StateReference:
+        track_bytes = (
+            json.dumps(seed_track, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        track_hash = sha256(track_bytes).hexdigest()
+        identity = {
+            "project_id": project_id,
+            "source_clip_id": source.clip_id,
+            "target_clip_id": target.clip_id,
+            "direction": direction,
+            "target_frame": target_frame,
+            "source_workbench_output_revision": source_session.workbench_output_revision,
+            "source_workbench_output_fingerprint": source_session.workbench_output_fingerprint,
+            "source_output_revision": source_manifest.get("source_output_revision"),
+            "track_sha256": track_hash,
+            "operation_id": operation_id,
+        }
+        seed_hash = sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        revision = f"seed-{seed_hash[:16]}"
+        parent = self.projects_root / project_id / "workbench_seeds" / target.clip_id
+        parent.mkdir(parents=True, exist_ok=True)
+        target_root = parent / revision
+        temporary = Path(tempfile.mkdtemp(prefix=f".{revision}-", dir=parent))
+        try:
+            track_path = temporary / "camera_track_seed.json"
+            manifest_path = temporary / "workbench_seed_manifest.json"
+            _atomic_write_bytes(track_path, track_bytes)
+            manifest = {
+                "schema_version": 1,
+                "seed_revision": revision,
+                **identity,
+                "camera_track": {
+                    "path": "camera_track_seed.json",
+                    "sha256": track_hash,
+                    "size_bytes": len(track_bytes),
+                },
+            }
+            _atomic_write_bytes(
+                manifest_path,
+                (
+                    json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n"
+                ).encode("utf-8"),
+            )
+            os.replace(temporary, target_root)
+            _fsync_directory(parent)
+            temporary = None
+        finally:
+            if temporary is not None and temporary.exists():
+                shutil.rmtree(temporary)
+        return StateReference(
+            owner="clips",
+            key=f"workbench_seed:{target.clip_id}",
+            operation_id=operation_id,
+            value={
+                "seed_revision": revision,
+                "source_clip_id": source.clip_id,
+                "source_workbench_output_revision": source_session.workbench_output_revision,
+                "source_workbench_output_fingerprint": source_session.workbench_output_fingerprint,
+                "direction": direction,
+                "target_frame": target_frame,
+                "track_sha256": track_hash,
+            },
+        )
+
+    def _restore_workbench_seed_to_run(
+        self, project_id: str, clip: ClipDefinition
+    ) -> None:
+        reference = self._workbench_seed_reference(clip)
+        if reference is None:
+            return
+        track_bytes = self._validated_workbench_seed(project_id, clip, reference)
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        destination = (
+            self.viewer_runs_root
+            / dataset
+            / clip.clip_id
+            / "01_keyframes/camera_track_manual.json"
+        )
+        _atomic_write_bytes(destination, track_bytes)
+
+    def _restore_scene_bridge_to_run(
+        self, project_id: str, clip: ClipDefinition
+    ) -> None:
+        reference = self._scene_bridge_reference(clip)
+        if reference is None:
+            return
+        revision = reference.value.get("bridge_revision")
+        if not isinstance(revision, str) or not revision.startswith("bridge-"):
+            raise InvalidWorkbenchOutput("场景路线桥接 revision 无效")
+        root = (
+            self.projects_root
+            / project_id
+            / "scene_bridges"
+            / clip.clip_id
+            / revision
+        )
+        manifest_path = root / "scene_bridge_manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InvalidWorkbenchOutput("场景路线桥接结果不可读") from exc
+        identity = manifest.get("identity") if isinstance(manifest, Mapping) else None
+        if not isinstance(identity, Mapping):
+            raise InvalidWorkbenchOutput("场景路线桥接身份缺失")
+        validated = validate_scene_bridge_candidate(root, identity)
+        if (
+            validated.status != "success"
+            or validated.output_revision != revision
+            or validated.output_fingerprint
+            != reference.value.get("output_fingerprint")
+            or identity.get("project_id") != project_id
+            or identity.get("target_clip_id") != clip.clip_id
+            or identity.get("source_clip_id")
+            != reference.value.get("source_clip_id")
+            or identity.get("direction") != reference.value.get("direction")
+        ):
+            raise InvalidWorkbenchOutput("场景路线桥接结果校验失败")
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        run = self.viewer_runs_root / dataset / clip.clip_id
+        _atomic_write_bytes(
+            run / "01_keyframes/camera_track_manual.json",
+            (root / "camera_track_seed.json").read_bytes(),
+        )
+        for stage in ("03_alignment", "05_viewer_scene"):
+            source = root / "core_alignment" / stage
+            destination = run / stage
+            temporary = run / f".{stage}.{uuid4().hex}.tmp"
+            stale = run / f".{stage}.{uuid4().hex}.stale"
+            shutil.copytree(source, temporary)
+            moved_old = False
+            try:
+                if destination.exists():
+                    os.replace(destination, stale)
+                    moved_old = True
+                os.replace(temporary, destination)
+                _fsync_directory(run)
+            except Exception:
+                if moved_old and stale.exists() and not destination.exists():
+                    os.replace(stale, destination)
+                raise
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+                if stale.exists():
+                    shutil.rmtree(stale)
+
+    def _validated_workbench_seed(
+        self,
+        project_id: str,
+        clip: ClipDefinition,
+        reference: StateReference,
+    ) -> bytes:
+        revision = reference.value.get("seed_revision")
+        if not isinstance(revision, str) or not revision.startswith("seed-"):
+            raise InvalidWorkbenchOutput("工作台定位种子 revision 无效")
+        root = (
+            self.projects_root
+            / project_id
+            / "workbench_seeds"
+            / clip.clip_id
+            / revision
+        )
+        manifest_path = root / "workbench_seed_manifest.json"
+        track_path = root / "camera_track_seed.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            track_bytes = track_path.read_bytes()
+            track = json.loads(track_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidWorkbenchOutput("工作台定位种子不可读") from exc
+        expected = {
+            "schema_version": 1,
+            "seed_revision": revision,
+            "project_id": project_id,
+            "target_clip_id": clip.clip_id,
+            "source_clip_id": reference.value.get("source_clip_id"),
+            "direction": reference.value.get("direction"),
+            "target_frame": reference.value.get("target_frame"),
+            "source_workbench_output_revision": reference.value.get(
+                "source_workbench_output_revision"
+            ),
+            "source_workbench_output_fingerprint": reference.value.get(
+                "source_workbench_output_fingerprint"
+            ),
+            "track_sha256": reference.value.get("track_sha256"),
+            "operation_id": reference.operation_id,
+        }
+        if not isinstance(manifest, Mapping) or any(
+            manifest.get(key) != value for key, value in expected.items()
+        ):
+            raise InvalidWorkbenchOutput("工作台定位种子身份不匹配")
+        if sha256(track_bytes).hexdigest() != reference.value.get("track_sha256"):
+            raise InvalidWorkbenchOutput("工作台定位种子内容校验失败")
+        _validate_manual_camera_track(track)
+        return track_bytes
 
     def _physical_clip_for_context(
         self,
@@ -2283,6 +2880,25 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _precomputed_scene_solve_ready(job: QueueJob | None) -> bool:
+    if job is None or job.adapter_name != "sfm_only" or job.adapter_version != "2":
+        return False
+    try:
+        return all(
+            isinstance(job.published_outputs.get(key), str)
+            and Path(str(job.published_outputs[key])).is_file()
+            for key in (
+                "trajectory",
+                "solve_trajectory",
+                "solve_video",
+                "solve_frame_map",
+                "core_frame_map",
+            )
+        )
+    except OSError:
+        return False
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:

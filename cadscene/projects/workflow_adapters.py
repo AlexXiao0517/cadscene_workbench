@@ -45,6 +45,14 @@ class ExistingWorkflowAdapter:
                 )
         if self.name == "srt_sfm_fused":
             _validate_exact_clip_mapping(inputs)
+        if self.name == "sfm_only":
+            if inputs.frame_map_path is None or not inputs.frame_map_path.is_file():
+                raise FileNotFoundError("SfM solve frame map is required")
+            if (
+                inputs.core_frame_map_path is None
+                or not inputs.core_frame_map_path.is_file()
+            ):
+                raise FileNotFoundError("SfM core frame map is required")
         inputs.attempt_directory.mkdir(parents=True, exist_ok=True)
         return inputs
 
@@ -65,6 +73,8 @@ class ExistingWorkflowAdapter:
         for module in self.modules:
             if module == "cadscene.cli.run_sfm":
                 commands.append(self._sfm_command(inputs))
+            elif module == "cadscene.cli.partition_sfm_trajectory":
+                commands.append(self._sfm_partition_command(inputs))
             elif module == "cadscene.cli.fuse_srt_sfm":
                 commands.append(self._srt_fusion_command(inputs))
             elif module == "cadscene.cli.run_pure_rotation":
@@ -93,11 +103,58 @@ class ExistingWorkflowAdapter:
                 return AdapterResult.failed("invalid pure-rotation trajectory output")
         elif not payload.get("poses"):
             return AdapterResult.failed("trajectory output contains no poses")
-        fingerprint = sha256(output.read_bytes()).hexdigest()
+        outputs = {self.output_key: str(output)}
+        validation_proof: dict[str, object] | None = None
+        digest = sha256(output.read_bytes())
+        if self.name == "sfm_only":
+            solve_output = next(
+                (
+                    path
+                    for path in (
+                        inputs.attempt_directory
+                        / "02_sfm/camera_trajectory_solve.json",
+                        self._run_root(inputs)
+                        / "02_sfm/camera_trajectory_solve.json",
+                    )
+                    if path.is_file()
+                ),
+                None,
+            )
+            if solve_output is None:
+                return AdapterResult.failed("SfM solve trajectory output is missing")
+            if inputs.frame_map_path is None or inputs.core_frame_map_path is None:
+                return AdapterResult.failed("SfM frame-map bindings are missing")
+            for path in (
+                solve_output,
+                inputs.frame_map_path,
+                inputs.core_frame_map_path,
+            ):
+                digest.update(path.read_bytes())
+            outputs.update(
+                {
+                    "solve_trajectory": str(solve_output),
+                    "solve_video": str(inputs.video_path),
+                    "solve_frame_map": str(inputs.frame_map_path),
+                    "core_frame_map": str(inputs.core_frame_map_path),
+                }
+            )
+            validation_proof = {
+                "trajectory_sha256": sha256(output.read_bytes()).hexdigest(),
+                "solve_trajectory_sha256": sha256(
+                    solve_output.read_bytes()
+                ).hexdigest(),
+                "solve_frame_map_sha256": sha256(
+                    inputs.frame_map_path.read_bytes()
+                ).hexdigest(),
+                "core_frame_map_sha256": sha256(
+                    inputs.core_frame_map_path.read_bytes()
+                ).hexdigest(),
+            }
+        fingerprint = digest.hexdigest()
         return AdapterResult.success(
             output_revision=f"{self.name}:{fingerprint[:16]}",
             output_fingerprint=fingerprint,
-            outputs={self.output_key: str(output)},
+            outputs=outputs,
             progress=(
                 AdapterProgress(
                     stage="validated",
@@ -105,6 +162,7 @@ class ExistingWorkflowAdapter:
                     fraction=1.0,
                 ),
             ),
+            validation_proof=validation_proof,
         )
 
     def describe_workbench(self) -> Mapping[str, object]:
@@ -178,6 +236,26 @@ class ExistingWorkflowAdapter:
             _source_offset_seconds(inputs),
         ]
         return tuple(command)
+
+    def _sfm_partition_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
+        if inputs.frame_map_path is None or inputs.core_frame_map_path is None:
+            raise FileNotFoundError("SfM solve/core frame maps are required")
+        trajectory = self._run_root(inputs) / "02_sfm/camera_trajectory.json"
+        return (
+            sys.executable,
+            "-m",
+            "cadscene.cli.partition_sfm_trajectory",
+            "--trajectory",
+            str(trajectory),
+            "--solve-frame-map",
+            str(inputs.frame_map_path),
+            "--core-frame-map",
+            str(inputs.core_frame_map_path),
+            "--solve-output",
+            str(self._run_root(inputs) / "02_sfm/camera_trajectory_solve.json"),
+            "--core-output",
+            str(trajectory),
+        )
 
     def _pure_rotation_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         command = [
@@ -256,9 +334,12 @@ def default_workflow_adapters(
         (
             ExistingWorkflowAdapter(
                 name="sfm_only",
-                version="1",
+                version="2",
                 srt_requirement="none",
-                modules=("cadscene.cli.run_sfm",),
+                modules=(
+                    "cadscene.cli.run_sfm",
+                    "cadscene.cli.partition_sfm_trajectory",
+                ),
                 output_relative_path="02_sfm/camera_trajectory.json",
             ),
             ExistingWorkflowAdapter(

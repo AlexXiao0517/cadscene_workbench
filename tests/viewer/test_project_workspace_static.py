@@ -81,16 +81,24 @@ def test_workspace_light_theme_covers_the_full_application_shell() -> None:
 
 def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
     css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
 
     assert "场景 01 · 第 1 段" in html
     assert "时间范围" in html and "时长" in html
+    assert "检测模式" not in html
+    assert 'class="motion-mode"' not in html
+    assert 'class="confidence"' not in html
     assert "推荐工作流" in html and "最终工作流" in html
     assert "当前状态" in html and "进度" in html
     assert "源 PTS" not in html
     assert html.count('data-action="merge-project"') == 1
     assert ".workflow-recommendation" in css
     assert "font-size: var(--font-size-body)" in css
+    assert 'sfm_only: "三维重建"' in script
+    assert 'pure_rotation: "旋转估计"' in script
+    assert 'WORKFLOW_LABELS[clip.recommended_workflow]' in script
+    assert 'clip.recommended_workflow || "需人工确认"' not in script
 
 
 def test_polling_uses_etag_and_preserves_dirty_edits_and_selection() -> None:
@@ -344,6 +352,33 @@ def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     assert 'params.get("focusClip")' in script
     assert "scrollIntoView" in script
     assert '.open-workbench", row).addEventListener' in script
+
+
+def test_completed_route_can_bridge_previous_or_next_clip_from_source_row() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="button compact bridge-up"' in html
+    assert 'class="button compact bridge-down"' in html
+    assert "向上打通" in html and "向下打通" in html
+    assert "capabilities.can_bridge_up" in script
+    assert "capabilities.can_bridge_down" in script
+    assert "bridge_up_target_clip_id" in script
+    assert "bridge_down_target_clip_id" in script
+    assert "bridge_down_reason" in script
+    assert "旧打通结果已失效，可重新打通" in script
+    assert "/scene-bridges`" in script
+    assert 'direction: direction' in script
+    assert "async function bridgeAdjacent" in script
+    assert "expected_jobs_revision: state.snapshot.component_revisions.jobs" in script
+    assert "async function waitForSceneBridge" in script
+    assert "response.status === 202" in script
+    assert "await openWorkbench(target, targetRow)" in script
+    assert 'const directionLabel = direction === "up" ? "向上" : "向下";' in script
+    assert "正在提交${directionLabel}打通任务" in script
+    assert "路线打通失败：${error.message}" in script
+    assert ".row-actions" in css and "flex-wrap: wrap" in css
 
 
 def test_ready_clip_prepares_inputs_then_opens_workbench_with_chinese_status() -> None:

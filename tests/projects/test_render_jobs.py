@@ -447,6 +447,34 @@ def test_render_reuses_validated_export_job_when_clip_has_no_embedded_paths(
     assert _render_physical_inputs(logical_only, (export,)) == (video, frame_map)
 
 
+def test_precomputed_solve_media_never_replaces_core_render_inputs(
+    tmp_path: Path,
+) -> None:
+    _service, repositories, _queue, _adapter, trajectories = _system(tmp_path)
+    clip = next(
+        item
+        for item in repositories.clips.load("p1").clips
+        if item.clip_id == "ready"
+    )
+    core_video = Path(str(clip.analysis["physical_mp4_path"]))
+    core_map = Path(str(clip.analysis["frame_map_path"]))
+    solve_video = tmp_path / "ready-solve.mp4"
+    solve_map = tmp_path / "ready-solve-frame-map.json"
+    solve_video.write_bytes(b"overlap-only")
+    solve_map.write_text("{}", encoding="utf-8")
+    trajectory = next(job for job in trajectories if job.clip_id == "ready")
+    trajectory = replace(
+        trajectory,
+        published_outputs={
+            **trajectory.published_outputs,
+            "solve_video": str(solve_video),
+            "solve_frame_map": str(solve_map),
+        },
+    )
+
+    assert _render_physical_inputs(clip, (trajectory,)) == (core_video, core_map)
+
+
 def test_preflight_rejects_tampered_workbench_artifact(tmp_path: Path) -> None:
     service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
     clip = next(item for item in repositories.clips.load("p1").clips if item.clip_id == "ready")

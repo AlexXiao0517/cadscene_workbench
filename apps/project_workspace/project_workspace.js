@@ -111,6 +111,18 @@
     open.title = capabilities.can_open_workbench
       ? "进入片段工作台"
       : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪");
+    const bridgeUp = $(".bridge-up", row);
+    bridgeUp.hidden = capabilities.can_bridge_up !== true;
+    bridgeUp.disabled = capabilities.can_bridge_up !== true;
+    bridgeUp.title = capabilities.can_bridge_up
+      ? `用重叠帧打通 ${capabilities.bridge_up_target_clip_id} 的路线，完成后进入微调`
+      : (capabilities.bridge_up_reason || "没有可安全打通的同场景上一片段");
+    const bridgeDown = $(".bridge-down", row);
+    bridgeDown.hidden = capabilities.can_bridge_down !== true;
+    bridgeDown.disabled = capabilities.can_bridge_down !== true;
+    bridgeDown.title = capabilities.can_bridge_down
+      ? `用重叠帧打通 ${capabilities.bridge_down_target_clip_id} 的路线，完成后进入微调`
+      : (capabilities.bridge_down_reason || "没有可安全打通的同场景下一片段");
     $(".retry-job", row).disabled = !capabilities.can_retry;
     $(".cancel-job", row).disabled = !capabilities.can_cancel;
     $(".workflow-select", row).title = capabilities.reason || "";
@@ -132,9 +144,8 @@
     $(".review-badge", row).hidden = !clip.needs_review;
     $(".time-range", row).textContent = clip.time_range;
     $(".duration", row).textContent = clip.duration;
-    $(".motion-mode", row).textContent = clip.detected_motion_mode;
-    $(".confidence", row).textContent = clip.confidence == null ? "" : `置信度 ${Math.round(clip.confidence * 100)}%`;
-    $(".workflow-recommendation", row).textContent = clip.recommended_workflow || "需人工确认";
+    $(".workflow-recommendation", row).textContent = WORKFLOW_LABELS[clip.recommended_workflow]
+      || "需人工确认";
     const workflow = $(".workflow-select", row);
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
@@ -164,7 +175,17 @@
     if (hasPercentage) progressPercent.textContent = `${percent}%`;
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
+    const bridgeStatus = clip.scene_bridge?.status;
+    const bridgeReason = clip.capabilities?.bridge_up_reason
+      || clip.capabilities?.bridge_down_reason;
+    if (["stale_input", "superseded"].includes(bridgeStatus)) {
+      $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
+    } else if (bridgeReason) {
+      $(".row-error", row).textContent = bridgeReason;
+    }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
+    $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
+    $(".bridge-down", row).addEventListener("click", () => bridgeAdjacent(clip, "down", row));
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
     $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
@@ -744,8 +765,85 @@
     }
   }
 
+  async function bridgeAdjacent(clip, direction, row) {
+    const capability = clip.capabilities || {};
+    const targetClipId = direction === "up"
+      ? capability.bridge_up_target_clip_id
+      : capability.bridge_down_target_clip_id;
+    if (!targetClipId) return;
+    const dialog = $("#workbenchPreparationDialog");
+    const directionLabel = direction === "up" ? "向上" : "向下";
+    $("#workbenchPreparationTitle").textContent = "正在提交路线打通任务";
+    $("#workbenchPreparationMessage").textContent = `正在提交${directionLabel}打通任务…`;
+    $("#workbenchPreparationFill").style.width = "0%";
+    $("#workbenchPreparationPercent").textContent = "—";
+    if (!dialog.open) dialog.showModal();
+    setMessage(`正在提交${directionLabel}打通任务…`);
+    try {
+      const { response, body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clip.clip_id)}/scene-bridges`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.clips,
+            expected_jobs_revision: state.snapshot.component_revisions.jobs,
+            direction: direction,
+          }),
+        },
+      );
+      if (response.status !== 202) throw new Error("场景路线打通任务未成功入队");
+      state.snapshot.component_revisions.clips = body.clips_revision;
+      state.snapshot.component_revisions.jobs = body.jobs_revision;
+      await waitForSceneBridge(body.job_id, targetClipId);
+    } catch (error) {
+      if (dialog.open) dialog.close();
+      $(".row-error", row).textContent = error.message;
+      setMessage(`路线打通失败：${error.message}`, true);
+      state.etag = null;
+      await pollSnapshot();
+    }
+  }
+
+  async function waitForSceneBridge(jobId, targetClipId) {
+    const dialog = $("#workbenchPreparationDialog");
+    $("#workbenchPreparationTitle").textContent = "正在打通相邻片段路线";
+    if (!dialog.open) dialog.showModal();
+    while (true) {
+      state.etag = null;
+      await pollSnapshot();
+      const target = state.snapshot?.clips.find((item) => item.clip_id === targetClipId);
+      if (!target) throw new Error("目标片段已不存在，无法继续打通路线");
+      const bridge = target.scene_bridge;
+      if (bridge?.job_id !== jobId) {
+        dialog.close();
+        throw new Error("目标片段的场景路线任务已变化，请重新操作");
+      }
+      const fraction = bridge?.progress?.fraction;
+      const percent = typeof fraction === "number"
+        ? Math.max(0, Math.min(100, Math.round(fraction * 100)))
+        : null;
+      $("#workbenchPreparationMessage").textContent = bridge?.progress?.message
+        || (bridge?.stage ? (STATUS_LABELS[bridge.stage] || bridge.stage) : "正在使用共同 PTS 打通相邻片段路线…");
+      $("#workbenchPreparationFill").style.width = percent == null ? "0%" : `${percent}%`;
+      $("#workbenchPreparationPercent").textContent = percent == null ? "—" : `${percent}%`;
+      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(bridge?.status)) {
+        dialog.close();
+        throw new Error(bridge?.error || "相邻片段路线打通失败，请重试");
+      }
+      if (bridge?.status === "success") {
+        dialog.close();
+        const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
+        await openWorkbench(target, targetRow);
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+  }
+
   async function waitForWorkbenchPreparation(clipId) {
     const dialog = $("#workbenchPreparationDialog");
+    $("#workbenchPreparationTitle").textContent = "正在准备片段工作台";
     if (!dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;

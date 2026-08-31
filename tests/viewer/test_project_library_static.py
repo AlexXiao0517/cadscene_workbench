@@ -179,8 +179,40 @@ def test_project_rename_is_hover_only_and_uses_existing_revision_api() -> None:
     assert 'event.key === "Escape"' in script
 
 
+def test_project_library_supports_safe_multi_select_workspace_deletion() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+    script = _read("project_library.js")
+
+    for contract in (
+        'id="deleteSelectedButton"',
+        'id="deleteProjectDialog"',
+        'id="confirmDeleteButton"',
+        'id="selectAllProjects"',
+        "永久删除项目工作空间",
+        "外部源文件不会删除",
+    ):
+        assert contract in html
+    for contract in (
+        "selectedProjectIds: new Set()",
+        "createSelectionControl",
+        "toggleProjectSelection",
+        'method: "DELETE"',
+        "confirmation: project.project_id",
+        "expected_revision: project.revision",
+        "showModal()",
+        "project_deletion_blocked",
+        "running_job_count",
+    ):
+        assert contract in script
+    assert ".project-selection" in css
+    assert ".danger-button" in css
+    assert ".confirm-dialog" in css
+    assert ".project-card.selected" in css
+
+
 def test_project_library_does_not_add_out_of_scope_controls() -> None:
     content = "\n".join((_read("index.html"), _read("project_library.js")))
 
-    for label in ("删除项目", "归档项目", "导出项目", "搜索项目"):
+    for label in ("归档项目", "导出项目", "搜索项目"):
         assert label not in content

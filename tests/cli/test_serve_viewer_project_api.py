@@ -14,7 +14,7 @@ from cadscene.projects.adapters import AdapterProgress
 from cadscene.projects.http_api import ProjectApi, UploadRequest
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, StateReference, register_analysis_revision
-from cadscene.projects.queue import LocalResourceQueue
+from cadscene.projects.queue import LocalResourceQueue, QueueJob
 from cadscene.projects.service import ProjectService, RegisterUploadResult
 from cadscene.projects.service import (
     EnqueueRenderResult,
@@ -200,6 +200,134 @@ def test_project_catalog_api_lists_safe_project_summaries(tmp_path: Path) -> Non
     assert response.headers["Cache-Control"] == "no-store"
     assert response.body["projects"][0]["project_id"] == "p1"
     assert str(tmp_path) not in json.dumps(response.body)
+
+
+def test_delete_project_workspace_removes_only_exact_owned_paths(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    external_video = tmp_path / "source.mp4"
+    external_cad = tmp_path / "design.dxf"
+    owned_data = tmp_path / "data" / "p1-clip-1"
+    owned_run = tmp_path / "runs" / "p1-clip-1"
+    similarly_named = tmp_path / "data" / "p1-clip-10"
+    for directory in (owned_data, owned_run, similarly_named):
+        directory.mkdir(parents=True)
+        (directory / "proof.txt").write_text("owned", encoding="utf-8")
+
+    response = api.handle(
+        "DELETE",
+        "/api/projects/p1",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "confirmation": "p1",
+        },
+    )
+
+    assert response.status == 200
+    assert response.body == {"project_id": "p1", "state": "deleted"}
+    assert not (tmp_path / "projects" / "p1").exists()
+    assert not owned_data.exists()
+    assert not owned_run.exists()
+    assert similarly_named.is_dir()
+    assert external_video.read_bytes() == b"video"
+    assert external_cad.read_bytes() == b"cad"
+
+
+def test_delete_project_workspace_requires_exact_confirmation_and_revision(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    revision = repositories.project.load("p1").revision
+
+    unconfirmed = api.handle(
+        "DELETE",
+        "/api/projects/p1",
+        json_body={"expected_revision": revision, "confirmation": "other"},
+    )
+    stale = api.handle(
+        "DELETE",
+        "/api/projects/p1",
+        json_body={"expected_revision": revision - 1, "confirmation": "p1"},
+    )
+
+    assert unconfirmed.status == 400
+    assert unconfirmed.body["error"] == "confirmation must exactly match project_id"
+    assert stale.status == 409
+    assert stale.body["error"] == "revision_conflict"
+    assert (tmp_path / "projects" / "p1").is_dir()
+
+
+def test_delete_project_workspace_rejects_active_job(tmp_path: Path) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("clip-1"),))
+    queue.submit(
+        QueueJob(
+            job_id="job-1",
+            project_id="p1",
+            clip_id="clip-1",
+            job_type="trajectory",
+            resource_class="heavy_compute",
+            status="queued",
+            stage="queued",
+            priority=0,
+            depends_on_job_ids=(),
+            exclusive_key="trajectory:p1:clip-1",
+            idempotency_key="delete-block-job",
+            input_revision="analysis-1",
+            input_fingerprint="input-v1",
+            adapter_name="sfm_only",
+            adapter_version="1",
+            output_revision=None,
+            operation_id="operation-job-1",
+            attempts=(),
+        )
+    )
+
+    response = api.handle(
+        "DELETE",
+        "/api/projects/p1",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "confirmation": "p1",
+        },
+    )
+
+    assert response.status == 409
+    assert response.body["error"] == "project_deletion_blocked"
+    assert response.body["reason"] == "active_jobs"
+    assert (tmp_path / "projects" / "p1").is_dir()
+
+
+def test_delete_project_workspace_rejects_active_workbench_session(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    sessions = tmp_path / "projects" / "p1" / "workbench_sessions"
+    sessions.mkdir()
+    (sessions / "active.json").write_text(
+        json.dumps(
+            {
+                "project_id": "p1",
+                "state": "editing",
+                "expires_at": "2026-08-04T00:10:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = api.handle(
+        "DELETE",
+        "/api/projects/p1",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "confirmation": "p1",
+        },
+    )
+
+    assert response.status == 409
+    assert response.body["error"] == "project_deletion_blocked"
+    assert response.body["reason"] == "active_workbench_session"
+    assert (tmp_path / "projects" / "p1").is_dir()
 
 
 def test_annotation_crud_api_and_snapshot_use_independent_revisions(

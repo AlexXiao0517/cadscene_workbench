@@ -33,6 +33,7 @@
             <button id="cardViewButton" class="view-button active" type="button" aria-label="卡片展示" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></button>
             <button id="listViewButton" class="view-button" type="button" aria-label="列表展示" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg></button>
           </div>
+          <button id="deleteSelectedButton" class="danger-button" type="button" disabled><span aria-hidden="true">×</span><span id="deleteButtonLabel">删除项目</span></button>
           <a id="newProjectButton" class="primary-button" href="/apps/workflow_portal/"><span aria-hidden="true">＋</span> 新建项目</a>
         </div>
       </header>
@@ -40,12 +41,24 @@
       <div id="liveMessage" class="live-message" role="status" aria-live="polite"></div>
       <section id="projectGrid" class="project-grid" aria-label="项目卡片"></section>
       <section id="projectTable" class="table-panel" aria-label="项目列表" hidden>
-        <table><thead><tr><th>项目名称</th><th>视频 / CAD 文件</th><th>片段完成度</th><th>当前状态</th><th>最近更新时间</th></tr></thead><tbody id="projectTableBody"></tbody></table>
+        <table><thead><tr><th class="selection-column"><input id="selectAllProjects" class="project-selection" type="checkbox" aria-label="选择全部可删除项目"></th><th>项目名称</th><th>视频 / CAD 文件</th><th>片段完成度</th><th>当前状态</th><th>最近更新时间</th></tr></thead><tbody id="projectTableBody"></tbody></table>
       </section>
       <section id="emptyState" class="state-panel" hidden><div class="empty-folder" aria-hidden="true"></div><h2>还没有项目</h2><p>创建第一个项目，上传 MP4 视频和 DXF 图纸开始工作。</p><a class="primary-button" href="/apps/workflow_portal/">新建第一个项目</a></section>
       <section id="errorState" class="state-panel error-state" hidden><h2>项目库暂时无法读取</h2><p id="errorMessage">请检查服务和存储目录后重试。</p><button id="retryButton" class="secondary-button" type="button">重新加载</button></section>
     </main>
   </div>
+  <dialog id="deleteProjectDialog" class="confirm-dialog" aria-labelledby="deleteDialogTitle">
+    <form method="dialog">
+      <p class="dialog-eyebrow">删除项目</p>
+      <h2 id="deleteDialogTitle">永久删除项目工作空间？</h2>
+      <p class="dialog-warning">项目中的 manifest、任务、工作台和渲染结果将被永久删除；外部源文件不会删除。</p>
+      <ul id="deleteProjectList" class="delete-project-list"></ul>
+      <div class="dialog-actions">
+        <button class="secondary-button" value="cancel">取消</button>
+        <button id="confirmDeleteButton" class="danger-button" type="button">永久删除</button>
+      </div>
+    </form>
+  </dialog>
   <script src="project_library.js"></script>
 </body>
 </html>

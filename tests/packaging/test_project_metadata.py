@@ -18,10 +18,13 @@ def _dependency_name(requirement: str) -> str:
     return re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0].strip().lower()
 
 
-def test_distribution_version_matches_release_0_1_2() -> None:
+def test_distribution_and_runtime_versions_match_release_0_1_3() -> None:
+    from cadscene import __version__
+
     project = _project_metadata()
 
-    assert project["version"] == "0.1.2"
+    assert project["version"] == "0.1.3"
+    assert __version__ == project["version"]
 
 
 def test_default_install_declares_supported_runtime_dependencies() -> None:

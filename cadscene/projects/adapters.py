@@ -42,6 +42,7 @@ class AdapterInputs:
     source_end_pts_exclusive: int | None = None
     source_time_base: Fraction | None = None
     frame_map_path: Path | None = None
+    core_frame_map_path: Path | None = None
 
 
 @dataclass(frozen=True)

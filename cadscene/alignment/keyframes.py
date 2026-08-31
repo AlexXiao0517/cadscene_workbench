@@ -19,6 +19,8 @@ CONFIRMED_KEYFRAME_SOURCES = frozenset(
         "confirmed",
         "manual_anchor",
         "manual_corrected",
+        "scene_boundary_anchor",
+        "scene_overlap_anchor",
     }
 )
 

@@ -777,6 +777,21 @@ def test_load_export_clips_uses_exact_pts_below_sixty_not_rounded_seconds(
     )
 
 
+def test_load_export_clips_allows_explicit_bounded_solve_duration(
+    tmp_path: Path,
+) -> None:
+    manifest = _write_manifest(
+        tmp_path,
+        [_integer_pts_clip("target-solve", 0, 65_000)],
+    )
+
+    clips = load_export_clips(manifest, max_duration_seconds=66)
+
+    assert [(item.clip_id, item.duration_sec) for item in clips] == [
+        ("target-solve", 65.0)
+    ]
+
+
 def test_load_export_clips_rejects_casefold_colliding_ids(tmp_path: Path) -> None:
     manifest = _write_manifest(
         tmp_path,
