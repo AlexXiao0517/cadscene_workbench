@@ -87,14 +87,14 @@
 
 ### 平面位置
 
-SRT 经纬度以 WGS84 输入，通过受控 CRS 转换到已确认的 CGCS2000 投影平面。转换后先保留审计用的原始 easting/northing，再根据 `cad_axis_mapping` 得到 CAD X/Y，最后复用现有 CAD 归一化：
+SRT 经纬度以 WGS84 输入，通过受控 CRS 转换到已确认的 CGCS2000 投影平面。转换后先保留审计用的原始 easting/northing，再根据 `cad_axis_mapping` 得到原始 CAD X/Y，最后复用现有内部局部米制变换：
 
 ```text
-viewer_x = (cad_x - origin_x) * cad_scale
-viewer_y = (cad_y - origin_y) * cad_scale
+cad_local_x_m = (cad_raw_x - origin_x) * cad_scale
+cad_local_y_m = (cad_raw_y - origin_y) * cad_scale
 ```
 
-轨迹文件的权威计算坐标仍使用 CAD 米制坐标；Viewer 导出阶段再做显示归一化。任何人工校正默认只允许固定 XY 平移，米制 scale 锁定为 1。
+trajectory 的 `center` 使用 `cad_local_*_m`，与现有 alignment、quality 和 `CameraState` 的内部坐标一致，并避免把几十万/几百万量级的原始投影值直接送入几何计算。诊断产物同时保留原始 projected easting/northing 与 CAD raw X/Y。Viewer 导出阶段按现有逆变换 `web_x = cad_local_x_m / cad_scale + origin_x` 还原到 CAD world。任何人工校正默认只允许固定 XY 平移，米制 scale 锁定为 1。
 
 ### 高度
 
@@ -179,7 +179,7 @@ ProjectService、工作台和 job runner 应通过 adapter 输出键解析 `traj
 - 3°/6°分带、带号/无带号、CAD X/Y 互换和异常坐标范围；
 - 候选接近或轨迹落图失败时必须人工确认；
 - 已知 WGS84 点投影到 CGCS2000 后的数值与可信基准一致；
-- `origin_xy/cad_scale` 显示归一化不改变权威 CAD 米制坐标；
+- `origin_xy/cad_scale` 在 CAD raw、内部局部米制与 Viewer CAD world 之间正确往返；
 - 水平 FOV 到 PINHOLE 焦距的横竖屏计算和非法值拒绝；
 - 权威 PTS 同步、bounded interpolation 和 VFR frame map；
 - 北/东/俯视/roll 合成姿态转换；
