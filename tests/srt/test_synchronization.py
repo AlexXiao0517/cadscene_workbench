@@ -13,6 +13,39 @@ def _records() -> list[SrtRecord]:
     ]
 
 
+def _attitude_records(
+    first_yaw: float = 10.0, second_yaw: float = 20.0
+) -> list[SrtRecord]:
+    return [
+        SrtRecord(
+            start_sec=0.0,
+            end_sec=0.1,
+            latitude=30.0,
+            longitude=120.0,
+            rel_alt=10.0,
+            gimbal_yaw=first_yaw,
+            gimbal_pitch=-40.0,
+            gimbal_roll=1.0,
+            drone_yaw=5.0,
+            drone_pitch=1.0,
+            drone_roll=-1.0,
+        ),
+        SrtRecord(
+            start_sec=1.0,
+            end_sec=1.1,
+            latitude=30.001,
+            longitude=120.002,
+            rel_alt=12.0,
+            gimbal_yaw=second_yaw,
+            gimbal_pitch=-50.0,
+            gimbal_roll=3.0,
+            drone_yaw=15.0,
+            drone_pitch=3.0,
+            drone_roll=1.0,
+        ),
+    ]
+
+
 def test_pts_by_source_frame_has_priority_over_cfr_fallback() -> None:
     rows = resolve_frame_timestamps(
         source_frame_indices=[0, 10],
@@ -62,3 +95,55 @@ def test_time_offset_is_applied_to_srt_lookup_not_persisted_pts() -> None:
     assert frame.pts_time_sec == 0.0
     assert sample.srt_time_sec == 1.0
     assert sample.latitude == pytest.approx(30.001)
+
+
+def test_gimbal_and_drone_attitude_are_sampled_with_position() -> None:
+    frame = FrameTimestamp(5, 0, "frame_000005.png", 0.5, "pts_csv", False)
+
+    sample = sample_srt_at_frames(
+        _attitude_records(),
+        frame_timestamps=[frame],
+        max_interpolation_gap_sec=1.0,
+    )[0]
+
+    assert sample.gimbal_yaw == pytest.approx(15.0)
+    assert sample.gimbal_pitch == pytest.approx(-45.0)
+    assert sample.gimbal_roll == pytest.approx(2.0)
+    assert sample.drone_yaw == pytest.approx(10.0)
+    assert sample.drone_pitch == pytest.approx(2.0)
+    assert sample.drone_roll == pytest.approx(0.0)
+
+
+def test_yaw_interpolation_wraps_across_180_on_the_short_arc() -> None:
+    frame = FrameTimestamp(5, 0, "frame_000005.png", 0.5, "pts_csv", False)
+
+    sample = sample_srt_at_frames(
+        _attitude_records(179.0, -179.0),
+        frame_timestamps=[frame],
+        max_interpolation_gap_sec=1.0,
+    )[0]
+
+    assert sample.gimbal_yaw is not None
+    assert abs(abs(sample.gimbal_yaw) - 180.0) < 1e-9
+
+
+def test_long_gap_does_not_interpolate_attitude() -> None:
+    records = _attitude_records()
+    records[1] = SrtRecord(
+        **{
+            **records[1].to_dict(),
+            "start_sec": 10.0,
+            "end_sec": 10.1,
+        }
+    )
+    frame = FrameTimestamp(5, 0, "frame_000005.png", 5.0, "pts_csv", False)
+
+    sample = sample_srt_at_frames(
+        records,
+        frame_timestamps=[frame],
+        max_interpolation_gap_sec=1.0,
+    )[0]
+
+    assert sample.gimbal_yaw is None
+    assert sample.gimbal_pitch is None
+    assert sample.drone_yaw is None

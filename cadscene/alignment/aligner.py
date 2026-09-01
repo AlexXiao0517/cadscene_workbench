@@ -8,7 +8,11 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from cadscene.alignment.keyframes import confirmed_keyframes, load_web_camera_track
-from cadscene.core.camera import CameraState, decompose_world_from_camera_rotation
+from cadscene.core.camera import (
+    CameraState,
+    camera_to_world_rotation,
+    decompose_world_from_camera_rotation,
+)
 from cadscene.core.coordinates import python_state_to_web_camera, web_camera_to_python_state
 from cadscene.core.io import read_json
 from cadscene.core.sim3 import Sim3
@@ -140,24 +144,7 @@ def _normalize_angle(degrees: float) -> float:
 def _camera_to_world_rotation(state: CameraState) -> np.ndarray:
     """相机坐标系 x=右、y=下、z=前；pitch 为 Python 后端向下角。"""
 
-    yaw = math.radians(state.yaw_deg)
-    pitch = math.radians(max(-89.5, min(89.5, state.pitch_deg)))
-    roll = math.radians(state.roll_deg)
-    forward = np.asarray(
-        [math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), -math.sin(pitch)],
-        dtype=np.float64,
-    )
-    forward /= max(np.linalg.norm(forward), 1e-12)
-    right = np.asarray([math.cos(yaw), -math.sin(yaw), 0.0], dtype=np.float64)
-    right /= max(np.linalg.norm(right), 1e-12)
-    down = np.cross(forward, right)
-    down /= max(np.linalg.norm(down), 1e-12)
-    if abs(roll) > 1e-12:
-        c, s = math.cos(roll), math.sin(roll)
-        right0, down0 = right.copy(), down.copy()
-        right = c * right0 + s * down0
-        down = -s * right0 + c * down0
-    return np.column_stack([right, down, forward])
+    return camera_to_world_rotation(state)
 
 
 def _decompose_world_from_cam(rotation: np.ndarray) -> tuple[float, float, float]:

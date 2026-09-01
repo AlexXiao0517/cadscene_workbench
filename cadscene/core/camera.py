@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,62 @@ class CameraState:
             fov_deg=float(row.get("fov", row.get("fov_deg", 70.0))),
             cad_scale=float(row.get("cad_scale", cad_scale)),
         )
+
+
+def camera_to_world_rotation(state: CameraState) -> np.ndarray:
+    """Return world-from-camera for x-right, y-down, z-forward camera axes."""
+
+    yaw = math.radians(float(state.yaw_deg))
+    pitch = math.radians(max(-89.5, min(89.5, float(state.pitch_deg))))
+    roll = math.radians(float(state.roll_deg))
+    forward = np.asarray(
+        [
+            math.sin(yaw) * math.cos(pitch),
+            math.cos(yaw) * math.cos(pitch),
+            -math.sin(pitch),
+        ],
+        dtype=np.float64,
+    )
+    forward /= max(np.linalg.norm(forward), 1e-12)
+    right = np.asarray(
+        [math.cos(yaw), -math.sin(yaw), 0.0], dtype=np.float64
+    )
+    right /= max(np.linalg.norm(right), 1e-12)
+    down = np.cross(forward, right)
+    down /= max(np.linalg.norm(down), 1e-12)
+    if abs(roll) > 1e-12:
+        cosine, sine = math.cos(roll), math.sin(roll)
+        right_before, down_before = right.copy(), down.copy()
+        right = cosine * right_before + sine * down_before
+        down = -sine * right_before + cosine * down_before
+    return np.column_stack([right, down, forward])
+
+
+def quaternion_wxyz_to_rotation_matrix(quaternion: object) -> np.ndarray:
+    """Convert a normalized-or-normalizable wxyz quaternion into a matrix."""
+
+    values = np.asarray(quaternion, dtype=np.float64).reshape(-1)
+    if len(values) != 4 or not np.all(np.isfinite(values)):
+        raise ValueError("quaternion_wxyz must contain four finite values")
+    norm = float(np.linalg.norm(values))
+    if norm <= 1e-12:
+        raise ValueError("quaternion_wxyz has zero norm")
+    w, x, y, z = values / norm
+    return Rotation.from_quat([x, y, z, w]).as_matrix()
+
+
+def rotation_matrix_to_quaternion_wxyz(matrix: np.ndarray) -> list[float]:
+    """Convert a proper rotation matrix into a deterministic wxyz quaternion."""
+
+    value = np.asarray(matrix, dtype=np.float64)
+    if value.shape != (3, 3) or not np.all(np.isfinite(value)):
+        raise ValueError("rotation matrix must be finite 3x3")
+    x, y, z, w = Rotation.from_matrix(value).as_quat()
+    quaternion = np.asarray([w, x, y, z], dtype=np.float64)
+    if quaternion[0] < 0.0:
+        quaternion = -quaternion
+    quaternion /= max(float(np.linalg.norm(quaternion)), 1e-12)
+    return [float(component) for component in quaternion]
 
 
 def decompose_world_from_camera_rotation(rotation: np.ndarray) -> tuple[float, float, float]:

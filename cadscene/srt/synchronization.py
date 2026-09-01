@@ -34,6 +34,12 @@ class FrameSrtSample:
     source_entry_after: int | None
     rel_alt: float | None = None
     abs_alt: float | None = None
+    gimbal_yaw: float | None = None
+    gimbal_pitch: float | None = None
+    gimbal_roll: float | None = None
+    drone_yaw: float | None = None
+    drone_pitch: float | None = None
+    drone_roll: float | None = None
 
 
 def load_frame_timestamps(path: str) -> list[FrameTimestamp]:
@@ -130,6 +136,23 @@ def _interpolate_optional(before: SrtRecord, after: SrtRecord, field: str, alpha
     return (1.0 - alpha) * float(first) + alpha * float(second)
 
 
+def _interpolate_angle_optional(
+    before: SrtRecord, after: SrtRecord, field: str, alpha: float
+) -> float | None:
+    first = getattr(before, field, None)
+    second = getattr(after, field, None)
+    if (
+        first is None
+        or second is None
+        or not isfinite(float(first))
+        or not isfinite(float(second))
+    ):
+        return None
+    start = float(first)
+    delta = (float(second) - start + 180.0) % 360.0 - 180.0
+    return (start + float(alpha) * delta + 180.0) % 360.0 - 180.0
+
+
 def sample_srt_at_frames(
     records: Sequence[SrtRecord],
     *,
@@ -185,6 +208,24 @@ def sample_srt_at_frames(
                 after_index,
                 _interpolate_optional(before_record, after_record, "rel_alt", alpha),
                 _interpolate_optional(before_record, after_record, "abs_alt", alpha),
+                _interpolate_angle_optional(
+                    before_record, after_record, "gimbal_yaw", alpha
+                ),
+                _interpolate_angle_optional(
+                    before_record, after_record, "gimbal_pitch", alpha
+                ),
+                _interpolate_angle_optional(
+                    before_record, after_record, "gimbal_roll", alpha
+                ),
+                _interpolate_angle_optional(
+                    before_record, after_record, "drone_yaw", alpha
+                ),
+                _interpolate_angle_optional(
+                    before_record, after_record, "drone_pitch", alpha
+                ),
+                _interpolate_angle_optional(
+                    before_record, after_record, "drone_roll", alpha
+                ),
             )
         )
     return out
