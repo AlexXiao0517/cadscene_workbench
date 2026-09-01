@@ -2434,6 +2434,27 @@ def test_batch_completed_trajectory_is_materialized_when_workbench_opens(
     assert json.loads(published.read_text(encoding="utf-8"))["poses"]
 
 
+def test_materializing_completed_trajectory_removes_superseded_run(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    target = runs_root / "project-1-clip-1/clip-1"
+    target.mkdir(parents=True)
+    (target / "superseded.txt").write_text("old", encoding="utf-8")
+
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert opened.status == 201
+    assert not list(target.parent.glob(".clip-1.*.stale"))
+
+
 def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
     tmp_path: Path,
 ) -> None:

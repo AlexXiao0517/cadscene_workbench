@@ -2345,12 +2345,14 @@ class ProjectWorkbenchService:
         stale = target.parent / f".{target.name}.{uuid4().hex}.stale"
         shutil.copytree(source, temporary)
         moved_old = False
+        committed = False
         try:
             if target.exists():
                 os.replace(target, stale)
                 moved_old = True
             os.replace(temporary, target)
             _fsync_directory(target.parent)
+            committed = True
         except Exception:
             if moved_old and stale.exists() and not target.exists():
                 os.replace(stale, target)
@@ -2358,6 +2360,8 @@ class ProjectWorkbenchService:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+            if committed and stale.exists():
+                shutil.rmtree(stale)
 
     def _saved_resume_baseline(
         self, context: WorkbenchContext
