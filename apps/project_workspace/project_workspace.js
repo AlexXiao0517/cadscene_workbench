@@ -176,9 +176,10 @@
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
     const bridgeStatus = clip.scene_bridge?.status;
+    const hasSavedWorkbench = clip.workbench?.state === "saved";
     const bridgeReason = clip.capabilities?.bridge_up_reason
       || clip.capabilities?.bridge_down_reason;
-    if (["stale_input", "superseded"].includes(bridgeStatus)) {
+    if (!hasSavedWorkbench && ["stale_input", "superseded"].includes(bridgeStatus)) {
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
     } else if (bridgeReason) {
       $(".row-error", row).textContent = bridgeReason;

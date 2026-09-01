@@ -1045,13 +1045,7 @@ def _save_completed_sfm_route(
 
 
 def _scene_bridge_result(api: ProjectApi, bridge) -> object:
-    request_path = (
-        api.service.projects_root
-        / bridge.project_id
-        / "scene_bridge_requests"
-        / f"{bridge.operation_id}.json"
-    )
-    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request = api.service._load_scene_bridge_request(bridge)
     identity = request["runner_identity"]
     root = Path(bridge.attempts[-1].directory) / "candidate"
     artifacts = {
@@ -1436,6 +1430,158 @@ def test_scene_bridge_success_publishes_immutable_route_refinement(
     assert target_payload["workbench"]["bridge_revision"] == result.output_revision
 
 
+def test_scene_bridge_success_keeps_stable_request_identity_after_publication(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    queued = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == queued.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    attempt = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+
+    assert finished.status == "success"
+    assert finished.operation_id != running.operation_id
+    assert finished.submission_operation_id == running.operation_id
+    request = api.service._load_scene_bridge_request(finished)
+    assert request["operation_id"] == running.operation_id
+    assert api.service._current_input_fingerprint(finished) == finished.input_fingerprint
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=api.service.projects_root,
+        now=lambda: "2026-08-04T08:01:00Z",
+    )
+
+    restarted.restore_jobs("project-1", process_probe=lambda _pid: None)
+
+    assert restarted_queue.get(finished.job_id).status == "success"
+
+
+def test_legacy_scene_bridge_finds_request_by_semantic_input_identity(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    queued = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == queued.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    attempt = running.attempts[-1]
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    legacy = replace(finished, submission_operation_id=None)
+
+    request = api.service._load_scene_bridge_request(legacy)
+
+    assert request["identity"]["target_clip_id"] == legacy.clip_id
+    assert api.service._current_input_fingerprint(legacy) == legacy.input_fingerprint
+
+
+def test_restart_recovers_current_legacy_bridge_downgraded_by_old_request_lookup(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    queued = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == queued.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    attempt = running.attempts[-1]
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=attempt.number,
+        claim_token=str(attempt.worker_claim_token),
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                {
+                    **item,
+                    "status": "superseded",
+                    "stage": "superseded",
+                    "submission_operation_id": None,
+                    "output_revision": None,
+                    "output_fingerprint": None,
+                    "output_validated": False,
+                    "validated_input_fingerprint": None,
+                    "published_outputs": {},
+                    "validation_proof": None,
+                }
+                if item["job_id"] == finished.job_id
+                else item
+                for item in value.jobs
+            ),
+        ),
+    )
+    restarted_queue = LocalResourceQueue()
+    restarted = ProjectService(
+        repositories,
+        restarted_queue,
+        default_workflow_adapters(),
+        projects_root=api.service.projects_root,
+        now=lambda: "2026-08-04T08:01:00Z",
+    )
+
+    restarted.restore_jobs("project-1", process_probe=lambda _pid: None)
+
+    recovered = restarted_queue.get(finished.job_id)
+    assert recovered.status == "success"
+    assert recovered.output_revision == result.output_revision
+    assert recovered.output_fingerprint == result.output_fingerprint
+    assert recovered.output_validated is True
+    assert recovered.validated_input_fingerprint == recovered.input_fingerprint
+
+
 def test_superseded_scene_bridge_reference_does_not_block_retry(
     tmp_path: Path,
 ) -> None:
@@ -1464,13 +1610,20 @@ def test_superseded_scene_bridge_reference_does_not_block_retry(
         claim_token=str(attempt.worker_claim_token),
     )
     assert finished.status == "success"
-    request_path = (
+    publication_request_path = (
         api.service.projects_root
         / "project-1"
         / "scene_bridge_requests"
         / f"{finished.operation_id}.json"
     )
-    assert not request_path.exists()
+    stable_request_path = (
+        api.service.projects_root
+        / "project-1"
+        / "scene_bridge_requests"
+        / f"{finished.submission_operation_id}.json"
+    )
+    assert not publication_request_path.exists()
+    assert stable_request_path.is_file()
 
     jobs = repositories.jobs.load("project-1")
     superseded_jobs = tuple(
@@ -1513,7 +1666,8 @@ def test_superseded_scene_bridge_reference_does_not_block_retry(
 
     assert retried.status == 202
     assert retried.body["job_id"] == finished.job_id
-    assert request_path.is_file()
+    assert stable_request_path.is_file()
+    assert not publication_request_path.exists()
     retrying = api.service.queue.claim_next_unstarted()
     assert retrying is not None
     assert retrying.job_id == finished.job_id
