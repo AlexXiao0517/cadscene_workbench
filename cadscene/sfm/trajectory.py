@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -55,6 +55,7 @@ class SfmTrajectory:
     width: int
     height: int
     intrinsics: dict
+    meta: dict = field(default_factory=dict)
 
     @property
     def frame_min(self) -> int:
@@ -114,5 +115,5 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
         width=int(data.get("width", 0)),
         height=int(data.get("height", 0)),
         intrinsics=intrinsics,
+        meta=dict(data.get("meta") or {}),
     )
-

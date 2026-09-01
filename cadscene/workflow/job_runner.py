@@ -263,6 +263,10 @@ def resolve_stage_inputs(
     manifest_video = (dataset_manifest.get("video") or {}).get("path")
     manifest_cad = (dataset_manifest.get("cad") or {}).get("design_json")
     manifest_defaults = dataset_manifest.get("defaults") or {}
+    workflow = str(
+        (dataset_manifest.get("workflow") or {}).get("trajectory_mode") or "sfm_only"
+    )
+    full_pose = workflow == "srt_full_pose"
 
     video_option = opts.get("video") or opts.get("video_path")
     video = _first_existing(
@@ -318,8 +322,13 @@ def resolve_stage_inputs(
         "cad_dir": cad_dir,
         "cad_scale": cad_scale,
         "origin_xy": [float(origin_xy[0]), float(origin_xy[1])] if origin_xy is not None else None,
-        "trajectory": run_dir / "02_sfm" / "camera_trajectory.json",
-        "sparse_ply": run_dir / "02_sfm" / "sparse_points.ply",
+        "workflow": workflow,
+        "trajectory": (
+            run_dir / "02_srt_full_pose" / "camera_trajectory_full_pose.json"
+            if full_pose
+            else run_dir / "02_sfm" / "camera_trajectory.json"
+        ),
+        "sparse_ply": None if full_pose else run_dir / "02_sfm" / "sparse_points.ply",
         "manual_track": run_dir / "01_keyframes" / "camera_track_manual.json",
         "sfm_camera_path": run_dir / "03_alignment" / "sfm_camera_path.csv",
         "render_output": run_dir / "08_render" / "sfm_align_overlay.mp4",
@@ -557,10 +566,16 @@ def build_stage_command(
         if bool(opts.get("no_cpu_fallback")):
             command.append("--no-cpu-fallback")
         return command
+    full_pose = resolved["workflow"] == "srt_full_pose"
+    pipeline_config = (
+        "srt_full_pose_overlay.yaml" if full_pose else "sfm_overlay_existing_sfm.yaml"
+    )
     if stage in {"alignment", "quality"}:
-        required = ("trajectory", "sparse_ply", "manual_track")
+        required = ["trajectory", "manual_track"]
+        if not full_pose:
+            required.append("sparse_ply")
         if stage == "quality":
-            required = (*required, "sfm_camera_path")
+            required.append("sfm_camera_path")
         for label in required:
             if not resolved[label].exists():
                 if label in {"trajectory", "sparse_ply"}:
@@ -568,27 +583,32 @@ def build_stage_command(
                 if label == "sfm_camera_path":
                     raise FileNotFoundError("请先在关键帧标定阶段完成路线拟合。")
                 raise FileNotFoundError(f"manual camera track not found: {resolved[label]}")
-        _require_suitable_sfm(resolved["run_dir"])
-        if stage == "alignment":
+        if not full_pose:
+            _require_suitable_sfm(resolved["run_dir"])
+        if stage == "alignment" and not full_pose:
             anchor_count = _manual_keyframe_count(resolved["manual_track"])
             if anchor_count < 2:
                 raise ValueError(f"路线拟合至少需要 2 个人工关键帧；当前为 {anchor_count} 个。")
         if stage == "quality":
             validate_quality_plan(keyframe_plan_path(resolved["run_dir"]), resolved["sfm_camera_path"])
-        selected_stages = "alignment,viewer_scene" if stage == "alignment" else "quality,viewer_scene,road_surface"
+        selected_stages = (
+            "alignment,viewer_scene"
+            if stage == "alignment"
+            else "quality,viewer_scene"
+            if full_pose
+            else "quality,viewer_scene,road_surface"
+        )
         command = [
             python,
             "-m",
             "cadscene.cli.run_pipeline",
             *common,
             "--config",
-            str(config_root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
+            str(config_root / "configs" / "pipelines" / pipeline_config),
             "--stages",
             selected_stages,
             "--trajectory",
             str(resolved["trajectory"]),
-            "--sparse-ply",
-            str(resolved["sparse_ply"]),
             "--web-camera-track",
             str(resolved["manual_track"]),
             "--video",
@@ -601,6 +621,12 @@ def build_stage_command(
             str(resolved["origin_xy"][0]),
             str(resolved["origin_xy"][1]),
         ]
+        if not full_pose:
+            trajectory_index = command.index("--trajectory")
+            command[trajectory_index:trajectory_index] = [
+                "--sparse-ply",
+                str(resolved["sparse_ply"]),
+            ]
         if stage == "quality":
             command.extend(
                 [
@@ -609,29 +635,30 @@ def build_stage_command(
                 ]
             )
         return command
-    required = ("trajectory", "sparse_ply", "manual_track")
+    required = ["trajectory", "manual_track"]
+    if not full_pose:
+        required.append("sparse_ply")
     for label in required:
         if not resolved[label].exists():
             if label in {"trajectory", "sparse_ply"}:
                 raise FileNotFoundError("请先完成 SfM 重建，或选择已有 SfM 结果。")
             raise FileNotFoundError(f"manual camera track not found: {resolved[label]}")
-    _require_suitable_sfm(resolved["run_dir"])
-    anchor_count = _manual_keyframe_count(resolved["manual_track"])
-    if anchor_count < 2:
-        raise ValueError(f"渲染前路线拟合至少需要 2 个人工关键帧；当前为 {anchor_count} 个。")
-    return [
+    if not full_pose:
+        _require_suitable_sfm(resolved["run_dir"])
+        anchor_count = _manual_keyframe_count(resolved["manual_track"])
+        if anchor_count < 2:
+            raise ValueError(f"渲染前路线拟合至少需要 2 个人工关键帧；当前为 {anchor_count} 个。")
+    command = [
         python,
         "-m",
         "cadscene.cli.run_pipeline",
         *common,
         "--config",
-        str(config_root / "configs" / "pipelines" / "sfm_overlay_existing_sfm.yaml"),
+        str(config_root / "configs" / "pipelines" / pipeline_config),
         "--stages",
         "alignment,render",
         "--trajectory",
         str(resolved["trajectory"]),
-        "--sparse-ply",
-        str(resolved["sparse_ply"]),
         "--web-camera-track",
         str(resolved["manual_track"]),
         "--video",
@@ -644,6 +671,13 @@ def build_stage_command(
         str(resolved["origin_xy"][0]),
         str(resolved["origin_xy"][1]),
     ]
+    if not full_pose:
+        trajectory_index = command.index("--trajectory")
+        command[trajectory_index:trajectory_index] = [
+            "--sparse-ply",
+            str(resolved["sparse_ply"]),
+        ]
+    return command
 
 
 class JobRunner:

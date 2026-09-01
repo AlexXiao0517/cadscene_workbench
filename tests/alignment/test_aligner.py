@@ -78,7 +78,9 @@ def _track_from_states(states: dict[int, CameraState], *, origin_xy=(1000.0, 200
     }
 
 
-def _write_trajectory(path: Path, traj: SfmTrajectory) -> None:
+def _write_trajectory(
+    path: Path, traj: SfmTrajectory, *, meta: dict | None = None
+) -> None:
     path.write_text(
         json.dumps(
             {
@@ -86,6 +88,7 @@ def _write_trajectory(path: Path, traj: SfmTrajectory) -> None:
                 "width": traj.width,
                 "height": traj.height,
                 "intrinsics": [traj.intrinsics],
+                "meta": meta or {},
                 "poses": [
                     {
                         "frame_index": int(frame),
@@ -98,6 +101,88 @@ def _write_trajectory(path: Path, traj: SfmTrajectory) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_metric_full_pose_trajectory(path: Path) -> SfmTrajectory:
+    trajectory = _trajectory()
+    _write_trajectory(
+        path,
+        trajectory,
+        meta={
+            "trajectory_mode": "srt_full_pose",
+            "coordinate_system": "cad_local_m",
+            "metric_scale_locked": True,
+        },
+    )
+    return trajectory
+
+
+def test_metric_full_pose_alignment_keeps_scale_one_with_single_manual_anchor(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "full_pose.json"
+    trajectory = _write_metric_full_pose_trajectory(trajectory_path)
+    source_center = trajectory.centers[0]
+    corrected = CameraState(
+        camera_x=float(source_center[0] + 4.0),
+        camera_y=float(source_center[1] - 3.0),
+        camera_z=float(source_center[2] + 1.5),
+        yaw_deg=8.0,
+        pitch_deg=2.0,
+        roll_deg=-1.0,
+        fov_deg=67.0,
+        cad_scale=1.0,
+    )
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(
+        json.dumps(
+            _track_from_states({0: corrected}, origin_xy=(0.0, 0.0))
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+        ),
+    )
+
+    assert result.alignment_json["sim3"]["scale"] == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        result.alignment_json["sim3"]["rotation"], np.eye(3)
+    )
+    assert result.alignment_json["sim3"]["translation"] == pytest.approx(
+        [4.0, -3.0, 1.5]
+    )
+    assert result.alignment_json["validation"]["alignment_mode"] == "metric_direct"
+    assert result.alignment_json["validation"]["metric_scale_locked"] is True
+
+
+def test_metric_full_pose_never_calls_free_sim3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trajectory_path = tmp_path / "full_pose.json"
+    _write_metric_full_pose_trajectory(trajectory_path)
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps({"keyframes": []}), encoding="utf-8")
+
+    def fail_free_sim3(_correspondences):
+        raise AssertionError("free Sim3 must not run for metric full-pose input")
+
+    monkeypatch.setattr(aligner, "estimate_global_sim3", fail_free_sim3)
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0)),
+    )
+
+    assert result.alignment_json["sim3"]["scale"] == 1.0
+    assert result.metrics["alignment_mode"] == "metric_direct"
 
 
 def test_estimate_global_sim3_recovers_known_transform() -> None:

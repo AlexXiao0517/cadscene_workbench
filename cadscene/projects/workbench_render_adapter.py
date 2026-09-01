@@ -77,11 +77,12 @@ class ExistingWorkbenchRenderAdapter:
             )
         else:
             trajectory = _required_path(inputs.parameters, "trajectory_path")
-            run_root = trajectory.parent.parent
-            sparse_ply = run_root / "02_sfm" / "sparse_points.ply"
-            if not sparse_ply.is_file():
-                raise FileNotFoundError(f"SfM sparse point cloud is unavailable: {sparse_ply}")
-            render_command = (
+            pipeline_name = (
+                "srt_full_pose_overlay.yaml"
+                if self.workflow == "srt_full_pose"
+                else "sfm_overlay_existing_sfm.yaml"
+            )
+            command = [
                 sys.executable,
                 "-m",
                 "cadscene.cli.run_pipeline",
@@ -96,14 +97,12 @@ class ExistingWorkbenchRenderAdapter:
                     self.application_root
                     / "configs"
                     / "pipelines"
-                    / "sfm_overlay_existing_sfm.yaml"
+                    / pipeline_name
                 ),
                 "--stages",
                 "alignment,render",
                 "--trajectory",
                 str(trajectory),
-                "--sparse-ply",
-                str(sparse_ply),
                 "--web-camera-track",
                 str(inputs.workbench_artifact_path),
                 "--video",
@@ -117,7 +116,20 @@ class ExistingWorkbenchRenderAdapter:
                 str(origin_xy[1]),
                 "--progress-file",
                 str(progress_path),
-            )
+            ]
+            if self.workflow != "srt_full_pose":
+                run_root = trajectory.parent.parent
+                sparse_ply = run_root / "02_sfm" / "sparse_points.ply"
+                if not sparse_ply.is_file():
+                    raise FileNotFoundError(
+                        f"SfM sparse point cloud is unavailable: {sparse_ply}"
+                    )
+                trajectory_index = command.index("--trajectory")
+                command[trajectory_index:trajectory_index] = [
+                    "--sparse-ply",
+                    str(sparse_ply),
+                ]
+            render_command = tuple(command)
         annotation_bundle_value = inputs.parameters.get(
             "annotation_render_bundle_path"
         )

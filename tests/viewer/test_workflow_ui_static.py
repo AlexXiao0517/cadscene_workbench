@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
+
+import yaml
 
 
 APP = Path("apps/web_camera_viewer")
@@ -80,6 +83,21 @@ def test_workflow_polls_job_status_and_handles_ignored_suggestions() -> None:
     assert "next_step_recommendation" in script
     assert "SfM 注册失败" in script
     assert 'if (sfmSuitable === false) return "sfm"' in script
+
+
+def test_full_pose_workbench_preserves_workflow_and_uses_no_sfm_artifacts() -> None:
+    script = _read("workflow.js")
+    pipeline_path = Path("configs/pipelines/srt_full_pose_overlay.yaml")
+
+    assert '"srt_full_pose"' in script
+    assert "fullPoseTrajectoryPath" in script
+    assert '02_srt_full_pose/camera_trajectory_full_pose.json' in script
+    assert "fullPoseTrajectoryReady" in script
+    pipeline = yaml.safe_load(pipeline_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(pipeline)
+    assert "road_surface" not in pipeline["stages"]
+    assert "sparse_ply" not in serialized
+    assert "sfm" not in pipeline["stages"]
 
 
 def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> None:

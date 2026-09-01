@@ -408,6 +408,60 @@ def test_alignment_command_uses_manual_track_and_exports_viewer_scene(tmp_path: 
     assert command[stages_index] == "alignment,viewer_scene"
 
 
+def test_full_pose_alignment_resolves_semantic_trajectory_without_sparse_ply(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data/demo"
+    data.mkdir(parents=True)
+    (data / "demo.mp4").write_bytes(b"video")
+    (data / "design.json").write_text("{}", encoding="utf-8")
+    (data / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset": "demo",
+                "video": {"path": "data/demo/demo.mp4"},
+                "cad": {"design_json": "data/demo/design.json", "status": "ready"},
+                "defaults": {"cad_scale": 1.0, "origin_xy": [499000, 3319000]},
+                "workflow": {
+                    "trajectory_mode": "srt_full_pose",
+                    "implementation_status": "ready",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    run = tmp_path / "runs/demo/full-pose"
+    trajectory = run / "02_srt_full_pose/camera_trajectory_full_pose.json"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text("{}", encoding="utf-8")
+    track = run / "01_keyframes/camera_track_manual.json"
+    track.parent.mkdir()
+    track.write_text(
+        '{"keyframes":[{"frame":0,"source":"manual_anchor","camera":'
+        '{"x":499000,"y":3319000,"z":60,"yaw":0,"pitch":-90,"roll":0,"fov":120}}]}',
+        encoding="utf-8",
+    )
+
+    resolved = resolve_stage_inputs(tmp_path, "demo", "full-pose", {})
+    command = build_stage_command(
+        tmp_path,
+        "demo",
+        "full-pose",
+        "alignment",
+        {},
+        application_root=Path.cwd(),
+    )
+
+    assert resolved["workflow"] == "srt_full_pose"
+    assert resolved["trajectory"] == trajectory
+    assert resolved["sparse_ply"] is None
+    assert command[command.index("--trajectory") + 1] == str(trajectory)
+    assert command[command.index("--config") + 1].endswith(
+        "configs\\pipelines\\srt_full_pose_overlay.yaml"
+    )
+    assert "--sparse-ply" not in command
+
+
 def test_alignment_command_allows_rotation_only_manual_anchor_positions(tmp_path: Path) -> None:
     root = tmp_path
     run_dir = root / "runs/demo/r-overlap"

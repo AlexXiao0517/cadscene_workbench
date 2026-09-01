@@ -23,8 +23,10 @@ def validate_viewer_scene(scene: dict) -> None:
     if "global_sfm_track" not in tracks or "anchored_camera_path" not in tracks:
         raise ValueError("tracks 必须包含 global_sfm_track 和 anchored_camera_path。")
     for row in tracks["global_sfm_track"]:
-        if row.get("source") != "global_sim3_sfm":
-            raise ValueError("global_sfm_track source 必须是 global_sim3_sfm。")
+        if row.get("source") not in {"global_sim3_sfm", "metric_direct_srt"}:
+            raise ValueError(
+                "global_sfm_track source 必须是 global_sim3_sfm 或 metric_direct_srt。"
+            )
         _validate_track_row(row)
     for row in tracks["anchored_camera_path"]:
         if row.get("source") != "segment_anchor_path":

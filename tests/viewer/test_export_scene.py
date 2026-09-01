@@ -43,10 +43,11 @@ def _write_ply(path: Path) -> None:
     )
 
 
-def _write_trajectory(path: Path) -> None:
+def _write_trajectory(path: Path, *, meta: dict | None = None) -> None:
     write_json(
         path,
         {
+            **({"meta": meta} if meta is not None else {}),
             "fps": 25.0,
             "width": 100,
             "height": 100,
@@ -57,6 +58,50 @@ def _write_trajectory(path: Path) -> None:
             ],
         },
     )
+
+
+def test_full_pose_scene_declares_workflow_and_keeps_empty_point_cloud(
+    tmp_path: Path,
+) -> None:
+    trajectory = tmp_path / "camera_trajectory_full_pose.json"
+    alignment = tmp_path / "alignment.json"
+    _write_trajectory(
+        trajectory,
+        meta={
+            "trajectory_mode": "srt_full_pose",
+            "coordinate_system": "cad_local_m",
+            "metric_scale_locked": True,
+        },
+    )
+    _write_alignment(
+        alignment,
+        validation={
+            "status": "ok",
+            "alignment_mode": "metric_direct",
+            "metric_scale_locked": True,
+        },
+    )
+
+    scene, stats = build_viewer_scene(
+        dataset="synthetic",
+        run_id="full-pose",
+        sparse_ply=None,
+        trajectory=trajectory,
+        alignment=alignment,
+        sfm_camera_path=None,
+        quality_timeline=None,
+        suggestions=None,
+        config=ExportViewerSceneConfig(
+            cad_scale=1.0,
+            origin_xy=(499000.0, 3319000.0),
+        ),
+    )
+
+    validate_viewer_scene(scene)
+    assert scene["meta"]["workflow"] == "srt_full_pose"
+    assert scene["points"]["count_exported"] == 0
+    assert scene["points"]["data"] == []
+    assert stats["global_track_count"] == 2
 
 
 def _write_alignment(

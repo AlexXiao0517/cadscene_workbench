@@ -329,6 +329,43 @@ def test_sfm_render_forwards_structured_progress_sidecar(tmp_path: Path) -> None
     assert str(inputs.attempt_directory / "adapter_progress.json") in render_command
 
 
+def test_full_pose_render_uses_metric_pipeline_without_sparse_point_cloud(
+    tmp_path: Path,
+) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    trajectory = (
+        tmp_path / "run" / "02_srt_full_pose" / "camera_trajectory_full_pose.json"
+    ).resolve()
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text('{"poses":[]}', encoding="utf-8")
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "workflow": "srt_full_pose",
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 1.0,
+                "origin_xy": [499000.0, 3319000.0],
+                "trajectory_path": str(trajectory),
+            },
+        }
+    )
+
+    plan = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("srt_full_pose").prepare(inputs)
+    command = plan.commands[0]
+
+    assert "cadscene.cli.run_pipeline" in command
+    assert command[command.index("--config") + 1].endswith(
+        "configs\\pipelines\\srt_full_pose_overlay.yaml"
+    )
+    assert "--sparse-ply" not in command
+    assert "02_sfm" not in " ".join(command)
+
+
 def test_workbench_render_draws_annotation_overlay_before_packaging(
     tmp_path: Path,
 ) -> None:

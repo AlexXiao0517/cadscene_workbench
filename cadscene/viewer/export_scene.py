@@ -162,6 +162,11 @@ def _read_csv_rows(path: str | Path) -> list[dict]:
 
 def build_global_sfm_track(trajectory: str | Path, alignment: str | Path, config: ExportViewerSceneConfig) -> list[dict]:
     traj = load_sfm_trajectory(trajectory)
+    source = (
+        "metric_direct_srt"
+        if traj.meta.get("trajectory_mode") == "srt_full_pose"
+        else "global_sim3_sfm"
+    )
     alignment_data = read_json(alignment)
     raw_sim3 = alignment_data.get("sim3") or alignment_data.get("transform") or alignment_data
     sim3 = Sim3.from_dict(raw_sim3)
@@ -194,7 +199,7 @@ def build_global_sfm_track(trajectory: str | Path, alignment: str | Path, config
             {
                 "frame_index": int(frame),
                 "camera": python_state_to_web_camera(state, config.origin_xy),
-                "source": "global_sim3_sfm",
+                "source": source,
             }
         )
     return out
@@ -257,6 +262,7 @@ def assemble_scene(
     suggestions: Sequence[dict],
     quality_timeline: str | Path | None,
     suggestions_path: str | Path | None,
+    workflow: str | None = None,
     alignment_validation: Mapping[str, object] | None = None,
     warnings: Sequence[str] | None = None,
 ) -> dict:
@@ -273,6 +279,8 @@ def assemble_scene(
     }
     if alignment_validation:
         meta["alignment_validation"] = dict(alignment_validation)
+    if workflow:
+        meta["workflow"] = str(workflow)
     scene = {
         "schema_version": SCHEMA_VERSION,
         "meta": meta,
@@ -338,7 +346,14 @@ def build_viewer_scene(
     else:
         warnings.append("未提供 sparse_ply，点云为空。")
     global_track: list[dict] = []
+    workflow: str | None = None
     if trajectory:
+        trajectory_data = read_json(trajectory)
+        trajectory_meta = trajectory_data.get("meta")
+        if isinstance(trajectory_meta, Mapping):
+            trajectory_mode = trajectory_meta.get("trajectory_mode")
+            if trajectory_mode:
+                workflow = str(trajectory_mode)
         global_track = build_global_sfm_track(trajectory, alignment, config)
     else:
         warnings.append("未提供 trajectory，global_sfm_track 为空。")
@@ -357,6 +372,7 @@ def build_viewer_scene(
         suggestions=suggestions_rows,
         quality_timeline=quality_timeline,
         suggestions_path=suggestions,
+        workflow=workflow,
         alignment_validation=validation,
         warnings=warnings,
     )

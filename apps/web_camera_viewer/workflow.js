@@ -144,8 +144,22 @@
     return trajectoryWorkflow?.trajectory_mode === "pure_rotation";
   }
 
+  function isFullPoseWorkflow() {
+    return trajectoryWorkflow?.trajectory_mode === "srt_full_pose";
+  }
+
+  function fullPoseTrajectoryPath() {
+    return runPath("02_srt_full_pose/camera_trajectory_full_pose.json");
+  }
+
   function applyProjectWorkbenchSessionWorkflow(session) {
-    const mode = session?.workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";
+    const supported = new Set([
+      "sfm_only",
+      "srt_sfm_fused",
+      "srt_full_pose",
+      "pure_rotation",
+    ]);
+    const mode = supported.has(session?.workflow) ? session.workflow : "sfm_only";
     trajectoryWorkflow = {
       ...(trajectoryWorkflow || {}),
       trajectory_mode: mode,
@@ -751,8 +765,14 @@
     if (projectWorkbenchToken) {
       try {
         await ensureProjectWorkbenchSession();
-        projectWorkbenchWorkflowMode = projectWorkbenchSession.workflow === "pure_rotation"
-          ? "pure_rotation"
+        const supported = new Set([
+          "sfm_only",
+          "srt_sfm_fused",
+          "srt_full_pose",
+          "pure_rotation",
+        ]);
+        projectWorkbenchWorkflowMode = supported.has(projectWorkbenchSession.workflow)
+          ? projectWorkbenchSession.workflow
           : "sfm_only";
       } catch (error) {
         trajectoryWorkflowLoaded = false;
@@ -886,6 +906,14 @@
         updatePureRotationRecoveryActions({ ready: true });
         return "keyframes";
       }
+      const viewerPaths = window.resolveViewerPaths ? window.resolveViewerPaths() : {};
+      const videoReady = await resourceExists(viewerPaths.video);
+      const cadReady = await resourceExists(viewerPaths.cad);
+      return videoReady && cadReady ? "sfm" : "upload";
+    }
+    if (isFullPoseWorkflow()) {
+      const fullPoseTrajectoryReady = await resourceExists(fullPoseTrajectoryPath());
+      if (fullPoseTrajectoryReady) return "keyframes";
       const viewerPaths = window.resolveViewerPaths ? window.resolveViewerPaths() : {};
       const videoReady = await resourceExists(viewerPaths.video);
       const cadReady = await resourceExists(viewerPaths.cad);

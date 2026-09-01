@@ -21,6 +21,7 @@ from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 
 MAX_GLOBAL_ANCHOR_RESIDUAL_M = 10.0
 MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
+MAX_METRIC_CORRECTION_ANGLE_RESIDUAL_DEG = 15.0
 MAX_FOCAL_ASPECT_RATIO = 2.0
 UPSTREAM_SFM_MANUAL_FOV_WARNING = (
     "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used."
@@ -110,7 +111,10 @@ class AnchoredAlignment:
             "residual_pos_m_max": float(mag.max()) if len(mag) else 0.0,
             "residual_pos_m_mean": float(mag.mean()) if len(mag) else 0.0,
             "alignment_mode": self.position_mode,
-            "scale_observable": self.position_mode != "rotation_only",
+            "scale_observable": self.position_mode not in {
+                "rotation_only",
+                "metric_direct",
+            },
         }
 
     def anchor_position_at(self, frame_index: float) -> np.ndarray | None:
@@ -255,7 +259,13 @@ def _validate_alignment_result(
         )
 
 
-def build_correspondences(track: Mapping[str, object], traj: SfmTrajectory, config: AlignmentConfig) -> list[KeyframeCorrespondence]:
+def build_correspondences(
+    track: Mapping[str, object],
+    traj: SfmTrajectory,
+    config: AlignmentConfig,
+    *,
+    allow_empty: bool = False,
+) -> list[KeyframeCorrespondence]:
     out: list[KeyframeCorrespondence] = []
     for keyframe in confirmed_keyframes(dict(track)):
         camera = keyframe.get("camera") or {}
@@ -275,9 +285,98 @@ def build_correspondences(track: Mapping[str, object], traj: SfmTrajectory, conf
             )
         )
     out.sort(key=lambda row: row.frame_index)
-    if not out:
+    if not out and not allow_empty:
         raise RuntimeError("camera_track.json 中没有可用于对齐的人工或已确认关键帧。")
     return out
+
+
+def _is_metric_direct_trajectory(traj: SfmTrajectory) -> bool:
+    return bool(
+        traj.meta.get("coordinate_system") == "cad_local_m"
+        and traj.meta.get("metric_scale_locked") is True
+    )
+
+
+def _wrapped_mean_degrees(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    radians = np.radians(np.asarray(values, dtype=np.float64))
+    return _normalize_angle(
+        math.degrees(
+            math.atan2(float(np.mean(np.sin(radians))), float(np.mean(np.cos(radians))))
+        )
+    )
+
+
+def _metric_direct_alignment(
+    correspondences: Sequence[KeyframeCorrespondence],
+    traj: SfmTrajectory,
+    config: AlignmentConfig,
+) -> tuple[Sim3, AnchoredAlignment]:
+    if not correspondences:
+        return Sim3.identity(), AnchoredAlignment(
+            sim3=Sim3.identity(),
+            frames=np.asarray([], dtype=np.int64),
+            residual_positions=np.empty((0, 3), dtype=np.float64),
+            residual_angles_deg=np.empty((0, 3), dtype=np.float64),
+            position_mode="metric_direct",
+            anchor_positions=None,
+        )
+    translations = np.asarray(
+        [row.center_cad - row.center_sfm for row in correspondences],
+        dtype=np.float64,
+    )
+    translation = np.median(translations, axis=0)
+    position_residuals = np.linalg.norm(translations - translation, axis=1)
+    if float(position_residuals.max()) > MAX_GLOBAL_ANCHOR_RESIDUAL_M:
+        raise RuntimeError(
+            "metric-direct translation corrections disagree by more than "
+            f"{MAX_GLOBAL_ANCHOR_RESIDUAL_M:g} m"
+        )
+    identity = Sim3(
+        scale=1.0,
+        rotation=np.eye(3, dtype=np.float64),
+        translation=translation,
+    )
+    angle_deltas: list[list[float]] = []
+    for row in correspondences:
+        source = _global_state_at_frame(row.frame_index, traj, identity, config)
+        angle_deltas.append(
+            [
+                _normalize_angle(row.state.yaw_deg - source.yaw_deg),
+                _normalize_angle(row.state.pitch_deg - source.pitch_deg),
+                _normalize_angle(row.state.roll_deg - source.roll_deg),
+            ]
+        )
+    angle_offset = np.asarray(
+        [
+            _wrapped_mean_degrees([row[index] for row in angle_deltas])
+            for index in range(3)
+        ],
+        dtype=np.float64,
+    )
+    angular_residuals = np.asarray(
+        [
+            [_normalize_angle(row[index] - angle_offset[index]) for index in range(3)]
+            for row in angle_deltas
+        ],
+        dtype=np.float64,
+    )
+    if angular_residuals.size and float(np.max(np.abs(angular_residuals))) > MAX_METRIC_CORRECTION_ANGLE_RESIDUAL_DEG:
+        raise RuntimeError(
+            "metric-direct attitude corrections are inconsistent across anchors"
+        )
+    anchored = AnchoredAlignment(
+        sim3=identity,
+        frames=np.asarray(
+            [row.frame_index for row in correspondences], dtype=np.int64
+        ),
+        residual_positions=np.zeros((len(correspondences), 3), dtype=np.float64),
+        residual_angles_deg=np.tile(angle_offset, (len(correspondences), 1)),
+        position_mode="metric_direct",
+        anchor_positions=None,
+    )
+    return identity, anchored
 
 
 def estimate_global_sim3(correspondences: Sequence[KeyframeCorrespondence]) -> Sim3:
@@ -607,7 +706,9 @@ def generate_aligned_camera_path(
         state = aligned_state_at_frame(frame, traj, sim3, anchored, config)
         row = state.to_row(frame_index=frame, status="ok")
         row["path_source"] = (
-            "rotation_only_anchor"
+            "metric_direct"
+            if anchored is not None and anchored.position_mode == "metric_direct"
+            else "rotation_only_anchor"
             if anchored is not None and anchored.position_mode == "rotation_only"
             else "segment_anchor" if anchored is not None else "global_sim3"
         )
@@ -616,7 +717,9 @@ def generate_aligned_camera_path(
         state = aligned_state_at_frame(end, traj, sim3, anchored, config)
         row = state.to_row(frame_index=end, status="ok")
         row["path_source"] = (
-            "rotation_only_anchor"
+            "metric_direct"
+            if anchored is not None and anchored.position_mode == "metric_direct"
+            else "rotation_only_anchor"
             if anchored is not None and anchored.position_mode == "rotation_only"
             else "segment_anchor" if anchored is not None else "global_sim3"
         )
@@ -741,7 +844,10 @@ def _alignment_json(
     return {
         "schema_version": "cadscene_alignment_v1",
         "alignment_mode": anchored.position_mode,
-        "scale_observable": anchored.position_mode != "rotation_only",
+        "scale_observable": anchored.position_mode not in {
+            "rotation_only",
+            "metric_direct",
+        },
         "transform": sim3.to_dict(),
         "sim3": sim3.to_dict(),
         "anchors": [row.to_row() for row in correspondences],
@@ -759,6 +865,8 @@ def _alignment_json(
                 fov_source=fov_source,
                 intrinsics_warning=intrinsics_warning,
             ),
+            "alignment_mode": anchored.position_mode,
+            "metric_scale_locked": anchored.position_mode == "metric_direct",
         },
         "config": {
             "cad_scale": float(config.cad_scale),
@@ -856,9 +964,15 @@ def run_alignment(
         fov_source = "config"
     if config.fov_from == "config":
         _validated_configured_fov(config.fov)
-    correspondences = build_correspondences(track, traj, config)
-    sim3 = estimate_global_sim3(correspondences)
-    anchored = apply_segment_anchoring(sim3, correspondences, traj, config)
+    metric_direct = _is_metric_direct_trajectory(traj)
+    correspondences = build_correspondences(
+        track, traj, config, allow_empty=metric_direct
+    )
+    if metric_direct:
+        sim3, anchored = _metric_direct_alignment(correspondences, traj, config)
+    else:
+        sim3 = estimate_global_sim3(correspondences)
+        anchored = apply_segment_anchoring(sim3, correspondences, traj, config)
     path_rows = generate_aligned_camera_path(traj, sim3, anchored, config)
     camera_track_pred = generate_camera_track_pred(track, path_rows, config, fps=traj.fps)
     metrics = _compute_metrics(correspondences, traj, sim3, anchored, config)
