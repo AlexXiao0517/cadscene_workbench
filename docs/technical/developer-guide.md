@@ -81,6 +81,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `run_pipeline` | 读取流水线配置并串行执行；`--config`、`--stages`、`--skip-render`、`--skip-road-surface`、`--skip-viewer-scene` |
 | `fuse_srt_sfm` | 实验性 partial-SRT CLI；需要轨迹和 SRT，支持 `--frame-timestamps`、时间偏移、ENU/融合质量参数 |
 | `build_srt_full_pose` | 用精确 frame map、完整 DJI SRT、已确认 georeference 和用户水平 FOV 构建 `02_srt_full_pose` 米制轨迹；不调用 SfM |
+| `build_cad_georeference_candidates` | 从不可变候选请求读取 SRT/CAD bbox，按可选中央经线筛选 CGCS2000 EPSG，原子输出候选与 `adapter_progress.json` |
 | `run_pure_rotation` | 调用外部 OpenGV 纯旋转后端；需要 `--video`、`--output-root`，可提供后端目录/命令 |
 | `render_pure_rotation` | 用已校正的固定中心轨迹渲染；需要视频、CAD 和 `--track` |
 | `benchmark_sfm_backends` | 对比 SfM 后端；支持 `--dry-run`、帧范围和 GPU 索引 |
@@ -149,7 +150,7 @@ python -m pytest -p no:cacheprovider
 python scripts/check_no_project_dependency.py
 ```
 
-项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。`tests/integration/test_srt_full_pose_workflow.py` 覆盖合成 SRT 从 adapter 到 metric-direct 对齐和无点云 scene；packaging 测试在源码目录外解析 EPSG:4549。当前测试仍不代替真实 GPU、外部 OpenGV、长 MP4、DXF、现场 DJI 镜头或独立测量高程验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
+项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。`cad_georeference_candidates` 是不绑定 clip 的 `light_compute` 项目任务，输入指纹绑定 CAD、SRT、中央经线、候选上限和算法版本；成功产物只有当前指纹仍有效时才能确认。`tests/integration/test_srt_full_pose_workflow.py` 覆盖合成 SRT 从 adapter 到 metric-direct 对齐和无点云 scene；packaging 测试在源码目录外解析 EPSG:4549。当前测试仍不代替真实 GPU、外部 OpenGV、长 MP4、DXF、现场 DJI 镜头或独立测量高程验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
 
 现行文档契约测试同时读取上传页、自动分析与项目页源码，锁定“正式界面只支持
 MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project 与兼容 dataset/run 存储

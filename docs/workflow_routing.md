@@ -19,8 +19,10 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
 - **SRT 遥测**：选传。上传后先做解析和能力检测；只有完整 DJI 云台姿态路线可在完成坐标/FOV 确认后直接执行，不上传不影响稳定的无 SRT 流程。
 
 门户先创建 Project API 项目并并行上传视频、CAD 和可选 SRT，再启动 CAD/video 分析，
-等待候选 analysis revision 完成并激活，最后进入项目片段管理。上传页没有纯旋转模式
-复选框，也不会在分析前要求用户声明运动类型。
+等待候选 analysis revision 完成并激活，最后进入项目片段管理。新建项目进度在 source
+assets 含 SRT 时条件显示“解析 SRT”，并复用 `video_analysis` 的 `parsing_srt`、
+`routing_clips` 真实阶段；没有 SRT 时不显示该行。上传页没有纯旋转模式复选框，也不会
+在分析前要求用户声明运动类型。
 
 Project API 的底层上传校验器和兼容 Workflow API 仍能接收一些额外扩展名，用于迁移、
 历史数据或维护调用；这些入口未被正式上传界面开放，也没有形成当前用户流程的格式
@@ -46,7 +48,8 @@ SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹�
 前提。
 
 项目页保留 `sfm_only`、`pure_rotation`、`srt_sfm_fused` 与 `srt_full_pose` 的真实模式，
-不再把全姿态片段回显为 SfM。`srt_sfm_fused` 仍只显示能力提示；`srt_full_pose` 会显示
+并分别显示为“三维重建”“旋转估计”“SRT 定位 + 三维重建（实验）”和
+“SRT 全姿态（跳过三维重建）”，不再把全姿态片段回显为 SfM。`srt_sfm_fused` 仍只显示能力提示；`srt_full_pose` 会显示
 当前 CAD 指纹绑定的候选投影、CAD 包围盒与投影轨迹预览。用户必须显式确认一个候选，
 并为每个片段保存单一的 `horizontal_fov_deg`；配置 revision 或 CAD 版本改变后，旧确认
 和旧轨迹会 stale，不能继续发布。
@@ -55,6 +58,9 @@ SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹�
 
 - 坐标候选按当前 CAD 数值范围与 SRT 投影后落图证据生成；经度接近 120°时可推荐
   EPSG:4549（3°带中央经线 120°），但 120°只属于当前项目确认，不是通用默认。
+- 用户可填写中央经线筛选 PROJ 数据库中的可审计 EPSG 候选，留空时按 SRT 经度自动
+  推荐。候选生成作为持久化项目任务运行，阶段为输入校验、CRS 枚举、逐候选评分、
+  预览整理和完成；刷新弹窗可恢复进度，CAD/SRT 或输入指纹变化会使旧候选失效。
 - FOV 始终指水平视场角，只保存一个数值；首版不提供水平/垂直类型选择，也不支持
   逐帧变焦或鱼眼内参。
 - 姿态固定采用 DJI absolute-NED 云台 yaw/pitch/roll 约定，不运行自由姿态/尺度反算。
