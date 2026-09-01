@@ -64,6 +64,7 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
         members = set(archive.namelist())
 
     for required in (
+        "cadscene/cli/build_srt_full_pose.py",
         "apps/workflow_portal/index.html",
         "apps/project_workspace/index.html",
         "apps/project_library/index.html",

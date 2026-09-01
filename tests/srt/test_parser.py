@@ -54,3 +54,20 @@ def test_parser_keeps_relative_and_absolute_altitude_distinct() -> None:
     assert record is not None
     assert record.rel_alt == 12.5
     assert record.abs_alt == 86.0
+
+
+def test_public_loader_retains_gimbal_fields(tmp_path) -> None:
+    path = tmp_path / "flight.srt"
+    path.write_text(
+        "1\n00:00:00,000 --> 00:00:00,100\n"
+        "[latitude: 30.0] [longitude: 120.0] [rel_alt: 12.5] "
+        "[gb_yaw: 90.0] [gb_pitch: -45.0] [gb_roll: 2.0]\n",
+        encoding="utf-8",
+    )
+
+    records = parser.load_srt_records(path)
+
+    assert len(records) == 1
+    assert records[0].gimbal_yaw == 90.0
+    assert records[0].gimbal_pitch == -45.0
+    assert records[0].gimbal_roll == 2.0

@@ -3,6 +3,7 @@
 import codecs
 import re
 import warnings
+from pathlib import Path
 from typing import Any, BinaryIO
 
 from .capability import detect_trajectory_capability
@@ -156,3 +157,10 @@ def analyze_srt_stream(
     analysis["source_file"] = source_file
     analysis["records"] = [record.to_dict() for record in records]
     return analysis
+
+
+def load_srt_records(path: str | Path) -> list[SrtRecord]:
+    """Load bounded DJI-style SRT records from a physical file."""
+
+    with Path(path).open("rb") as stream:
+        return _parse_records(stream)
