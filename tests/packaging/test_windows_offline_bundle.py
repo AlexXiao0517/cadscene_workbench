@@ -101,6 +101,22 @@ def test_backend_runtime_files_are_an_explicit_allowlist(tmp_path: Path) -> None
     assert not (set(unwanted) & selected)
 
 
+def test_backend_runtime_files_reuses_colocated_native_libraries(tmp_path: Path) -> None:
+    backend = tmp_path / "released-backend"
+    colocated = (
+        Path("outputs/build_opengv_cli/libc++.dll"),
+        Path("outputs/build_opengv_cli/libunwind.dll"),
+    )
+    for relative in colocated:
+        path = backend / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("released runtime", encoding="utf-8")
+
+    selected = set(backend_runtime_files(backend))
+
+    assert set(colocated) <= selected
+
+
 def test_write_zip64_uses_one_top_level_bundle_directory(tmp_path: Path) -> None:
     root = tmp_path / "CADSceneWorkbench-0.1.0-win64-offline"
     (root / "launcher").mkdir(parents=True)

@@ -99,6 +99,10 @@ def backend_runtime_files(root: str | Path) -> tuple[Path, ...]:
     ):
         if (backend / relative).is_file():
             selected.add(relative)
+    for name in _NATIVE_RUNTIME_NAMES:
+        relative = Path("outputs/build_opengv_cli") / name
+        if (backend / relative).is_file():
+            selected.add(relative)
     toolchain_bins = sorted(
         (backend / "outputs" / "toolchains").glob(
             "llvm-mingw-*-ucrt-x86_64/bin"
