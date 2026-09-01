@@ -93,6 +93,8 @@ from cadscene.srt.parser import load_srt_records
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
+CAD_GEOREFERENCE_CANDIDATE_ADAPTER_NAME = "cad_georeference_candidates"
+CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION = "1"
 
 
 def _has_exact_success_proof(job: QueueJob) -> bool:
@@ -2421,8 +2423,285 @@ class ProjectService:
             ),
         )
 
+    def enqueue_cad_georeference_candidates(
+        self,
+        project_id: str,
+        *,
+        expected_revision: int,
+        central_meridian_deg: float | None = None,
+        limit: int = 6,
+    ) -> QueueJob:
+        """Queue one fingerprinted, project-level CRS candidate operation."""
+
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            request = _cad_georeference_candidate_request(
+                project_id,
+                project.source_assets,
+                central_meridian_deg=central_meridian_deg,
+                limit=limit,
+            )
+            input_fingerprint = _fingerprint(request)
+            request = {**request, "input_fingerprint": input_fingerprint}
+            idempotency_key = _fingerprint(
+                {
+                    "purpose": "cad_georeference_candidates",
+                    "input_fingerprint": input_fingerprint,
+                }
+            )
+            existing = next(
+                (
+                    item
+                    for item in reversed(self.queue.jobs())
+                    if item.project_id == project_id
+                    and item.job_type == "cad_georeference_candidates"
+                    and item.idempotency_key == idempotency_key
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            job_id = self._identity()
+            attempt_dir = self._attempt_directory(project_id, job_id, 1)
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+            _atomic_write_json_file(
+                attempt_dir / "cad_georeference_candidate_request.json",
+                request,
+            )
+            job = QueueJob(
+                job_id=job_id,
+                project_id=project_id,
+                clip_id="project-coordinate-system",
+                job_type="cad_georeference_candidates",
+                resource_class="light_compute",
+                status="queued",
+                stage="queued",
+                priority=0,
+                depends_on_job_ids=(),
+                exclusive_key=f"cad-georeference:{project_id}",
+                idempotency_key=idempotency_key,
+                input_revision="cad-georeference-candidates-v1",
+                input_fingerprint=input_fingerprint,
+                adapter_name=CAD_GEOREFERENCE_CANDIDATE_ADAPTER_NAME,
+                adapter_version=CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION,
+                output_revision=None,
+                operation_id=self._identity(),
+                attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            )
+            try:
+                submitted = self.queue.submit(job)
+                self._publish_queue_locked(project_id)
+            except Exception:
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+                raise
+            return submitted
+
+    def cad_georeference_candidate_status(
+        self, project_id: str
+    ) -> Mapping[str, object]:
+        candidates = tuple(
+            item
+            for item in self.queue.jobs()
+            if item.project_id == project_id
+            and item.job_type == "cad_georeference_candidates"
+        )
+        if not candidates:
+            return {
+                "job_type": "cad_georeference_candidates",
+                "status": "not_started",
+                "stale": False,
+                "candidates": [],
+            }
+        job = candidates[-1]
+        request = self._load_cad_georeference_candidate_request(job)
+        authoritative = self._current_input_fingerprint(job)
+        stale = authoritative != job.input_fingerprint
+        result_candidates: list[object] = []
+        if _has_exact_success_proof(job) and not stale:
+            output = self._read_cad_georeference_candidate_output(job)
+            raw_candidates = output.get("candidates")
+            if isinstance(raw_candidates, list):
+                result_candidates = list(raw_candidates)
+        progress = None if job.progress is None else dict(job.progress)
+        if (
+            job.status == "success"
+            and progress is not None
+            and progress.get("stage") == "complete"
+        ):
+            progress["message"] = "坐标系候选生成完成"
+        return {
+            "job_id": job.job_id,
+            "job_type": job.job_type,
+            "status": (
+                "stale_input" if stale and job.status == "success" else job.status
+            ),
+            "stage": (
+                "stale_input" if stale and job.status == "success" else job.stage
+            ),
+            "progress": progress,
+            "error": job.error,
+            "stale": stale,
+            "input_fingerprint": job.input_fingerprint,
+            "requested_central_meridian_deg": request.get(
+                "central_meridian_deg"
+            ),
+            "candidates": result_candidates,
+        }
+
+    def _load_cad_georeference_candidate_request(
+        self, job: QueueJob
+    ) -> Mapping[str, object]:
+        for attempt in reversed(job.attempts):
+            path = (
+                Path(attempt.directory)
+                / "cad_georeference_candidate_request.json"
+            )
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(payload, Mapping)
+                and payload.get("input_fingerprint") == job.input_fingerprint
+                and payload.get("algorithm_version")
+                == CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION
+            ):
+                return payload
+        raise FileNotFoundError("CAD georeference candidate request is unavailable")
+
+    def _read_cad_georeference_candidate_output(
+        self, job: QueueJob
+    ) -> Mapping[str, object]:
+        raw_path = job.published_outputs.get("cad_georeference_candidates")
+        if raw_path is None:
+            raise FileNotFoundError("CAD georeference candidate output is unavailable")
+        path = Path(raw_path).resolve()
+        attempt = Path(job.attempts[-1].directory).resolve()
+        if not path.is_relative_to(attempt) or not path.is_file():
+            raise FileNotFoundError("CAD georeference candidate output is unsafe")
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, Mapping):
+            raise ValueError("CAD georeference candidate output must be an object")
+        if payload.get("input_fingerprint") != job.input_fingerprint:
+            raise ValueError("CAD georeference candidate output fingerprint mismatch")
+        if not isinstance(payload.get("candidates"), list):
+            raise ValueError("CAD georeference candidate output has no candidate list")
+        return payload
+
+    def _validate_current_cad_georeference_candidate(
+        self,
+        project_id: str,
+        candidate: Mapping[str, object],
+        *,
+        candidate_job_id: str | None,
+        candidate_input_fingerprint: str | None,
+    ) -> None:
+        if not candidate_job_id or not candidate_input_fingerprint:
+            raise ValueError(
+                "candidate_job_id and candidate_input_fingerprint are required"
+            )
+        latest = next(
+            (
+                item
+                for item in reversed(self.queue.jobs())
+                if item.project_id == project_id
+                and item.job_type == "cad_georeference_candidates"
+            ),
+            None,
+        )
+        if latest is None or latest.job_id != candidate_job_id:
+            raise ValueError("CAD georeference candidate job is not current")
+        if (
+            latest.input_fingerprint != candidate_input_fingerprint
+            or not _has_exact_success_proof(latest)
+            or self._current_input_fingerprint(latest) != latest.input_fingerprint
+        ):
+            raise ValueError("CAD georeference candidate result is stale or invalid")
+        output = self._read_cad_georeference_candidate_output(latest)
+        allowed = output["candidates"]
+        candidate_fingerprint = _fingerprint(dict(candidate))
+        if not any(
+            isinstance(item, Mapping)
+            and _fingerprint(dict(item)) == candidate_fingerprint
+            for item in allowed  # type: ignore[union-attr]
+        ):
+            raise ValueError("candidate does not belong to the current result")
+
+    def _prepare_cad_georeference_candidate_plan(
+        self, job: QueueJob
+    ) -> JobExecutionPlan:
+        request = self._load_cad_georeference_candidate_request(job)
+        attempt = Path(job.attempts[-1].directory)
+        request_path = attempt / "cad_georeference_candidate_request.json"
+        if not request_path.is_file():
+            _atomic_write_json_file(request_path, request)
+        output_path = attempt / "cad_georeference_candidates.json"
+        progress_path = attempt / "adapter_progress.json"
+        command = (
+            sys.executable,
+            "-m",
+            "cadscene.cli.build_cad_georeference_candidates",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_path),
+            "--progress-file",
+            str(progress_path),
+        )
+        return JobExecutionPlan(
+            commands=(command,),
+            validate=lambda: self._validate_cad_georeference_candidate_outputs(
+                job
+            ),
+        )
+
+    def _validate_cad_georeference_candidate_outputs(
+        self, job: QueueJob
+    ) -> AdapterResult:
+        output = (
+            Path(job.attempts[-1].directory)
+            / "cad_georeference_candidates.json"
+        )
+        try:
+            payload = json.loads(output.read_text(encoding="utf-8-sig"))
+            if not isinstance(payload, Mapping):
+                raise ValueError("candidate output root must be an object")
+            if payload.get("input_fingerprint") != job.input_fingerprint:
+                raise ValueError("candidate output input fingerprint mismatch")
+            if payload.get("algorithm_version") != job.adapter_version:
+                raise ValueError("candidate output algorithm version mismatch")
+            candidates = payload.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                raise ValueError("candidate output contains no candidates")
+            for item in candidates:
+                if not isinstance(item, Mapping):
+                    raise ValueError("candidate output contains an invalid item")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            return AdapterResult.failed(str(exc))
+        digest = sha256(output.read_bytes()).hexdigest()
+        return AdapterResult.success(
+            output_revision=f"cad-georef-candidates:{digest[:16]}",
+            output_fingerprint=digest,
+            outputs={"cad_georeference_candidates": str(output)},
+            validation_proof={
+                "input_fingerprint": job.input_fingerprint,
+                "candidate_count": len(candidates),
+            },
+        )
+
     def recommend_cad_georeference(
-        self, project_id: str, *, limit: int = 6
+        self,
+        project_id: str,
+        *,
+        limit: int = 6,
+        central_meridian_deg: float | None = None,
+        progress_callback: Callable[[str, str, float | None], None] | None = None,
     ) -> tuple[CrsCandidate, ...]:
         """Rank CGCS2000 Gauss-Kruger candidates without confirming one."""
 
@@ -2443,6 +2722,8 @@ class ProjectService:
             [item[1] for item in gps],
             _active_cad_coordinate_bbox(project.source_assets),
             limit=limit,
+            central_meridian_deg=central_meridian_deg,
+            progress_callback=progress_callback,
         )
 
     def confirm_cad_georeference(
@@ -2451,6 +2732,8 @@ class ProjectService:
         candidate: Mapping[str, object],
         *,
         expected_revision: int,
+        candidate_job_id: str | None = None,
+        candidate_input_fingerprint: str | None = None,
     ) -> ProjectManifest:
         """Persist an explicit projection choice bound to the active CAD asset."""
 
@@ -2460,6 +2743,13 @@ class ProjectService:
                 project_id=project_id,
                 expected_revision=expected_revision,
                 current_revision=project.revision,
+            )
+        if candidate_job_id is not None or candidate_input_fingerprint is not None:
+            self._validate_current_cad_georeference_candidate(
+                project_id,
+                candidate,
+                candidate_job_id=candidate_job_id,
+                candidate_input_fingerprint=candidate_input_fingerprint,
             )
         cad_fingerprint = _active_cad_asset_fingerprint(project.source_assets)
         if cad_fingerprint is None:
@@ -4423,6 +4713,8 @@ class ProjectService:
         self, job: QueueJob
     ) -> JobExecutionPlan:
         project_id = job.project_id
+        if job.job_type == "cad_georeference_candidates":
+            return self._prepare_cad_georeference_candidate_plan(job)
         if job.job_type == "clip_export":
             return self._prepare_clip_export(job)
         if job.job_type == "sfm_solve_export":
@@ -6167,6 +6459,22 @@ class ProjectService:
 
     def _current_input_fingerprint(self, job: QueueJob) -> str | None:
         project = self.repositories.project.load(job.project_id)
+        if job.job_type == "cad_georeference_candidates":
+            try:
+                request = self._load_cad_georeference_candidate_request(job)
+                current = _cad_georeference_candidate_request(
+                    job.project_id,
+                    project.source_assets,
+                    central_meridian_deg=(
+                        None
+                        if request.get("central_meridian_deg") is None
+                        else float(request["central_meridian_deg"])
+                    ),
+                    limit=int(request["limit"]),
+                )
+                return _fingerprint(current)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                return None
         if job.job_type == "cad_replacement":
             state = project.source_assets.get("_cad_replacement")
             if (
@@ -7705,6 +8013,56 @@ def _active_cad_render_identity(
         key: cad.get(key)
         for key in ("revision", "sha256", "dataset_id", "dataset_path")
         if cad.get(key) is not None
+    }
+
+
+def _cad_georeference_candidate_request(
+    project_id: str,
+    project_assets: Mapping[str, object],
+    *,
+    central_meridian_deg: float | None,
+    limit: int,
+) -> dict[str, object]:
+    requested_meridian = None
+    if central_meridian_deg is not None:
+        requested_meridian = float(central_meridian_deg)
+        if not isfinite(requested_meridian) or not -180.0 <= requested_meridian <= 180.0:
+            raise ValueError(
+                "central_meridian_deg must be finite and between -180 and 180"
+            )
+    candidate_limit = int(limit)
+    if candidate_limit <= 0:
+        raise ValueError("candidate limit must be positive")
+    srt_path = _asset_path(project_assets, "srt")
+    if srt_path is None or not srt_path.is_file():
+        raise FileNotFoundError("physical SRT is required for CAD georeference")
+    srt_descriptor = project_assets.get("srt")
+    if isinstance(srt_descriptor, Mapping):
+        srt_identity: Mapping[str, object] = {
+            key: srt_descriptor.get(key)
+            for key in ("revision", "sha256", "path", "size_bytes")
+            if srt_descriptor.get(key) is not None
+        }
+    else:
+        stat = srt_path.stat()
+        srt_identity = {
+            "path": str(srt_path.resolve()),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    cad_fingerprint = _active_cad_asset_fingerprint(project_assets)
+    if cad_fingerprint is None:
+        raise ValueError("active CAD asset identity is unavailable")
+    return {
+        "schema_version": 1,
+        "algorithm_version": CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION,
+        "project_id": project_id,
+        "cad_asset_fingerprint": cad_fingerprint,
+        "srt_asset_fingerprint": _fingerprint(dict(srt_identity)),
+        "srt_path": str(srt_path.resolve()),
+        "cad_bbox_raw": list(_active_cad_coordinate_bbox(project_assets)),
+        "central_meridian_deg": requested_meridian,
+        "limit": candidate_limit,
     }
 
 

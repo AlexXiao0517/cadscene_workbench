@@ -200,7 +200,9 @@ class ProjectApi:
                 )
             match = _CAD_GEOREFERENCE.fullmatch(path)
             if method == "POST" and match and match["action"] == "candidates":
-                return self._recommend_cad_georeference(match["project"])
+                return self._recommend_cad_georeference(match["project"], payload)
+            if method == "GET" and match and match["action"] == "candidates":
+                return self._cad_georeference_candidate_status(match["project"])
             if method == "POST" and match and match["action"] == "confirm":
                 return self._confirm_cad_georeference(match["project"], payload)
             match = _NAME.fullmatch(path)
@@ -1470,8 +1472,34 @@ class ProjectApi:
             },
         )
 
-    def _recommend_cad_georeference(self, project_id: str) -> ApiResponse:
-        candidates = self.service.recommend_cad_georeference(project_id)
+    def _recommend_cad_georeference(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        raw_meridian = payload.get("central_meridian_deg")
+        job = self.service.enqueue_cad_georeference_candidates(
+            project_id,
+            expected_revision=_required_revision(payload),
+            central_meridian_deg=(
+                None if raw_meridian is None else float(raw_meridian)
+            ),
+        )
+        return ApiResponse(
+            202,
+            {
+                "project_id": project_id,
+                "project_revision": self.repositories.project.load(
+                    project_id
+                ).revision,
+                "operation": dict(
+                    self.service.cad_georeference_candidate_status(project_id)
+                ),
+            },
+            {"Cache-Control": "no-store"},
+        )
+
+    def _cad_georeference_candidate_status(
+        self, project_id: str
+    ) -> ApiResponse:
         return ApiResponse(
             200,
             {
@@ -1479,7 +1507,9 @@ class ProjectApi:
                 "project_revision": self.repositories.project.load(
                     project_id
                 ).revision,
-                "candidates": [item.to_dict() for item in candidates],
+                "operation": dict(
+                    self.service.cad_georeference_candidate_status(project_id)
+                ),
             },
             {"Cache-Control": "no-store"},
         )
@@ -1490,10 +1520,21 @@ class ProjectApi:
         candidate = payload.get("candidate")
         if not isinstance(candidate, Mapping):
             raise TypeError("candidate must be an object")
+        candidate_job_id = payload.get("candidate_job_id")
+        candidate_input_fingerprint = payload.get("candidate_input_fingerprint")
+        if not isinstance(candidate_job_id, str) or not candidate_job_id:
+            raise ValueError("candidate_job_id is required")
+        if (
+            not isinstance(candidate_input_fingerprint, str)
+            or not candidate_input_fingerprint
+        ):
+            raise ValueError("candidate_input_fingerprint is required")
         project = self.service.confirm_cad_georeference(
             project_id,
             candidate,
             expected_revision=_required_revision(payload),
+            candidate_job_id=candidate_job_id,
+            candidate_input_fingerprint=candidate_input_fingerprint,
         )
         return ApiResponse(
             200,

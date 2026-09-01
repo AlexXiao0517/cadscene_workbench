@@ -8,15 +8,16 @@ from uuid import uuid4
 
 
 def write_progress_sidecar(
-    path: Path, stage: str, message: str, fraction: float
+    path: Path, stage: str, message: str, fraction: float | None
 ) -> None:
     """Atomically publish adapter progress for the project executor."""
     payload = {
         "schema_version": "1.0",
         "stage": stage,
         "message": message,
-        "fraction": max(0.0, min(1.0, float(fraction))),
     }
+    if fraction is not None:
+        payload["fraction"] = max(0.0, min(1.0, float(fraction)))
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:

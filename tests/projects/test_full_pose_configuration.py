@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from cadscene.projects.http_api import ProjectApi
+from cadscene.projects.executor import LocalJobExecutor
 from cadscene.projects.media import ProjectMediaSpec
 from cadscene.projects.service import (
     _job_identity_payload,
@@ -194,23 +195,117 @@ def test_candidate_and_confirmation_routes_use_project_revision(tmp_path: Path) 
         now=lambda: "2026-09-01T00:00:00Z",
     )
 
+    project_revision = repositories.project.load("p1").revision
     candidates_response = api.handle(
-        "POST", "/api/projects/p1/cad-georeference/candidates"
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": project_revision,
+            "central_meridian_deg": 120.0,
+        },
     )
-    candidate = candidates_response.body["candidates"][0]
+    repeated = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": project_revision,
+            "central_meridian_deg": 120.0,
+        },
+    )
+    queued = api.handle("GET", "/api/projects/p1/cad-georeference/candidates")
+
+    assert candidates_response.status == 202
+    assert repeated.body["operation"]["job_id"] == candidates_response.body[
+        "operation"
+    ]["job_id"]
+    assert queued.body["operation"]["status"] in {"queued", "running"}
+    assert queued.body["operation"]["requested_central_meridian_deg"] == 120.0
+
+    finished = LocalJobExecutor(service).run_next()
+    assert finished is not None and finished.status == "success"
+    completed = api.handle("GET", "/api/projects/p1/cad-georeference/candidates")
+    operation = completed.body["operation"]
+    candidate = operation["candidates"][0]
     confirm_response = api.handle(
         "POST",
         "/api/projects/p1/cad-georeference/confirm",
         json_body={
             "expected_revision": repositories.project.load("p1").revision,
+            "candidate_job_id": operation["job_id"],
+            "candidate_input_fingerprint": operation["input_fingerprint"],
             "candidate": candidate,
         },
     )
 
-    assert candidates_response.status == 200
+    assert completed.status == 200
+    assert operation["status"] == "success"
+    assert operation["progress"] == {
+        "stage": "complete",
+        "message": "坐标系候选生成完成",
+        "fraction": 1.0,
+    }
     assert candidate["confirmed"] is False
     assert confirm_response.status == 200
     assert confirm_response.body["cad_georeference"]["confirmed"] is True
+
+
+def test_candidate_status_and_confirmation_reject_changed_cad_input(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    api = ProjectApi(
+        repositories=repositories,
+        service=service,
+        uploads=ValidatedUploadStore(tmp_path / "projects"),
+        now=lambda: "2026-09-01T00:00:00Z",
+    )
+    started = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "central_meridian_deg": 120.0,
+        },
+    )
+    finished = LocalJobExecutor(service).run_next()
+    assert finished is not None and finished.status == "success"
+    operation = api.handle(
+        "GET", "/api/projects/p1/cad-georeference/candidates"
+    ).body["operation"]
+    candidate = operation["candidates"][0]
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "cad": {**value.source_assets["cad"], "sha256": "d" * 64},
+            },
+        ),
+    )
+
+    stale = api.handle("GET", "/api/projects/p1/cad-georeference/candidates")
+    rejected = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/confirm",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "candidate_job_id": started.body["operation"]["job_id"],
+            "candidate_input_fingerprint": operation["input_fingerprint"],
+            "candidate": candidate,
+        },
+    )
+
+    assert stale.body["operation"]["status"] == "stale_input"
+    assert stale.body["operation"]["stale"] is True
+    assert stale.body["operation"]["candidates"] == []
+    assert rejected.status == 400
+    assert "stale" in rejected.body["error"]
 
 
 def test_job_parameters_merge_confirmed_georeference_cad_defaults_and_video(
