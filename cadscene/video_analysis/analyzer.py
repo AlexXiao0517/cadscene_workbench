@@ -408,6 +408,7 @@ def analyze_video(
 
     srt_records: list[dict[str, Any]] = []
     if srt_path is not None:
+        report("parsing_srt", "正在解析 SRT 飞行与云台姿态", None)
         srt_source = Path(srt_path)
         with srt_source.open("rb") as stream:
             srt_analysis = analyze_srt_stream(
@@ -418,6 +419,8 @@ def analyze_video(
             )
         srt_records = list(srt_analysis.get("records", []))
 
+    if srt_path is not None:
+        report("routing_clips", "正在按片段评估 SRT 姿态覆盖率", 0.91)
     clip_payloads: list[dict[str, Any]] = []
     source_rotation_verified = len(planned) == 1 and _rotation_evidence_verified(
         stable_windows,

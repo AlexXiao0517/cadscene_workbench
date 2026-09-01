@@ -192,6 +192,7 @@ def test_rotation_recommendation_verification_rejects_general_motion_counterevid
 
 def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path) -> None:
     video = _make_short_video(tmp_path / "short-with-srt.mkv")
+    progress: list[tuple[str, str, float | None]] = []
     blocks = []
     for second in range(4):
         blocks.append(
@@ -214,6 +215,9 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
         srt_path=srt,
         analysis_revision="analysis-test-srt",
         sample_interval_sec=0.5,
+        progress_callback=lambda stage, message, fraction: progress.append(
+            (stage, message, fraction)
+        ),
     )
 
     clip = json.loads(
@@ -224,6 +228,9 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
     assert clip["srt_coverage"]["kind"] == "full_pose"
     assert clip["recommended_workflow"] == "srt_full_pose"
     assert clip["workflow_recommendation"]["auto_selected"] is False
+    stages = [stage for stage, _message, _fraction in progress]
+    assert stages.index("parsing_srt") < stages.index("routing_clips")
+    assert stages.index("routing_clips") < stages.index("publishing")
 
 
 def test_terminal_fade_is_reported_but_does_not_create_tiny_tail_clip() -> None:
