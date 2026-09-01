@@ -44,6 +44,7 @@ def test_default_install_declares_supported_runtime_dependencies() -> None:
         "ezdxf",
         "imageio-ffmpeg",
         "pycolmap",
+        "pyproj",
         "psutil",
     } <= names
 
