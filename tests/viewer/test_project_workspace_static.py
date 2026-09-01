@@ -368,6 +368,11 @@ def test_completed_route_can_bridge_previous_or_next_clip_from_source_row() -> N
     assert "bridge_down_target_clip_id" in script
     assert "bridge_down_reason" in script
     assert "旧打通结果已失效，可重新打通" in script
+    assert 'const hasSavedWorkbench = clip.workbench?.state === "saved";' in script
+    assert (
+        'if (!hasSavedWorkbench && ["stale_input", "superseded"].includes(bridgeStatus))'
+        in script
+    )
     assert "/scene-bridges`" in script
     assert 'direction: direction' in script
     assert "async function bridgeAdjacent" in script

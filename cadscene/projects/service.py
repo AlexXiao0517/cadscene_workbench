@@ -2172,9 +2172,17 @@ class ProjectService:
                     "stale_input",
                     "superseded",
                 }:
+                    try:
+                        request_operation_id = str(
+                            self._load_scene_bridge_request(existing)["operation_id"]
+                        )
+                    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                        request_operation_id = str(
+                            existing.submission_operation_id or existing.operation_id
+                        )
                     _atomic_write_json_file(
-                        bridge_request_path(existing.operation_id),
-                        bridge_request(existing.operation_id),
+                        bridge_request_path(request_operation_id),
+                        bridge_request(request_operation_id),
                     )
                     existing = self.retry_job(
                         project_id,
@@ -2208,6 +2216,7 @@ class ProjectService:
                 adapter_version="1",
                 output_revision=None,
                 operation_id=operation_id,
+                submission_operation_id=operation_id,
                 attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
             )
             submitted = self.queue.submit(bridge)
@@ -4672,6 +4681,9 @@ class ProjectService:
             manifest, downgraded_render_ids = self._downgrade_restored_render_jobs_locked(
                 project_id, manifest
             )
+            manifest = self._recover_restored_scene_bridge_jobs_locked(
+                project_id, manifest
+            )
             restored = self.queue.merge_restored(
                 manifest.jobs,
                 project_id=project_id,
@@ -4706,6 +4718,102 @@ class ProjectService:
                     )
                 self._publish_queue_locked(project_id)
         return restored
+
+    def _recover_restored_scene_bridge_jobs_locked(
+        self, project_id: str, jobs_manifest: JobsManifest
+    ) -> JobsManifest:
+        clips = self.repositories.clips.load(project_id)
+        clips_by_id = {clip.clip_id: clip for clip in clips.clips}
+        recovered: dict[str, QueueJob] = {}
+        repair_operation_id: str | None = None
+        for payload in jobs_manifest.jobs:
+            job = QueueJob.from_dict(payload)
+            if (
+                job.job_type != "scene_bridge"
+                or job.status not in {"stale_input", "superseded"}
+            ):
+                continue
+            clip = clips_by_id.get(job.clip_id)
+            if clip is None:
+                continue
+            reference = next(
+                (
+                    item
+                    for item in reversed(clip.references)
+                    if item.owner == "jobs"
+                    and item.key == f"job:{job.job_id}"
+                    and item.value.get("reference_type") == "scene_bridge"
+                    and item.value.get("status") == "awaiting_route_refinement"
+                ),
+                None,
+            )
+            if reference is None or not _validate_scene_bridge_reference(
+                self.projects_root, project_id, clip, reference
+            ):
+                continue
+            try:
+                if self._current_input_fingerprint(job) != job.input_fingerprint:
+                    continue
+                request = self._load_scene_bridge_request(job)
+                revision = str(reference.value["bridge_revision"])
+                root = self.projects_root / project_id / "scene_bridges" / clip.clip_id / revision
+                manifest = json.loads(
+                    (root / "scene_bridge_manifest.json").read_text(encoding="utf-8-sig")
+                )
+                identity = manifest.get("identity")
+                if not isinstance(identity, Mapping):
+                    continue
+                validated = validate_scene_bridge_candidate(root, identity)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if (
+                validated.status != "success"
+                or validated.output_revision != revision
+                or validated.output_fingerprint
+                != reference.value.get("output_fingerprint")
+                or not isinstance(validated.validation_proof, Mapping)
+            ):
+                continue
+            if repair_operation_id is None:
+                repair_operation_id = self._identity()
+            recovered[job.job_id] = replace(
+                job,
+                status="success",
+                stage="success",
+                operation_id=repair_operation_id,
+                submission_operation_id=(
+                    job.submission_operation_id or str(request["operation_id"])
+                ),
+                publication_operation_id=repair_operation_id,
+                output_revision=validated.output_revision,
+                output_fingerprint=validated.output_fingerprint,
+                output_validated=True,
+                validated_input_fingerprint=job.input_fingerprint,
+                published_outputs=dict(validated.outputs),
+                validation_proof=dict(validated.validation_proof),
+                progress={
+                    "stage": "complete",
+                    "message": "completed",
+                    "fraction": 1.0,
+                },
+                error=None,
+                cleanup_reason=None,
+                target_terminal_status=None,
+            )
+        if not recovered:
+            return jobs_manifest
+        assert repair_operation_id is not None
+        return self.repositories.jobs.update(
+            project_id,
+            expected_revision=jobs_manifest.revision,
+            mutate=lambda value: replace(
+                value,
+                jobs=tuple(
+                    recovered.get(str(item.get("job_id")), QueueJob.from_dict(item)).to_dict()
+                    for item in value.jobs
+                ),
+            ),
+        )
 
     def _downgrade_restored_render_jobs_locked(
         self,
@@ -5938,14 +6046,17 @@ class ProjectService:
                 source_workbench = _saved_workbench_reference(source)
                 if source_workbench is None or source_workbench.value.get("status") != "saved":
                     return None
-                source_job = self.queue.get(str(request["source_trajectory_job_id"]))
-                target_job = self.queue.get(str(request["target_trajectory_job_id"]))
                 stored_jobs = tuple(
                     QueueJob.from_dict(item)
                     for item in self.repositories.jobs.load(job.project_id).jobs
                 )
+                jobs_by_id = {item.job_id: item for item in stored_jobs}
+                source_job = jobs_by_id.get(str(request["source_trajectory_job_id"]))
+                target_job = jobs_by_id.get(str(request["target_trajectory_job_id"]))
                 if (
-                    self._current_trajectory_for_render(source, (source_job,))
+                    source_job is None
+                    or target_job is None
+                    or self._current_trajectory_for_render(source, (source_job,))
                     != source_job
                     or target_job.job_type != "trajectory"
                     or target_job.clip_id != target.clip_id
@@ -6110,23 +6221,33 @@ class ProjectService:
         )
 
     def _load_scene_bridge_request(self, job: QueueJob) -> Mapping[str, object]:
-        path = (
+        requests_root = (
             self.projects_root
             / job.project_id
             / "scene_bridge_requests"
-            / f"{job.operation_id}.json"
         )
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        if (
-            not isinstance(payload, Mapping)
-            or payload.get("schema_version") != 1
-            or payload.get("operation_id") != job.operation_id
-            or not isinstance(payload.get("identity"), Mapping)
-            or not isinstance(payload.get("runner_identity"), Mapping)
-            or payload["identity"].get("target_clip_id") != job.clip_id
-        ):
-            raise ValueError("scene bridge request identity is invalid")
-        return payload
+        preferred_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in (job.submission_operation_id, job.operation_id)
+                if isinstance(value, str) and value
+            )
+        )
+        candidates = [requests_root / f"{value}.json" for value in preferred_ids]
+        if requests_root.is_dir():
+            candidates.extend(
+                path
+                for path in sorted(requests_root.glob("*.json"))
+                if path not in candidates
+            )
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if _scene_bridge_request_matches_job(payload, job, path):
+                return payload
+        raise FileNotFoundError("scene bridge request identity is unavailable")
 
     def _prepare_scene_bridge(self, job: QueueJob) -> JobExecutionPlan:
         request = self._load_scene_bridge_request(job)
@@ -7497,6 +7618,28 @@ def _scene_bridge_identity_payload(
             "input_fingerprint": target_trajectory.input_fingerprint,
         },
     }
+
+
+def _scene_bridge_request_matches_job(
+    payload: object, job: QueueJob, path: Path
+) -> bool:
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != 1:
+        return False
+    operation_id = payload.get("operation_id")
+    identity = payload.get("identity")
+    runner_identity = payload.get("runner_identity")
+    if (
+        not isinstance(operation_id, str)
+        or path.name != f"{operation_id}.json"
+        or not isinstance(identity, Mapping)
+        or not isinstance(runner_identity, Mapping)
+        or identity.get("project_id") != job.project_id
+        or identity.get("target_clip_id") != job.clip_id
+        or runner_identity.get("operation_id") != operation_id
+        or any(runner_identity.get(key) != value for key, value in identity.items())
+    ):
+        return False
+    return _fingerprint(identity) == job.input_fingerprint
 
 
 def _atomic_write_json_file(path: Path, payload: Mapping[str, object]) -> None:
