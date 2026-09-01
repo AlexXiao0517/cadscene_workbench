@@ -182,9 +182,9 @@ git commit -m "fix: preserve bundle-local workspace on nested paths"
 ### Task 3: Regression verification and 0.1.3 package replacement
 
 **Files:**
-- Generated: `dist/releases/0.1.3-longpath-fix/CADScene-0.1.3/`
-- Generated: `dist/releases/0.1.3-longpath-fix/CADScene-0.1.3.zip`
-- Generated: `dist/releases/0.1.3-longpath-fix/CADScene-0.1.3.zip.sha256`
+- Generated: `dist/releases/0.1.3-fix/CADScene-0.1.3/`
+- Generated: `dist/releases/0.1.3-fix/CADScene-0.1.3.zip`
+- Generated: `dist/releases/0.1.3-fix/CADScene-0.1.3.zip.sha256`
 
 **Interfaces:**
 - Consumes: compact attempt layout and corrected launcher template.
@@ -211,25 +211,25 @@ Expected: pytest has zero failures, dependency check exits 0, and `git diff --ch
 - [ ] **Step 3: Build a fresh wheel and packed runtime without touching the existing extracted package**
 
 ```powershell
-python -m build --wheel --outdir dist/releases/0.1.3-longpath-fix/wheels
-python scripts/windows_offline_bundle.py prepare-runtime --conda D:/anaconda3/Scripts/conda.exe --conda-pack D:/anaconda3/Scripts/conda-pack.exe --source-prefix .worktrees/fix-windows-path-and-scene-segmentation/.local/compact-paths-9858176/build-env --build-prefix .local/release-0.1.3-longpath/build-env --wheel dist/releases/0.1.3-longpath-fix/wheels/cadscene_workbench-0.1.3-py3-none-any.whl --runtime-archive .local/release-0.1.3-longpath/runtime.tar.gz
+python -m build --wheel --outdir dist/releases/0.1.3-fix/wheels
+python scripts/windows_offline_bundle.py prepare-runtime --conda D:/anaconda3/Scripts/conda.exe --conda-pack D:/anaconda3/Scripts/conda-pack.exe --source-prefix .worktrees/fix-windows-path-and-scene-segmentation/.local/compact-paths-9858176/build-env --build-prefix .local/r013lp/env --wheel dist/releases/0.1.3-fix/wheels/cadscene_workbench-0.1.3-py3-none-any.whl --runtime-archive .local/r013lp/runtime.tar.gz
 $cadsceneSourceCommit = git rev-parse HEAD
-python scripts/windows_offline_bundle.py assemble --config packaging/windows/release-config.json --runtime-archive .local/release-0.1.3-longpath/runtime.tar.gz --backend-root dist/releases/0.1.3/CADScene-0.1.3/pure_rotation_backend --templates-root packaging/windows --output-dir dist/releases/0.1.3-longpath-fix --source-commit $cadsceneSourceCommit --zip
-python scripts/windows_offline_bundle.py verify --config packaging/windows/release-config.json --bundle-root dist/releases/0.1.3-longpath-fix/CADScene-0.1.3
+python scripts/windows_offline_bundle.py assemble --config packaging/windows/release-config.json --runtime-archive .local/r013lp/runtime.tar.gz --backend-root dist/releases/0.1.3/CADScene-0.1.3/pure_rotation_backend --templates-root packaging/windows --output-dir dist/releases/0.1.3-fix --source-commit $cadsceneSourceCommit --zip
+python scripts/windows_offline_bundle.py verify --config packaging/windows/release-config.json --bundle-root dist/releases/0.1.3-fix/CADScene-0.1.3
 ```
 
-Expected: the new output is generated under `0.1.3-longpath-fix`; the existing `dist/releases/0.1.3/CADScene-0.1.3` directory is not removed or overwritten.
+Expected: the new output is generated under `0.1.3-fix`; the existing `dist/releases/0.1.3/CADScene-0.1.3` directory is not removed or overwritten.
 
 - [ ] **Step 4: Verify the rebuilt bundle in place without starting a persistent service**
 
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File dist/releases/0.1.3-longpath-fix/CADScene-0.1.3/launcher/start.ps1 -PreferredPort 8300 -NoBrowser
-$cadsceneState = Get-Content -Raw -LiteralPath dist/releases/0.1.3-longpath-fix/CADScene-0.1.3/launcher/service-state.json | ConvertFrom-Json
-$cadsceneExpectedWorkspace = [IO.Path]::GetFullPath('dist/releases/0.1.3-longpath-fix/CADScene-0.1.3/workspace')
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File dist/releases/0.1.3-fix/CADScene-0.1.3/launcher/start.ps1 -PreferredPort 8300 -NoBrowser
+$cadsceneState = Get-Content -Raw -LiteralPath dist/releases/0.1.3-fix/CADScene-0.1.3/launcher/service-state.json | ConvertFrom-Json
+$cadsceneExpectedWorkspace = [IO.Path]::GetFullPath('dist/releases/0.1.3-fix/CADScene-0.1.3/workspace')
 if ([IO.Path]::GetFullPath([string]$cadsceneState.storage_root) -ine $cadsceneExpectedWorkspace) { throw 'packaged service left the bundle-local workspace' }
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File dist/releases/0.1.3-longpath-fix/CADScene-0.1.3/launcher/stop.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File dist/releases/0.1.3-fix/CADScene-0.1.3/launcher/stop.ps1
 if (Get-NetTCPConnection -LocalPort ([int]$cadsceneState.port) -State Listen -ErrorAction SilentlyContinue) { throw 'packaged service is still listening' }
 ```
 
@@ -240,7 +240,7 @@ Expected: startup succeeds from the nested release path, `storage_root` equals t
 ```powershell
 git status --short
 git log -3 --oneline
-$cadsceneZip = 'dist/releases/0.1.3-longpath-fix/CADScene-0.1.3.zip'
+$cadsceneZip = 'dist/releases/0.1.3-fix/CADScene-0.1.3.zip'
 $cadsceneHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $cadsceneZip).Hash.ToLowerInvariant()
 Set-Content -LiteralPath "$cadsceneZip.sha256" -Value "$cadsceneHash  CADScene-0.1.3.zip" -Encoding ascii
 Get-Content -LiteralPath "$cadsceneZip.sha256"
