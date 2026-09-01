@@ -166,27 +166,72 @@ function progressOf(job) {
 function stageMessage(job, fallback) {
   return job?.progress?.message || job?.error || fallback;
 }
-function renderTaskStage(name, percent, message, active) {
+const VIDEO_ANALYSIS_STAGE_ORDER = [
+  "probing_pts",
+  "sampling_frames",
+  "verifying_scenes",
+  "segmenting",
+  "parsing_srt",
+  "routing_clips",
+  "publishing",
+  "complete",
+];
+function videoStageIndex(job) {
+  const stage = job?.progress?.stage || job?.stage || "";
+  return VIDEO_ANALYSIS_STAGE_ORDER.indexOf(stage);
+}
+function renderTaskStage(name, percent, message, active, indeterminate = false) {
   const element = $(`#taskStage${name}`);
   element.classList.toggle("is-active", active && percent < 100);
   element.classList.toggle("is-complete", percent >= 100);
+  element.classList.toggle("is-indeterminate", indeterminate);
   element.querySelector("small").textContent = message;
-  element.querySelector("b").textContent = `${percent}%`;
+  element.querySelector("b").textContent = indeterminate ? "—" : `${percent}%`;
   const meter = element.querySelector(".meter span");
   if (meter) meter.style.width = `${percent}%`;
+}
+function renumberVisibleTaskStages() {
+  [...document.querySelectorAll(".task-stages > li:not([hidden])")].forEach((element, index) => {
+    element.querySelector(".stage-icon").textContent = String(index + 1);
+  });
 }
 function renderAnalysis(snapshot) {
   const jobs = Object.fromEntries((snapshot.analysis?.jobs || []).map((job) => [job.job_type, job]));
   const cadJob = jobs.cad_analysis;
   const videoJob = jobs.video_analysis;
   const cad = progressOf(cadJob);
-  const video = progressOf(videoJob);
+  const hasSrt = Boolean(snapshot.assets?.srt);
+  $("#taskStageSrt").hidden = !hasSrt;
+  renumberVisibleTaskStages();
+  const stage = videoJob?.progress?.stage || videoJob?.stage || "";
+  const currentVideoStageIndex = videoStageIndex(videoJob);
+  const parsingSrtIndex = VIDEO_ANALYSIS_STAGE_ORDER.indexOf("parsing_srt");
+  const video = hasSrt && currentVideoStageIndex >= parsingSrtIndex
+    ? 100
+    : progressOf(videoJob);
+  const srt = !hasSrt
+    ? 0
+    : (videoJob?.status === "success" || currentVideoStageIndex > parsingSrtIndex ? 100 : 0);
+  const srtActive = hasSrt && stage === "parsing_srt" && videoJob?.status !== "success";
   const workspace = snapshot.project_state === "ready" && snapshot.clips?.length ? 100 : 0;
   renderTaskStage("Upload", 100, "视频与 CAD 已原子发布", false);
   renderTaskStage("Cad", cad, stageMessage(cadJob, "等待任务启动"), cadJob?.status !== "success");
   renderTaskStage("Video", video, stageMessage(videoJob, cad >= 100 ? "等待任务启动" : "等待 CAD 解析完成"), cad >= 100 && videoJob?.status !== "success");
+  if (hasSrt) {
+    renderTaskStage(
+      "Srt",
+      srt,
+      srt === 100 ? "SRT 姿态解析与片段覆盖率评估完成" : stageMessage(videoJob, "等待视频时间轴与片段建立"),
+      srtActive,
+      srtActive,
+    );
+  }
   renderTaskStage("Workspace", workspace, workspace ? "项目片段已生成" : "等待生成逻辑片段", video >= 100);
-  const overall = Math.round(15 + cad * .15 + video * .65 + workspace * .05);
+  const overall = Math.round(
+    hasSrt
+      ? 15 + cad * .15 + video * .45 + srt * .20 + workspace * .05
+      : 15 + cad * .15 + video * .65 + workspace * .05
+  );
   $("#taskOverallPercent").textContent = `${overall}%`;
   $("#taskCirclePercent").textContent = `${overall}%`;
   $("#taskCircleProgress").style.strokeDashoffset = String(100 - overall);

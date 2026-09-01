@@ -156,8 +156,11 @@ form { padding: 0; border: 0; background: transparent; }
 .analysis-copy p { margin: 9px 0 0; color: #9eb2c8; line-height: 1.6; }
 .task-stages { margin: 20px 0; padding: 0; display: grid; gap: 9px; list-style: none; }
 .task-stages li { display: grid; grid-template-columns: 30px 1fr 42px; gap: 11px; align-items: center; padding: 11px; border: 1px solid #273f58; border-radius: 10px; background: rgba(5, 15, 25, .28); }
+.task-stages li[hidden] { display: none; }
 .stage-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #456482; border-radius: 50%; color: #8faac5; font-size: 12px; }
 .task-stages li.is-active { border-color: #3e78b4; background: rgba(35, 102, 177, .1); }
+.task-stages li.is-indeterminate b { color: #72b0ff; animation: stage-pulse 1s ease-in-out infinite alternate; }
+@keyframes stage-pulse { from { opacity: .45; } to { opacity: 1; } }
 .task-stages li.is-complete .stage-icon { color: #071b14; border-color: var(--green); background: var(--green); }
 .task-stages li > div { min-width: 0; display: grid; gap: 4px; }
 .task-stages small { overflow: hidden; color: #849ab1; text-overflow: ellipsis; white-space: nowrap; }

@@ -117,7 +117,7 @@ def test_portal_uses_real_upload_bytes_and_never_timer_drives_upload_progress() 
     assert "fakeProgress" not in script
 
 
-def test_portal_has_two_drag_drop_cards_and_four_real_task_stages() -> None:
+def test_portal_has_two_drag_drop_cards_and_conditionally_visible_srt_stage() -> None:
     html, script = _read("index.html"), _read("workflow_portal.js")
     assert 'data-upload-kind="video"' in html
     assert 'data-upload-kind="cad"' in html
@@ -125,8 +125,12 @@ def test_portal_has_two_drag_drop_cards_and_four_real_task_stages() -> None:
     assert 'accept=".dxf,application/dxf"' in html
     assert all(
         f'id="taskStage{stage}"' in html
-        for stage in ("Upload", "Cad", "Video", "Workspace")
+        for stage in ("Upload", "Cad", "Srt", "Video", "Workspace")
     )
+    assert 'id="taskStageSrt" hidden' in html
+    assert "snapshot.assets?.srt" in script
+    assert 'stage === "parsing_srt"' in script
+    assert '"routing_clips"' in script
     assert 'id="taskOverallProgress"' in html
     assert 'addEventListener("dragover"' in script
     assert 'addEventListener("drop"' in script

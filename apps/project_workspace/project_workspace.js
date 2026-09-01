@@ -39,8 +39,8 @@
   };
   const WORKFLOW_LABELS = {
     sfm_only: "三维重建",
-    srt_sfm_fused: "SRT + 三维重建",
-    srt_full_pose: "SRT 全姿态",
+    srt_sfm_fused: "SRT 定位 + 三维重建（实验）",
+    srt_full_pose: "SRT 全姿态（跳过三维重建）",
     pure_rotation: "旋转估计",
   };
   const MOTION_LABELS = {
@@ -104,6 +104,12 @@
     return clip.status === "cancelled" ? "ready" : clip.status;
   }
 
+  function formatSrtCoverage(coverage) {
+    if (!coverage || Number(coverage.overlapping_record_count || 0) <= 0) return "未检测到片段内 SRT 记录";
+    const percent = (value) => `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
+    return `定位/高度覆盖 ${percent(coverage.trajectory_coverage)} · 完整姿态覆盖 ${percent(coverage.full_pose_coverage)} · ${coverage.overlapping_record_count} 条记录`;
+  }
+
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
     const open = $(".open-workbench", row);
@@ -146,8 +152,10 @@
     $(".review-badge", row).hidden = !clip.needs_review;
     $(".time-range", row).textContent = clip.time_range;
     $(".duration", row).textContent = clip.duration;
-    $(".workflow-recommendation", row).textContent = WORKFLOW_LABELS[clip.recommended_workflow]
+    const recommendation = $(".workflow-recommendation", row);
+    recommendation.textContent = WORKFLOW_LABELS[clip.recommended_workflow]
       || "需人工确认";
+    if (clip.srt_coverage) recommendation.title = formatSrtCoverage(clip.srt_coverage);
     const workflow = $(".workflow-select", row);
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
@@ -547,6 +555,7 @@
     state.fullPoseClipId = clip.clip_id;
     state.georeferenceCandidates = [];
     const settings = clip.srt_full_pose_settings || {};
+    $("#srtCoverageSummary").textContent = formatSrtCoverage(clip.srt_coverage);
     $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
     $("#cadZOffsetInput").value = settings.cad_z_offset_m ?? 0;
     $("#cadGeoreferenceCandidates").replaceChildren(Object.assign(document.createElement("span"), {
