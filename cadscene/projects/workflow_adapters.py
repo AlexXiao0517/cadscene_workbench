@@ -16,6 +16,7 @@ from .adapters import (
     WorkflowAdapterRegistry,
 )
 from cadscene.workflow.job_runner import resolve_sfm_python
+from cadscene.srt.full_pose import FullPoseBuildConfig
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,8 @@ class ExistingWorkflowAdapter:
                 )
         if self.name == "srt_sfm_fused":
             _validate_exact_clip_mapping(inputs)
+        if self.name == "srt_full_pose":
+            _validate_exact_clip_mapping(inputs)
         if self.name == "sfm_only":
             if inputs.frame_map_path is None or not inputs.frame_map_path.is_file():
                 raise FileNotFoundError("SfM solve frame map is required")
@@ -54,6 +57,8 @@ class ExistingWorkflowAdapter:
             ):
                 raise FileNotFoundError("SfM core frame map is required")
         inputs.attempt_directory.mkdir(parents=True, exist_ok=True)
+        if self.name == "srt_full_pose":
+            _write_full_pose_config(inputs)
         return inputs
 
     def build_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
@@ -81,6 +86,8 @@ class ExistingWorkflowAdapter:
                 if self.pure_rotation_calibration_root is not None:
                     commands.append(self._pure_rotation_calibration_command(inputs))
                 commands.append(self._pure_rotation_command(inputs))
+            elif module == "cadscene.cli.build_srt_full_pose":
+                commands.append(self._full_pose_command(inputs))
             else:  # pragma: no cover - constructor constants are closed
                 raise ValueError(f"unsupported existing workflow module: {module}")
         return tuple(commands)
@@ -101,6 +108,16 @@ class ExistingWorkflowAdapter:
             poses = payload.get("poses")
             if payload.get("trajectory_mode") != "pure_rotation_only" or not poses:
                 return AdapterResult.failed("invalid pure-rotation trajectory output")
+        elif self.name == "srt_full_pose":
+            meta = payload.get("meta")
+            if (
+                not payload.get("poses")
+                or not isinstance(meta, Mapping)
+                or meta.get("trajectory_mode") != "srt_full_pose"
+                or meta.get("coordinate_system") != "cad_local_m"
+                or meta.get("metric_scale_locked") is not True
+            ):
+                return AdapterResult.failed("invalid full-pose trajectory output")
         elif not payload.get("poses"):
             return AdapterResult.failed("trajectory output contains no poses")
         outputs = {self.output_key: str(output)}
@@ -149,6 +166,41 @@ class ExistingWorkflowAdapter:
                 "core_frame_map_sha256": sha256(
                     inputs.core_frame_map_path.read_bytes()
                 ).hexdigest(),
+            }
+        elif self.name == "srt_full_pose":
+            root = output.parent
+            artifacts = {
+                "diagnostics": root / "georeference_diagnostics.json",
+                "camera_path": root / "camera_path_full_pose.csv",
+                "report": root / "full_pose_report.md",
+            }
+            missing = [key for key, path in artifacts.items() if not path.is_file()]
+            if missing:
+                return AdapterResult.failed(
+                    "full-pose artifact output is missing: " + ", ".join(missing)
+                )
+            for path in artifacts.values():
+                digest.update(path.read_bytes())
+            if inputs.frame_map_path is None:
+                return AdapterResult.failed("full-pose frame-map binding is missing")
+            config_path = _full_pose_config_path(inputs)
+            for path in (inputs.frame_map_path, config_path):
+                digest.update(path.read_bytes())
+            outputs.update({key: str(path) for key, path in artifacts.items()})
+            validation_proof = {
+                "trajectory_sha256": sha256(output.read_bytes()).hexdigest(),
+                "diagnostics_sha256": sha256(
+                    artifacts["diagnostics"].read_bytes()
+                ).hexdigest(),
+                "camera_path_sha256": sha256(
+                    artifacts["camera_path"].read_bytes()
+                ).hexdigest(),
+                "report_sha256": sha256(artifacts["report"].read_bytes()).hexdigest(),
+                "frame_map_sha256": sha256(
+                    inputs.frame_map_path.read_bytes()
+                ).hexdigest(),
+                "configuration_sha256": sha256(config_path.read_bytes()).hexdigest(),
+                "metric_scale_locked": True,
             }
         fingerprint = digest.hexdigest()
         return AdapterResult.success(
@@ -257,6 +309,31 @@ class ExistingWorkflowAdapter:
             str(trajectory),
         )
 
+    def _full_pose_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
+        if inputs.srt_path is None or inputs.frame_map_path is None:
+            raise FileNotFoundError("full-pose SRT and frame map are required")
+        return (
+            sys.executable,
+            "-m",
+            "cadscene.cli.build_srt_full_pose",
+            "--dataset",
+            inputs.project_id,
+            "--run-id",
+            inputs.clip_id,
+            "--output-root",
+            str(inputs.attempt_directory),
+            "--video",
+            str(inputs.video_path),
+            "--srt",
+            str(inputs.srt_path),
+            "--frame-map",
+            str(inputs.frame_map_path),
+            "--config",
+            str(_full_pose_config_path(inputs)),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
+        )
+
     def _pure_rotation_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         command = [
             sys.executable,
@@ -354,14 +431,10 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_full_pose",
-                version="1",
+                version="2",
                 srt_requirement="full_pose",
-                modules=(),
-                output_relative_path="camera_trajectory_full_pose.json",
-                available=False,
-                unavailable_reason=(
-                    "srt_full_pose is interface-only; no executable workflow exists"
-                ),
+                modules=("cadscene.cli.build_srt_full_pose",),
+                output_relative_path="02_srt_full_pose/camera_trajectory_full_pose.json",
             ),
             ExistingWorkflowAdapter(
                 name="pure_rotation",
@@ -435,3 +508,76 @@ def _source_offset_seconds(inputs: AdapterInputs) -> str:
         decimal = Decimal(offset.numerator) / Decimal(offset.denominator)
     rendered = format(decimal, "f").rstrip("0").rstrip(".")
     return rendered or "0"
+
+
+def _full_pose_config_path(inputs: AdapterInputs) -> Path:
+    return inputs.attempt_directory / "srt_full_pose_config.json"
+
+
+def _full_pose_config_payload(inputs: AdapterInputs) -> dict[str, object]:
+    if (
+        inputs.source_start_pts is None
+        or inputs.source_end_pts_exclusive is None
+        or inputs.source_time_base is None
+    ):
+        raise ValueError("srt_full_pose requires an authoritative source interval")
+    parameters = inputs.parameters
+    georeference = parameters.get("cad_georeference")
+    settings = parameters.get("srt_full_pose")
+    video_metadata = parameters.get("video_metadata")
+    origin = parameters.get("cad_origin_xy")
+    if not isinstance(georeference, Mapping):
+        raise ValueError("confirmed cad_georeference is required")
+    if not isinstance(settings, Mapping):
+        raise ValueError("srt_full_pose settings are required")
+    if "horizontal_fov_deg" not in settings:
+        raise ValueError("horizontal_fov_deg is required")
+    if not isinstance(video_metadata, Mapping):
+        raise ValueError("video_metadata is required")
+    if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+        raise ValueError("cad_origin_xy must contain two values")
+    build = FullPoseBuildConfig.from_dict(
+        {
+            "clip_id": inputs.clip_id,
+            "source_start_pts": inputs.source_start_pts,
+            "source_end_pts_exclusive": inputs.source_end_pts_exclusive,
+            "source_time_base": {
+                "numerator": inputs.source_time_base.numerator,
+                "denominator": inputs.source_time_base.denominator,
+            },
+            "georeference": dict(georeference),
+            "cad_origin_xy": list(origin),
+            "cad_scale": parameters.get("cad_scale"),
+            "horizontal_fov_deg": settings["horizontal_fov_deg"],
+            "cad_z_offset_m": settings.get("cad_z_offset_m", 0.0),
+            "attitude_profile": settings.get(
+                "attitude_profile", "dji_absolute_ned"
+            ),
+            "max_interpolation_gap_sec": settings.get(
+                "max_interpolation_gap_sec", 1.5
+            ),
+            "minimum_registered_coverage": settings.get(
+                "minimum_registered_coverage", 0.8
+            ),
+            "max_horizontal_speed_mps": settings.get(
+                "max_horizontal_speed_mps", 100.0
+            ),
+        }
+    )
+    return {"video_metadata": dict(video_metadata), "build": build.to_dict()}
+
+
+def _write_full_pose_config(inputs: AdapterInputs) -> Path:
+    path = _full_pose_config_path(inputs)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(
+            _full_pose_config_payload(inputs),
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path

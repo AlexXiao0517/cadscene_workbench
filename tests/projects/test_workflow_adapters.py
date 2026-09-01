@@ -303,21 +303,156 @@ def test_partial_srt_rejects_frame_map_interval_mismatch(tmp_path: Path) -> None
         )
 
 
-def test_full_pose_adapter_preserves_interface_only_existing_contract(
-    tmp_path: Path,
-) -> None:
+def _full_pose_georeference() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "horizontal_datum": "CGCS2000",
+        "projection_family": "gauss_kruger",
+        "zone_width_deg": 3,
+        "central_meridian_deg": 120.0,
+        "epsg": 4549,
+        "projected_axis_order": "easting_northing",
+        "cad_axis_mapping": "cad_x_easting_cad_y_northing",
+        "zone_prefix": False,
+        "linear_unit": "metre",
+        "source": "user_confirmed",
+        "confirmed": True,
+        "confidence": 0.99,
+        "validation": {"trajectory_inside_cad_ratio": 1.0},
+    }
+
+
+def _full_pose_parameters() -> dict[str, object]:
+    return {
+        "cad_georeference": _full_pose_georeference(),
+        "srt_full_pose": {
+            "horizontal_fov_deg": 82.0,
+            "cad_z_offset_m": 100.0,
+            "attitude_profile": "dji_absolute_ned",
+        },
+        "cad_origin_xy": [500_000.0, 3_320_113.3978450196],
+        "cad_scale": 1.0,
+        "video_metadata": {"width": 3840, "height": 2160, "fps": 25.0},
+    }
+
+
+def _full_pose_inputs(tmp_path: Path, *, include_fov: bool = True) -> AdapterInputs:
     video = tmp_path / "clip.mp4"
     srt = tmp_path / "clip.srt"
+    frame_map = tmp_path / "clip_frame_map.json"
     video.write_bytes(b"mp4")
     srt.write_text("full pose", encoding="utf-8")
-    inputs = AdapterInputs("p1", "c1", video, srt, tmp_path / "attempt-1")
+    frame_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 25},
+                "clips": [
+                    {
+                        "clip_id": "c1",
+                        "source_start_pts": 0,
+                        "source_end_pts_exclusive": 100,
+                        "frames": [{"ordinal": 0, "pts": 0}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    parameters = _full_pose_parameters()
+    if not include_fov:
+        parameters["srt_full_pose"] = {
+            "cad_z_offset_m": 100.0,
+            "attitude_profile": "dji_absolute_ned",
+        }
+    return AdapterInputs(
+        "p1",
+        "c1",
+        video,
+        srt,
+        tmp_path / "attempt-1",
+        parameters=parameters,
+        source_start_pts=0,
+        source_end_pts_exclusive=100,
+        source_time_base=Fraction(1, 25),
+        frame_map_path=frame_map,
+    )
+
+
+def test_full_pose_adapter_is_available_and_runs_no_sfm(
+    tmp_path: Path,
+) -> None:
+    inputs = _full_pose_inputs(tmp_path)
     adapter = default_workflow_adapters().for_workflow("srt_full_pose")
 
-    assert adapter.available is False
-    assert adapter.unavailable_reason is not None
-    assert "interface-only" in adapter.unavailable_reason
-    with pytest.raises(NotImplementedError, match="interface-only"):
-        adapter.build_commands(adapter.prepare_inputs(inputs))
+    prepared = adapter.prepare_inputs(inputs)
+    commands = adapter.build_commands(prepared)
+
+    assert adapter.available is True
+    assert adapter.unavailable_reason is None
+    assert adapter.version == "2"
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[1:3] == ("-m", "cadscene.cli.build_srt_full_pose")
+    assert "cadscene.cli.run_sfm" not in command
+    config = Path(command[command.index("--config") + 1])
+    assert config.is_file()
+    assert json.loads(config.read_text(encoding="utf-8"))["build"][
+        "horizontal_fov_deg"
+    ] == 82.0
+
+
+def test_full_pose_prepare_requires_horizontal_fov(tmp_path: Path) -> None:
+    inputs = _full_pose_inputs(tmp_path, include_fov=False)
+
+    with pytest.raises(ValueError, match="horizontal_fov_deg"):
+        default_workflow_adapters().for_workflow("srt_full_pose").prepare_inputs(
+            inputs
+        )
+
+
+def test_full_pose_adapter_validates_trajectory_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    inputs = _full_pose_inputs(tmp_path)
+    adapter = default_workflow_adapters().for_workflow("srt_full_pose")
+    prepared = adapter.prepare_inputs(inputs)
+    output = (
+        inputs.attempt_directory
+        / "02_srt_full_pose"
+        / "camera_trajectory_full_pose.json"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "poses": [{"registered": True}],
+                "meta": {
+                    "trajectory_mode": "srt_full_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    diagnostics = output.with_name("georeference_diagnostics.json")
+    diagnostics.write_text(
+        json.dumps({"registered_coverage": 1.0}), encoding="utf-8"
+    )
+    camera_path = output.with_name("camera_path_full_pose.csv")
+    camera_path.write_text("frame_index,camera_x\n0,0\n", encoding="utf-8")
+    report = output.with_name("full_pose_report.md")
+    report.write_text("# report\n", encoding="utf-8")
+
+    result = adapter.validate_outputs(prepared)
+
+    assert result.status == "success"
+    assert result.outputs["trajectory"] == str(output)
+    assert result.outputs["diagnostics"] == str(diagnostics)
+    assert result.outputs["camera_path"] == str(camera_path)
+    assert result.outputs["report"] == str(report)
+    assert result.validation_proof is not None
+    assert result.validation_proof["metric_scale_locked"] is True
 
 
 def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:

@@ -1343,6 +1343,27 @@ class ProjectService:
                     adapter.unavailable_reason or "adapter unavailable"
                 )
                 continue
+            if adapter.name == "srt_full_pose":
+                georeference = project.source_assets.get("_cad_georeference")
+                if (
+                    not isinstance(georeference, Mapping)
+                    or georeference.get("confirmed") is not True
+                ):
+                    skipped.append(clip.clip_id)
+                    reasons[clip.clip_id] = (
+                        "confirmed CAD georeference is required for srt_full_pose"
+                    )
+                    continue
+                settings = clip.manual_definition.get("srt_full_pose")
+                if (
+                    not isinstance(settings, Mapping)
+                    or settings.get("horizontal_fov_deg") is None
+                ):
+                    skipped.append(clip.clip_id)
+                    reasons[clip.clip_id] = (
+                        "horizontal FOV is required for srt_full_pose"
+                    )
+                    continue
             if adapter.requires_physical_mp4 and (
                 video_path is None or not video_path.is_file()
             ):

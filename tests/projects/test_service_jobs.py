@@ -205,7 +205,7 @@ def test_batch_preflight_groups_partial_eligibility_without_enqueueing(
     assert result.eligible == ("ready",)
     assert result.needs_confirmation == ("review",)
     assert result.skipped == ("unsupported",)
-    assert "interface-only" in result.reasons["unsupported"]
+    assert "CAD georeference" in result.reasons["unsupported"]
     assert repositories.jobs.load("p1").jobs == ()
 
 
