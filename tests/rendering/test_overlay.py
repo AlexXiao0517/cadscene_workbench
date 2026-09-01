@@ -10,6 +10,7 @@ from cadscene.core.camera import CameraState
 from cadscene.core.io import write_csv_utf8_sig
 from cadscene.rendering.overlay import (
     RenderOverlayConfig,
+    _nearest_camera,
     load_camera_path_csv,
     render_frame_overlay,
     render_overlay_video,
@@ -85,6 +86,26 @@ def test_load_camera_path_csv(tmp_path: Path) -> None:
     assert rows[0][0] == 0
     assert rows[0][1].camera_x == 1
     assert rows[0][1].pitch_deg == 5
+
+
+def test_unregistered_camera_path_rows_block_nearest_camera_fallback(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "sfm_camera_path.csv"
+    write_csv_utf8_sig(
+        path,
+        [
+            {"frame_index": 0, "camera_x": 0, "camera_y": 0, "camera_z": 1, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70, "status": "ok"},
+            {"frame_index": 1, "camera_x": 0, "camera_y": 0, "camera_z": 0, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70, "status": "unregistered"},
+            {"frame_index": 2, "camera_x": 2, "camera_y": 0, "camera_z": 1, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70, "status": "ok"},
+        ],
+    )
+
+    rows = load_camera_path_csv(path)
+
+    assert rows[1] == (1, None)
+    assert _nearest_camera(1, rows) is None
+    assert _nearest_camera(0.5, rows) is None
 
 
 def test_render_frame_overlay_returns_same_dimensions() -> None:

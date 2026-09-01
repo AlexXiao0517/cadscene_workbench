@@ -553,6 +553,8 @@ def _load_web_camera_path(
     rows: dict[int, dict[str, float]] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         for raw in csv.DictReader(stream):
+            if str(raw.get("status", "ok")).lower() != "ok":
+                continue
             frame = int(float(raw["frame_index"]))
             state = CameraState.from_row(dict(raw), cad_scale=cad_scale)
             rows[frame] = python_state_to_web_camera(state, origin_xy)

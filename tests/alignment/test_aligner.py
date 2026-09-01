@@ -185,6 +185,47 @@ def test_metric_full_pose_never_calls_free_sim3(
     assert result.metrics["alignment_mode"] == "metric_direct"
 
 
+def test_metric_full_pose_alignment_preserves_unregistered_frame_gaps() -> None:
+    trajectory = SfmTrajectory(
+        frames=np.asarray([0, 3], dtype=np.int64),
+        centers=np.asarray(
+            [[0.0, 0.0, 10.0], [3.0, 0.0, 10.0]], dtype=np.float64
+        ),
+        quats_c2w_wxyz=np.asarray(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        fps=25.0,
+        width=1920,
+        height=1080,
+        intrinsics={"width": 1920, "params": [960.0]},
+        meta={
+            "trajectory_mode": "srt_full_pose",
+            "coordinate_system": "cad_local_m",
+            "metric_scale_locked": True,
+        },
+        unregistered_frames=np.asarray([1, 2], dtype=np.int64),
+    )
+    config = AlignmentConfig(
+        cad_scale=1.0,
+        origin_xy=(0.0, 0.0),
+        frontend_track_step=1,
+        frame_step=3,
+    )
+    rows = generate_aligned_camera_path(
+        trajectory, Sim3.identity(), anchored=None, config=config
+    )
+    prediction = generate_camera_track_pred({"keyframes": []}, rows, config)
+
+    assert [row["status"] for row in rows] == [
+        "ok",
+        "unregistered",
+        "unregistered",
+        "ok",
+    ]
+    assert [item["frame"] for item in prediction["keyframes"]] == [0, 3]
+
+
 def test_estimate_global_sim3_recovers_known_transform() -> None:
     traj = _trajectory()
     orientation = CameraState(yaw_deg=30.0, pitch_deg=0.0, roll_deg=0.0, cad_scale=0.5)

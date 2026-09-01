@@ -10,6 +10,7 @@ from cadscene.alignment.quality import (
     build_reason_codes,
     combined_risk_score,
     evaluate_quality,
+    load_sfm_camera_path,
     normalize_weights,
     risk_level,
     select_suggestions,
@@ -104,6 +105,18 @@ def test_quality_reports_measured_progress_for_each_authoritative_path_row() -> 
     )
 
     assert measured == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
+def test_quality_loader_excludes_unregistered_camera_rows(tmp_path: Path) -> None:
+    path = tmp_path / "camera.csv"
+    rows = _path_rows()[:2]
+    rows[0]["status"] = "ok"
+    rows[1]["status"] = "unregistered"
+    write_csv_utf8_sig(path, rows)
+
+    loaded = load_sfm_camera_path(path)
+
+    assert [row["frame_index"] for row in loaded] == [0]
 
 
 def test_suggestion_nms_gap_and_max_count() -> None:

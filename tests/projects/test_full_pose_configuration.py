@@ -259,3 +259,45 @@ def test_job_parameters_merge_confirmed_georeference_cad_defaults_and_video(
     assert parameters["srt_full_pose"]["horizontal_fov_deg"] == 120.0
     assert identity["cad_georeference"]["revision"].startswith("cad-georef-")
     assert service.preflight_trajectory_jobs("p1").eligible == ("clip-1",)
+
+
+def test_missing_full_pose_frame_map_is_reported_and_regenerated_before_adapter(
+    tmp_path: Path,
+) -> None:
+    physical_clip = tmp_path / "clip-1.mp4"
+    physical_clip.write_bytes(b"mp4")
+    selected = clip("clip-1", workflow="srt_full_pose")
+    selected = replace(
+        selected,
+        analysis={
+            **selected.analysis,
+            "physical_mp4_path": str(physical_clip),
+            "frame_map_path": str(tmp_path / "missing-frame-map.json"),
+        },
+        manual_definition={
+            **selected.manual_definition,
+            "srt_full_pose": {
+                "horizontal_fov_deg": 82.0,
+                "cad_z_offset_m": 0.0,
+                "attitude_profile": "dji_absolute_ned",
+            },
+        },
+    )
+    service, repositories, queue = service_with_clips(tmp_path, (selected,))
+    _configure_project_inputs(tmp_path, repositories)
+    project = repositories.project.load("p1")
+    service.confirm_cad_georeference(
+        "p1",
+        service.recommend_cad_georeference("p1")[0].to_dict(),
+        expected_revision=project.revision,
+    )
+
+    preflight = service.preflight_trajectory_jobs("p1")
+    result = service.enqueue_trajectory_jobs("p1")
+    jobs = queue.jobs()
+
+    assert preflight.eligible == ("clip-1",)
+    assert "frame map" in preflight.reasons["clip-1"]
+    assert [job.job_type for job in jobs] == ["clip_export", "trajectory"]
+    assert jobs[1].depends_on_job_ids == (jobs[0].job_id,)
+    assert result.enqueued_clip_ids == ("clip-1",)

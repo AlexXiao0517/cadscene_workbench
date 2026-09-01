@@ -196,6 +196,8 @@ def _float(row: Mapping[str, object], name: str, default: float = 0.0) -> float:
 def load_sfm_camera_path(path: str | Path) -> list[dict]:
     out: list[dict] = []
     for row in _read_csv_rows(path):
+        if str(row.get("status", "ok")).lower() != "ok":
+            continue
         out.append(
             {
                 "frame_index": int(float(row["frame_index"])),

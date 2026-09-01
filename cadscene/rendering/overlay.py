@@ -43,27 +43,54 @@ class RenderOverlayResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def load_camera_path_csv(path: str | Path) -> list[tuple[int, CameraState]]:
+def load_camera_path_csv(
+    path: str | Path,
+) -> list[tuple[int, CameraState | None]]:
     src = Path(path)
     if not src.exists():
         raise FileNotFoundError(f"sfm_camera_path not found: {src}")
-    rows: list[tuple[int, CameraState]] = []
+    rows: list[tuple[int, CameraState | None]] = []
     with src.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if not row:
                 continue
             frame = int(float(row.get("frame_index", 0)))
-            rows.append((frame, CameraState.from_row(row)))
+            state = (
+                None
+                if str(row.get("status", "ok")).lower() != "ok"
+                else CameraState.from_row(row)
+            )
+            rows.append((frame, state))
     if not rows:
         raise ValueError(f"sfm_camera_path has no camera rows: {src}")
     rows.sort(key=lambda item: item[0])
     return rows
 
 
-def _nearest_camera(frame_index: int, path_rows: Sequence[tuple[int, CameraState]]) -> CameraState:
-    best = min(path_rows, key=lambda item: abs(item[0] - frame_index))
-    return best[1]
+def _nearest_camera(
+    frame_index: float,
+    path_rows: Sequence[tuple[int, CameraState | None]],
+) -> CameraState | None:
+    low = 0
+    high = len(path_rows)
+    while low < high:
+        middle = (low + high) // 2
+        if path_rows[middle][0] < frame_index:
+            low = middle + 1
+        else:
+            high = middle
+    if low < len(path_rows) and path_rows[low][0] == frame_index:
+        return path_rows[low][1]
+    if low == 0:
+        return path_rows[0][1]
+    if low == len(path_rows):
+        return path_rows[-1][1]
+    left = path_rows[low - 1]
+    right = path_rows[low]
+    if left[1] is None or right[1] is None:
+        return None
+    return left[1] if frame_index - left[0] <= right[0] - frame_index else right[1]
 
 
 def _cad_lines(bundle: CadBundle) -> list[RoadLine]:
@@ -241,6 +268,7 @@ def render_overlay_video(
     if start:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
     rendered = 0
+    unregistered_camera_frames = 0
     current = start
     while current <= end:
         ok, frame = cap.read()
@@ -249,17 +277,21 @@ def render_overlay_video(
         if config.sample_every <= 1 or ((current - start) % max(1, int(config.sample_every)) == 0):
             frame = _scale_frame(frame, config.debug_scale)
             camera = _nearest_camera(current, path_rows)
-            rendered_frame = render_frame_overlay(
-                frame,
-                camera,
-                cad,
-                overlay_linewidth=config.overlay_linewidth,
-                overlay_alpha=config.overlay_alpha,
-                faded_overlay=config.faded_overlay,
-                max_distance_m=config.max_distance_m,
-                fade_start_m=config.fade_start_m,
-                cad_scale=float(config.cad_scale or 1.0),
-            )
+            if camera is None:
+                rendered_frame = frame.copy()
+                unregistered_camera_frames += 1
+            else:
+                rendered_frame = render_frame_overlay(
+                    frame,
+                    camera,
+                    cad,
+                    overlay_linewidth=config.overlay_linewidth,
+                    overlay_alpha=config.overlay_alpha,
+                    faded_overlay=config.faded_overlay,
+                    max_distance_m=config.max_distance_m,
+                    fade_start_m=config.fade_start_m,
+                    cad_scale=float(config.cad_scale or 1.0),
+                )
             writer.write(rendered_frame)
             if config.write_sample_frames and rendered < 5:
                 cv2.imwrite(str(sample_dir / f"frame_{current:06d}.jpg"), rendered_frame)
@@ -295,6 +327,7 @@ def render_overlay_video(
         ),
         "fade_start_m": float(config.fade_start_m),
         "camera_path_frame_count": int(len(path_rows)),
+        "unregistered_camera_frame_count": int(unregistered_camera_frames),
         "cad_polyline_count": int(len(lines)),
         "cad_coordinate_source": "design_json" if (Path(config.cad_dir) / "design.json").exists() else "road_json",
         "camera_interpolation": "nearest_frame",

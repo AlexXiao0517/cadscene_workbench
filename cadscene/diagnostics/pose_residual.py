@@ -23,6 +23,8 @@ def load_anchored_rows(path: str | Path) -> dict[int, CameraState]:
     out: dict[int, CameraState] = {}
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
+            if str(row.get("status", "ok")).lower() != "ok":
+                continue
             out[int(float(row["frame_index"]))] = CameraState(
                 camera_x=float(row["camera_x"]),
                 camera_y=float(row["camera_y"]),
@@ -51,6 +53,8 @@ def keyframe_pose_residuals(web_camera_track, trajectory, alignment, sfm_camera_
     rows: list[dict] = []
     for item in confirmed_keyframes(track):
         frame = int(item.get("frame", 0))
+        if not traj.is_frame_registered(frame):
+            continue
         manual = web_camera_to_python_state(item["camera"], origin_xy, cad_scale)
         global_state = aligned_state_at_frame(frame, traj, sim3, anchored=None, config=config)
         anch = _nearest_anchor(anchored, frame) or CameraState()

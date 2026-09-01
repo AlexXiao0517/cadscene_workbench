@@ -56,17 +56,43 @@ class SfmTrajectory:
     height: int
     intrinsics: dict
     meta: dict = field(default_factory=dict)
+    unregistered_frames: np.ndarray = field(
+        default_factory=lambda: np.asarray([], dtype=np.int64)
+    )
 
     @property
     def frame_min(self) -> int:
+        if len(self.unregistered_frames):
+            return min(int(self.frames[0]), int(self.unregistered_frames[0]))
         return int(self.frames[0])
 
     @property
     def frame_max(self) -> int:
+        if len(self.unregistered_frames):
+            return max(int(self.frames[-1]), int(self.unregistered_frames[-1]))
         return int(self.frames[-1])
+
+    def is_frame_registered(self, frame_index: float) -> bool:
+        if not len(self.unregistered_frames):
+            return True
+        frame = float(frame_index)
+        index = int(np.searchsorted(self.unregistered_frames, frame, side="left"))
+        return not (
+            index < len(self.unregistered_frames)
+            and math.isclose(
+                float(self.unregistered_frames[index]),
+                frame,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        )
 
     def query(self, frame_index: float) -> tuple[np.ndarray, np.ndarray]:
         f = float(frame_index)
+        if not self.is_frame_registered(f):
+            raise ValueError(
+                f"trajectory frame {f:g} is explicitly unregistered"
+            )
         if f <= self.frames[0]:
             return self.centers[0].copy(), quat_wxyz_to_matrix(self.quats_c2w_wxyz[0])
         if f >= self.frames[-1]:
@@ -74,6 +100,17 @@ class SfmTrajectory:
         j = int(np.searchsorted(self.frames, f, side="right"))
         i = j - 1
         fa, fb = float(self.frames[i]), float(self.frames[j])
+        if len(self.unregistered_frames):
+            gap_start = int(
+                np.searchsorted(self.unregistered_frames, fa, side="right")
+            )
+            gap_end = int(
+                np.searchsorted(self.unregistered_frames, fb, side="left")
+            )
+            if gap_start < gap_end:
+                raise ValueError(
+                    f"trajectory query at frame {f:g} crosses an unregistered gap"
+                )
         alpha = (f - fa) / max(fb - fa, 1e-9)
         center = self.centers[i] * (1.0 - alpha) + self.centers[j] * alpha
         quat = quat_slerp(self.quats_c2w_wxyz[i], self.quats_c2w_wxyz[j], alpha)
@@ -97,8 +134,10 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
     frames: list[int] = []
     centers: list[list[float]] = []
     quats: list[list[float]] = []
+    unregistered_frames: list[int] = []
     for pose in data.get("poses", []):
         if not pose.get("registered", True):
+            unregistered_frames.append(int(pose["frame_index"]))
             continue
         frames.append(int(pose["frame_index"]))
         centers.append([float(v) for v in pose["center"]])
@@ -116,4 +155,7 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
         height=int(data.get("height", 0)),
         intrinsics=intrinsics,
         meta=dict(data.get("meta") or {}),
+        unregistered_frames=np.asarray(
+            sorted(set(unregistered_frames)), dtype=np.int64
+        ),
     )

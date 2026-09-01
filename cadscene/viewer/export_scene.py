@@ -208,6 +208,8 @@ def build_global_sfm_track(trajectory: str | Path, alignment: str | Path, config
 def load_anchored_camera_path(path: str | Path, config: ExportViewerSceneConfig) -> list[dict]:
     out: list[dict] = []
     for row in _read_csv_rows(path):
+        if str(row.get("status", "ok")).lower() != "ok":
+            continue
         frame = int(float(row["frame_index"]))
         state = CameraState(
             camera_x=float(row["camera_x"]),

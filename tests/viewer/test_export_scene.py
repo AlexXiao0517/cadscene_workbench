@@ -10,10 +10,28 @@ from cadscene.viewer.export_scene import (
     ExportViewerSceneConfig,
     build_viewer_scene,
     build_viewer_scene_report,
+    load_anchored_camera_path,
     load_suggestions,
     prepare_point_cloud,
 )
 from cadscene.viewer.schema import validate_viewer_scene
+
+
+def test_anchored_viewer_track_excludes_unregistered_rows(tmp_path: Path) -> None:
+    path = tmp_path / "camera.csv"
+    write_csv_utf8_sig(
+        path,
+        [
+            {"frame_index": 0, "camera_x": 0, "camera_y": 0, "camera_z": 1, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70, "status": "ok"},
+            {"frame_index": 1, "camera_x": 0, "camera_y": 0, "camera_z": 0, "yaw": 0, "pitch": 0, "roll": 0, "fov": 70, "status": "unregistered"},
+        ],
+    )
+
+    rows = load_anchored_camera_path(
+        path, ExportViewerSceneConfig(cad_scale=1.0, origin_xy=(0.0, 0.0))
+    )
+
+    assert [row["frame_index"] for row in rows] == [0]
 
 
 def _write_ply(path: Path) -> None:

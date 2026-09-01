@@ -1369,6 +1369,11 @@ class ProjectService:
                         "horizontal FOV is required for srt_full_pose"
                     )
                     continue
+                frame_map_path = _clip_frame_map_path(clip)
+                if frame_map_path is None or not frame_map_path.is_file():
+                    reasons[clip.clip_id] = (
+                        "exact frame map is missing; clip export will regenerate it"
+                    )
             if adapter.requires_physical_mp4 and (
                 video_path is None or not video_path.is_file()
             ):
@@ -2597,7 +2602,8 @@ class ProjectService:
                 _clip_output_path(by_id[clip_id]) is None
                 or not _clip_output_path(by_id[clip_id]).is_file()
                 or (
-                    by_id[clip_id].resolved_workflow == "sfm_only"
+                    by_id[clip_id].resolved_workflow
+                    in {"sfm_only", "srt_full_pose"}
                     and (
                         _clip_frame_map_path(by_id[clip_id]) is None
                         or not _clip_frame_map_path(by_id[clip_id]).is_file()

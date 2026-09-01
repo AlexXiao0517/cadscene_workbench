@@ -272,6 +272,8 @@ def build_correspondences(
         if not all(name in camera for name in ("x", "y", "z")):
             continue
         frame_index = int(keyframe.get("frame", 0))
+        if not traj.is_frame_registered(frame_index):
+            continue
         state = web_camera_to_python_state(camera, config.origin_xy, config.cad_scale)
         center_sfm, r_camfromworld_sfm = traj.query(frame_index)
         out.append(
@@ -702,28 +704,47 @@ def generate_aligned_camera_path(
     end = int(config.end_frame if config.end_frame is not None else traj.frame_max)
     step = max(1, int(config.frame_step))
     rows: list[dict] = []
-    for frame in range(start, end + 1, step):
+
+    def path_source() -> str:
+        return (
+            "metric_direct"
+            if anchored is not None and anchored.position_mode == "metric_direct"
+            else "rotation_only_anchor"
+            if anchored is not None and anchored.position_mode == "rotation_only"
+            else "segment_anchor"
+            if anchored is not None
+            else "global_sim3"
+        )
+
+    def row_at(frame: int) -> dict:
+        if not traj.is_frame_registered(frame):
+            return {
+                "frame_index": frame,
+                "camera_x": 0.0,
+                "camera_y": 0.0,
+                "camera_z": 0.0,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "fov": _fov_for_path(traj, config),
+                "cad_scale": float(config.cad_scale),
+                "status": "unregistered",
+                "path_source": path_source(),
+            }
         state = aligned_state_at_frame(frame, traj, sim3, anchored, config)
         row = state.to_row(frame_index=frame, status="ok")
-        row["path_source"] = (
-            "metric_direct"
-            if anchored is not None and anchored.position_mode == "metric_direct"
-            else "rotation_only_anchor"
-            if anchored is not None and anchored.position_mode == "rotation_only"
-            else "segment_anchor" if anchored is not None else "global_sim3"
-        )
-        rows.append(row)
-    if rows and rows[-1]["frame_index"] != end:
-        state = aligned_state_at_frame(end, traj, sim3, anchored, config)
-        row = state.to_row(frame_index=end, status="ok")
-        row["path_source"] = (
-            "metric_direct"
-            if anchored is not None and anchored.position_mode == "metric_direct"
-            else "rotation_only_anchor"
-            if anchored is not None and anchored.position_mode == "rotation_only"
-            else "segment_anchor" if anchored is not None else "global_sim3"
-        )
-        rows.append(row)
+        row["path_source"] = path_source()
+        return row
+
+    output_frames = set(range(start, end + 1, step))
+    output_frames.update(
+        int(frame)
+        for frame in traj.unregistered_frames
+        if start <= int(frame) <= end
+    )
+    output_frames.add(end)
+    for frame in sorted(output_frames):
+        rows.append(row_at(frame))
     return rows
 
 
@@ -744,7 +765,11 @@ def generate_camera_track_pred(
     step = max(1, int(config.frontend_track_step))
     for row in path_rows:
         frame = int(row["frame_index"])
-        if frame in manual_frames or frame % step != 0:
+        if (
+            str(row.get("status", "ok")).lower() != "ok"
+            or frame in manual_frames
+            or frame % step != 0
+        ):
             continue
         state = CameraState.from_row(dict(row), cad_scale=config.cad_scale)
         kept.append(
