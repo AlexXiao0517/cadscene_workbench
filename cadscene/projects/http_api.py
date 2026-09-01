@@ -805,15 +805,32 @@ class ProjectApi:
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
         export_job_by_clip: dict[str, Mapping[str, object]] = {}
         scene_bridge_job_by_clip: dict[str, Mapping[str, object]] = {}
+        jobs_by_id = {
+            str(job.get("job_id")): job
+            for job in jobs.jobs
+            if isinstance(job.get("job_id"), str)
+        }
+        clip_analysis_revisions = {
+            clip.clip_id: clip.analysis_revision for clip in clips.clips
+        }
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
-            if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
+            if not isinstance(clip_id, str):
+                continue
+            analysis_revision = clip_analysis_revisions.get(clip_id)
+            if analysis_revision is None or not _job_belongs_to_analysis_revision(
+                job,
+                analysis_revision=analysis_revision,
+                jobs_by_id=jobs_by_id,
+            ):
+                continue
+            if job.get("job_type") == "trajectory":
                 job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "clip_render":
+            elif job.get("job_type") == "clip_render":
                 render_job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "clip_export":
+            elif job.get("job_type") == "clip_export":
                 export_job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "scene_bridge":
+            elif job.get("job_type") == "scene_bridge":
                 scene_bridge_job_by_clip[clip_id] = job
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
@@ -1610,6 +1627,26 @@ def _render_preflight_payload(preflight: RenderPreflight) -> dict[str, object]:
         "skipped": list(preflight.skipped),
         "reasons": dict(preflight.reasons),
     }
+
+
+def _job_belongs_to_analysis_revision(
+    job: Mapping[str, object],
+    *,
+    analysis_revision: str,
+    jobs_by_id: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """只把当前分段 revision 产生的任务关联回片段快照。"""
+
+    if job.get("job_type") != "clip_render":
+        return job.get("input_revision") == analysis_revision
+    if job.get("status") in {"stale_input", "superseded"}:
+        return True
+    return any(
+        dependency.get("job_type") == "trajectory"
+        and dependency.get("input_revision") == analysis_revision
+        for dependency_id in job.get("depends_on_job_ids", ())
+        if (dependency := jobs_by_id.get(str(dependency_id))) is not None
+    )
 
 
 def _visible_job_progress(
