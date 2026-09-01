@@ -276,6 +276,12 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert 'id="fullPoseDialog"' in html
     assert "水平视场角（°）" in html
     assert 'id="horizontalFovInput"' in html
+    assert 'id="centralMeridianInput"' in html
+    assert "CGCS2000 中央经线（°）" in html
+    assert 'id="horizontalFovInput" type="number"' in html
+    assert 'placeholder="例如 72"' in html
+    assert 'id="centralMeridianInput" type="number"' in html
+    assert 'placeholder="例如 120；留空则自动推荐"' in html
     assert "fovType" not in html and "FOV 类型" not in html
     assert 'id="cadGeoreferenceCandidates"' in html
     assert 'id="cadGeoreferencePreview"' in html
@@ -290,6 +296,28 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert "trajectory_polyline_raw" in script
     assert ".full-pose-dialog" in css
     assert ".crs-candidate" in css
+
+
+def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    for element_id in (
+        "cadGeoreferenceProgress",
+        "cadGeoreferenceProgressFill",
+        "cadGeoreferenceProgressText",
+        "cadGeoreferenceProgressPercent",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "function renderCadGeoreferenceOperation" in script
+    assert "async function pollCadGeoreferenceCandidates" in script
+    assert 'method: "GET"' in script
+    assert "central_meridian_deg" in script
+    assert "candidate_job_id" in script
+    assert "candidate_input_fingerprint" in script
+    assert "progress-indeterminate" in script
+    assert ".candidate-operation-progress" in css
 
 
 def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> None:

@@ -20,6 +20,8 @@
     cadReplacementUploading: false,
     fullPoseClipId: null,
     georeferenceCandidates: [],
+    georeferenceOperation: null,
+    georeferencePollGeneration: 0,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -504,20 +506,108 @@
     renderCadGeoreferencePreview(top);
   }
 
+  function renderCadGeoreferenceOperation(operation) {
+    state.georeferenceOperation = operation || null;
+    const status = operation?.status || "not_started";
+    const active = ["queued", "running", "preparing", "validating"].includes(status);
+    const progress = operation?.progress || {};
+    const fraction = Number(progress.fraction);
+    const hasFraction = Number.isFinite(fraction);
+    const percent = status === "success"
+      ? 100
+      : (hasFraction ? Math.min(99, Math.max(0, Math.round(fraction * 100))) : null);
+    const container = $("#cadGeoreferenceProgress");
+    const track = $("#cadGeoreferenceProgress .progress-track");
+    container.hidden = status === "not_started";
+    track.classList.toggle("progress-indeterminate", active && percent == null);
+    $("#cadGeoreferenceProgressFill").style.width = percent == null ? "" : `${percent}%`;
+    $("#cadGeoreferenceProgressPercent").textContent = percent == null ? "—" : `${percent}%`;
+    $("#cadGeoreferenceProgressText").textContent = progress.message
+      || operation?.error
+      || ({
+        queued: "候选任务已排队",
+        running: "正在生成坐标系候选",
+        preparing: "正在准备坐标输入",
+        validating: "正在验证候选结果",
+        success: "坐标系候选生成完成",
+        failed: "坐标系候选生成失败",
+        stale_input: "候选输入已变化，请重新生成",
+      }[status] || "等待生成候选");
+    const currentCandidates = status === "success" && operation?.stale !== true
+      ? (operation.candidates || [])
+      : [];
+    state.georeferenceCandidates = currentCandidates;
+    renderCadGeoreferenceCandidates();
+    if (!currentCandidates.length) {
+      const empty = $("#cadGeoreferenceCandidates .empty-state");
+      if (empty) {
+        empty.textContent = active
+          ? "候选计算完成后将在这里显示"
+          : (status === "failed" ? "生成失败；请检查参数后重试" : "填写中央经线后点击“生成候选”");
+      }
+    }
+    const button = $("#loadCadGeoreferenceCandidates");
+    button.disabled = active;
+    button.textContent = active ? "正在生成…" : (status === "not_started" ? "生成候选" : "重新生成候选");
+    $("#centralMeridianInput").disabled = active;
+  }
+
+  async function pollCadGeoreferenceCandidates() {
+    const generation = ++state.georeferencePollGeneration;
+    while ($("#fullPoseDialog").open && generation === state.georeferencePollGeneration) {
+      try {
+        const { body } = await request(
+          `/api/projects/${encodeURIComponent(projectId)}/cad-georeference/candidates`,
+          { method: "GET" },
+        );
+        if (generation !== state.georeferencePollGeneration) return;
+        const operation = body.operation || { status: "not_started", candidates: [] };
+        const input = $("#centralMeridianInput");
+        if (input.value === "" && operation.requested_central_meridian_deg != null) {
+          input.value = String(operation.requested_central_meridian_deg);
+        }
+        renderCadGeoreferenceOperation(operation);
+        if (!["queued", "running", "preparing", "validating"].includes(operation.status)) return;
+      } catch (error) {
+        if (generation === state.georeferencePollGeneration) {
+          setMessage(`坐标系候选状态读取失败：${error.message}`, true);
+        }
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+  }
+
   async function loadCadGeoreferenceCandidates() {
     const button = $("#loadCadGeoreferenceCandidates");
+    const input = $("#centralMeridianInput");
+    const rawMeridian = input.value.trim();
+    const centralMeridian = rawMeridian === "" ? null : Number(rawMeridian);
+    if (centralMeridian != null && (!Number.isFinite(centralMeridian) || centralMeridian < -180 || centralMeridian > 180)) {
+      input.setCustomValidity("请输入 -180° 到 180° 之间的中央经线，或留空自动推荐");
+      input.reportValidity();
+      input.setCustomValidity("");
+      return;
+    }
+    state.georeferencePollGeneration += 1;
     button.disabled = true;
-    button.textContent = "正在匹配…";
+    button.textContent = "正在提交…";
     try {
       const { body } = await request(
         `/api/projects/${encodeURIComponent(projectId)}/cad-georeference/candidates`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.project,
+            central_meridian_deg: centralMeridian,
+          }),
+        },
       );
-      state.georeferenceCandidates = body.candidates || [];
-      renderCadGeoreferenceCandidates();
+      renderCadGeoreferenceOperation(body.operation);
+      void pollCadGeoreferenceCandidates();
     } catch (error) {
       setMessage(`坐标系候选生成失败：${error.message}`, true);
-    } finally {
       button.disabled = false;
       button.textContent = "重新生成候选";
     }
@@ -532,6 +622,8 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expected_revision: state.snapshot.component_revisions.project,
+            candidate_job_id: state.georeferenceOperation?.job_id,
+            candidate_input_fingerprint: state.georeferenceOperation?.input_fingerprint,
             candidate: {
               ...candidate,
               cad_axis_mapping: candidate.cad_axis_mapping,
@@ -554,21 +646,28 @@
     if (!clip) return;
     state.fullPoseClipId = clip.clip_id;
     state.georeferenceCandidates = [];
+    state.georeferenceOperation = null;
     const settings = clip.srt_full_pose_settings || {};
     $("#srtCoverageSummary").textContent = formatSrtCoverage(clip.srt_coverage);
     $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
+    const confirmedGeoreference = state.snapshot?.cad_georeference || {};
+    $("#centralMeridianInput").value = confirmedGeoreference.confirmed
+      ? (confirmedGeoreference.central_meridian_deg ?? "")
+      : "";
     $("#cadZOffsetInput").value = settings.cad_z_offset_m ?? 0;
     $("#cadGeoreferenceCandidates").replaceChildren(Object.assign(document.createElement("span"), {
       className: "empty-state",
-      textContent: "正在基于 SRT 与当前 CAD 生成候选…",
+      textContent: "填写中央经线后点击“生成候选”",
     }));
+    renderCadGeoreferenceOperation({ status: "not_started", candidates: [] });
     renderCadGeoreferenceStatus();
     renderCadGeoreferencePreview(null);
     $("#fullPoseDialog").showModal();
-    loadCadGeoreferenceCandidates();
+    void pollCadGeoreferenceCandidates();
   }
 
   function closeFullPoseDialog() {
+    state.georeferencePollGeneration += 1;
     state.fullPoseClipId = null;
     $("#fullPoseDialog").close();
   }
@@ -1168,6 +1267,10 @@
   $("#cancelCadReplacement").addEventListener("click", () => $("#cadReplacementDialog").close());
   $("#fullPoseForm").addEventListener("submit", saveFullPoseSettings);
   $("#loadCadGeoreferenceCandidates").addEventListener("click", loadCadGeoreferenceCandidates);
+  $("#centralMeridianInput").addEventListener("input", () => {
+    state.georeferencePollGeneration += 1;
+    renderCadGeoreferenceOperation({ status: "not_started", candidates: [] });
+  });
   $("#closeFullPoseDialog").addEventListener("click", closeFullPoseDialog);
   $("#cancelFullPoseSettings").addEventListener("click", closeFullPoseDialog);
   $("#confirmAnalysisCandidate").addEventListener("click", activateCandidateAnalysis);

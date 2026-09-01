@@ -121,12 +121,17 @@
       <p>大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。</p>
       <p id="srtCoverageSummary" class="srt-coverage-summary"></p>
       <div class="full-pose-fields">
-        <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="1.01" max="178.99" step="0.1" required placeholder="例如 120"></label>
+        <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="1.01" max="178.99" step="0.1" required placeholder="例如 72"></label>
+        <label><span>CGCS2000 中央经线（°）</span><input id="centralMeridianInput" type="number" min="-180" max="180" step="0.1" placeholder="例如 120；留空则自动推荐"></label>
         <label><span>CAD 高程修正（米）</span><input id="cadZOffsetInput" type="number" step="0.1" value="0"></label>
       </div>
       <section class="georeference-section" aria-labelledby="georeferenceTitle">
         <div class="georeference-heading"><div><h3 id="georeferenceTitle">CAD 坐标系确认</h3><p id="cadGeoreferenceStatus">尚未确认</p></div><button id="loadCadGeoreferenceCandidates" class="button secondary" type="button">生成候选</button></div>
         <p class="georeference-help">系统用 SRT 的 WGS84 轨迹与 CAD 坐标范围排序候选；不会把某个中央经线自动套用到其他 CAD。</p>
+        <div id="cadGeoreferenceProgress" class="candidate-operation-progress" hidden>
+          <div><span id="cadGeoreferenceProgressText">等待生成候选</span><b id="cadGeoreferenceProgressPercent">—</b></div>
+          <div class="progress-track"><span id="cadGeoreferenceProgressFill" class="progress-fill"></span></div>
+        </div>
         <svg id="cadGeoreferencePreview" class="georeference-preview" viewBox="0 0 640 230" role="img" aria-label="CAD 范围和候选轨迹预览"></svg>
         <div id="cadGeoreferenceCandidates" class="crs-candidates"><span class="empty-state">点击“生成候选”后显示 EPSG、中央经线和匹配证据</span></div>
         <p id="centralMeridianNotice" class="central-meridian-notice" hidden></p>
