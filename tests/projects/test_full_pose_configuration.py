@@ -122,6 +122,7 @@ def test_confirmation_is_bound_to_current_cad_and_replacement_invalidates_it(
     assert stored["confirmed"] is True
     assert stored["epsg"] == 4549
     assert stored["cad_asset_fingerprint"]
+    assert "trajectory_polyline_raw" not in stored["validation"]
 
     current = repositories.project.load("p1")
     repositories.project.update(

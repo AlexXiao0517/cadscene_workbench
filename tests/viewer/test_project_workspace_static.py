@@ -236,19 +236,46 @@ def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> 
     assert "confirmed_clip_ids: confirmedClipIds" in script
 
 
-def test_final_workflow_selector_only_exposes_sfm_and_opengv() -> None:
+def test_final_workflow_selector_preserves_all_four_workflows() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     workflow_select = html.split('class="workflow-select"', 1)[1].split(
         "</select>", 1
     )[0]
-    assert workflow_select.count("<option") == 2
+    assert workflow_select.count("<option") == 4
     assert '<option value="sfm_only">三维重建（SfM）</option>' in workflow_select
+    assert '<option value="srt_sfm_fused">SRT + 三维重建</option>' in workflow_select
+    assert '<option value="srt_full_pose">SRT 全姿态（无需重建）</option>' in workflow_select
     assert '<option value="pure_rotation">旋转估计（OpenGV）</option>' in workflow_select
     assert "使用系统推荐" not in workflow_select
     assert "function visibleWorkflowChoice(clip, edit)" in script
     assert "clip.resolved_workflow" in script
+    assert 'workflow === "pure_rotation" ? "pure_rotation" : "sfm_only"' not in script
+
+
+def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="fullPoseDialog"' in html
+    assert "水平视场角（°）" in html
+    assert 'id="horizontalFovInput"' in html
+    assert "fovType" not in html and "FOV 类型" not in html
+    assert 'id="cadGeoreferenceCandidates"' in html
+    assert 'id="cadGeoreferencePreview"' in html
+    assert "/cad-georeference/candidates" in script
+    assert "/cad-georeference/confirm" in script
+    assert "/srt-full-pose`" in script
+    assert "cad_axis_mapping" in script
+    assert "central_meridian_deg" in script
+    assert "project_revision" in script
+    assert "expected_revision: state.snapshot.component_revisions.project" in script
+    assert "120°是本项目推荐中央经线，不会应用到其他 CAD" in script
+    assert "trajectory_polyline_raw" in script
+    assert ".full-pose-dialog" in css
+    assert ".crs-candidate" in css
 
 
 def test_workspace_wires_reanalysis_retry_and_cancel_to_real_api_routes() -> None:

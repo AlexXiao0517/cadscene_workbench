@@ -95,6 +95,13 @@ def test_candidate_near_120_recommends_4549_when_bbox_matches() -> None:
     assert candidates
     assert candidates[0].epsg == 4549
     assert candidates[0].central_meridian_deg == 120.0
+    assert candidates[0].evidence["cad_bbox_raw"] == [
+        499_800.0,
+        3_319_900.0,
+        500_200.0,
+        3_320_400.0,
+    ]
+    assert candidates[0].evidence["trajectory_polyline_raw"]
     assert candidates[0].cad_axis_mapping == "cad_x_easting_cad_y_northing"
     assert candidates[0].confirmed is False
 

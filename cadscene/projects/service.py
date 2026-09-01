@@ -2460,6 +2460,15 @@ class ProjectService:
         if cad_fingerprint is None:
             raise ValueError("active CAD asset identity is unavailable")
         evidence = candidate.get("evidence")
+        validation = (
+            {
+                str(key): value
+                for key, value in evidence.items()
+                if key not in {"cad_bbox_raw", "trajectory_polyline_raw"}
+            }
+            if isinstance(evidence, Mapping)
+            else {}
+        )
         score = float(candidate.get("score", 0.0))
         confidence = min(1.0, max(0.0, score / 120.0))
         config = CadGeoreference.from_dict(
@@ -2477,7 +2486,7 @@ class ProjectService:
                 "source": "user_confirmed_candidate",
                 "confirmed": True,
                 "confidence": confidence,
-                "validation": dict(evidence) if isinstance(evidence, Mapping) else {},
+                "validation": validation,
             }
         )
         payload = {

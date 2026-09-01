@@ -112,7 +112,28 @@
       <div class="dialog-actions"><button id="cancelCadReplacement" type="button" class="button secondary">取消</button><button id="confirmCadReplacement" type="submit" class="button primary" disabled>开始替换</button></div>
     </form>
   </dialog>
-  <template id="clipRowTemplate"><tr><td><input class="clip-select" type="checkbox"></td><td><div class="clip-name-cell"><div class="clip-thumbnail"><img alt="片段缩略图"><span class="thumb-play" aria-hidden="true">▶</span></div><div><button class="clip-name" type="button"></button><span class="review-badge" hidden>需确认</span></div></div></td><td class="time-range"></td><td class="duration"></td><td class="workflow-recommendation"></td><td><select class="workflow-select" aria-label="最终工作流"><option value="sfm_only">三维重建（SfM）</option><option value="pure_rotation">旋转估计（OpenGV）</option></select><span class="row-error" role="alert"></span></td><td><span class="status-pill"></span></td><td><div class="progress-cell"><div class="progress-track"><span class="progress-fill"></span></div><span class="progress-percent">—</span></div></td><td><div class="row-actions"><button class="button compact open-workbench" type="button">进入工作台</button><button class="button compact bridge-up" type="button" hidden>向上打通</button><button class="button compact bridge-down" type="button" hidden>向下打通</button><button class="button compact retry-job" type="button">重试</button><button class="button compact cancel-job" type="button">取消</button></div></td></tr></template>
+  <dialog id="fullPoseDialog" class="dialog full-pose-dialog">
+    <form id="fullPoseForm">
+      <div class="full-pose-heading">
+        <div><p class="eyebrow">SRT 直接轨迹</p><h2>配置无人机与 CAD 坐标</h2></div>
+        <button id="closeFullPoseDialog" class="dialog-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <p>大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。</p>
+      <div class="full-pose-fields">
+        <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="1.01" max="178.99" step="0.1" required placeholder="例如 120"></label>
+        <label><span>CAD 高程修正（米）</span><input id="cadZOffsetInput" type="number" step="0.1" value="0"></label>
+      </div>
+      <section class="georeference-section" aria-labelledby="georeferenceTitle">
+        <div class="georeference-heading"><div><h3 id="georeferenceTitle">CAD 坐标系确认</h3><p id="cadGeoreferenceStatus">尚未确认</p></div><button id="loadCadGeoreferenceCandidates" class="button secondary" type="button">生成候选</button></div>
+        <p class="georeference-help">系统用 SRT 的 WGS84 轨迹与 CAD 坐标范围排序候选；不会把某个中央经线自动套用到其他 CAD。</p>
+        <svg id="cadGeoreferencePreview" class="georeference-preview" viewBox="0 0 640 230" role="img" aria-label="CAD 范围和候选轨迹预览"></svg>
+        <div id="cadGeoreferenceCandidates" class="crs-candidates"><span class="empty-state">点击“生成候选”后显示 EPSG、中央经线和匹配证据</span></div>
+        <p id="centralMeridianNotice" class="central-meridian-notice" hidden></p>
+      </section>
+      <div class="dialog-actions"><button id="cancelFullPoseSettings" type="button" class="button secondary">取消</button><button id="saveFullPoseSettings" type="submit" class="button primary">保存配置</button></div>
+    </form>
+  </dialog>
+  <template id="clipRowTemplate"><tr><td><input class="clip-select" type="checkbox"></td><td><div class="clip-name-cell"><div class="clip-thumbnail"><img alt="片段缩略图"><span class="thumb-play" aria-hidden="true">▶</span></div><div><button class="clip-name" type="button"></button><span class="review-badge" hidden>需确认</span></div></div></td><td class="time-range"></td><td class="duration"></td><td class="workflow-recommendation"></td><td><select class="workflow-select" aria-label="最终工作流"><option value="sfm_only">三维重建（SfM）</option><option value="srt_sfm_fused">SRT + 三维重建</option><option value="srt_full_pose">SRT 全姿态（无需重建）</option><option value="pure_rotation">旋转估计（OpenGV）</option></select><span class="row-error" role="alert"></span></td><td><span class="status-pill"></span></td><td><div class="progress-cell"><div class="progress-track"><span class="progress-fill"></span></div><span class="progress-percent">—</span></div></td><td><div class="row-actions"><button class="button compact configure-full-pose" type="button" hidden>配置 SRT/FOV</button><button class="button compact open-workbench" type="button">进入工作台</button><button class="button compact bridge-up" type="button" hidden>向上打通</button><button class="button compact bridge-down" type="button" hidden>向下打通</button><button class="button compact retry-job" type="button">重试</button><button class="button compact cancel-job" type="button">取消</button></div></td></tr></template>
   <script src="project_workspace.js"></script>
 </body>
 </html>

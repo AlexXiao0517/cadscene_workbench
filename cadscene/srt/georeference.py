@@ -298,10 +298,19 @@ def _candidate_score(
     score = 100.0 * inside_ratio + 20.0 * buffered_ratio - min(
         100.0, median_distance / span
     )
+    if len(points) <= 80:
+        preview_points = points
+    else:
+        indexes = {
+            round(index * (len(points) - 1) / 79) for index in range(80)
+        }
+        preview_points = [points[index] for index in sorted(indexes)]
     return score, {
         "trajectory_inside_cad_ratio": inside_ratio,
         "trajectory_inside_buffer_ratio": buffered_ratio,
         "median_distance_to_cad_bbox_m": median_distance,
+        "cad_bbox_raw": [min_x, min_y, max_x, max_y],
+        "trajectory_polyline_raw": [list(point) for point in preview_points],
     }
 
 

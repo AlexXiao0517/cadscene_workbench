@@ -18,6 +18,8 @@
     activatingAnalysis: false,
     dismissedCandidateRevision: null,
     cadReplacementUploading: false,
+    fullPoseClipId: null,
+    georeferenceCandidates: [],
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -95,7 +97,7 @@
 
   function visibleWorkflowChoice(clip, edit) {
     const workflow = edit.workflow || clip.resolved_workflow;
-    return workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";
+    return Object.hasOwn(WORKFLOW_LABELS, workflow) ? workflow : "sfm_only";
   }
 
   function trajectoryDisplayStatus(clip) {
@@ -175,6 +177,9 @@
     if (hasPercentage) progressPercent.textContent = `${percent}%`;
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
+    const configureFullPose = $(".configure-full-pose", row);
+    configureFullPose.hidden = workflow.value !== "srt_full_pose";
+    configureFullPose.addEventListener("click", () => openFullPoseDialog(clip));
     const bridgeStatus = clip.scene_bridge?.status;
     const hasSavedWorkbench = clip.workbench?.state === "saved";
     const bridgeReason = clip.capabilities?.bridge_up_reason
@@ -183,6 +188,8 @@
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
     } else if (bridgeReason) {
       $(".row-error", row).textContent = bridgeReason;
+    } else if (workflow.value === "srt_full_pose" && clip.capabilities?.reason) {
+      $(".row-error", row).textContent = clip.capabilities.reason;
     }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
@@ -363,6 +370,238 @@
     }
   }
 
+  function axisMappingLabel(value) {
+    return value === "cad_x_northing_cad_y_easting"
+      ? "CAD X=北坐标，Y=东坐标"
+      : "CAD X=东坐标，Y=北坐标";
+  }
+
+  function renderCadGeoreferenceStatus() {
+    const config = state.snapshot?.cad_georeference || {};
+    const status = $("#cadGeoreferenceStatus");
+    if (config.confirmed === true) {
+      status.textContent = `已确认 EPSG:${config.epsg} · 中央经线 ${config.central_meridian_deg}° · ${axisMappingLabel(config.cad_axis_mapping)}`;
+      status.classList.add("is-confirmed");
+    } else if (config.stale_reason === "cad_asset_changed") {
+      status.textContent = "CAD 已更换，请为当前图纸重新确认坐标系";
+      status.classList.remove("is-confirmed");
+    } else {
+      status.textContent = "尚未确认；轨迹任务会保持禁用";
+      status.classList.remove("is-confirmed");
+    }
+  }
+
+  function svgElement(name, attributes = {}) {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+    for (const [key, value] of Object.entries(attributes)) {
+      element.setAttribute(key, String(value));
+    }
+    return element;
+  }
+
+  function renderCadGeoreferencePreview(candidate) {
+    const svg = $("#cadGeoreferencePreview");
+    const evidence = candidate?.evidence || {};
+    const bbox = evidence.cad_bbox_raw;
+    const trajectory = evidence.trajectory_polyline_raw;
+    svg.replaceChildren();
+    if (!Array.isArray(bbox) || bbox.length !== 4 || !Array.isArray(trajectory) || !trajectory.length) {
+      const label = svgElement("text", { x: 320, y: 118, "text-anchor": "middle", class: "preview-empty" });
+      label.textContent = "此候选暂无可视化证据";
+      svg.append(label);
+      return;
+    }
+    const validPoints = trajectory
+      .filter((point) => Array.isArray(point) && point.length === 2)
+      .map((point) => [Number(point[0]), Number(point[1])])
+      .filter((point) => point.every(Number.isFinite));
+    if (!validPoints.length) return;
+    const xValues = [Number(bbox[0]), Number(bbox[2]), ...validPoints.map((point) => point[0])];
+    const yValues = [Number(bbox[1]), Number(bbox[3]), ...validPoints.map((point) => point[1])];
+    const minX = Math.min(...xValues);
+    const maxX = Math.max(...xValues);
+    const minY = Math.min(...yValues);
+    const maxY = Math.max(...yValues);
+    const spanX = Math.max(maxX - minX, 1);
+    const spanY = Math.max(maxY - minY, 1);
+    const project = ([x, y]) => [
+      24 + ((x - minX) / spanX) * 592,
+      206 - ((y - minY) / spanY) * 182,
+    ];
+    const cadMin = project([Number(bbox[0]), Number(bbox[1])]);
+    const cadMax = project([Number(bbox[2]), Number(bbox[3])]);
+    svg.append(svgElement("rect", {
+      x: Math.min(cadMin[0], cadMax[0]),
+      y: Math.min(cadMin[1], cadMax[1]),
+      width: Math.abs(cadMax[0] - cadMin[0]),
+      height: Math.abs(cadMax[1] - cadMin[1]),
+      class: "cad-preview-bounds",
+    }));
+    const screenPoints = validPoints.map(project);
+    svg.append(svgElement("path", {
+      d: screenPoints.map((point, index) => `${index ? "L" : "M"}${point[0].toFixed(2)},${point[1].toFixed(2)}`).join(" "),
+      class: "trajectory-preview-line",
+    }));
+    svg.append(svgElement("circle", { cx: screenPoints[0][0], cy: screenPoints[0][1], r: 5, class: "trajectory-start" }));
+    const end = screenPoints.at(-1);
+    svg.append(svgElement("circle", { cx: end[0], cy: end[1], r: 5, class: "trajectory-end" }));
+  }
+
+  function renderCadGeoreferenceCandidates() {
+    const container = $("#cadGeoreferenceCandidates");
+    const candidates = state.georeferenceCandidates;
+    if (!candidates.length) {
+      container.replaceChildren(Object.assign(document.createElement("span"), {
+        className: "empty-state",
+        textContent: "没有找到可用的 CGCS2000 高斯-克吕格候选",
+      }));
+      renderCadGeoreferencePreview(null);
+      return;
+    }
+    container.replaceChildren(...candidates.map((candidate, index) => {
+      const card = document.createElement("article");
+      card.className = "crs-candidate";
+      if (index === 0) card.classList.add("is-recommended");
+      const title = document.createElement("div");
+      title.className = "crs-candidate-title";
+      const code = document.createElement("strong");
+      code.textContent = `EPSG:${candidate.epsg}`;
+      const rank = document.createElement("span");
+      rank.textContent = index === 0 ? "推荐" : "备选";
+      title.append(code, rank);
+      const projection = document.createElement("p");
+      projection.textContent = `${candidate.crs_name} · 中央经线 ${candidate.central_meridian_deg}°`;
+      const mapping = document.createElement("p");
+      mapping.textContent = axisMappingLabel(candidate.cad_axis_mapping);
+      const evidence = document.createElement("p");
+      const inside = Number(candidate.evidence?.trajectory_inside_cad_ratio || 0) * 100;
+      evidence.className = "crs-evidence";
+      evidence.textContent = `匹配分 ${Number(candidate.score).toFixed(1)} · 轨迹落入 CAD ${inside.toFixed(0)}%`;
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className = "button compact";
+      confirm.textContent = "确认此坐标系";
+      confirm.addEventListener("click", () => confirmCadGeoreference(candidate));
+      card.addEventListener("mouseenter", () => renderCadGeoreferencePreview(candidate));
+      card.addEventListener("focusin", () => renderCadGeoreferencePreview(candidate));
+      card.append(title, projection, mapping, evidence, confirm);
+      return card;
+    }));
+    const top = candidates[0];
+    const notice = $("#centralMeridianNotice");
+    notice.hidden = Number(top.epsg) !== 4549;
+    notice.textContent = Number(top.epsg) === 4549
+      ? "120°是本项目推荐中央经线，不会应用到其他 CAD"
+      : "";
+    renderCadGeoreferencePreview(top);
+  }
+
+  async function loadCadGeoreferenceCandidates() {
+    const button = $("#loadCadGeoreferenceCandidates");
+    button.disabled = true;
+    button.textContent = "正在匹配…";
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/cad-georeference/candidates`,
+        { method: "POST" },
+      );
+      state.georeferenceCandidates = body.candidates || [];
+      renderCadGeoreferenceCandidates();
+    } catch (error) {
+      setMessage(`坐标系候选生成失败：${error.message}`, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = "重新生成候选";
+    }
+  }
+
+  async function confirmCadGeoreference(candidate) {
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/cad-georeference/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.project,
+            candidate: {
+              ...candidate,
+              cad_axis_mapping: candidate.cad_axis_mapping,
+              central_meridian_deg: candidate.central_meridian_deg,
+            },
+          }),
+        },
+      );
+      state.snapshot.component_revisions.project = body.project_revision;
+      state.snapshot.cad_georeference = body.cad_georeference;
+      state.etag = null;
+      renderCadGeoreferenceStatus();
+      setMessage(`已确认 EPSG:${body.cad_georeference.epsg}，仅绑定当前 CAD`);
+    } catch (error) {
+      setMessage(`坐标系确认失败：${error.message}`, true);
+    }
+  }
+
+  function openFullPoseDialog(clip) {
+    if (!clip) return;
+    state.fullPoseClipId = clip.clip_id;
+    state.georeferenceCandidates = [];
+    const settings = clip.srt_full_pose_settings || {};
+    $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
+    $("#cadZOffsetInput").value = settings.cad_z_offset_m ?? 0;
+    $("#cadGeoreferenceCandidates").replaceChildren(Object.assign(document.createElement("span"), {
+      className: "empty-state",
+      textContent: "正在基于 SRT 与当前 CAD 生成候选…",
+    }));
+    renderCadGeoreferenceStatus();
+    renderCadGeoreferencePreview(null);
+    $("#fullPoseDialog").showModal();
+    loadCadGeoreferenceCandidates();
+  }
+
+  function closeFullPoseDialog() {
+    state.fullPoseClipId = null;
+    $("#fullPoseDialog").close();
+  }
+
+  async function saveFullPoseSettings(event) {
+    event.preventDefault();
+    const clipId = state.fullPoseClipId;
+    const fovInput = $("#horizontalFovInput");
+    const horizontalFov = Number(fovInput.value);
+    const cadZOffset = Number($("#cadZOffsetInput").value || 0);
+    if (!clipId || !Number.isFinite(horizontalFov) || horizontalFov <= 1 || horizontalFov >= 179) {
+      fovInput.setCustomValidity("请输入 1° 到 179° 之间的水平视场角");
+      fovInput.reportValidity();
+      fovInput.setCustomValidity("");
+      return;
+    }
+    try {
+      const { body } = await request(
+        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clipId)}/srt-full-pose`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: state.snapshot.component_revisions.clips,
+            horizontal_fov_deg: horizontalFov,
+            cad_z_offset_m: cadZOffset,
+            attitude_profile: "dji_absolute_ned",
+          }),
+        },
+      );
+      state.snapshot.component_revisions.clips = body.clips_revision;
+      const selected = state.snapshot.clips.find((item) => item.clip_id === clipId);
+      if (selected) selected.srt_full_pose_settings = body.settings;
+      state.etag = null;
+      closeFullPoseDialog();
+      setMessage("SRT 全姿态配置已保存");
+      await pollSnapshot();
+    } catch (error) {
+      setMessage(`SRT 全姿态配置保存失败：${error.message}`, true);
+    }
+  }
+
   function offerAnalysisCandidate(snapshot) {
     const revision = snapshot.candidate_analysis_revision;
     const preview = snapshot.candidate_analysis_preview;
@@ -510,6 +749,10 @@
       state.snapshot.component_revisions.clips = body.clips_revision;
       state.etag = null;
       await pollSnapshot();
+      if (workflow === "srt_full_pose") {
+        const refreshed = state.snapshot?.clips.find((item) => item.clip_id === clip.clip_id);
+        openFullPoseDialog(refreshed || clip);
+      }
     } catch (error) {
       $(".row-error", row).textContent = error.message;
     }
@@ -914,6 +1157,10 @@
   $("#cadReplacementFile").addEventListener("change", updateCadReplacementConfirmation);
   $("#cadCoordinateConfirmation").addEventListener("change", updateCadReplacementConfirmation);
   $("#cancelCadReplacement").addEventListener("click", () => $("#cadReplacementDialog").close());
+  $("#fullPoseForm").addEventListener("submit", saveFullPoseSettings);
+  $("#loadCadGeoreferenceCandidates").addEventListener("click", loadCadGeoreferenceCandidates);
+  $("#closeFullPoseDialog").addEventListener("click", closeFullPoseDialog);
+  $("#cancelFullPoseSettings").addEventListener("click", closeFullPoseDialog);
   $("#confirmAnalysisCandidate").addEventListener("click", activateCandidateAnalysis);
   $("#dismissAnalysisCandidate").addEventListener("click", () => {
     state.dismissedCandidateRevision = state.snapshot?.candidate_analysis_revision || null;
