@@ -153,7 +153,11 @@ CAD 替换后，旧分析 job 的 CAD identity 与当前活动 CAD 不同。服�
 
 `/api/workflow/*` 和 `/api/pure-rotation/*` 仍支持既有单 dataset/run 工作台阶段。其主要端点包括创建/上传 dataset、`run-stage`、job status/log、camera track、keyframe plan，以及 pure-rotation run/placement/corrections/trajectory。
 
-`srt_sfm_fused` 和 `srt_full_pose` 仍是 Interface only，`run-stage` 会拒绝。兼容 JobRunner 的活动外部子进程不能在服务重启后重新接管；这与当前 ProjectRuntime 能恢复 manifest/队列状态不是同一语义。
+`srt_sfm_fused` 仍是 Interface only，`run-stage` 会拒绝。`srt_full_pose` 使用项目级
+georeference 推荐/确认 API 和片段级水平 FOV 设置；成功轨迹产物位于
+`02_srt_full_pose/`，兼容 JobRunner/Viewer 通过语义 trajectory 路径读取且不要求
+`sparse_points.ply`。活动外部子进程不能在服务重启后重新接管；这与当前
+ProjectRuntime 能恢复 manifest/队列状态不是同一语义。
 
 旧目录：
 

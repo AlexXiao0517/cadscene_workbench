@@ -136,11 +136,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ### 对齐被拒绝、路线漂移，或 CAD / SfM 看起来不在同一平面
 
-**可能原因：** SfM world、CAD meters、查看器 `cad_world` 和 partial-SRT 的 local ENU 不是同一坐标系；比例、`origin_xy`、pitch 符号或人工锚点不一致。可观测性不足、共线/退化锚点或过大残差也会导致拒绝。
+**可能原因：** SfM world、CAD meters、查看器 `cad_world`、partial-SRT 的 local ENU 和 full-pose 的 CGCS2000 projected/CAD local metres 不是同一坐标系；比例、`origin_xy`、pitch 符号或人工锚点不一致。全姿态还可能选错中央经线、分带、带号或 CAD X/Y 轴序。可观测性不足、共线/退化锚点或过大残差也会导致拒绝。
 
-**检查：** 查看 `03_alignment/alignment.json` 的 `alignment_mode`、`scale_observable`、Sim3、残差、FOV 来源和 warnings，以及 `keyframe_correspondences.csv`。确认人工关键帧不是 `algorithm_prediction`，并核对 `cad_scale`、`origin_xy`。常规对齐至少需要两个位置可区分的人工锚点；partial-SRT 融合需要至少三个空间独立约束。
+**检查：** 查看 `03_alignment/alignment.json` 的 `alignment_mode`、`scale_observable`、Sim3、残差、FOV 来源和 warnings，以及 `keyframe_correspondences.csv`。确认人工关键帧不是 `algorithm_prediction`，并核对 `cad_scale`、`origin_xy`。常规对齐至少需要两个位置可区分的人工锚点；partial-SRT 融合需要至少三个空间独立约束。full-pose 应显示 `metric_direct`、`metric_scale_locked=true` 和 `scale=1.0`，并在项目 snapshot 中保留与当前 CAD 指纹一致的 confirmed georeference。
 
-**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退，不是实测比例。
+**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。full-pose 先回到项目页比较 CAD bbox/轨迹预览并重新确认候选，不要靠放开自由 Sim3 尺度掩盖选错投影。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退；`metric_direct` 的 1.0 则是已投影米制轨迹的强制单位尺度。
 
 ### FOV 约为 29°、内参异常或对齐拒绝
 
@@ -148,17 +148,17 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 **检查：** 读取 `alignment.json` 的 FOV 来源和警告，比较所有已确认人工关键帧的 FOV。可信人工 FOV 必须有限、合法且彼此差异不超过 0.1°。
 
-**处理：** 在同一镜头条件下人工复核关键帧 FOV；满足一致性后其平均值优先于 SfM 重建值。若缺失或不一致，使用经审计的配置 FOV 或修复相机输入后重建；不要仅为了消除 29° 而硬编码一个数值。
+**处理：** 在同一镜头条件下人工复核关键帧 FOV；满足一致性后其平均值优先于 SfM 重建值。full-pose 只填写镜头的水平 FOV 数值，不要把垂直或对角视场角直接填入，也不要假设所有 DJI 镜头相同。若缺失或不一致，使用经审计的配置 FOV 或修复相机输入后重建；不要仅为了消除 29° 而硬编码一个数值。
 
 ## SRT 与 pure-rotation
 
-### 上传 SRT 后显示 Interface only 或无法启动工作流
+### 上传完整姿态 SRT 后仍无法启动，或轨迹预览不落在 CAD 上
 
-**可能原因：** 普通 SRT 只用于能力检测；门户路由 `srt_sfm_fused` 和 `srt_full_pose` 均为 Interface only，服务器会返回 409 并阻止 `run-stage`。
+**可能原因：** SRT 的 GPS/高度/云台 yaw-pitch-roll 共同覆盖不足；精确 frame map 缺失；当前 CAD 的 CGCS2000 候选尚未确认或已因 CAD revision 变化失效；水平 FOV 非法；候选投影、带号或 X/Y 轴序导致轨迹不落图；或安装环境缺少 `pyproj`/`proj.db`。
 
-**检查：** 查看 `GET /api/workflow/srt-analysis?dataset=…`、manifest 中的 `srt` 和 `workflow.trajectory_mode`，以及 `srt_analysis_report.md`。
+**检查：** 查看项目 snapshot 的 `resolved_workflow`、`cad_georeference`、候选 evidence/preview、`can_run_trajectory` 与 blockers，以及片段 `srt_full_pose_settings.horizontal_fov_deg`。运行开发者指南中的 EPSG:4549 smoke 检查 PROJ 数据；它成功也不代表当前 CAD 应采用 120°中央经线。
 
-**处理：** 要使用 Stable 主路线，创建未上传 SRT 的数据集并走 `sfm_only`。需要研究 SRT 时使用独立的 `fuse_srt_sfm` Experimental CLI，并接受其尚未接入 JobRunner。普通 SRT 不能当作高精度位置、姿态或 CAD 高程真值。
+**处理：** 在当前 CAD bbox 与投影轨迹预览证据一致后显式确认候选，为片段填写实际镜头的水平 FOV，并按相对高度设置 `cad_z_offset_m`。不要把 120°复制为其他 CAD 的默认中央经线，也不要把未经共同基准验证的绝对高度当作 CAD Z。若 SRT 不满足完整姿态门槛，`srt_sfm_fused` 仍为 Interface only；需要正式稳定路径时改用符合产品契约的 `sfm_only` 项目输入。
 
 ### pure-rotation 后无法放置、没有轨迹或渲染位置不对
 

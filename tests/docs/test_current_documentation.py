@@ -86,13 +86,13 @@ def test_pure_rotation_is_documented_as_an_automatic_analysis_recommendation() -
     workflow_select = workspace_html.split('class="workflow-select"', 1)[1].split(
         "</select>", 1
     )[0]
-    assert workflow_select.count("<option") == 2
+    assert workflow_select.count("<option") == 4
     assert 'value="sfm_only"' in workflow_select
+    assert 'value="srt_sfm_fused"' in workflow_select
+    assert 'value="srt_full_pose"' in workflow_select
     assert 'value="pure_rotation"' in workflow_select
-    assert (
-        'return workflow === "pure_rotation" ? "pure_rotation" : "sfm_only";'
-        in workspace_script
-    )
+    assert "function visibleWorkflowChoice(clip, edit)" in workspace_script
+    assert 'workflow === "pure_rotation" ? "pure_rotation" : "sfm_only"' not in workspace_script
     assert 'workflow.addEventListener("change"' in workspace_script
 
     assert "自动检测运动特征并保守推荐" in current_docs
@@ -100,9 +100,9 @@ def test_pure_rotation_is_documented_as_an_automatic_analysis_recommendation() -
     routing = _read("docs/workflow_routing.md")
     assert "单一逻辑片段且不足 60 秒" in routing
     assert "项目页的“最终工作流”选择器用于纠正推荐" in routing
-    assert "最终工作流下拉框只显示 SfM 和 OpenGV" in routing
-    assert "不能仅凭下拉框显示的 SfM 认为覆盖已经保存" in routing
-    assert "必须新建一个不上传 SRT 的项目" in routing
+    assert "项目页保留 `sfm_only`、`pure_rotation`、`srt_sfm_fused` 与 `srt_full_pose` 的真实模式" in routing
+    assert "不再把全姿态片段回显为 SfM" in routing
+    assert "120°只属于当前项目确认，不是通用默认" in routing
 
     stale_rotation_claims = (
         "用户显式声明“无人机悬停，仅转动视角”后使用",

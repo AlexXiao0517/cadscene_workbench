@@ -30,7 +30,8 @@
 | 视频目标跟踪标牌 | Hidden baseline | 后端和历史数据兼容存在，但当前创建入口隐藏，不作为用户可用能力。 |
 | 全局 CAD 替换 | Supported with guard | 仅坐标系已打通的项目可用；要求确认新版 CAD 坐标系相同，保留轨迹并使渲染/合并 stale。 |
 | partial-SRT core | Experimental CLI | PTS、ENU 与稳健 Sim3 核心可通过命令行使用，尚未进入正式项目队列。 |
-| `srt_sfm_fused` / `srt_full_pose` | Interface only | 门户可识别并提示，但正式阶段启动被阻止。 |
+| `srt_full_pose` | Supported with guard | 完整 DJI 云台姿态、精确 frame map、当前 CAD 的 CGCS2000 投影和用户水平 FOV 均确认后，直接生成尺度锁定的米制轨迹并跳过 SfM。 |
+| `srt_sfm_fused` | Interface only | partial-SRT 门户可识别并提示，但正式阶段启动仍被阻止。 |
 | SfM CUDA | Optional | 只在受支持的特征提取和匹配范围内加速；不能确认时回退 CPU。 |
 
 ## 理解设计

@@ -14,6 +14,7 @@ from scripts.windows_offline_bundle import (
     assemble_bundle,
     backend_runtime_files,
     prepare_runtime_commands,
+    proj_runtime_smoke_code,
     verify_bundle,
     validate_staging_tree,
     write_zip64,
@@ -270,7 +271,11 @@ def test_prepare_runtime_commands_clone_install_check_and_pack(tmp_path: Path) -
     assert "--clone" in commands[0]
     assert commands[1][1:4] == ("-m", "pip", "install")
     assert commands[2][1:] == ("-m", "pip", "check")
-    assert commands[3][1:3] == ("-c", "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap, psutil")
+    assert commands[3][1] == "-c"
+    assert "import av, cv2, numpy, scipy, yaml, PIL, ezdxf" in commands[3][2]
+    assert "import pyproj" in commands[3][2]
+    assert "CRS.from_epsg(4549)" in commands[3][2]
+    assert "Transformer.from_crs(4326, 4549" in commands[3][2]
     assert commands[4][1:] == ("-m", "pip", "install", "conda-pack==0.9.2")
     assert commands[5][0].endswith("build env\\python.exe")
     assert commands[5][1] == "-c"
@@ -278,6 +283,23 @@ def test_prepare_runtime_commands_clone_install_check_and_pack(tmp_path: Path) -
     assert "unlink(missing_ok=True)" in commands[5][2]
     assert commands[6][0].endswith("build env\\Scripts\\conda-pack.exe")
     assert "--force" in commands[6]
+
+
+def test_proj_runtime_smoke_resolves_epsg4549_away_from_checkout(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    completed = subprocess.run(
+        ["python", "-I", "-c", proj_runtime_smoke_code()],
+        cwd=outside,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def _write_fake_runtime_archive(path: Path) -> None:

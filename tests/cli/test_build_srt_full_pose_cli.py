@@ -128,6 +128,20 @@ def test_builder_emits_local_cad_metric_centers_and_user_fov(
     assert result.camera_path_path.is_file()
     assert result.diagnostics_path.is_file()
     assert result.report_path.is_file()
+    diagnostics = json.loads(
+        result.diagnostics_path.read_text(encoding="utf-8")
+    )
+    assert diagnostics["horizontal_validation"] == {
+        "status": "user_confirmed",
+        "confidence": 0.99,
+        "warnings": [],
+    }
+    assert diagnostics["vertical_validation"] == {
+        "status": "relative_height_with_user_offset",
+        "cad_z_offset_m": 100.0,
+        "height_source_counts": {"rel_alt": 3},
+        "warnings": [],
+    }
 
 
 def test_builder_rejects_frame_map_interval_disagreement(tmp_path: Path) -> None:

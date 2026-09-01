@@ -1,8 +1,8 @@
 # SRT 能力检测
 
-SRT 是可选输入。系统只解析 DJI 风格字幕中的位置、高度和姿态字段，以保守地选择
-接口分支；**SRT 不是高精度轨迹、相机姿态或 CAD 高程真值**，不能据此跳过 SfM、
-人工关键帧标定、SfM-CAD 对齐和质量检查。
+SRT 是可选输入。系统解析 DJI 风格字幕中的位置、高度和姿态字段，以保守地选择
+工作流；**检测标签本身不是高精度轨迹、相机姿态或 CAD 高程真值**。只有完整姿态
+分支在确认当前 CAD 投影、水平 FOV 和高度偏移后可以跳过 SfM。
 
 ## 识别字段
 
@@ -39,9 +39,14 @@ SRT 是可选输入。系统只解析 DJI 风格字幕中的位置、高度和�
 | `sfm_only` | **Stable** | 唯一稳定的端到端正式工作流。 |
 | partial-SRT core | **Experimental CLI** | 可处理 PTS、局部 ENU、稳健 Sim3 和融合核心，但尚未接入 JobRunner。 |
 | `srt_sfm_fused` portal route | **Interface only** | 检测和提示可用；服务阻止正式 workflow 启动。 |
-| `srt_full_pose` | **Interface only** | 没有端到端执行。 |
+| `srt_full_pose` | **Supported with guard** | 完整云台姿态、精确 frame map、当前 CAD 投影和水平 FOV 均确认后，可直接生成尺度锁定的 CAD 米制轨迹并跳过 SfM。 |
 
 Partial-SRT 融合仍需要 SfM、PTS 时间同步、质量门控和人工关键帧到 CAD 的对齐。它在
 WGS84 局部 ENU 中处理 East/North，Up 仅保留为 `rel_alt` 或 `abs_alt` 的相对变化；
 融合失败时应明确回退 `sfm_only`，而不是写出伪造轨迹。`fusion_confidence` 只表示
 内部一致性，不代表绝对定位精度。
+
+全姿态执行前还会检查候选投影的轨迹落图比例。中央经线（例如当前项目可能推荐的
+120°）是绑定 CAD 指纹的显式确认项，不能跨图纸复用。FOV 只接受用户输入的单一水平
+角度。相对高度通过 `cad_z_offset_m` 接到 CAD 高程；绝对高度缺少共同测量基准时不会
+自动宣称为 CAD Z 真值。

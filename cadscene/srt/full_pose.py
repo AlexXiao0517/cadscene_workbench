@@ -377,6 +377,7 @@ def build_full_pose_trajectory(
     registered_points: list[tuple[float, float, float]] = []
     registered_times: list[float] = []
     warnings: list[str] = []
+    vertical_warnings: list[str] = []
     for frame_index, (sample, source_pts) in enumerate(
         zip(samples, source_points)
     ):
@@ -496,9 +497,25 @@ def build_full_pose_trajectory(
             f"{max_speed:.3f} m/s"
         )
     if any(source != "rel_alt" for source in height_sources):
-        warnings.append(
+        vertical_warnings.append(
             "Absolute or generic altitude is not tied to a verified CAD height datum."
         )
+    warnings.extend(vertical_warnings)
+    horizontal_validation = {
+        "status": "user_confirmed",
+        "confidence": config.georeference.confidence,
+        "warnings": [],
+    }
+    vertical_validation = {
+        "status": (
+            "relative_height_with_user_offset"
+            if set(height_sources) <= {"rel_alt"}
+            else "unverified_absolute_height"
+        ),
+        "cad_z_offset_m": config.cad_z_offset_m,
+        "height_source_counts": height_sources,
+        "warnings": vertical_warnings,
+    }
     trajectory = {
         "fps": fps,
         "width": width,
@@ -538,6 +555,8 @@ def build_full_pose_trajectory(
         "max_horizontal_speed_mps": max_speed,
         "height_source_counts": height_sources,
         "warnings": warnings,
+        "horizontal_validation": horizontal_validation,
+        "vertical_validation": vertical_validation,
         "georeference": config.georeference.to_dict(),
     }
     report = (

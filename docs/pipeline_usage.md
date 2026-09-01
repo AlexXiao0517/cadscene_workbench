@@ -6,22 +6,25 @@
 http://127.0.0.1:8300/apps/workflow_portal/index.html
 ```
 
-门户的正式端到端路径包括 `sfm_only`（**Stable**）和固定相机中心的
-`pure_rotation`（**Supported**）。自动视频分析与路线推荐仍需人工复核；partial-SRT core 是 **Experimental CLI**；
-`srt_sfm_fused` 和 `srt_full_pose` 门户路由均为 **Interface only**，不能通过
-JobRunner 启动。不要用 SRT 的检测标签替代本节所述的 SfM、人工关键帧和质量验证。
+门户的正式端到端路径包括 `sfm_only`（**Stable**）、固定相机中心的
+`pure_rotation`（**Supported**）以及带显式确认门槛的 `srt_full_pose`。自动视频分析与
+路线推荐仍需人工复核；partial-SRT core 是 **Experimental CLI**，`srt_sfm_fused` 门户
+路由仍为 **Interface only**。SRT 检测标签本身不能替代坐标、FOV、高度和结果验证。
 
 正式上传界面当前只接受 MP4、DXF 和可选 SRT。上传页不要求选择运动模式；分析会自动
 检测运动特征并保守推荐 `sfm_only` 或 `pure_rotation`，项目片段管理页再显示最终工作流
 并允许人工覆盖。下文的 `run_pipeline`、`data/` 和 `runs/` 是维护/兼容入口，不代表
 正式项目界面支持额外文件格式。
 
-`v0.1-sfm-workbench` 提供两条 pipeline：
+当前提供三类主要 pipeline：
 
 - `sfm_overlay_existing_sfm.yaml`：消费已有 `camera_trajectory.json` 和
   `sparse_points.ply`。
 - `sfm_overlay_with_sfm.yaml`：从视频运行 SfM，再串联 alignment、quality、
   viewer_scene、road_surface 和 render。
+- `srt_full_pose_overlay.yaml`：消费 `02_srt_full_pose/camera_trajectory_full_pose.json`，
+  以 `scale=1.0` 的 metric-direct 模式运行 alignment/viewer/render；不接收 sparse PLY，
+  不运行 SfM 和 road-surface。
 
 ## 准备输入
 
@@ -30,7 +33,7 @@ JobRunner 启动。不要用 SRT 的检测标签替代本节所述的 SfM、人�
 
 人工关键帧应包含经确认的相机视场角（FOV）。当重建内参或几何不可靠时，彼此一致的
 已确认人工关键帧 FOV 优先于重建 FOV；不要把 SfM 或普通 SRT 元数据宣传为必然准确的
-FOV 来源。
+FOV 来源。全姿态管线的 FOV 是用户输入的单一水平角度，随轨迹内参传递。
 
 ## dry-run
 

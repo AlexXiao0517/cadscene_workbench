@@ -27,7 +27,8 @@ This document separates delivered behavior from future work. It is not a release
 
 - `pure_rotation` is Supported. It runs a pinned external OpenGV backend followed by fixed-center global placement, local pose corrections, and rendering. Translation and scale are not recovered. The automatic motion classifier remains immature, so Project Clip Management retains human review and a final workflow override.
 - The partial-SRT core is Experimental CLI functionality: PTS timing, local ENU conversion, robust Sim3 estimation, and fusion helpers exist outside the formal project queue.
-- `srt_sfm_fused` and `srt_full_pose` are Interface only. Upload and capability detection work, but the service blocks formal stage execution.
+- `srt_full_pose` is executable behind explicit per-project georeference and horizontal-FOV confirmation. It uses exact source PTS, emits a metric CAD-local trajectory, locks scale to 1.0, and does not require SfM or sparse points. Real-project surveying and height-datum validation remain necessary.
+- `srt_sfm_fused` remains Interface only. Upload and capability detection work, but the service blocks formal stage execution.
 - SfM CUDA is Optional and limited to supported feature extraction and matching. Mapping and global bundle adjustment are not advertised as GPU processing.
 - The video-target tracking annotation backend and immutable tracking revisions remain for automated tests and historical-data compatibility, but the creation UI is hidden and this is not a supported deliverable.
 
@@ -45,9 +46,9 @@ Do not expose this control until a baseline reliably tracks real textured target
 
 Connect the experimental partial-SRT core to a supported project route only after time synchronization, quality gates, failure recovery, and manual SfM-CAD alignment have been validated. Ordinary SRT remains supplementary metadata rather than precision position, pose, or CAD elevation truth.
 
-### Full-pose SRT workflow
+### Full-pose SRT field acceptance
 
-Implement and validate an end-to-end `srt_full_pose` route. Capability detection alone is not execution and must not be used as an accuracy claim.
+Expand real-project validation across additional DJI products, CGCS2000 zones, CAD axis conventions, horizontal FOV values, and independently surveyed height datums. The delivered synthetic end-to-end path proves execution and scale locking, not survey-grade accuracy for every camera or drawing.
 
 ### Motion-analysis reliability
 

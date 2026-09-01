@@ -22,7 +22,13 @@ python -m pip install -e ".[dev,diagnostics]"
 cadscene-workbench doctor --storage-root D:\cadscene-work
 ```
 
-`doctor` 会统一检查核心 Python 包、FFmpeg/FFprobe、pycolmap、正式网页和配置资源、固定版本 OpenGV 纯旋转后端及存储目录可写性。也可继续单独检查 SfM 后端能力：
+`doctor` 会统一检查核心 Python 包、FFmpeg/FFprobe、pycolmap、正式网页和配置资源、固定版本 OpenGV 纯旋转后端及存储目录可写性。full-pose 还依赖 `pyproj` 随包提供的 PROJ 数据库；安装或制作离线包后应额外执行 EPSG:4549 smoke：
+
+```powershell
+python -c "from pyproj import CRS, Transformer; assert CRS.from_epsg(4549).to_epsg() == 4549; e,n=Transformer.from_crs(4326,4549,always_xy=True).transform(120,30); assert abs(e-500000)<1"
+```
+
+这条检查只证明坐标库和 `proj.db` 可读取，不代表当前 CAD 必然采用 120°中央经线。也可继续单独检查 SfM 后端能力：
 
 ```powershell
 python --version
@@ -41,7 +47,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `cadscene/sfm/` | `pycolmap` / COLMAP CLI 后端、轨迹、相机初始化和点云 |
 | `cadscene/alignment/` 与 `cadscene/core/sim3.py` | 人工关键帧、SfM-CAD Sim3 对齐、质量与工件记录 |
 | `cadscene/cad/` | 正式 DXF 导入、兼容 DWG 转换、中心线检测与投影 |
-| `cadscene/srt/` | SRT 解析、PTS 同步、ENU、能力检测和实验性融合核心 |
+| `cadscene/srt/` | SRT 解析、PTS 同步、能力检测、PROJ-backed CGCS2000 候选/投影、全姿态米制轨迹和实验性 partial-SRT 融合核心 |
 | `cadscene/pure_rotation/` | 外部 OpenGV 后端、固定相机中心放置与局部姿态校正 |
 | `cadscene/projects/` | 项目 manifest、视频分析、持久队列、工作台 session、渲染、合并、CAD 替换与启动恢复 |
 | `cadscene/annotations/` | CAD/video 锚点模型、工程标牌布局、tracking revision 与透明叠加渲染 |
@@ -74,6 +80,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `render_overlay` | 输出视频叠加；需要 `--video`、`--cad-dir`、`--sfm-camera-path` |
 | `run_pipeline` | 读取流水线配置并串行执行；`--config`、`--stages`、`--skip-render`、`--skip-road-surface`、`--skip-viewer-scene` |
 | `fuse_srt_sfm` | 实验性 partial-SRT CLI；需要轨迹和 SRT，支持 `--frame-timestamps`、时间偏移、ENU/融合质量参数 |
+| `build_srt_full_pose` | 用精确 frame map、完整 DJI SRT、已确认 georeference 和用户水平 FOV 构建 `02_srt_full_pose` 米制轨迹；不调用 SfM |
 | `run_pure_rotation` | 调用外部 OpenGV 纯旋转后端；需要 `--video`、`--output-root`，可提供后端目录/命令 |
 | `render_pure_rotation` | 用已校正的固定中心轨迹渲染；需要视频、CAD 和 `--track` |
 | `benchmark_sfm_backends` | 对比 SfM 后端；支持 `--dry-run`、帧范围和 GPU 索引 |
@@ -142,7 +149,7 @@ python -m pytest -p no:cacheprovider
 python scripts/check_no_project_dependency.py
 ```
 
-项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。当前测试包含单元、静态契约和合成集成验证，但不代替真实 GPU、外部 OpenGV、长 MP4、DXF、兼容 DWG 转换器和浏览器人工验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
+项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。`tests/integration/test_srt_full_pose_workflow.py` 覆盖合成 SRT 从 adapter 到 metric-direct 对齐和无点云 scene；packaging 测试在源码目录外解析 EPSG:4549。当前测试仍不代替真实 GPU、外部 OpenGV、长 MP4、DXF、现场 DJI 镜头或独立测量高程验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
 
 现行文档契约测试同时读取上传页、自动分析与项目页源码，锁定“正式界面只支持
 MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project 与兼容 dataset/run 存储
@@ -152,8 +159,8 @@ MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project �
 ## 开发边界
 
 - `sfm_only` 与 `pure_rotation` 都是正式可执行路线；后者固定相机中心且不恢复平移或尺度，依赖固定版本 OpenGV 后端。当前仍不成熟的是自动视频分析和路线推荐精度，项目页允许人工覆盖。
-- partial-SRT core 是 Experimental CLI，尚未接入正式 JobRunner。门户中的 `srt_sfm_fused` 与 `srt_full_pose` 均为 Interface only，服务会阻止其启动阶段。
+- partial-SRT core 是 Experimental CLI，`srt_sfm_fused` 尚未接入正式 JobRunner。`srt_full_pose` 已接通项目 adapter，但必须绑定当前 CAD 指纹确认 CGCS2000 投影，并由用户输入单一水平 FOV；轨迹尺度锁定为 1.0，禁止自由 Sim3 和稀疏点云依赖。
 - CAD 锚定工程标牌已经接入预览和正式片段渲染；视频目标跟踪标牌创建入口当前隐藏，不能作为正式功能宣传。
 - 全局 CAD 替换只适用于坐标系、单位和原点不变且已有有效工作台输出的项目；成功后保留轨迹，只让渲染和合并 stale。
 - 相机轨迹、annotation、渲染和合并必须保持 source PTS/frame-map 契约；禁止用固定 FPS frame index 替代。
-- 可靠且一致的人工关键帧 FOV 优先于不可靠的 SfM 重建 FOV；普通 SRT 只是元数据能力线索，而非高精度位置、姿态或 CAD 高程真值。
+- 可靠且一致的人工关键帧 FOV 优先于不可靠的 SfM 重建 FOV；full-pose 的 FOV 是明确的用户水平角度。普通/不完整 SRT 只是元数据能力线索；full-pose 的相对高度也必须通过 `cad_z_offset_m` 接入 CAD，不能宣传为自动解决的绝对高程。

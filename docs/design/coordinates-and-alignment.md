@@ -10,6 +10,8 @@
 | CAD meters | 对齐模块使用的本地 CAD 米制坐标。 | 由人工关键帧的 Web 坐标通过 `origin_xy` 和 `cad_scale` 转换得到。 |
 | Web `cad_world` | 查看器保存/读取的相机坐标。 | 用于界面和下载/导入兼容；它不是自动地理参考坐标。 |
 | local ENU | partial-SRT CLI 将经纬度变换得到的东、北、天局部坐标。 | East/North 基于 WGS84 本地 ENU；Up 是单独记录的相对高度，不宣称为 CAD 绝对高程。 |
+| CGCS2000 projected / CAD raw | full-pose 将 WGS84 SRT 位置按用户确认的 EPSG/高斯—克吕格参数投影，并按 CAD 轴序映射。 | 候选绑定当前 CAD 指纹；中央经线、3°/6°分带、带号和 X/Y 轴序都不能跨项目猜测。 |
+| CAD local metres | full-pose 通过 `origin_xy` 与 `cad_scale` 把 CAD raw/projected 坐标变为内部局部米制轨迹。 | 轨迹标记 `metric_scale_locked=true`，不得进入自由尺度 Sim3。 |
 
 Web 到 CAD meters 的位置换算为：
 
@@ -35,6 +37,11 @@ p_cad = scale × R × p_sfm + t
 
 全局 Sim3 是基线，不是对每一帧的强制替换。系统计算每个锚点相对全局结果的位置和角度残差，并按帧号在相邻锚点间插值，形成分段锚定路径。查看器的点云/全局轨迹只使用 global Sim3，而相机路径可使用分段残差，因此两者不完全重合是预期现象。
 
+`srt_full_pose` 不使用上述自由 Sim3。投影后的轨迹已经位于 CAD local metres，因而
+对齐固定单位旋转和 `scale=1.0`；无人工修正时直接发布，存在人工锚点时只稳健估计一个
+固定 XYZ 平移以及独立的 wrapped yaw/pitch/roll 零偏。彼此矛盾的修正会被拒绝。该路线
+允许 viewer scene 没有 sparse PLY，且不运行依赖点云的道路表面诊断。
+
 ## FOV 优先级
 
 FOV（视场角）影响相机内参解释，但不是 SfM 一定准确的保证。当前优先级是：
@@ -55,7 +62,10 @@ FOV（视场角）影响相机内参解释，但不是 SfM 一定准确的保证
 
 独立的 partial-SRT core（Experimental CLI）可把 SfM 中心与 SRT 的局部 ENU 做稳健 Sim3，采用 PTS 优先的时间同步和 RANSAC/Umeyama 拟合。至少需要三个空间上独立的约束；质量门控、约束不足、RANSAC 内点不足或无效尺度都会拒绝融合并要求回退 `sfm_only`。
 
-该核心尚未接入正式 JobRunner。门户检测到 `srt_sfm_fused` 或 `srt_full_pose` 时均为 Interface only，服务会阻止工作流启动。因此 ENU/Sim3 融合说明不代表门户可运行，也不使普通 SRT 成为精确位置、相机姿态或 CAD 高程真值。
+该 partial-SRT 核心尚未接入正式 JobRunner，`srt_sfm_fused` 仍为 Interface only。
+`srt_full_pose` 是另一条已接通的 metric-direct 路线，只在完整云台姿态、精确 frame map、
+当前 CAD 投影和水平 FOV 均明确时执行；它不使用 ENU/自由 Sim3，也不使未确认的普通
+SRT 成为精确位置或 CAD 高程真值。
 
 ## 验证与拒绝
 

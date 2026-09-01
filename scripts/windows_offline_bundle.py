@@ -139,6 +139,19 @@ def write_zip64(source: str | Path, output: str | Path) -> Path:
     return destination
 
 
+def proj_runtime_smoke_code() -> str:
+    """Return a checkout-independent PROJ database and EPSG:4549 smoke probe."""
+
+    return (
+        "import pyproj; from pyproj import CRS, Transformer; "
+        "crs = CRS.from_epsg(4549); assert crs.to_epsg() == 4549; "
+        "e, n = Transformer.from_crs(4326, 4549, always_xy=True)"
+        ".transform(120.0, 30.0); "
+        "assert abs(e - 500000.0) < 1.0; "
+        "assert abs(n - 3320113.4) < 2.0"
+    )
+
+
 def prepare_runtime_commands(
     *,
     conda: Path,
@@ -169,7 +182,11 @@ def prepare_runtime_commands(
         (
             str(python),
             "-c",
-            "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, imageio_ffmpeg, pycolmap, psutil",
+            (
+                "import av, cv2, numpy, scipy, yaml, PIL, ezdxf, "
+                "imageio_ffmpeg, pycolmap, psutil; "
+                + proj_runtime_smoke_code()
+            ),
         ),
         (
             str(python),

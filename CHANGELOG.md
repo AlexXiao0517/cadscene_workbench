@@ -12,6 +12,7 @@
 - Added Stage 9 CAD-anchored engineering callouts with editable title/body, screen-space panels, polyline leaders, circular anchors, source-PTS visibility, Base/Corrected camera projection, browser preview, persistence, and burn-in rendering.
 - Added guarded global CAD replacement for calibrated projects. A same-coordinate-system replacement preserves analysis, trajectories, keyframes, and workbench outputs while making CAD-dependent render and merge outputs stale.
 - Added conservative SRT capability detection and the experimental partial-SRT core for PTS, ENU, robust Sim3, and fusion processing. Ordinary SRT remains a metadata capability source, not high-precision position, pose, or CAD elevation truth.
+- Added the guarded `srt_full_pose` project workflow: per-CAD CGCS2000 projection candidates and explicit confirmation, user-supplied horizontal FOV, exact-PTS DJI gimbal pose conversion, scale-locked metric alignment, and viewer/render output without SfM or sparse points.
 - Added the supported `pure_rotation` workflow for fixed-camera-center footage through the pinned external OpenGV backend. Conservative automatic motion analysis can recommend it and Project Clip Management allows a final override; the classifier remains immature and the route does not recover translation or scale.
 
 ### Changed
@@ -30,7 +31,7 @@
 
 - `sfm_only` and fixed-center `pure_rotation` are executable end-to-end paths. Automatic motion classification still requires human review.
 - The `srt_sfm_fused` portal route is interface-only: it can be recognized and described, but formal workflow launch is blocked.
-- `srt_full_pose` is interface-only and has no end-to-end execution workflow.
+- `srt_full_pose` is executable only after per-project georeference and per-clip horizontal-FOV confirmation. Synthetic end-to-end and offline PROJ checks do not replace field validation of the selected CRS, lens FOV, DJI attitude metadata, or CAD height datum.
 - The partial-SRT core is an experimental CLI capability and is not connected to the formal job runner.
 - The video-target tracking annotation backend remains available for tests and historical-data compatibility, but its creation control is hidden and it is not a supported user-facing capability.
 - CAD-anchored callouts do not infer real-world occlusion in source video. Cross-clip tracking, cross-scene annotation inheritance, semantic recognition, and neural tracking models are not implemented.

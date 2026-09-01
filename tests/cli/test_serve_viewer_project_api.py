@@ -543,7 +543,10 @@ def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     assert by_id["ready"]["capabilities"]["can_start_trajectory"] is True
     assert by_id["full-pose"]["recommended_workflow"] == "srt_full_pose"
     assert by_id["full-pose"]["capabilities"]["can_start_trajectory"] is False
-    assert "interface-only" in by_id["full-pose"]["capabilities"]["reason"]
+    assert (
+        "confirmed CAD georeference"
+        in by_id["full-pose"]["capabilities"]["reason"]
+    )
 
 
 def test_project_can_start_trajectory_when_only_review_confirmation_is_needed(
