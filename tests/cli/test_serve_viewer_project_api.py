@@ -1009,6 +1009,33 @@ def test_cancel_and_retry_job_routes_delegate_through_project_service(
     assert queue.status(job_id) in {"queued", "preparing"}
 
 
+def test_cancel_job_uses_current_state_when_progress_revision_advanced(
+    tmp_path: Path,
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("ready"),))
+    enqueued = api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={"clip_ids": ["ready"], "enqueue": True},
+    )
+    job_id = enqueued.body["job_ids"][-1]
+    stale_revision = repositories.jobs.load("p1").revision
+    repositories.jobs.update(
+        "p1",
+        expected_revision=stale_revision,
+        mutate=lambda value: replace(value, updated_at="progress advanced"),
+    )
+
+    response = api.handle(
+        "POST",
+        f"/api/projects/p1/jobs/{job_id}/cancel",
+        json_body={"expected_revision": stale_revision},
+    )
+
+    assert response.status == 202
+    assert queue.status(job_id) == "cancelled"
+
+
 def test_job_runtime_route_delegates_to_project_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

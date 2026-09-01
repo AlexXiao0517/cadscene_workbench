@@ -224,20 +224,27 @@ def test_upload_workspace_and_workbench_share_the_product_favicon() -> None:
         assert favicon in page.read_text(encoding="utf-8")
 
 
-def test_batch_actions_apply_to_all_clips_without_selection_or_second_confirmation() -> None:
+def test_batch_actions_keep_selection_and_cancel_without_second_clip_confirmation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
-    assert 'id="selectAll"' not in html
-    assert 'class="clip-select"' not in html
-    assert 'id="preflightDialog"' not in html
-    assert "selectedClipIds" not in script
-    assert "preflightBatch" not in script
-    assert "async function enqueueBatch" in script
-    assert "state.snapshot.clips.map((clip) => clip.clip_id)" in script
-    assert "state.snapshot.clips.filter((clip) => clip.needs_review)" in script
-    assert "confirmed_clip_ids: confirmedClipIds" in script
-    assert "enqueue: true" in script
+    assert 'id="selectAll"' in html
+    assert 'class="clip-select"' in html
+    assert 'id="preflightDialog"' in html
+    assert 'id="cancelPreflight"' in html
+    assert "selectedClipIds" in script
+    assert "function updateBatchSelectionControls" in script
+    assert "const clipIds = [...selectedClipIds]" in script
+    assert "if (!clipIds.length)" in script
+    assert "至少选择一个片段" in script
+    assert "selectedClipIds.size === 0" in script
+    assert ": state.snapshot.clips.map((clip) => clip.clip_id)" not in script
+    assert "async function preflightBatch" in script
+    assert "async function enqueuePreflight" in script
+    assert "body.reasons[clipId]" in script
+    assert 'data-confirm-clip-id' not in script
+    assert "confirmed_clip_ids: pending.needsConfirmation" in script
+    assert '#cancelPreflight").addEventListener' in script
 
 
 def test_final_workflow_selector_only_exposes_sfm_and_opengv() -> None:

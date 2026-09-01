@@ -11,6 +11,8 @@
     etag: null,
     polling: false,
     dirtyEdits: new Map(),
+    selectedClipIds: new Set(),
+    pendingPreflight: null,
     projectNameEditing: false,
     reanalysisSubmitting: false,
     activatingAnalysis: false,
@@ -18,6 +20,7 @@
     cadReplacementUploading: false,
   };
   const dirtyEdits = state.dirtyEdits;
+  const selectedClipIds = state.selectedClipIds;
   const $ = (selector, root = document) => root.querySelector(selector);
   const STATUS_LABELS = {
     ready: "待处理",
@@ -129,6 +132,13 @@
     const row = $("#clipRowTemplate").content.firstElementChild.cloneNode(true);
     row.dataset.clipId = clip.clip_id;
     const edit = effectiveEdit(clip);
+    const checkbox = $(".clip-select", row);
+    checkbox.checked = selectedClipIds.has(clip.clip_id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selectedClipIds.add(clip.clip_id);
+      else selectedClipIds.delete(clip.clip_id);
+      updateBatchSelectionControls();
+    });
     const nameButton = $(".clip-name", row);
     nameButton.textContent = effectiveDisplayName(clip);
     nameButton.addEventListener("click", () => renameClip(clip, row));
@@ -183,6 +193,23 @@
     return row;
   }
 
+  function updateBatchSelectionControls() {
+    const available = new Set((state.snapshot?.clips || []).map((clip) => clip.clip_id));
+    for (const clipId of selectedClipIds) {
+      if (!available.has(clipId)) selectedClipIds.delete(clipId);
+    }
+    const noSelection = selectedClipIds.size === 0;
+    const selectAll = $("#selectAll");
+    selectAll.checked = available.size > 0 && selectedClipIds.size === available.size;
+    selectAll.indeterminate = selectedClipIds.size > 0 && selectedClipIds.size < available.size;
+    const canStartTrajectory = state.snapshot
+      ? state.snapshot.capabilities.can_start_trajectory
+      : false;
+    const canRender = state.snapshot ? state.snapshot.capabilities.can_render : false;
+    $("#batchTrajectoryButton").disabled = noSelection || !canStartTrajectory;
+    $("#batchRenderButton").disabled = noSelection || !canRender;
+  }
+
   function renderSnapshot(snapshot) {
     state.snapshot = snapshot;
     if (!state.projectNameEditing) {
@@ -217,8 +244,6 @@
       reanalyzeButton.textContent = "重新分析";
       reanalyzeButton.disabled = !snapshot.capabilities.can_reanalyze;
     }
-    $("#batchTrajectoryButton").disabled = !snapshot.capabilities.can_start_trajectory;
-    $("#batchRenderButton").disabled = !snapshot.capabilities.can_render;
     const mergeButton = $("#mergeProjectButton");
     const mergeStatus = snapshot.merge?.status || "not_started";
     const mergeActive = ["queued", "preparing", "running", "validating"].includes(mergeStatus);
@@ -245,6 +270,7 @@
     }
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
+    updateBatchSelectionControls();
     if (focusClipId) {
       const focused = rows.querySelector(`[data-clip-id="${CSS.escape(focusClipId)}"]`);
       if (focused) {
@@ -531,21 +557,54 @@
     }
   }
 
-  async function enqueueBatch(kind = "trajectory") {
-    const clipIds = state.snapshot.clips.map((clip) => clip.clip_id);
-    const confirmedClipIds = state.snapshot.clips.filter((clip) => clip.needs_review)
-      .map((clip) => clip.clip_id);
+  async function preflightBatch(kind = "trajectory") {
+    const clipIds = [...selectedClipIds];
+    if (!clipIds.length) {
+      setMessage("请至少选择一个片段后再执行批量操作", true);
+      updateBatchSelectionControls();
+      return;
+    }
     const endpoint = kind === "render" ? "render-jobs" : "trajectory-jobs";
     try {
       const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clip_ids: clipIds, enqueue: false }),
+      });
+      const needsConfirmation = body.needs_confirmation || body.confirmation_required || [];
+      state.pendingPreflight = { clipIds, endpoint, needsConfirmation };
+      $("#preflightResult").innerHTML = `<p>可入队：${body.eligible.length} 个</p><p>需确认：${needsConfirmation.length} 个</p><p>已跳过：${body.skipped.length} 个</p>`;
+      const items = $("#preflightItems");
+      items.replaceChildren(...clipIds.map((clipId) => {
+        const label = document.createElement("label");
+        const category = body.eligible.includes(clipId)
+          ? "可入队"
+          : (needsConfirmation.includes(clipId) ? "将按当前工作流入队" : "已跳过");
+        const reason = body.reasons[clipId] || "检查通过";
+        label.append(document.createTextNode(`${clipId} · ${category} · ${reason}`));
+        return label;
+      }));
+      $("#preflightDialog").showModal();
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  }
+
+  async function enqueuePreflight() {
+    const pending = state.pendingPreflight;
+    if (!pending) return;
+    try {
+      const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${pending.endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          clip_ids: clipIds,
-          confirmed_clip_ids: confirmedClipIds,
+          clip_ids: pending.clipIds,
+          confirmed_clip_ids: pending.needsConfirmation,
           enqueue: true,
         }),
       });
+      state.pendingPreflight = null;
+      $("#preflightDialog").close();
       state.snapshot.component_revisions.jobs = body.jobs_revision;
       state.etag = null;
       const skipped = body.skipped?.length || 0;
@@ -554,6 +613,11 @@
     } catch (error) {
       setMessage(error.message, true);
     }
+  }
+
+  function cancelPreflight() {
+    state.pendingPreflight = null;
+    $("#preflightDialog").close();
   }
 
   async function reanalyzeProject() {
@@ -628,7 +692,7 @@
       const { body } = await request(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.jobs }),
+        body: JSON.stringify({}),
       });
       state.snapshot.component_revisions.jobs = body.jobs_revision;
       state.etag = null;
@@ -854,8 +918,15 @@
       cancelProjectRename();
     }
   });
-  $("#batchTrajectoryButton").addEventListener("click", () => enqueueBatch("trajectory"));
-  $("#batchRenderButton").addEventListener("click", () => enqueueBatch("render"));
+  $("#selectAll").addEventListener("change", (event) => {
+    for (const clip of state.snapshot?.clips || []) {
+      if (event.currentTarget.checked) selectedClipIds.add(clip.clip_id);
+      else selectedClipIds.delete(clip.clip_id);
+    }
+    if (state.snapshot) renderSnapshot(state.snapshot);
+  });
+  $("#batchTrajectoryButton").addEventListener("click", () => preflightBatch("trajectory"));
+  $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#mergeProjectButton").addEventListener("click", mergeProject);
   $("#closeMergeResult").addEventListener("click", () => $("#mergeResultDialog").close());
   $("#mergeResultDialog").addEventListener("close", resetMergeResult);
@@ -869,6 +940,8 @@
   $("#dismissAnalysisCandidate").addEventListener("click", () => {
     state.dismissedCandidateRevision = state.snapshot?.candidate_analysis_revision || null;
   });
+  $("#confirmPreflight").addEventListener("click", enqueuePreflight);
+  $("#cancelPreflight").addEventListener("click", cancelPreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
   initializeTheme();
   if (!projectId) setMessage("缺少项目标识，无法载入工作区。", true);

@@ -1552,18 +1552,18 @@ class ProjectApi:
         action: str,
         payload: Mapping[str, object],
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
+        # job_id 已明确标识用户要操作的任务；进度落盘 revision 不应阻断取消或重试。
         job = (
             self.service.cancel_job(
                 project_id,
                 job_id,
-                expected_jobs_revision=expected_revision,
+                expected_jobs_revision=None,
             )
             if action == "cancel"
             else self.service.retry_job(
                 project_id,
                 job_id,
-                expected_jobs_revision=expected_revision,
+                expected_jobs_revision=None,
             )
         )
         return ApiResponse(
