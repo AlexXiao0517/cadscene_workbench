@@ -101,14 +101,13 @@ def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> Non
     assert 'clip.recommended_workflow || "需人工确认"' not in script
 
 
-def test_polling_uses_etag_and_preserves_dirty_edits_and_selection() -> None:
+def test_polling_uses_etag_and_preserves_dirty_edits() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert "const POLL_INTERVAL_MS = 1500" in script
     assert '"If-None-Match"' in script
     assert "response.status === 304" in script
     assert "dirtyEdits" in script
-    assert "selectedClipIds" in script
     assert "capabilities" in script
     assert "workflow_override: null" in script
     assert "dirtyEdits.has(clip.clip_id)" in script
@@ -225,15 +224,20 @@ def test_upload_workspace_and_workbench_share_the_product_favicon() -> None:
         assert favicon in page.read_text(encoding="utf-8")
 
 
-def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> None:
+def test_batch_actions_apply_to_all_clips_without_selection_or_second_confirmation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
-    assert 'id="preflightItems"' in html
-    assert "body.reasons[clipId]" in script
-    assert 'data-confirm-clip-id' in script
-    assert "confirmedClipIds" in script
+    assert 'id="selectAll"' not in html
+    assert 'class="clip-select"' not in html
+    assert 'id="preflightDialog"' not in html
+    assert "selectedClipIds" not in script
+    assert "preflightBatch" not in script
+    assert "async function enqueueBatch" in script
+    assert "state.snapshot.clips.map((clip) => clip.clip_id)" in script
+    assert "state.snapshot.clips.filter((clip) => clip.needs_review)" in script
     assert "confirmed_clip_ids: confirmedClipIds" in script
+    assert "enqueue: true" in script
 
 
 def test_final_workflow_selector_only_exposes_sfm_and_opengv() -> None:

@@ -757,6 +757,31 @@ def test_batch_preflight_returns_per_clip_partial_result_without_enqueueing(
     assert queue.jobs() == ()
 
 
+def test_batch_enqueue_uses_current_jobs_state_when_progress_revision_advanced(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    stale_revision = repositories.jobs.load("p1").revision
+    repositories.jobs.update(
+        "p1",
+        expected_revision=stale_revision,
+        mutate=lambda value: replace(value, updated_at="progress advanced"),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={
+            "expected_revision": stale_revision,
+            "clip_ids": ["ready"],
+            "enqueue": True,
+        },
+    )
+
+    assert response.status == 202
+    assert response.body["enqueued_clip_ids"] == ["ready"]
+
+
 def test_render_preflight_and_enqueue_routes_delegate_to_project_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

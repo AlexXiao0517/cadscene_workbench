@@ -1475,14 +1475,8 @@ class ProjectApi:
     def _trajectory_jobs(
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
-        current = self.repositories.jobs.load(project_id)
-        if current.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=current.revision,
-            )
+        # jobs revision 包含高频进度落盘，不能作为“批量处理当前片段”的提交令牌。
+        # ProjectService 会在项目锁内重新预检，并以幂等键避免重复任务。
         clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=clip_ids or None
@@ -1496,7 +1490,7 @@ class ProjectApi:
             project_id,
             clip_ids=clip_ids or None,
             confirmed_clip_ids=confirmed,
-            expected_jobs_revision=expected_revision,
+            expected_jobs_revision=None,
         )
         return ApiResponse(
             202,
@@ -1511,14 +1505,7 @@ class ProjectApi:
     def _render_jobs(
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
-        current = self.repositories.jobs.load(project_id)
-        if current.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=current.revision,
-            )
+        # 与轨迹批量入队相同：以锁内当前状态为准，避免进度更新制造伪冲突。
         clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
         preflight = self.service.preflight_render_jobs(
             project_id, clip_ids=clip_ids or None
@@ -1532,7 +1519,7 @@ class ProjectApi:
             project_id,
             clip_ids=clip_ids or None,
             confirmed_clip_ids=confirmed,
-            expected_jobs_revision=expected_revision,
+            expected_jobs_revision=None,
         )
         return ApiResponse(
             202,
