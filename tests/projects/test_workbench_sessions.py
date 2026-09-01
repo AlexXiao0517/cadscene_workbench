@@ -2846,6 +2846,70 @@ def test_multi_segment_sfm_trajectory_depends_on_one_solve_export(
     ) == 1
 
 
+def test_multi_segment_sfm_first_batch_waits_for_scene_clip_exports(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(
+        api,
+        repositories,
+        tmp_path,
+        restore_trajectory_jobs=False,
+    )
+    clips = repositories.clips.load("project-1")
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=tuple(
+                replace(
+                    clip,
+                    analysis={
+                        key: item
+                        for key, item in clip.analysis.items()
+                        if key not in {"physical_mp4_path", "frame_map_path"}
+                    },
+                )
+                for clip in value.clips
+            ),
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/trajectory-jobs",
+        json_body={
+            "expected_revision": repositories.jobs.load("project-1").revision,
+            "clip_ids": ["clip-2"],
+            "confirmed_clip_ids": [],
+            "enqueue": True,
+        },
+    )
+
+    assert response.status == 202
+    manifest = repositories.jobs.load("project-1")
+    exports = [item for item in manifest.jobs if item["job_type"] == "clip_export"]
+    assert {item["clip_id"] for item in exports} == {
+        "clip-1",
+        "clip-2",
+        "clip-3",
+    }
+    solve_export = next(
+        item for item in manifest.jobs if item["job_type"] == "sfm_solve_export"
+    )
+    assert set(solve_export["depends_on_job_ids"]) == {
+        item["job_id"] for item in exports
+    }
+    trajectory = next(
+        item for item in manifest.jobs if item["job_type"] == "trajectory"
+    )
+    assert set(trajectory["depends_on_job_ids"]) == {
+        solve_export["job_id"],
+        next(item["job_id"] for item in exports if item["clip_id"] == "clip-2"),
+    }
+
+
 def test_solve_export_manifest_is_clamped_to_same_scene_and_keeps_core_map(
     tmp_path: Path,
 ) -> None:
