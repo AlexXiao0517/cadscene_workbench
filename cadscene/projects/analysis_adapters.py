@@ -6,7 +6,11 @@ from pathlib import Path
 import sys
 from typing import Mapping
 
-from cadscene.video_analysis.artifacts import CURRENT_REVISION_POINTER
+from cadscene.video_analysis.artifacts import (
+    ANALYSIS_REVISIONS_DIRECTORY,
+    CURRENT_REVISION_POINTER,
+    VIDEO_ANALYSIS_DIRECTORY,
+)
 
 from .adapters import AdapterResult
 from .executor import JobExecutionPlan
@@ -161,30 +165,36 @@ def validate_video_outputs(job: QueueJob, revision: str) -> AdapterResult:
 
 
 def _video_analysis_output_dir(job: QueueJob, revision: str) -> Path:
-    """Resolve both legacy flat and current revision-indexed analyzer layouts."""
-    root = Path(job.attempts[-1].directory) / "02_video_analysis"
-    flat = root / revision
-    indexed = root / "analysis_revisions" / revision
-    if (flat / "clip_manifest.json").is_file():
-        return flat
-    if (indexed / "clip_manifest.json").is_file():
-        return indexed
-    pointer = root / CURRENT_REVISION_POINTER
-    if pointer.is_file():
-        try:
-            payload = json.loads(pointer.read_text(encoding="utf-8-sig"))
-            if str(payload.get("analysis_revision")) == revision:
-                relative = Path(str(payload.get("revision_directory", "")))
-                candidate = (root / relative).resolve()
-                resolved_root = root.resolve()
-                if (
-                    candidate.is_relative_to(resolved_root)
-                    and (candidate / "clip_manifest.json").is_file()
-                ):
-                    return candidate
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-    return indexed
+    """Resolve compact analyzer output first while preserving legacy attempts."""
+    attempt = Path(job.attempts[-1].directory)
+    roots = (
+        attempt / VIDEO_ANALYSIS_DIRECTORY,
+        attempt / "02_video_analysis",
+    )
+    for root in roots:
+        for candidate in (
+            root / ANALYSIS_REVISIONS_DIRECTORY / revision,
+            root / "analysis_revisions" / revision,
+            root / revision,
+        ):
+            if (candidate / "clip_manifest.json").is_file():
+                return candidate
+        pointer = root / CURRENT_REVISION_POINTER
+        if pointer.is_file():
+            try:
+                payload = json.loads(pointer.read_text(encoding="utf-8-sig"))
+                if str(payload.get("analysis_revision")) == revision:
+                    relative = Path(str(payload.get("revision_directory", "")))
+                    candidate = (root / relative).resolve()
+                    resolved_root = root.resolve()
+                    if (
+                        candidate.is_relative_to(resolved_root)
+                        and (candidate / "clip_manifest.json").is_file()
+                    ):
+                        return candidate
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+    return roots[0] / ANALYSIS_REVISIONS_DIRECTORY / revision
 
 
 def asset_path(assets: Mapping[str, object], name: str) -> Path | None:

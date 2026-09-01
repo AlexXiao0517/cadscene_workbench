@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from cadscene.srt.parser import analyze_srt_stream
 
-from .artifacts import publish_analysis_revision
+from .artifacts import VIDEO_ANALYSIS_DIRECTORY, publish_analysis_revision
 from .models import BoundaryEvidence, LogicalClip, MotionMode, PtsMapping
 from .motion import (
     MotionAnalysisConfig,
@@ -558,7 +558,7 @@ def analyze_video(
         ),
     }
     published = publish_analysis_revision(
-        Path(output_root) / "02_video_analysis", revision, payloads
+        Path(output_root) / VIDEO_ANALYSIS_DIRECTORY, revision, payloads
     )
     report("complete", "视频分析完成", 1.0)
     return published

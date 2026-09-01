@@ -55,8 +55,8 @@ def test_short_video_end_to_end_publishes_one_explainable_pts_clip(tmp_path: Pat
         ),
     )
 
-    output = tmp_path / "run" / "02_video_analysis"
-    assert published.parent == output / "analysis_revisions"
+    output = tmp_path / "run" / "v"
+    assert published.parent == output / "r"
     assert published.name.startswith("r-")
     assert len(published.name) == 18
     assert all((output / name).is_file() for name in REQUIRED_ARTIFACTS)
@@ -217,7 +217,7 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
     )
 
     clip = json.loads(
-        (tmp_path / "srt-run" / "02_video_analysis" / "clip_manifest.json").read_text(
+        (tmp_path / "srt-run" / "v" / "clip_manifest.json").read_text(
             encoding="utf-8"
         )
     )["clips"][0]

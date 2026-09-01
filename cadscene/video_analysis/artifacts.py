@@ -19,6 +19,8 @@ REQUIRED_ARTIFACTS = (
     "video_analysis_report.md",
 )
 CURRENT_REVISION_POINTER = "current_analysis_revision.json"
+VIDEO_ANALYSIS_DIRECTORY = "v"
+ANALYSIS_REVISIONS_DIRECTORY = "r"
 
 
 def analysis_revision_directory_name(revision: str) -> str:
@@ -51,7 +53,7 @@ def publish_analysis_revision(
     output_dir: Path, revision: str, payloads: Mapping[str, str]
 ) -> Path:
     _validate_payloads(revision, payloads)
-    revisions_dir = output_dir / "analysis_revisions"
+    revisions_dir = output_dir / ANALYSIS_REVISIONS_DIRECTORY
     destination = revisions_dir / analysis_revision_directory_name(revision)
     if destination.exists():
         raise FileExistsError(f"analysis revision already exists: {revision}")
@@ -86,7 +88,9 @@ def publish_analysis_revision(
             json.dumps(
                 {
                     "analysis_revision": revision,
-                    "revision_directory": f"analysis_revisions/{destination.name}",
+                    "revision_directory": (
+                        f"{ANALYSIS_REVISIONS_DIRECTORY}/{destination.name}"
+                    ),
                 },
                 indent=2,
             )

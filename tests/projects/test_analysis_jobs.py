@@ -1002,6 +1002,25 @@ def test_video_analysis_validation_accepts_revision_indexed_output(
     assert result.outputs["analysis_output"] == str(indexed_root / revision)
 
 
+def test_video_analysis_validation_accepts_compact_revision_indexed_output(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _service(tmp_path)
+    service.enqueue_analysis_jobs("p1")
+    _finish_cad(service, queue, tmp_path)
+    video_job = queue.claim_next_unstarted()
+    assert video_job is not None
+    output, revision = _video_output(video_job, tmp_path)
+    compact_root = Path(video_job.attempts[-1].directory) / "v" / "r"
+    compact_root.mkdir(parents=True)
+    output.rename(compact_root / revision)
+
+    result = validate_video_outputs(video_job, revision)
+
+    assert result.status == "success"
+    assert result.outputs["analysis_output"] == str(compact_root / revision)
+
+
 def test_video_analysis_validation_resolves_short_revision_directory_from_pointer(
     tmp_path: Path,
 ) -> None:
