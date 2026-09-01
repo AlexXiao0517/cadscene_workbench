@@ -170,7 +170,8 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
     assert "function Assert-PathBudget" in source
     assert '$probeProject = "dataset-00000000-0000-0000-0000-000000000000"' in source
     assert '".va-00000000\\r"' in source
-    assert '"02_video_analysis\\analysis_revisions\\r-0000000000000000\\video_analysis_manifest.json"' in source
+    assert '"v\\r\\r-0000000000000000\\video_analysis_manifest.json"' in source
+    assert '"02_video_analysis\\analysis_revisions\\r-0000000000000000\\video_analysis_manifest.json"' not in source
     assert '"analysis_artifacts\\.pub-00000000\\a\\02_video_analysis\\video_analysis_manifest.json"' in source
     assert '"analysis_artifacts\\va-0000000000000000\\02_video_analysis\\video_analysis_manifest.json"' in source
     assert "$probePaths" in source
@@ -179,16 +180,16 @@ def test_start_launcher_rejects_an_unsafe_windows_path_before_runtime_setup() ->
     assert "请把包含启动文件的程序目录直接移动到较短位置，例如 D:\\CADScene" in source
     assert source.index("Assert-PathBudget") < source.index("conda-unpack-script.py")
 
-    previous_workspace = Path(
-        r"D:\CADWORK\CADScene-0.1.1\CADScene-0.1.0\workspace"
+    nested_release_workspace = Path(
+        r"D:\zjic2026\cadscene_workbench\dist\releases\0.1.3\CADScene-0.1.3\workspace"
     )
-    previous_probe = previous_workspace / (
+    compact_probe = nested_release_workspace / (
         "projects/dataset-00000000-0000-0000-0000-000000000000/"
         "jobs/00000000000000000000000000000000/attempt-1/"
-        "02_video_analysis/analysis_revisions/r-0000000000000000/"
+        "v/r/r-0000000000000000/"
         "video_analysis_manifest.json"
     )
-    assert len(str(previous_probe)) <= 240
+    assert len(str(compact_probe)) <= 240
 
 
 def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor() -> None:

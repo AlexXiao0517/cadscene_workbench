@@ -21,7 +21,7 @@ function Assert-PathBudget() {
     $probeProjectRoot = Join-Path $workspace "projects\$probeProject"
     $probePaths = @(
         (Join-Path $probeJobRoot ".va-00000000\r"),
-        (Join-Path $probeJobRoot "02_video_analysis\analysis_revisions\r-0000000000000000\video_analysis_manifest.json"),
+        (Join-Path $probeJobRoot "v\r\r-0000000000000000\video_analysis_manifest.json"),
         (Join-Path $probeProjectRoot "analysis_artifacts\.pub-00000000\a\02_video_analysis\video_analysis_manifest.json"),
         (Join-Path $probeProjectRoot "analysis_artifacts\va-0000000000000000\02_video_analysis\video_analysis_manifest.json")
     )
