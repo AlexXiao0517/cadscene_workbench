@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from math import hypot, isfinite
 from statistics import median
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from pyproj import CRS, Transformer
 from pyproj.aoi import AreaOfInterest
@@ -320,11 +320,25 @@ def recommend_cgcs2000_candidates(
     cad_bbox_raw: Sequence[float],
     *,
     limit: int = 6,
+    central_meridian_deg: float | None = None,
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
 ) -> tuple[CrsCandidate, ...]:
+    def report(stage: str, message: str, fraction: float | None) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, message, fraction)
+
+    report("validating_inputs", "正在校验 SRT 轨迹与 CAD 坐标范围", None)
     samples = _validated_samples(longitudes, latitudes)
     bbox = _validated_bbox(cad_bbox_raw)
     if int(limit) <= 0:
         raise ValueError("limit must be positive")
+    requested_meridian = None
+    if central_meridian_deg is not None:
+        requested_meridian = float(central_meridian_deg)
+        if not isfinite(requested_meridian) or not -180.0 <= requested_meridian <= 180.0:
+            raise ValueError(
+                "central_meridian_deg must be finite and between -180 and 180"
+            )
     lon_values = [item[0] for item in samples]
     lat_values = [item[1] for item in samples]
     area = AreaOfInterest(
@@ -333,6 +347,7 @@ def recommend_cgcs2000_candidates(
         max(lon_values) + 0.01,
         max(lat_values) + 0.01,
     )
+    report("enumerating_crs", "正在枚举 CGCS2000 高斯-克吕格候选", None)
     try:
         infos = query_crs_info(
             auth_name="EPSG",
@@ -345,18 +360,43 @@ def recommend_cgcs2000_candidates(
             f"PROJ cannot query CGCS2000 candidates: {exc}"
         ) from exc
 
-    candidates: list[CrsCandidate] = []
+    descriptors: list[tuple[object, int, float, int, bool]] = []
     for info in infos:
         if not info.name.startswith("CGCS2000 /") or "Gauss-Kruger" not in info.name:
             continue
         epsg = int(info.code)
         crs = _crs_from_epsg(epsg)
         central_meridian = _central_meridian(crs)
+        if (
+            requested_meridian is not None
+            and abs(central_meridian - requested_meridian) > 1e-9
+        ):
+            continue
         zone_width = 3 if "3-degree" in info.name else 6
         zone_prefix = " zone " in f" {info.name.lower()} "
+        descriptors.append(
+            (info, epsg, central_meridian, zone_width, zone_prefix)
+        )
+    if requested_meridian is not None and not descriptors:
+        raise ValueError(
+            "no CGCS2000 Gauss-Kruger EPSG candidate matches central meridian "
+            f"{requested_meridian:g}"
+        )
+
+    candidates: list[CrsCandidate] = []
+    total_variants = len(descriptors) * len(_AXIS_MAPPINGS)
+    processed_variants = 0
+    for info, epsg, central_meridian, zone_width, zone_prefix in descriptors:
         transformer = _transformer(epsg)
         projected = [transformer.transform(lon, lat) for lon, lat in samples]
         if any(not isfinite(east) or not isfinite(north) for east, north in projected):
+            processed_variants += len(_AXIS_MAPPINGS)
+            if total_variants:
+                report(
+                    "scoring_candidates",
+                    f"正在评分坐标候选 {processed_variants}/{total_variants}",
+                    processed_variants / total_variants,
+                )
             continue
         for mapping in sorted(_AXIS_MAPPINGS):
             points = [_mapped_xy(east, north, mapping) for east, north in projected]
@@ -380,6 +420,13 @@ def recommend_cgcs2000_candidates(
                     evidence=evidence,
                 )
             )
+            processed_variants += 1
+            report(
+                "scoring_candidates",
+                f"正在评分坐标候选 {processed_variants}/{total_variants}",
+                processed_variants / total_variants,
+            )
+    report("building_previews", "正在整理候选证据与轨迹预览", None)
     candidates.sort(
         key=lambda item: (
             -item.score,
@@ -390,4 +437,6 @@ def recommend_cgcs2000_candidates(
             item.cad_axis_mapping,
         )
     )
-    return tuple(candidates[: int(limit)])
+    result = tuple(candidates[: int(limit)])
+    report("complete", "坐标系候选生成完成", 1.0)
+    return result

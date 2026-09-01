@@ -141,3 +141,68 @@ def test_candidate_inputs_require_matching_finite_samples() -> None:
             [],
             cad_bbox_raw=(0.0, 0.0, 1.0, 1.0),
         )
+
+
+def test_manual_120_meridian_filters_every_candidate() -> None:
+    candidates = recommend_cgcs2000_candidates(
+        [119.999, 120.001],
+        [30.0, 30.001],
+        cad_bbox_raw=(499_800.0, 3_319_900.0, 500_200.0, 3_320_400.0),
+        central_meridian_deg=120.0,
+    )
+
+    assert candidates
+    assert {item.central_meridian_deg for item in candidates} == {120.0}
+
+
+def test_candidate_progress_is_derived_from_scored_variants() -> None:
+    events: list[tuple[str, str, float | None]] = []
+
+    recommend_cgcs2000_candidates(
+        [119.999, 120.001],
+        [30.0, 30.001],
+        cad_bbox_raw=(499_800.0, 3_319_900.0, 500_200.0, 3_320_400.0),
+        central_meridian_deg=120.0,
+        progress_callback=lambda stage, message, fraction: events.append(
+            (stage, message, fraction)
+        ),
+    )
+
+    scoring = [
+        fraction
+        for stage, _message, fraction in events
+        if stage == "scoring_candidates"
+    ]
+    assert scoring
+    assert scoring == sorted(scoring)
+    assert scoring[-1] == 1.0
+    assert [stage for stage, _message, _fraction in events] == [
+        "validating_inputs",
+        "enumerating_crs",
+        *(["scoring_candidates"] * len(scoring)),
+        "building_previews",
+        "complete",
+    ]
+
+
+@pytest.mark.parametrize("central_meridian", [float("nan"), 181.0, -181.0])
+def test_manual_meridian_must_be_finite_and_in_range(
+    central_meridian: float,
+) -> None:
+    with pytest.raises(ValueError, match="central_meridian_deg"):
+        recommend_cgcs2000_candidates(
+            [120.0, 120.001],
+            [30.0, 30.001],
+            cad_bbox_raw=(0.0, 0.0, 1.0, 1.0),
+            central_meridian_deg=central_meridian,
+        )
+
+
+def test_manual_meridian_without_epsg_candidate_is_explicit() -> None:
+    with pytest.raises(ValueError, match="no CGCS2000.*120.5"):
+        recommend_cgcs2000_candidates(
+            [120.0, 120.001],
+            [30.0, 30.001],
+            cad_bbox_raw=(0.0, 0.0, 1.0, 1.0),
+            central_meridian_deg=120.5,
+        )
