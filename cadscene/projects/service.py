@@ -6,6 +6,7 @@ from datetime import datetime
 from fractions import Fraction
 from hashlib import sha256
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import shutil
@@ -83,6 +84,12 @@ from .queue import (
 from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.workflow.job_runner import read_workflow_log_text
 from cadscene.application_resources import application_root
+from cadscene.srt.georeference import (
+    CadGeoreference,
+    CrsCandidate,
+    recommend_cgcs2000_candidates,
+)
+from cadscene.srt.parser import load_srt_records
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
@@ -1344,14 +1351,12 @@ class ProjectService:
                 )
                 continue
             if adapter.name == "srt_full_pose":
-                georeference = project.source_assets.get("_cad_georeference")
-                if (
-                    not isinstance(georeference, Mapping)
-                    or georeference.get("confirmed") is not True
-                ):
+                georeference = _confirmed_cad_georeference(project.source_assets)
+                if georeference is None:
                     skipped.append(clip.clip_id)
                     reasons[clip.clip_id] = (
-                        "confirmed CAD georeference is required for srt_full_pose"
+                        "confirmed CAD georeference bound to the current CAD is "
+                        "required for srt_full_pose"
                     )
                     continue
                 settings = clip.manual_definition.get("srt_full_pose")
@@ -2409,6 +2414,149 @@ class ProjectService:
                 updated_at=self.now(),
                 source_assets={**value.source_assets, "display_name": normalized},
             ),
+        )
+
+    def recommend_cad_georeference(
+        self, project_id: str, *, limit: int = 6
+    ) -> tuple[CrsCandidate, ...]:
+        """Rank CGCS2000 Gauss-Kruger candidates without confirming one."""
+
+        project = self.repositories.project.load(project_id)
+        srt_path = _asset_path(project.source_assets, "srt")
+        if srt_path is None or not srt_path.is_file():
+            raise FileNotFoundError("physical SRT is required for CAD georeference")
+        records = load_srt_records(srt_path)
+        gps = tuple(
+            (float(record.longitude), float(record.latitude))
+            for record in records
+            if record.longitude is not None and record.latitude is not None
+        )
+        if not gps:
+            raise ValueError("SRT contains no usable WGS84 longitude/latitude samples")
+        return recommend_cgcs2000_candidates(
+            [item[0] for item in gps],
+            [item[1] for item in gps],
+            _active_cad_coordinate_bbox(project.source_assets),
+            limit=limit,
+        )
+
+    def confirm_cad_georeference(
+        self,
+        project_id: str,
+        candidate: Mapping[str, object],
+        *,
+        expected_revision: int,
+    ) -> ProjectManifest:
+        """Persist an explicit projection choice bound to the active CAD asset."""
+
+        project = self.repositories.project.load(project_id)
+        if project.revision != expected_revision:
+            raise RevisionConflict(
+                project_id=project_id,
+                expected_revision=expected_revision,
+                current_revision=project.revision,
+            )
+        cad_fingerprint = _active_cad_asset_fingerprint(project.source_assets)
+        if cad_fingerprint is None:
+            raise ValueError("active CAD asset identity is unavailable")
+        evidence = candidate.get("evidence")
+        score = float(candidate.get("score", 0.0))
+        confidence = min(1.0, max(0.0, score / 120.0))
+        config = CadGeoreference.from_dict(
+            {
+                "schema_version": 1,
+                "horizontal_datum": "CGCS2000",
+                "projection_family": "gauss_kruger",
+                "zone_width_deg": candidate["zone_width_deg"],
+                "central_meridian_deg": candidate["central_meridian_deg"],
+                "epsg": candidate["epsg"],
+                "projected_axis_order": "easting_northing",
+                "cad_axis_mapping": candidate["cad_axis_mapping"],
+                "zone_prefix": candidate["zone_prefix"],
+                "linear_unit": "metre",
+                "source": "user_confirmed_candidate",
+                "confirmed": True,
+                "confidence": confidence,
+                "validation": dict(evidence) if isinstance(evidence, Mapping) else {},
+            }
+        )
+        payload = {
+            **config.to_dict(),
+            "cad_asset_fingerprint": cad_fingerprint,
+        }
+        payload["revision"] = f"cad-georef-{_fingerprint(payload)[:16]}"
+        return self.repositories.project.update(
+            project_id,
+            expected_revision=expected_revision,
+            mutate=lambda value: replace(
+                value,
+                updated_at=self.now(),
+                source_assets={
+                    **value.source_assets,
+                    "_cad_georeference": payload,
+                },
+            ),
+        )
+
+    def update_srt_full_pose_settings(
+        self,
+        project_id: str,
+        clip_id: str,
+        *,
+        expected_revision: int,
+        horizontal_fov_deg: float,
+        cad_z_offset_m: float = 0.0,
+        attitude_profile: str = "dji_absolute_ned",
+    ) -> ClipsManifest:
+        """Store the deliberately small user contract for DJI full-pose SRT."""
+
+        fov = float(horizontal_fov_deg)
+        z_offset = float(cad_z_offset_m)
+        if not isfinite(fov) or not 1.0 < fov < 179.0:
+            raise ValueError("horizontal_fov_deg must be finite and inside (1, 179)")
+        if not isfinite(z_offset):
+            raise ValueError("cad_z_offset_m must be finite")
+        if attitude_profile != "dji_absolute_ned":
+            raise ValueError("unsupported attitude_profile")
+        settings = {
+            "horizontal_fov_deg": fov,
+            "cad_z_offset_m": z_offset,
+            "attitude_profile": attitude_profile,
+        }
+        with self._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=current.revision,
+                )
+            if not any(item.clip_id == clip_id for item in current.clips):
+                raise KeyError(f"unknown clip ID: {clip_id}")
+            return self.repositories.clips.update(
+                project_id,
+                expected_revision=expected_revision,
+                mutate=lambda value: replace(
+                    value,
+                    updated_at=self.now(),
+                    clips=tuple(
+                        replace(
+                            item,
+                            manual_definition={
+                                **item.manual_definition,
+                                "srt_full_pose": settings,
+                            },
+                        )
+                        if item.clip_id == clip_id
+                        else item
+                        for item in value.clips
+                    ),
+                ),
+            )
+
+    def cad_georeference_snapshot(self, project_id: str) -> Mapping[str, object]:
+        return _cad_georeference_snapshot(
+            self.repositories.project.load(project_id).source_assets
         )
 
     def _enqueue_trajectory_jobs_locked(
@@ -4317,7 +4465,13 @@ class ProjectService:
             video_path=video_path,
             srt_path=_clip_asset_path(clip, project.source_assets, "srt"),
             attempt_directory=Path(job.attempts[-1].directory),
-            parameters=dict(clip.manual_definition),
+            parameters=(
+                _srt_full_pose_adapter_parameters(
+                    self.projects_root, project, clip
+                )
+                if adapter.name == "srt_full_pose"
+                else dict(clip.manual_definition)
+            ),
             source_start_pts=int(clip.analysis["source_start_pts"]),
             source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
             source_time_base=time_base,
@@ -7023,19 +7177,26 @@ def _workbench_render_parameters(
     parameters: dict[str, object] = {}
     if isinstance(cad_path, str) and cad_path:
         parameters["cad_dataset_path"] = cad_path
-    manifest_path = (
+    defaults: Mapping[str, object] = {}
+    manifest_paths: list[Path] = []
+    if isinstance(cad_path, str) and cad_path:
+        manifest_paths.append(Path(cad_path) / "dataset_manifest.json")
+    manifest_paths.append(
         Path(storage_root)
         / "data"
         / f"{project_id}-{clip.clip_id}"
         / "dataset_manifest.json"
     )
-    defaults: Mapping[str, object] = {}
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        if isinstance(payload, Mapping) and isinstance(payload.get("defaults"), Mapping):
-            defaults = payload["defaults"]
-    except (OSError, json.JSONDecodeError):
-        pass
+    for manifest_path in manifest_paths:
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            if isinstance(payload, Mapping) and isinstance(
+                payload.get("defaults"), Mapping
+            ):
+                defaults = payload["defaults"]
+                break
+        except (OSError, json.JSONDecodeError):
+            continue
     parameters["cad_scale"] = defaults.get("cad_scale", 0.06)
     parameters["origin_xy"] = defaults.get("origin_xy", [0.0, 0.0])
     return parameters
@@ -7532,6 +7693,131 @@ def _active_cad_render_identity(
     }
 
 
+def _active_cad_asset_fingerprint(
+    project_assets: Mapping[str, object],
+) -> str | None:
+    cad = project_assets.get("cad")
+    if not isinstance(cad, Mapping):
+        path = project_assets.get("cad_path")
+        if not isinstance(path, str) or not path:
+            return None
+        return _fingerprint({"path": path})
+    identity = {
+        key: cad.get(key)
+        for key in ("revision", "sha256", "dataset_id", "dataset_path", "path")
+        if cad.get(key) is not None
+    }
+    return _fingerprint(identity) if identity else None
+
+
+def _active_cad_coordinate_bbox(
+    project_assets: Mapping[str, object],
+) -> tuple[float, float, float, float]:
+    cad = project_assets.get("cad")
+    if not isinstance(cad, Mapping):
+        raise ValueError("active CAD descriptor is unavailable")
+    candidates: list[object] = [
+        cad.get("coordinate_bbox"),
+        cad.get("bbox"),
+    ]
+    stats = cad.get("stats")
+    if isinstance(stats, Mapping):
+        candidates.extend((stats.get("coordinate_bbox"), stats.get("bbox")))
+    dataset_path = cad.get("dataset_path")
+    if isinstance(dataset_path, str) and dataset_path:
+        try:
+            manifest = json.loads(
+                (Path(dataset_path) / "dataset_manifest.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            manifest_cad = (
+                manifest.get("cad") if isinstance(manifest, Mapping) else None
+            )
+            if isinstance(manifest_cad, Mapping):
+                candidates.extend(
+                    (
+                        manifest_cad.get("coordinate_bbox"),
+                        manifest_cad.get("bbox"),
+                    )
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+    for candidate in candidates:
+        if (
+            isinstance(candidate, Sequence)
+            and not isinstance(candidate, (str, bytes))
+            and len(candidate) == 4
+        ):
+            return tuple(float(value) for value in candidate)  # type: ignore[return-value]
+    raise ValueError("active CAD coordinate bbox is unavailable")
+
+
+def _confirmed_cad_georeference(
+    project_assets: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    value = project_assets.get("_cad_georeference")
+    if not isinstance(value, Mapping) or value.get("confirmed") is not True:
+        return None
+    if value.get("cad_asset_fingerprint") != _active_cad_asset_fingerprint(
+        project_assets
+    ):
+        return None
+    try:
+        CadGeoreference.from_dict(value)
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
+def _cad_georeference_snapshot(
+    project_assets: Mapping[str, object],
+) -> Mapping[str, object]:
+    value = project_assets.get("_cad_georeference")
+    if not isinstance(value, Mapping):
+        return {}
+    if _confirmed_cad_georeference(project_assets) is not None:
+        return dict(value)
+    return {
+        **value,
+        "confirmed": False,
+        "stale_reason": "cad_asset_changed",
+    }
+
+
+def _srt_full_pose_adapter_parameters(
+    storage_root: Path,
+    project: ProjectManifest,
+    clip: ClipDefinition,
+) -> dict[str, object]:
+    georeference = _confirmed_cad_georeference(project.source_assets)
+    settings = clip.manual_definition.get("srt_full_pose")
+    media_binding = _project_media_binding(project)
+    if georeference is None:
+        raise ValueError("confirmed CAD georeference is not bound to the current CAD")
+    if not isinstance(settings, Mapping):
+        raise ValueError("srt_full_pose settings are unavailable")
+    if media_binding is None:
+        raise ValueError("project media specification is unavailable")
+    _media_revision, media = media_binding
+    if media.nominal_frame_rate is None:
+        raise ValueError("project nominal frame rate is unavailable")
+    render = _workbench_render_parameters(
+        storage_root, project.project_id, clip, project.source_assets
+    )
+    return {
+        "cad_georeference": dict(georeference),
+        "srt_full_pose": dict(settings),
+        "cad_origin_xy": list(render["origin_xy"]),
+        "cad_scale": render["cad_scale"],
+        "video_metadata": {
+            "width": media.width,
+            "height": media.height,
+            "fps": float(media.nominal_frame_rate),
+        },
+    }
+
+
 def _job_identity_payload(
     *,
     job_type: str,
@@ -7553,6 +7839,8 @@ def _job_identity_payload(
         "adapter_version": adapter_version,
         "parameters": dict(clip.manual_definition),
     }
+    if adapter_name == "srt_full_pose":
+        payload["cad_georeference"] = _cad_georeference_snapshot(project_assets)
     if _clip_input_snapshot(clip) is None:
         payload.update(
             {

@@ -47,6 +47,12 @@ _SNAPSHOT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})/snapshot$")
 _WORKFLOW = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/workflow$"
 )
+_SRT_FULL_POSE_SETTINGS = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/srt-full-pose$"
+)
+_CAD_GEOREFERENCE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/cad-georeference/(?P<action>candidates|confirm)$"
+)
 _NAME = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/name$"
 )
@@ -187,6 +193,16 @@ class ProjectApi:
             match = _WORKFLOW.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_workflow(match["project"], match["clip"], payload)
+            match = _SRT_FULL_POSE_SETTINGS.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_srt_full_pose_settings(
+                    match["project"], match["clip"], payload
+                )
+            match = _CAD_GEOREFERENCE.fullmatch(path)
+            if method == "POST" and match and match["action"] == "candidates":
+                return self._recommend_cad_georeference(match["project"])
+            if method == "POST" and match and match["action"] == "confirm":
+                return self._confirm_cad_georeference(match["project"], payload)
             match = _NAME.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_name(match["project"], match["clip"], payload)
@@ -910,6 +926,13 @@ class ProjectApi:
                     "recommended_workflow": clip.recommended_workflow,
                     "workflow_override": clip.workflow_override,
                     "resolved_workflow": clip.resolved_workflow,
+                    "srt_full_pose_settings": dict(
+                        clip.manual_definition.get("srt_full_pose")
+                        if isinstance(
+                            clip.manual_definition.get("srt_full_pose"), Mapping
+                        )
+                        else {}
+                    ),
                     "needs_review": bool(clip.analysis.get("needs_review", False)),
                     "status": (
                         "ready" if display_job is None else display_job.get("status")
@@ -1034,6 +1057,9 @@ class ProjectApi:
                 "jobs": analysis_jobs,
             },
             "cad_replacement": cad_replacement,
+            "cad_georeference": dict(
+                self.service.cad_georeference_snapshot(project_id)
+            ),
             "assets": _snapshot_assets(project_id, project.source_assets),
             "capabilities": {
                 "can_start_trajectory": can_start_any,
@@ -1441,6 +1467,70 @@ class ProjectApi:
                 "clips_revision": manifest.revision,
                 "workflow_override": clip.workflow_override,
                 "resolved_workflow": clip.resolved_workflow,
+            },
+        )
+
+    def _recommend_cad_georeference(self, project_id: str) -> ApiResponse:
+        candidates = self.service.recommend_cad_georeference(project_id)
+        return ApiResponse(
+            200,
+            {
+                "project_id": project_id,
+                "project_revision": self.repositories.project.load(
+                    project_id
+                ).revision,
+                "candidates": [item.to_dict() for item in candidates],
+            },
+            {"Cache-Control": "no-store"},
+        )
+
+    def _confirm_cad_georeference(
+        self, project_id: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        candidate = payload.get("candidate")
+        if not isinstance(candidate, Mapping):
+            raise TypeError("candidate must be an object")
+        project = self.service.confirm_cad_georeference(
+            project_id,
+            candidate,
+            expected_revision=_required_revision(payload),
+        )
+        return ApiResponse(
+            200,
+            {
+                "project_id": project_id,
+                "project_revision": project.revision,
+                "cad_georeference": dict(
+                    project.source_assets["_cad_georeference"]
+                ),
+            },
+        )
+
+    def _update_srt_full_pose_settings(
+        self,
+        project_id: str,
+        clip_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        if "horizontal_fov_deg" not in payload:
+            raise ValueError("horizontal_fov_deg is required")
+        manifest = self.service.update_srt_full_pose_settings(
+            project_id,
+            clip_id,
+            expected_revision=_required_revision(payload),
+            horizontal_fov_deg=float(payload["horizontal_fov_deg"]),
+            cad_z_offset_m=float(payload.get("cad_z_offset_m", 0.0)),
+            attitude_profile=str(
+                payload.get("attitude_profile", "dji_absolute_ned")
+            ),
+        )
+        selected = next(item for item in manifest.clips if item.clip_id == clip_id)
+        return ApiResponse(
+            200,
+            {
+                "clip_id": clip_id,
+                "clips_revision": manifest.revision,
+                "settings": dict(selected.manual_definition["srt_full_pose"]),
             },
         )
 
