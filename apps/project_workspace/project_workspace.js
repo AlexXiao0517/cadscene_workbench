@@ -18,6 +18,7 @@
     activatingAnalysis: false,
     dismissedCandidateRevision: null,
     cadReplacementUploading: false,
+    preparationDialogDismissed: false,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -40,6 +41,12 @@
     srt_sfm_fused: "SRT + 三维重建",
     srt_full_pose: "SRT 全姿态",
     pure_rotation: "旋转估计",
+  };
+  const JOB_TYPE_LABELS = {
+    trajectory: "轨迹反算",
+    scene_bridge: "路线打通",
+    clip_render: "视频渲染",
+    clip_export: "工作台准备",
   };
   const MOTION_LABELS = {
     general_motion: "一般运动",
@@ -99,7 +106,34 @@
   }
 
   function trajectoryDisplayStatus(clip) {
-    return clip.status === "cancelled" ? "ready" : clip.status;
+    return clip.job_type === "trajectory" && clip.status === "cancelled"
+      ? "ready"
+      : clip.status;
+  }
+
+  function jobStatusLabel(clip) {
+    const status = trajectoryDisplayStatus(clip);
+    const statusLabel = STATUS_LABELS[trajectoryDisplayStatus(clip)]
+      || status
+      || STATUS_LABELS.ready;
+    const taskLabel = JOB_TYPE_LABELS[clip.job_type];
+    const taskScopedStatuses = [
+      "queued", "preparing", "running", "validating",
+      "failed", "interrupted", "cancelled",
+    ];
+    return taskLabel && taskScopedStatuses.includes(status)
+      ? `${taskLabel}${statusLabel}`
+      : statusLabel;
+  }
+
+  function jobActionLabel(jobType, action) {
+    const actionLabels = {
+      trajectory: action === "cancel" ? "取消反算" : "重试反算",
+      scene_bridge: action === "cancel" ? "取消打通" : "重试打通",
+      clip_render: action === "cancel" ? "取消渲染" : "重试渲染",
+      clip_export: action === "cancel" ? "取消准备" : "重试准备",
+    };
+    return actionLabels[jobType] || (action === "cancel" ? "取消" : "重试");
   }
 
   function applyCapabilities(clip, row) {
@@ -123,8 +157,12 @@
     bridgeDown.title = capabilities.can_bridge_down
       ? `用重叠帧打通 ${capabilities.bridge_down_target_clip_id} 的路线，完成后进入微调`
       : (capabilities.bridge_down_reason || "没有可安全打通的同场景下一片段");
-    $(".retry-job", row).disabled = !capabilities.can_retry;
-    $(".cancel-job", row).disabled = !capabilities.can_cancel;
+    const retry = $(".retry-job", row);
+    const cancel = $(".cancel-job", row);
+    retry.disabled = !capabilities.can_retry;
+    cancel.disabled = !capabilities.can_cancel;
+    retry.textContent = jobActionLabel(clip.job_type, "retry");
+    cancel.textContent = jobActionLabel(clip.job_type, "cancel");
     $(".workflow-select", row).title = capabilities.reason || "";
   }
 
@@ -151,10 +189,7 @@
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
-    const displayStatus = trajectoryDisplayStatus(clip);
-    $(".status-pill", row).textContent = STATUS_LABELS[trajectoryDisplayStatus(clip)]
-      || displayStatus
-      || STATUS_LABELS.ready;
+    $(".status-pill", row).textContent = jobStatusLabel(clip);
     const thumbnail = $(".clip-thumbnail img", row);
     thumbnail.src = clip.thumbnail_url || "";
     thumbnail.hidden = !clip.thumbnail_url;
@@ -178,12 +213,18 @@
     applyCapabilities(clip, row);
     const bridgeStatus = clip.scene_bridge?.status;
     const hasSavedWorkbench = clip.workbench?.state === "saved";
-    const bridgeReason = clip.capabilities?.bridge_up_reason
-      || clip.capabilities?.bridge_down_reason;
+    const capabilities = clip.capabilities || {};
+    const bridgeReasons = [];
+    if (capabilities.bridge_up_reason) {
+      bridgeReasons.push(`向上：${capabilities.bridge_up_reason}`);
+    }
+    if (capabilities.bridge_down_reason) {
+      bridgeReasons.push(`向下：${capabilities.bridge_down_reason}`);
+    }
     if (!hasSavedWorkbench && ["stale_input", "superseded"].includes(bridgeStatus)) {
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
-    } else if (bridgeReason) {
-      $(".row-error", row).textContent = bridgeReason;
+    } else if (bridgeReasons.length) {
+      $(".row-error", row).textContent = bridgeReasons.join("；");
     }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
@@ -795,6 +836,7 @@
       : capability.bridge_down_target_clip_id;
     if (!targetClipId) return;
     const dialog = $("#workbenchPreparationDialog");
+    state.preparationDialogDismissed = false;
     const directionLabel = direction === "up" ? "向上" : "向下";
     $("#workbenchPreparationTitle").textContent = "正在提交路线打通任务";
     $("#workbenchPreparationMessage").textContent = `正在提交${directionLabel}打通任务…`;
@@ -831,7 +873,7 @@
   async function waitForSceneBridge(jobId, targetClipId) {
     const dialog = $("#workbenchPreparationDialog");
     $("#workbenchPreparationTitle").textContent = "正在打通相邻片段路线";
-    if (!dialog.open) dialog.showModal();
+    if (!state.preparationDialogDismissed && !dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;
       await pollSnapshot();
@@ -855,13 +897,24 @@
         throw new Error(bridge?.error || "相邻片段路线打通失败，请重试");
       }
       if (bridge?.status === "success") {
-        dialog.close();
-        const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
-        await openWorkbench(target, targetRow);
+        const shouldOpenWorkbench = !state.preparationDialogDismissed;
+        if (dialog.open) dialog.close();
+        if (shouldOpenWorkbench) {
+          const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
+          await openWorkbench(target, targetRow);
+        } else {
+          setMessage("路线打通已完成，可进入目标片段工作台继续微调");
+        }
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
     }
+  }
+
+  function closeWorkbenchPreparationDialog() {
+    state.preparationDialogDismissed = true;
+    const dialog = $("#workbenchPreparationDialog");
+    if (dialog.open) dialog.close();
   }
 
   async function waitForWorkbenchPreparation(clipId) {
@@ -929,6 +982,14 @@
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#mergeProjectButton").addEventListener("click", mergeProject);
   $("#closeMergeResult").addEventListener("click", () => $("#mergeResultDialog").close());
+  $("#closeWorkbenchPreparation").addEventListener("click", closeWorkbenchPreparationDialog);
+  {
+    const dialog = $("#workbenchPreparationDialog");
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeWorkbenchPreparationDialog();
+    });
+  }
   $("#mergeResultDialog").addEventListener("close", resetMergeResult);
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#cadReplacementTrigger").addEventListener("click", openCadReplacementDialog);

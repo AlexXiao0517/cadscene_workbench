@@ -1143,6 +1143,7 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert bridge.adapter_name == "scene_bridge"
     assert len(bridge.depends_on_job_ids) == 1
     dependency = api.service.queue.get(bridge.depends_on_job_ids[0])
+    assert bridge.priority > dependency.priority
     assert dependency.job_type == "trajectory"
     assert dependency.clip_id == "clip-3"
     assert api.service._current_input_fingerprint(bridge) == bridge.input_fingerprint
@@ -1151,6 +1152,56 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert target["scene_bridge"]["job_id"] == bridge.job_id
     assert target["scene_bridge"]["source_clip_id"] == "clip-2"
     assert target["scene_bridge"]["direction"] == "down"
+
+
+@pytest.mark.parametrize(
+    ("target_status", "target_stage", "expected_reason"),
+    (
+        ("queued", "queued", "目标片段轨迹反算已排队，完成后可打通"),
+        ("running", "mapper", "目标片段轨迹反算中，完成后可打通"),
+        ("validating", "validating", "目标片段轨迹反算中，完成后可打通"),
+    ),
+)
+def test_scene_bridge_capability_reports_active_target_trajectory_without_rerun_hint(
+    tmp_path: Path,
+    target_status: str,
+    target_stage: str,
+    expected_reason: str,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    _save_completed_sfm_route(api, repositories, runs_root)
+    jobs = repositories.jobs.load("project-1")
+
+    def make_target_active(manifest):
+        updated = []
+        for payload in manifest.jobs:
+            if payload.get("job_type") == "trajectory" and payload.get("clip_id") == "clip-3":
+                payload = {
+                    **payload,
+                    "status": target_status,
+                    "stage": target_stage,
+                    "output_revision": None,
+                    "output_fingerprint": None,
+                    "output_validated": False,
+                    "validated_input_fingerprint": None,
+                    "published_outputs": {},
+                }
+            updated.append(payload)
+        return replace(manifest, jobs=tuple(updated))
+
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=make_target_active,
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    source = next(item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2")
+
+    assert source["capabilities"]["can_bridge_down"] is False
+    assert source["capabilities"]["bridge_down_reason"] == expected_reason
+    assert "重新轨迹反算" not in source["capabilities"]["bridge_down_reason"]
 
 
 def test_expired_unsaved_target_session_no_longer_blocks_scene_bridge(

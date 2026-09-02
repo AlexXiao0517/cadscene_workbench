@@ -221,7 +221,9 @@ tbody tr:hover { background: var(--row-hover-background); }
 .candidate-tag { padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .candidate-tag.review { color: #f1c46f; border-color: #6d5529; }
 .candidate-clips .empty-state { display: block; padding: 22px 2px; }
-.preparation-dialog { text-align: center; }
+.preparation-dialog { position: relative; text-align: center; }
+.preparation-dialog-close { position: absolute; top: 10px; right: 10px; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font-size: 25px; line-height: 1; cursor: pointer; }
+.preparation-dialog-close:hover,.preparation-dialog-close:focus-visible { color: var(--text); background: var(--control-hover-background); outline: none; }
 .preparation-visual { display: flex; justify-content: center; gap: 8px; margin: 8px 0 20px; }
 .preparation-visual span { width: 9px; height: 9px; border-radius: 50%; background: #6d9fff; animation: preparation-pulse 1.1s ease-in-out infinite; }
 .preparation-visual span:nth-child(2) { animation-delay: .14s; }.preparation-visual span:nth-child(3) { animation-delay: .28s; }

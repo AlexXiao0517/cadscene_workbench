@@ -93,7 +93,14 @@
       </div>
     </form>
   </dialog>
-  <dialog id="workbenchPreparationDialog" class="dialog preparation-dialog"><div class="preparation-visual" aria-hidden="true"><span></span><span></span><span></span></div><h2 id="workbenchPreparationTitle">正在准备片段工作台</h2><p id="workbenchPreparationMessage">正在按原视频时间范围准备片段视频…</p><div class="preparation-progress"><span id="workbenchPreparationFill"></span></div><strong id="workbenchPreparationPercent">—</strong></dialog>
+  <dialog id="workbenchPreparationDialog" class="dialog preparation-dialog">
+    <button id="closeWorkbenchPreparation" class="preparation-dialog-close" type="button" aria-label="关闭进度窗口" title="关闭进度窗口">×</button>
+    <div class="preparation-visual" aria-hidden="true"><span></span><span></span><span></span></div>
+    <h2 id="workbenchPreparationTitle">正在准备片段工作台</h2>
+    <p id="workbenchPreparationMessage">正在按原视频时间范围准备片段视频…</p>
+    <div class="preparation-progress"><span id="workbenchPreparationFill"></span></div>
+    <strong id="workbenchPreparationPercent">—</strong>
+  </dialog>
   <dialog id="mergeResultDialog" class="dialog merge-result-dialog" aria-labelledby="mergeResultTitle">
     <h2 id="mergeResultTitle">合并视频</h2>
     <p>可以先播放检查合并结果，确认后再下载到本地。</p>

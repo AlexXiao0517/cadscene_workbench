@@ -1086,9 +1086,26 @@ class ProjectWorkbenchService:
                 target, jobs
             )
             if not _precomputed_scene_solve_ready(target_trajectory):
-                result[f"locate_{direction}_reason"] = (
-                    "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                active_target_trajectory = next(
+                    (
+                        job
+                        for job in reversed(jobs)
+                        if job.job_type == "trajectory"
+                        and job.clip_id == target.clip_id
+                        and job.adapter_name == target.resolved_workflow
+                        and job.input_revision == target.analysis_revision
+                        and job.status
+                        in {"queued", "preparing", "running", "validating"}
+                    ),
+                    None,
                 )
+                if active_target_trajectory is None:
+                    reason = "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                elif active_target_trajectory.status == "queued":
+                    reason = "目标片段轨迹反算已排队，完成后可打通"
+                else:
+                    reason = "目标片段轨迹反算中，完成后可打通"
+                result[f"locate_{direction}_reason"] = reason
                 continue
             result[f"can_locate_{direction}"] = True
             result[f"locate_{direction}_target_clip_id"] = target.clip_id

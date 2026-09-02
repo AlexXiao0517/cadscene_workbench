@@ -88,6 +88,7 @@ from cadscene.application_resources import application_root
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
+SCENE_BRIDGE_INTERACTIVE_PRIORITY = 20
 
 
 def _has_exact_success_proof(job: QueueJob) -> bool:
@@ -2208,7 +2209,7 @@ class ProjectService:
                 resource_class="heavy_compute",
                 status="queued",
                 stage="queued",
-                priority=0,
+                priority=SCENE_BRIDGE_INTERACTIVE_PRIORITY,
                 depends_on_job_ids=dependency_ids,
                 exclusive_key=f"scene_bridge:{project_id}:{target.clip_id}",
                 idempotency_key=idempotency_key,
