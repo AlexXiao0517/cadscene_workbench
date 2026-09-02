@@ -22,7 +22,11 @@ from .queue import QueueJob
 from .repositories import RevisionConflict
 from .workbench_resume import AtomicWorkbenchResumeStore, WorkbenchResumeState
 from .scene_bridge_runner import validate_scene_bridge_candidate
-from .service import ProjectService
+from .service import (
+    ProjectService,
+    _validate_complete_sfm_route_output,
+    _validate_workbench_immutable_output,
+)
 from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 from cadscene.workflow.data_import import slugify_dataset_name
@@ -989,6 +993,14 @@ class ProjectWorkbenchService:
             self._publish_workbench_inputs(project_id, clip)
             context = self.resolve_context(project_id, clip_id)
             resume_baseline = self._saved_resume_baseline(context)
+            scene_bridge = self._scene_bridge_reference(clip)
+            workbench_seed = self._workbench_seed_reference(clip)
+            if (
+                resume_baseline is not None
+                and (scene_bridge is not None or workbench_seed is not None)
+                and not self._saved_session_has_complete_route(resume_baseline)
+            ):
+                resume_baseline = None
             if (
                 context.trajectory_job_id
                 and context.trajectory_run_id
@@ -1007,7 +1019,7 @@ class ProjectWorkbenchService:
                         resume_baseline, clip, context.trajectory_job_id
                     )
             if resume_baseline is None:
-                if self._scene_bridge_reference(clip) is not None:
+                if scene_bridge is not None:
                     self._restore_scene_bridge_to_run(project_id, clip)
                 else:
                     self._restore_workbench_seed_to_run(project_id, clip)
@@ -1063,6 +1075,13 @@ class ProjectWorkbenchService:
             or reference.value.get("status") != "saved"
             or not reference.value.get("workbench_output_revision")
         ):
+            return result
+        if not _validate_complete_sfm_route_output(
+            self.projects_root, project_id, source, reference
+        ):
+            message = "源片段尚未完成路线拟合并保存"
+            result["locate_up_reason"] = message
+            result["locate_down_reason"] = message
             return result
         jobs = tuple(
             QueueJob.from_dict(item)
@@ -1884,17 +1903,26 @@ class ProjectWorkbenchService:
         reference = self._workbench_reference(target)
         if reference is not None:
             status = reference.value.get("status")
-            if (
-                status in {"pending_save", "saved"}
-                or reference.value.get("workbench_output_revision")
-            ):
+            if status == "pending_save":
                 return False
+            if status == "saved":
+                if not reference.value.get("workbench_output_revision"):
+                    return False
+                if not _validate_workbench_immutable_output(
+                    self.projects_root, project_id, target, reference
+                ):
+                    return False
+                if _validate_complete_sfm_route_output(
+                    self.projects_root, project_id, target, reference
+                ):
+                    return False
             if status == "editing" and self.snapshot_for_clip(
                 project_id, target
             ).get("state") != "ready":
                 return False
         context = self.resolve_context(project_id, target.clip_id)
-        if self._saved_resume_baseline(context) is not None:
+        baseline = self._saved_resume_baseline(context)
+        if baseline is not None and self._saved_session_has_complete_route(baseline):
             return False
         seed = self._workbench_seed_reference(target)
         if seed is not None:
@@ -2385,6 +2413,16 @@ class ProjectWorkbenchService:
                 continue
             return candidate
         return None
+
+    def _saved_session_has_complete_route(
+        self, session: WorkbenchSession
+    ) -> bool:
+        try:
+            _manifest, artifact = self._validated_saved_output(session)
+            track = json.loads(artifact.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+        return isinstance(track, dict) and len(confirmed_keyframes(track)) >= 2
 
     def _validated_saved_output(
         self, session: WorkbenchSession

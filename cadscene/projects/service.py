@@ -85,6 +85,7 @@ from .queue import (
 from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.workflow.job_runner import read_workflow_log_text
 from cadscene.application_resources import application_root
+from cadscene.alignment.keyframes import confirmed_keyframes
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
@@ -2030,11 +2031,11 @@ class ProjectService:
             if (
                 source_workbench is None
                 or source_workbench.value.get("status") != "saved"
-                or not _validate_workbench_immutable_output(
+                or not _validate_complete_sfm_route_output(
                     self.projects_root, project_id, source, source_workbench
                 )
             ):
-                raise ValueError("source clip has no validated saved route")
+                raise ValueError("source clip has no completed saved route")
             target_workbench = next(
                 (
                     reference
@@ -2046,10 +2047,21 @@ class ProjectService:
                 ),
                 None,
             )
-            if target_workbench is not None and _workbench_reference_blocks_scene_bridge(
-                target_workbench, self.now()
-            ):
-                raise ValueError("target clip already has a workbench result")
+            if target_workbench is not None:
+                target_status = target_workbench.value.get("status")
+                if target_status == "saved":
+                    if not _validate_workbench_immutable_output(
+                        self.projects_root, project_id, target, target_workbench
+                    ):
+                        raise ValueError("target clip has an invalid saved workbench result")
+                    if _validate_complete_sfm_route_output(
+                        self.projects_root, project_id, target, target_workbench
+                    ):
+                        raise ValueError("target clip already has a completed route")
+                elif _workbench_reference_blocks_scene_bridge(
+                    target_workbench, self.now()
+                ):
+                    raise ValueError("target clip already has a workbench result")
             stored_jobs = tuple(
                 QueueJob.from_dict(item)
                 for item in self.repositories.jobs.load(project_id).jobs
@@ -2057,11 +2069,11 @@ class ProjectService:
             target_trajectory = self._current_trajectory_for_render(
                 target, stored_jobs
             )
-            if _has_recoverable_saved_workbench_output(
+            if _has_recoverable_completed_workbench_output(
                 self.projects_root, project_id, target, target_trajectory
             ):
                 raise ValueError(
-                    "target clip has a recoverable saved workbench output"
+                    "target clip has a recoverable completed workbench output"
                 )
             jobs_by_id = {job.job_id: job for job in stored_jobs}
             active_bridge = None
@@ -2779,6 +2791,37 @@ class ProjectService:
                 **kwargs,
             )
             jobs = self.repositories.jobs.load(current.project_id)
+            target_workbench_revision = identity.get(
+                "target_workbench_output_revision"
+            )
+            target_workbench_fingerprint = identity.get(
+                "target_workbench_output_fingerprint"
+            )
+
+            def supersede_incomplete_target_workbench(
+                item: StateReference,
+            ) -> StateReference:
+                if (
+                    isinstance(target_workbench_revision, str)
+                    and isinstance(target_workbench_fingerprint, str)
+                    and item.owner == "clips"
+                    and item.key == f"workbench:{current.clip_id}"
+                    and item.value.get("status") == "saved"
+                    and item.value.get("workbench_output_revision")
+                    == target_workbench_revision
+                    and item.value.get("workbench_output_fingerprint")
+                    == target_workbench_fingerprint
+                ):
+                    return replace(
+                        item,
+                        value={
+                            **item.value,
+                            "status": "stale",
+                            "stale_reason": "superseded_by_scene_bridge",
+                            "superseded_by_bridge_revision": result.output_revision,
+                        },
+                    )
+                return item
 
             def mutate_clips(
                 value: ClipsManifest, _operation_id: str
@@ -2792,7 +2835,7 @@ class ProjectService:
                         replace(
                             clip,
                             references=tuple(
-                                item
+                                supersede_incomplete_target_workbench(item)
                                 for item in clip.references
                                 if not (
                                     item.value.get("reference_type")
@@ -7214,7 +7257,7 @@ def _saved_workbench_reference(clip: ClipDefinition) -> StateReference | None:
     return None
 
 
-def _has_recoverable_saved_workbench_output(
+def _has_recoverable_completed_workbench_output(
     projects_root: Path,
     project_id: str,
     clip: ClipDefinition,
@@ -7273,7 +7316,7 @@ def _has_recoverable_saved_workbench_output(
         )
         if _workbench_binds_trajectory(
             clip, trajectory, reference.value
-        ) and _validate_workbench_immutable_output(
+        ) and _validate_complete_sfm_route_output(
             projects_root, project_id, clip, reference
         ):
             return True
@@ -7431,6 +7474,43 @@ def _validate_workbench_immutable_output(
             len(artifact_bytes) == size_bytes
             and sha256(artifact_bytes).hexdigest() == artifact_hash
         )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _validate_complete_sfm_route_output(
+    projects_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    workbench: StateReference,
+) -> bool:
+    if clip.resolved_workflow != "sfm_only" or not _validate_workbench_immutable_output(
+        projects_root, project_id, clip, workbench
+    ):
+        return False
+    revision = workbench.value.get("workbench_output_revision")
+    if not isinstance(revision, str):
+        return False
+    try:
+        revision_root = (
+            projects_root / project_id / "workbench_outputs" / revision
+        ).resolve(strict=True)
+        manifest = json.loads(
+            (revision_root / "workbench_output_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        artifacts = manifest.get("artifacts")
+        camera_track = (
+            artifacts.get("camera_track") if isinstance(artifacts, Mapping) else None
+        )
+        relative = camera_track.get("path") if isinstance(camera_track, Mapping) else None
+        if not isinstance(relative, str):
+            return False
+        track_path = (revision_root / relative).resolve(strict=True)
+        track_path.relative_to(revision_root)
+        track = json.loads(track_path.read_text(encoding="utf-8-sig"))
+        return isinstance(track, dict) and len(confirmed_keyframes(track)) >= 2
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
@@ -7709,6 +7789,7 @@ def _scene_bridge_identity_payload(
     source_core_frame_map: Mapping[str, object],
     target_core_frame_map: Mapping[str, object],
 ) -> dict[str, object]:
+    target_workbench = _saved_workbench_reference(target)
     return {
         "identity_schema": 1,
         "algorithm_version": BRIDGE_ALGORITHM_VERSION,
@@ -7731,6 +7812,16 @@ def _scene_bridge_identity_payload(
         ),
         "source_workbench_output_fingerprint": source_workbench.value.get(
             "workbench_output_fingerprint"
+        ),
+        "target_workbench_output_revision": (
+            None
+            if target_workbench is None
+            else target_workbench.value.get("workbench_output_revision")
+        ),
+        "target_workbench_output_fingerprint": (
+            None
+            if target_workbench is None
+            else target_workbench.value.get("workbench_output_fingerprint")
         ),
         "source_trajectory": {
             "job_id": source_trajectory.job_id,

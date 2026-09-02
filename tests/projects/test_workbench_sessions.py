@@ -993,6 +993,7 @@ def _save_completed_sfm_route(
     runs_root: Path,
     *,
     clip_id: str = "clip-2",
+    frames: tuple[int, ...] = (0, 3),
 ) -> dict[str, object]:
     opened = api.handle(
         "POST",
@@ -1021,7 +1022,7 @@ def _save_completed_sfm_route(
                     "fov": 70.0,
                 },
             }
-            for frame in (0, 3)
+            for frame in frames
         ],
     }
     manual = (
@@ -1152,6 +1153,136 @@ def test_scene_bridge_request_queues_current_target_trajectory_dependency(
     assert target["scene_bridge"]["job_id"] == bridge.job_id
     assert target["scene_bridge"]["source_clip_id"] == "clip-2"
     assert target["scene_bridge"]["direction"] == "down"
+
+
+def test_incomplete_saved_route_remains_resumable_without_claiming_bridge_source(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    revisions = iter(("workbench-source-route", "workbench-target-keyframe"))
+    api.workbench.coordinator.revision_factory = lambda: next(revisions)
+    _save_completed_sfm_route(api, repositories, runs_root, clip_id="clip-1")
+    _save_completed_sfm_route(
+        api, repositories, runs_root, clip_id="clip-2", frames=(0,)
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    first = next(item for item in snapshot.body["clips"] if item["clip_id"] == "clip-1")
+    second = next(item for item in snapshot.body["clips"] if item["clip_id"] == "clip-2")
+
+    assert second["workbench"]["state"] == "saved"
+    assert second["capabilities"]["can_open_workbench"] is True
+    assert second["capabilities"]["can_bridge_down"] is False
+    assert second["capabilities"]["bridge_down_reason"] == (
+        "源片段尚未完成路线拟合并保存"
+    )
+    assert first["capabilities"]["can_bridge_down"] is True
+    assert first["capabilities"]["bridge_down_target_clip_id"] == "clip-2"
+
+    rejected = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    assert rejected.status == 400
+    assert "completed saved route" in str(rejected.body["error"])
+
+    accepted = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    assert accepted.status == 202
+    assert accepted.body["target_clip_id"] == "clip-2"
+
+
+def test_scene_bridge_supersedes_incomplete_target_save_and_restores_bridge_seed(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    _add_same_scene_adjacent_clips(api, repositories, tmp_path)
+    revisions = iter(("workbench-source-route", "workbench-target-keyframe"))
+    api.workbench.coordinator.revision_factory = lambda: next(revisions)
+    _save_completed_sfm_route(api, repositories, runs_root, clip_id="clip-1")
+    incomplete = _save_completed_sfm_route(
+        api, repositories, runs_root, clip_id="clip-2", frames=(0,)
+    )
+    queued = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/scene-bridges",
+        json_body={
+            "direction": "down",
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        },
+    )
+    assert queued.status == 202
+    running = api.service.queue.claim_next_unstarted()
+    assert running is not None and running.job_id == queued.body["job_id"]
+    result = _scene_bridge_result(api, running)
+    lease = running.attempts[-1]
+
+    finished = api.service.finish_job(
+        "project-1",
+        running.job_id,
+        result,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    assert finished.status == "success"
+    target = next(
+        clip
+        for clip in repositories.clips.load("project-1").clips
+        if clip.clip_id == "clip-2"
+    )
+    workbench = next(
+        reference
+        for reference in target.references
+        if reference.key == "workbench:clip-2"
+    )
+    assert workbench.value["status"] == "stale"
+    assert workbench.value["workbench_output_revision"] == incomplete[
+        "workbench_output_revision"
+    ]
+
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-2/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    assert opened.status == 201
+    published_root = (
+        api.service.projects_root
+        / "project-1"
+        / "scene_bridges"
+        / "clip-2"
+        / str(result.output_revision)
+    )
+    target_track = (
+        runs_root
+        / "project-1-clip-2"
+        / "clip-2"
+        / "01_keyframes"
+        / "camera_track_manual.json"
+    )
+    assert target_track.read_bytes() == (
+        published_root / "camera_track_seed.json"
+    ).read_bytes()
+    resumed = api.workbench.coordinator.store.load("project-1", opened.body["token"])
+    assert resumed.workbench_output_revision is None
 
 
 @pytest.mark.parametrize(
@@ -2264,7 +2395,20 @@ def test_adjacent_location_rejects_recoverable_saved_target_without_reference(
     )
     manual = runs_root / "project-1-clip-3/clip-3/01_keyframes/camera_track_manual.json"
     manual.parent.mkdir(parents=True, exist_ok=True)
-    manual.write_text(json.dumps(_manual_track()), encoding="utf-8")
+    completed_track = _manual_track()
+    completed_track["keyframes"][0]["source"] = "manual_anchor"
+    completed_track["keyframes"].append(
+        {
+            **completed_track["keyframes"][0],
+            "frame": 3,
+            "time": 3 / 25.0,
+            "camera": {
+                **completed_track["keyframes"][0]["camera"],
+                "x": 4.0,
+            },
+        }
+    )
+    manual.write_text(json.dumps(completed_track), encoding="utf-8")
     saved = api.handle(
         "POST",
         f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
