@@ -5,6 +5,8 @@ from fractions import Fraction
 import json
 from pathlib import Path
 
+import pytest
+
 from cadscene.projects.http_api import ProjectApi
 from cadscene.projects.executor import LocalJobExecutor
 from cadscene.projects.media import ProjectMediaSpec
@@ -350,6 +352,58 @@ def test_candidate_request_prefers_viewer_focus_bbox_from_cad_import_stats(
     )
 
     assert request["cad_bbox_raw"] == focus_bbox
+
+
+def test_candidate_request_rejects_snapshot_from_a_different_cad(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    project = repositories.project.load("p1")
+    cad = dict(project.source_assets["cad"])
+    cad.pop("dataset_path")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda current: replace(
+            current,
+            source_assets={**current.source_assets, "cad": cad},
+        ),
+    )
+    clips = repositories.clips.load("p1")
+    active_clip = clips.clips[0]
+    repositories.clips.update(
+        "p1",
+        expected_revision=clips.revision,
+        mutate=lambda current: replace(
+            current,
+            clips=(
+                replace(
+                    active_clip,
+                    analysis={
+                        **active_clip.analysis,
+                        "input_snapshot": {
+                            "cad": {
+                                "sha256": "d" * 64,
+                                "dataset_id": "cad-analysis-old",
+                                "dataset_path": str(tmp_path / "cad-dataset"),
+                            }
+                        },
+                    },
+                ),
+            ),
+        ),
+    )
+
+    current = repositories.project.load("p1")
+    with pytest.raises(ValueError, match="coordinate bbox"):
+        service.enqueue_cad_georeference_candidates(
+            "p1",
+            expected_revision=current.revision,
+            central_meridian_deg=120.0,
+        )
 
 
 def test_candidate_status_and_confirmation_reject_changed_cad_input(

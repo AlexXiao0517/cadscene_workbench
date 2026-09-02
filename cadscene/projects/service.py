@@ -8004,6 +8004,16 @@ def _complete_active_cad_descriptor(
         cad = snapshot.get("cad") if isinstance(snapshot, Mapping) else None
         if not isinstance(cad, Mapping):
             continue
+        active_sha = descriptor.get("sha256")
+        snapshot_sha = cad.get("sha256")
+        if (
+            isinstance(active_sha, str)
+            and active_sha
+            and isinstance(snapshot_sha, str)
+            and snapshot_sha
+            and active_sha != snapshot_sha
+        ):
+            continue
         for key in ("dataset_id", "dataset_path"):
             if key not in descriptor and cad.get(key) is not None:
                 descriptor[key] = cad[key]
