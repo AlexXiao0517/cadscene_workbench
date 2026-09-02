@@ -2528,6 +2528,65 @@ def test_workflow_start_session_is_not_allowed_to_save_before_trajectory(
         )
 
 
+def test_workbench_inputs_prefer_atomic_hardlinks_for_readonly_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cadscene.projects.workbench_sessions as sessions_module
+
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    clip = repositories.clips.load("project-1").clips[0]
+    original_link = sessions_module.os.link
+    linked: list[tuple[Path, Path]] = []
+
+    def record_link(source, destination):
+        linked.append((Path(source), Path(destination)))
+        return original_link(source, destination)
+
+    monkeypatch.setattr(sessions_module.os, "link", record_link)
+
+    api.workbench._publish_workbench_inputs("project-1", clip)
+
+    assert len(linked) == 2
+    assert (
+        tmp_path / "data/project-1-clip-1/video/project-1-clip-1.mp4"
+    ).read_bytes() == b"physical-clip"
+    assert json.loads(
+        (tmp_path / "data/project-1-clip-1/cad/design.json").read_text("utf-8")
+    )["entities"] == [{"type": "line"}]
+    assert not list((tmp_path / "data/project-1-clip-1").rglob("*.tmp"))
+
+
+def test_workbench_input_hardlink_failure_falls_back_to_atomic_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cadscene.projects.workbench_sessions as sessions_module
+
+    api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
+    clip = repositories.clips.load("project-1").clips[0]
+    original_copy = sessions_module.shutil.copy2
+    copied: list[tuple[Path, Path]] = []
+
+    def reject_link(_source, _destination):
+        raise OSError("hardlinks unavailable")
+
+    def record_copy(source, destination):
+        copied.append((Path(source), Path(destination)))
+        return original_copy(source, destination)
+
+    monkeypatch.setattr(sessions_module.os, "link", reject_link)
+    monkeypatch.setattr(sessions_module.shutil, "copy2", record_copy)
+
+    api.workbench._publish_workbench_inputs("project-1", clip)
+
+    assert len(copied) == 2
+    assert (
+        tmp_path / "data/project-1-clip-1/video/project-1-clip-1.mp4"
+    ).read_bytes() == b"physical-clip"
+    assert not list((tmp_path / "data/project-1-clip-1").rglob("*.tmp"))
+
+
 def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     tmp_path: Path,
 ) -> None:

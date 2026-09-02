@@ -2262,18 +2262,7 @@ class ProjectWorkbenchService:
         video_target = target / "video" / f"{dataset}.mp4"
         cad_target = target / "cad" / "design.json"
         for source, destination in ((video, video_target), (cad, cad_target)):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(source, temporary)
-                with temporary.open("rb+") as stream:
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, destination)
-                _fsync_directory(destination.parent)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
+            _publish_readonly_file(source, destination)
         manifest = {
             "dataset": dataset,
             "status": "ready",
@@ -2884,6 +2873,32 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _publish_readonly_file(source: Path, destination: Path) -> None:
+    """优先硬链接不可变输入，跨卷或权限不允许时保持原子复制。"""
+
+    source = source.resolve(strict=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        try:
+            if os.path.samefile(source, destination):
+                return
+        except OSError:
+            pass
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        try:
+            os.link(source, temporary)
+        except OSError:
+            shutil.copy2(source, temporary)
+            with temporary.open("rb+") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _precomputed_scene_solve_ready(job: QueueJob | None) -> bool:
