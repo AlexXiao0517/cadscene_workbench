@@ -249,6 +249,109 @@ def test_candidate_and_confirmation_routes_use_project_revision(tmp_path: Path) 
     assert confirm_response.body["cad_georeference"]["confirmed"] is True
 
 
+def test_candidate_request_recovers_cad_dataset_from_active_clip_snapshot(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    dataset_path = tmp_path / "cad-dataset"
+    project = repositories.project.load("p1")
+    cad = dict(project.source_assets["cad"])
+    cad.pop("dataset_path")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda current: replace(
+            current,
+            source_assets={**current.source_assets, "cad": cad},
+        ),
+    )
+    clips = repositories.clips.load("p1")
+    active_clip = clips.clips[0]
+    repositories.clips.update(
+        "p1",
+        expected_revision=clips.revision,
+        mutate=lambda current: replace(
+            current,
+            clips=(
+                replace(
+                    active_clip,
+                    analysis={
+                        **active_clip.analysis,
+                        "input_snapshot": {
+                            "cad": {
+                                "sha256": "c" * 64,
+                                "dataset_id": "cad-analysis-1",
+                                "dataset_path": str(dataset_path),
+                            }
+                        },
+                    },
+                ),
+            ),
+        ),
+    )
+
+    current = repositories.project.load("p1")
+    job = service.enqueue_cad_georeference_candidates(
+        "p1",
+        expected_revision=current.revision,
+        central_meridian_deg=120.0,
+    )
+    request = json.loads(
+        (
+            Path(job.attempts[-1].directory)
+            / "cad_georeference_candidate_request.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert request["cad_bbox_raw"] == [
+        499000.0,
+        3319000.0,
+        501000.0,
+        3322000.0,
+    ]
+    assert service.cad_georeference_candidate_status("p1")["stale"] is False
+    assert service.recommend_cad_georeference(
+        "p1", central_meridian_deg=120.0
+    )
+
+
+def test_candidate_request_prefers_viewer_focus_bbox_from_cad_import_stats(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    focus_bbox = [484717.0, 3189945.0, 549016.0, 3211687.0]
+    (tmp_path / "cad-dataset" / "cad_import_stats.json").write_text(
+        json.dumps(
+            {
+                "bbox": [-3249624.0, -1907080.0, 3245569.0, 3276235.0],
+                "viewer_focus_bbox": focus_bbox,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    current = repositories.project.load("p1")
+    job = service.enqueue_cad_georeference_candidates(
+        "p1",
+        expected_revision=current.revision,
+        central_meridian_deg=120.0,
+    )
+    request = json.loads(
+        (
+            Path(job.attempts[-1].directory)
+            / "cad_georeference_candidate_request.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert request["cad_bbox_raw"] == focus_bbox
+
+
 def test_candidate_status_and_confirmation_reject_changed_cad_input(
     tmp_path: Path,
 ) -> None:

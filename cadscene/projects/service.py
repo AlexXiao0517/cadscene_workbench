@@ -2441,9 +2441,13 @@ class ProjectService:
                     expected_revision=expected_revision,
                     current_revision=project.revision,
                 )
+            request_assets = _complete_cad_georeference_assets(
+                project.source_assets,
+                self.repositories.clips.load(project_id),
+            )
             request = _cad_georeference_candidate_request(
                 project_id,
-                project.source_assets,
+                request_assets,
                 central_meridian_deg=central_meridian_deg,
                 limit=limit,
             )
@@ -2706,7 +2710,11 @@ class ProjectService:
         """Rank CGCS2000 Gauss-Kruger candidates without confirming one."""
 
         project = self.repositories.project.load(project_id)
-        srt_path = _asset_path(project.source_assets, "srt")
+        request_assets = _complete_cad_georeference_assets(
+            project.source_assets,
+            self.repositories.clips.load(project_id),
+        )
+        srt_path = _asset_path(request_assets, "srt")
         if srt_path is None or not srt_path.is_file():
             raise FileNotFoundError("physical SRT is required for CAD georeference")
         records = load_srt_records(srt_path)
@@ -2720,7 +2728,7 @@ class ProjectService:
         return recommend_cgcs2000_candidates(
             [item[0] for item in gps],
             [item[1] for item in gps],
-            _active_cad_coordinate_bbox(project.source_assets),
+            _active_cad_coordinate_bbox(request_assets),
             limit=limit,
             central_meridian_deg=central_meridian_deg,
             progress_callback=progress_callback,
@@ -6462,9 +6470,13 @@ class ProjectService:
         if job.job_type == "cad_georeference_candidates":
             try:
                 request = self._load_cad_georeference_candidate_request(job)
+                request_assets = _complete_cad_georeference_assets(
+                    project.source_assets,
+                    self.repositories.clips.load(job.project_id),
+                )
                 current = _cad_georeference_candidate_request(
                     job.project_id,
-                    project.source_assets,
+                    request_assets,
                     central_meridian_deg=(
                         None
                         if request.get("central_meridian_deg") is None
@@ -8000,6 +8012,18 @@ def _complete_active_cad_descriptor(
     return descriptor
 
 
+def _complete_cad_georeference_assets(
+    project_assets: Mapping[str, object], clips: ClipsManifest
+) -> Mapping[str, object]:
+    active_cad = project_assets.get("cad")
+    if not isinstance(active_cad, Mapping):
+        return project_assets
+    return {
+        **project_assets,
+        "cad": _complete_active_cad_descriptor(dict(active_cad), clips),
+    }
+
+
 def _active_cad_render_identity(
     project_assets: Mapping[str, object], clip: ClipDefinition
 ) -> dict[str, object]:
@@ -8089,15 +8113,35 @@ def _active_cad_coordinate_bbox(
     cad = project_assets.get("cad")
     if not isinstance(cad, Mapping):
         raise ValueError("active CAD descriptor is unavailable")
-    candidates: list[object] = [
+    focus_candidates: list[object] = [cad.get("viewer_focus_bbox")]
+    fallback_candidates: list[object] = [
         cad.get("coordinate_bbox"),
         cad.get("bbox"),
     ]
     stats = cad.get("stats")
     if isinstance(stats, Mapping):
-        candidates.extend((stats.get("coordinate_bbox"), stats.get("bbox")))
+        focus_candidates.append(stats.get("viewer_focus_bbox"))
+        fallback_candidates.extend(
+            (stats.get("coordinate_bbox"), stats.get("bbox"))
+        )
     dataset_path = cad.get("dataset_path")
     if isinstance(dataset_path, str) and dataset_path:
+        try:
+            import_stats = json.loads(
+                (Path(dataset_path) / "cad_import_stats.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            if isinstance(import_stats, Mapping):
+                focus_candidates.append(import_stats.get("viewer_focus_bbox"))
+                fallback_candidates.extend(
+                    (
+                        import_stats.get("coordinate_bbox"),
+                        import_stats.get("bbox"),
+                    )
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
         try:
             manifest = json.loads(
                 (Path(dataset_path) / "dataset_manifest.json").read_text(
@@ -8108,7 +8152,8 @@ def _active_cad_coordinate_bbox(
                 manifest.get("cad") if isinstance(manifest, Mapping) else None
             )
             if isinstance(manifest_cad, Mapping):
-                candidates.extend(
+                focus_candidates.append(manifest_cad.get("viewer_focus_bbox"))
+                fallback_candidates.extend(
                     (
                         manifest_cad.get("coordinate_bbox"),
                         manifest_cad.get("bbox"),
@@ -8116,7 +8161,7 @@ def _active_cad_coordinate_bbox(
                 )
         except (OSError, json.JSONDecodeError):
             pass
-    for candidate in candidates:
+    for candidate in (*focus_candidates, *fallback_candidates):
         if (
             isinstance(candidate, Sequence)
             and not isinstance(candidate, (str, bytes))
