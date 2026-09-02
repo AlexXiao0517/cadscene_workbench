@@ -1945,7 +1945,14 @@
       return { ok: true, kind: "pure_rotation_draft" };
     }
     if (typeof window.cadsceneGetCameraTrack === "function") {
-      return saveCurrentCameraTrack();
+      const result = await saveCurrentCameraTrack();
+      if (
+        projectWorkbenchSession.state === "editing"
+        || projectWorkbenchSession.state === "pending_save"
+      ) {
+        await finalizeProjectWorkbenchSave(result, { navigate: false });
+      }
+      return result;
     }
     return null;
   }

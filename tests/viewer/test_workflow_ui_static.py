@@ -874,6 +874,11 @@ def test_project_workbench_can_save_and_return_without_cancelling_background_job
     assert "推理和渲染任务会继续在后台运行" in html
     assert "async function persistWorkbenchDraftForReturn" in script
     assert "async function returnToProjectWorkspace" in script
+    persist_start = script.index("async function persistWorkbenchDraftForReturn")
+    persist_end = script.index("function projectWorkbenchFallbackReturnTo", persist_start)
+    persist_flow = script[persist_start:persist_end]
+    assert "const result = await saveCurrentCameraTrack()" in persist_flow
+    assert "await finalizeProjectWorkbenchSave(result, { navigate: false })" in persist_flow
     return_flow = script[
         script.index("async function returnToProjectWorkspace") :
         script.index("window.addEventListener(\"pagehide\"")

@@ -4023,6 +4023,88 @@ def test_reopen_restores_saved_pure_rotation_progress_and_resumes_render(
     )
 
 
+def test_reopen_restores_saved_manual_keyframes_before_route_fitting(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _job = _project_api_with_workbench(tmp_path)
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    run = runs_root / "project-1-clip-1/clip-1"
+    manual = run / "01_keyframes/camera_track_manual.json"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    saved_bytes = json.dumps(_manual_track()).encode("utf-8")
+    manual.write_bytes(saved_bytes)
+    assert not (run / "03_alignment/camera_track_pred.json").exists()
+
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+    assert saved.status == 200
+    resumed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/resume",
+        json_body={
+            "expected_resume_revision": None,
+            "operation_id": "resume-keyframes-before-route-fit",
+            "workflow_stage": "keyframes",
+            "source_pts": 0,
+            "source_time_base": {"numerator": 1, "denominator": 25},
+        },
+    )
+    assert resumed.status == 200
+    manual.unlink()
+
+    reopened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert reopened.status == 201
+    assert parse_qs(urlsplit(reopened.body["workbench_url"]).query)[
+        "workflowStage"
+    ] == ["keyframes"]
+    assert manual.read_bytes() == saved_bytes
+    assert not (run / "03_alignment/camera_track_pred.json").exists()
+    reference = repositories.clips.load("project-1").clips[0].references[-1]
+    assert reference.value["status"] == "editing"
+    assert (
+        reference.value["workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+
+    closed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{reopened.body['token']}/close",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+        },
+    )
+    assert closed.status == 200
+    assert closed.body["state"] == "saved"
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+    workbench = snapshot.body["clips"][0]["workbench"]
+    assert workbench["state"] == "saved"
+    assert (
+        workbench["workbench_output_revision"]
+        == saved.body["workbench_output_revision"]
+    )
+
+
 def test_stale_pure_rotation_corrected_lineage_falls_back_to_current_base(
     tmp_path: Path,
 ) -> None:
