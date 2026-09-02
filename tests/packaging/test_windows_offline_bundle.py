@@ -201,6 +201,25 @@ def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor()
     assert source.index("Set-Location -LiteralPath $bundleRoot") < source.index("$doctorArguments")
 
 
+def test_start_launcher_migrates_copied_workspace_with_a_recoverable_junction() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert "function Invoke-WorkspaceMigration" in source
+    assert '"-m", "cadscene.cli.workspace_migration", "plan"' in source
+    assert '"-m", "cadscene.cli.workspace_migration", "record"' in source
+    assert "Get-CimInstance Win32_Process" in source
+    assert "$candidate.CommandLine.Contains($oldWorkspace)" in source
+    assert 'Split-Path -Leaf $oldWorkspace) -ine "workspace"' in source
+    assert "Move-Item -LiteralPath $oldWorkspace -Destination $backupWorkspace" in source
+    assert "New-Item -ItemType Junction -Path $oldWorkspace -Target $workspace" in source
+    assert "Move-Item -LiteralPath $backupWorkspace -Destination $oldWorkspace" in source
+    assert "旧版 CADScene 服务仍在使用" in source
+    assert "创建兼容 Junction 失败" in source
+    assert source.index("Invoke-WorkspaceMigration\n\n    $doctorArguments") > source.index(
+        "conda-unpack-script.py"
+    )
+
+
 def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
 
