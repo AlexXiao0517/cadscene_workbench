@@ -122,6 +122,42 @@ def test_changed_project_manifest_is_rejected_before_old_workspace_moves(
     assert old_workspace.is_dir()
 
 
+def test_destination_only_project_is_reported_before_old_workspace_moves(
+    tmp_path: Path,
+) -> None:
+    old_workspace, new_workspace, _ = _copied_workspace(tmp_path)
+    _write_json(
+        new_workspace / "projects" / "p-new" / "project_manifest.json",
+        {"project_id": "p-new"},
+    )
+
+    with pytest.raises(
+        WorkspaceMigrationError,
+        match=r"新版额外.*projects/p-new/project_manifest\.json",
+    ):
+        build_migration_plan(new_workspace)
+
+    assert old_workspace.is_dir()
+
+
+def test_changed_project_manifest_error_identifies_conflicting_file(
+    tmp_path: Path,
+) -> None:
+    old_workspace, new_workspace, _ = _copied_workspace(tmp_path)
+    _write_json(
+        new_workspace / "projects" / "p-test" / "clips_manifest.json",
+        {"clips": []},
+    )
+
+    with pytest.raises(
+        WorkspaceMigrationError,
+        match=r"内容冲突.*projects/p-test/clips_manifest\.json",
+    ):
+        build_migration_plan(new_workspace)
+
+    assert old_workspace.is_dir()
+
+
 def test_existing_marker_requires_old_junction_to_target_current_workspace(
     tmp_path: Path,
 ) -> None:
@@ -170,4 +206,3 @@ def test_record_migration_writes_marker_only_after_junction_verification(
     assert payload["old_workspace"] == str(old_workspace.resolve())
     assert payload["backup_workspace"] == str(backup.resolve())
     assert payload["migrated_at"] == "2026-09-02T10:11:12+00:00"
-

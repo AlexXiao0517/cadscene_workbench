@@ -150,9 +150,29 @@ def _validate_copy(
 
     old_inventory = _manifest_inventory(old_workspace)
     new_inventory = _manifest_inventory(workspace)
-    if not old_inventory or old_inventory != new_inventory:
+    if not old_inventory:
         raise WorkspaceMigrationError(
-            "新旧 workspace 的项目清单不一致；为避免覆盖进度，迁移已停止。"
+            "旧 workspace 中没有可校验的项目清单；为避免覆盖进度，迁移已停止。"
+            "请关闭旧版服务后重新完整复制整个 workspace。"
+        )
+    missing_manifests = sorted(old_inventory.keys() - new_inventory.keys())
+    extra_manifests = sorted(new_inventory.keys() - old_inventory.keys())
+    changed_manifests = sorted(
+        relative
+        for relative in old_inventory.keys() & new_inventory.keys()
+        if old_inventory[relative] != new_inventory[relative]
+    )
+    if missing_manifests or extra_manifests or changed_manifests:
+        differences: list[str] = []
+        if missing_manifests:
+            differences.append(f"缺失：{'、'.join(missing_manifests[:5])}")
+        if extra_manifests:
+            differences.append(f"新版额外：{'、'.join(extra_manifests[:5])}")
+        if changed_manifests:
+            differences.append(f"内容冲突：{'、'.join(changed_manifests[:5])}")
+        raise WorkspaceMigrationError(
+            f"新旧 workspace 的项目清单不一致（{'；'.join(differences)}）；"
+            "为避免覆盖进度，迁移已停止。"
             "请关闭旧版服务后重新完整复制整个 workspace。"
         )
 
