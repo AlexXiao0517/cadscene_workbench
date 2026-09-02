@@ -158,6 +158,59 @@ def test_changed_project_manifest_error_identifies_conflicting_file(
     assert old_workspace.is_dir()
 
 
+def test_interrupted_migration_recovers_from_matching_pre_backup(
+    tmp_path: Path,
+) -> None:
+    old_workspace, new_workspace, _ = _copied_workspace(tmp_path)
+    backup = old_workspace.with_name("workspace.pre-0.1.3-20260902-101112")
+    old_workspace.rename(backup)
+    for name in ("projects", "data", "runs"):
+        (old_workspace / name).mkdir(parents=True)
+
+    plan = build_migration_plan(
+        new_workspace,
+        now=datetime(2026, 9, 2, 10, 20, 30, tzinfo=timezone.utc),
+    )
+
+    assert plan.action == "recover"
+    assert plan.old_workspace == old_workspace.resolve()
+    assert plan.backup_workspace == backup.resolve()
+    assert plan.displaced_workspace == old_workspace.with_name(
+        "workspace.empty-before-0.1.3-20260902-102030"
+    ).resolve()
+
+
+def test_interrupted_migration_ignores_a_stale_project_root_lease(
+    tmp_path: Path,
+) -> None:
+    old_workspace, new_workspace, _ = _copied_workspace(tmp_path)
+    backup = old_workspace.with_name("workspace.pre-0.1.3-20260902-101112")
+    old_workspace.rename(backup)
+    lease = old_workspace / "projects" / ".serve_viewer.lease"
+    lease.parent.mkdir(parents=True)
+    lease.write_text("stale process lease", encoding="utf-8")
+
+    plan = build_migration_plan(new_workspace)
+
+    assert plan.action == "recover"
+    assert plan.backup_workspace == backup.resolve()
+
+
+def test_interrupted_migration_does_not_replace_a_nonempty_old_workspace(
+    tmp_path: Path,
+) -> None:
+    old_workspace, new_workspace, _ = _copied_workspace(tmp_path)
+    backup = old_workspace.with_name("workspace.pre-0.1.3-20260902-101112")
+    old_workspace.rename(backup)
+    old_workspace.mkdir()
+    (old_workspace / "unknown.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(WorkspaceMigrationError, match="没有可校验的项目清单"):
+        build_migration_plan(new_workspace)
+
+    assert (old_workspace / "unknown.txt").read_text(encoding="utf-8") == "keep"
+
+
 def test_existing_marker_requires_old_junction_to_target_current_workspace(
     tmp_path: Path,
 ) -> None:

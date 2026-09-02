@@ -138,11 +138,12 @@ function Invoke-WorkspaceMigration() {
     if ($oldWorkspace -ieq [IO.Path]::GetFullPath($workspace)) {
         throw "旧 workspace 与当前 workspace 相同，拒绝执行迁移。"
     }
-    if ([string]$plan.action -eq "record") {
+    $migrationAction = [string]$plan.action
+    if ($migrationAction -eq "record") {
         Invoke-WorkspaceMigrationRecord $oldWorkspace $null
         return
     }
-    if ([string]$plan.action -ne "migrate") {
+    if ($migrationAction -notin @("migrate", "recover")) {
         throw "未知的 workspace 迁移动作：$($plan.action)"
     }
 
@@ -153,8 +154,11 @@ function Invoke-WorkspaceMigration() {
     if (-not (Test-Path -LiteralPath $oldWorkspace -PathType Container)) {
         throw "旧 workspace 不存在：$oldWorkspace"
     }
-    if (Test-Path -LiteralPath $backupWorkspace) {
+    if ($migrationAction -eq "migrate" -and (Test-Path -LiteralPath $backupWorkspace)) {
         throw "workspace 备份目录已存在：$backupWorkspace"
+    }
+    if ($migrationAction -eq "recover" -and -not (Test-Path -LiteralPath $backupWorkspace -PathType Container)) {
+        throw "用于恢复的 workspace pre 备份不存在：$backupWorkspace"
     }
     $oldItem = Get-Item -LiteralPath $oldWorkspace
     if (($oldItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -176,6 +180,47 @@ function Invoke-WorkspaceMigration() {
     }
     if ($active) {
         throw "旧版 CADScene 服务仍在使用 $oldWorkspace。请先点击旧版的关闭脚本，再启动新版。"
+    }
+
+    if ($migrationAction -eq "recover") {
+        $displacedWorkspace = [IO.Path]::GetFullPath([string]$plan.displaced_workspace)
+        if ((Split-Path -Parent $displacedWorkspace) -ine (Split-Path -Parent $oldWorkspace)) {
+            throw "旧 workspace 空壳备份必须位于原目录旁：$displacedWorkspace"
+        }
+        if (Test-Path -LiteralPath $displacedWorkspace) {
+            throw "旧 workspace 空壳备份已存在：$displacedWorkspace"
+        }
+        $junctionCreated = $false
+        Move-Item -LiteralPath $oldWorkspace -Destination $displacedWorkspace
+        try {
+            $allowedStaleLease = Join-Path $displacedWorkspace "projects\.serve_viewer.lease"
+            $unexpected = Get-ChildItem -LiteralPath $displacedWorkspace -Force -Recurse | Where-Object {
+                $isReparsePoint = ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                $isUnexpectedFile = -not $_.PSIsContainer -and $_.FullName -ine $allowedStaleLease
+                $isReparsePoint -or $isUnexpectedFile
+            } | Select-Object -First 1
+            if ($unexpected) {
+                throw "旧 workspace 空壳在恢复期间出现了文件：$($unexpected.FullName)"
+            }
+            New-Item -ItemType Junction -Path $oldWorkspace -Target $workspace | Out-Null
+            $junctionCreated = $true
+            Invoke-WorkspaceMigrationRecord $oldWorkspace $backupWorkspace
+            Write-Host "旧 workspace 空壳已恢复为兼容 Junction。原 pre 备份保留在：$backupWorkspace"
+        }
+        catch {
+            $recoveryError = $_
+            if ($junctionCreated -and (Test-Path -LiteralPath $oldWorkspace)) {
+                Remove-Item -LiteralPath $oldWorkspace -Force
+            }
+            if (
+                (Test-Path -LiteralPath $displacedWorkspace -PathType Container) -and
+                -not (Test-Path -LiteralPath $oldWorkspace)
+            ) {
+                Move-Item -LiteralPath $displacedWorkspace -Destination $oldWorkspace
+            }
+            throw "恢复中断的 workspace 迁移失败，旧空壳已回滚：$($recoveryError.Exception.Message)"
+        }
+        return
     }
 
     $junctionCreated = $false

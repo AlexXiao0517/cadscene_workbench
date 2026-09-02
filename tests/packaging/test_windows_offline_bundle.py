@@ -249,6 +249,15 @@ def test_start_launcher_migrates_copied_workspace_with_a_recoverable_junction() 
     )
 
 
+def test_start_launcher_recovers_an_interrupted_workspace_migration() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert '$migrationAction -eq "recover"' in source
+    assert "$plan.displaced_workspace" in source
+    assert '"projects\\.serve_viewer.lease"' in source
+    assert "旧 workspace 空壳已恢复为兼容 Junction" in source
+
+
 def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
 
@@ -262,6 +271,29 @@ def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     assert source.index("ExecutablePath") < source.index("Stop-Process")
 
 
+def test_small_hotfix_script_backs_up_files_and_repairs_opencv_without_workspace_writes() -> None:
+    source = (WINDOWS_PACKAGING / "hotfix" / "apply-hotfix.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'Join-Path $bundleRoot "runtime\\python.exe"' in source
+    assert 'Join-Path $bundleRoot "launcher\\start.ps1"' in source
+    assert "hotfix-backup-" in source
+    assert "Copy-Item -LiteralPath $sourceFile -Destination $destinationFile" in source
+    assert '"-m", "cadscene.cli.runtime_relocation", "--runtime", $runtime' in source
+    assert 'Join-Path $bundleRoot "workspace"' not in source
+    assert "Remove-Item" not in source
+
+
+def test_small_hotfix_cmd_runs_the_powershell_installer() -> None:
+    source = (WINDOWS_PACKAGING / "hotfix" / "应用0.1.3修复.cmd").read_text(
+        encoding="utf-8"
+    )
+
+    assert "%~dp0hotfix\\apply-hotfix.ps1" in source
+    assert "if errorlevel 1 pause" in source
+
+
 def test_start_launcher_persists_process_start_time_for_pid_reuse_protection() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
@@ -270,7 +302,10 @@ def test_start_launcher_persists_process_start_time_for_pid_reuse_protection() -
     assert "ToUniversalTime().ToString(\"o\")" in source
 
 
-@pytest.mark.parametrize("script_name", ("start.ps1", "stop.ps1"))
+@pytest.mark.parametrize(
+    "script_name",
+    ("start.ps1", "stop.ps1", "../hotfix/apply-hotfix.ps1"),
+)
 def test_powershell_launchers_parse_without_errors(script_name: str) -> None:
     script = WINDOWS_PACKAGING / "launcher" / script_name
     command = (

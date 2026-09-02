@@ -29,12 +29,18 @@ class MigrationPlan:
     workspace: Path
     old_workspace: Path | None = None
     backup_workspace: Path | None = None
+    displaced_workspace: Path | None = None
     project_count: int = 0
     referenced_path_count: int = 0
 
     def to_json_dict(self) -> dict[str, object]:
         payload = asdict(self)
-        for key in ("workspace", "old_workspace", "backup_workspace"):
+        for key in (
+            "workspace",
+            "old_workspace",
+            "backup_workspace",
+            "displaced_workspace",
+        ):
             value = payload[key]
             payload[key] = str(value) if value is not None else None
         return payload
@@ -136,19 +142,24 @@ def _manifest_inventory(workspace: Path) -> dict[str, str]:
 
 
 def _validate_copy(
-    old_workspace: Path,
+    source_workspace: Path,
     workspace: Path,
     references: set[Path],
+    *,
+    reference_workspace: Path | None = None,
 ) -> None:
-    if not old_workspace.is_dir():
+    if not source_workspace.is_dir():
         raise WorkspaceMigrationError(
-            f"检测到旧项目路径，但旧 workspace 不存在：{old_workspace}。"
+            f"检测到旧项目路径，但校验源不存在：{source_workspace}。"
             "请保留旧整合包并重新完整复制 workspace。"
         )
-    if old_workspace.name.casefold() != "workspace":
-        raise WorkspaceMigrationError(f"拒绝处理非 workspace 目录：{old_workspace}")
+    logical_workspace = reference_workspace or source_workspace
+    if logical_workspace.name.casefold() != "workspace":
+        raise WorkspaceMigrationError(
+            f"拒绝处理非 workspace 引用根目录：{logical_workspace}"
+        )
 
-    old_inventory = _manifest_inventory(old_workspace)
+    old_inventory = _manifest_inventory(source_workspace)
     new_inventory = _manifest_inventory(workspace)
     if not old_inventory:
         raise WorkspaceMigrationError(
@@ -176,14 +187,15 @@ def _validate_copy(
             "请关闭旧版服务后重新完整复制整个 workspace。"
         )
 
-    old_key = _path_key(old_workspace)
+    old_key = _path_key(logical_workspace)
     missing: list[Path] = []
     for reference in sorted(references, key=str):
         try:
-            relative = reference.relative_to(old_workspace)
+            relative = reference.relative_to(logical_workspace)
         except ValueError:
             continue
-        if _path_key(reference).startswith(old_key) and reference.exists():
+        source_reference = source_workspace / relative
+        if _path_key(reference).startswith(old_key) and source_reference.exists():
             copied = workspace / relative
             if not copied.exists():
                 missing.append(copied)
@@ -195,6 +207,47 @@ def _validate_copy(
             f"workspace 复制不完整，以下旧文件在新副本中缺失：{examples}。"
             "请重新复制整个 workspace 后再启动。"
         )
+
+
+def _is_empty_workspace_shell(workspace: Path) -> bool:
+    if workspace.is_symlink() or not workspace.is_dir():
+        return False
+    try:
+        allowed_files = {"projects/.serve_viewer.lease"}
+        for path in workspace.rglob("*"):
+            if path.is_symlink():
+                return False
+            if path.is_file():
+                relative = path.relative_to(workspace).as_posix().casefold()
+                if relative not in allowed_files:
+                    return False
+        return True
+    except OSError:
+        return False
+
+
+def _matching_pre_backups(
+    old_workspace: Path,
+    workspace: Path,
+    references: set[Path],
+) -> list[Path]:
+    if not _is_empty_workspace_shell(old_workspace):
+        return []
+    matches: list[Path] = []
+    for candidate in sorted(old_workspace.parent.glob("workspace.pre-0.1.3-*")):
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        try:
+            _validate_copy(
+                candidate,
+                workspace,
+                references,
+                reference_workspace=old_workspace,
+            )
+        except WorkspaceMigrationError:
+            continue
+        matches.append(_absolute_path(candidate))
+    return matches
 
 
 def _load_marker(workspace: Path) -> dict[str, object] | None:
@@ -256,6 +309,27 @@ def build_migration_plan(
         for path in references
         if _path_key(path).startswith(_path_key(old_workspace))
     }
+    recovery_backups = _matching_pre_backups(
+        old_workspace, workspace, old_references
+    )
+    if recovery_backups:
+        timestamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
+        return MigrationPlan(
+            action="recover",
+            workspace=workspace,
+            old_workspace=old_workspace,
+            backup_workspace=recovery_backups[-1],
+            displaced_workspace=_absolute_path(
+                old_workspace.with_name(
+                    f"workspace.empty-before-0.1.3-{timestamp}"
+                )
+            ),
+            project_count=len(
+                list((workspace / "projects").glob("*/project_manifest.json"))
+            ),
+            referenced_path_count=len(old_references),
+        )
+
     _validate_copy(old_workspace, workspace, old_references)
     project_count = len(list((workspace / "projects").glob("*/project_manifest.json")))
     if same_path(old_workspace, workspace):
