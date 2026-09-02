@@ -1482,9 +1482,19 @@
   }
 
   function projectWorkbenchTrajectoryOwnsStatus() {
+    const activeStatuses = new Set([
+      "queued",
+      "preparing",
+      "running",
+      "validating",
+      "cancel_requested",
+    ]);
     return Boolean(
       projectWorkbenchToken
-      && (projectWorkbenchTrajectoryStatus || projectWorkbenchRenderStatus),
+      && (
+        activeStatuses.has(projectWorkbenchTrajectoryStatus)
+        || activeStatuses.has(projectWorkbenchRenderStatus)
+      ),
     );
   }
 
