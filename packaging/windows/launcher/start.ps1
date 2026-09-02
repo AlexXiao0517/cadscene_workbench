@@ -237,6 +237,14 @@ try {
         New-Item -ItemType File -Force -Path $relocatedMarker | Out-Null
     }
 
+    $runtimeRepairArguments = @(
+        "-m", "cadscene.cli.runtime_relocation", "--runtime", $runtime
+    )
+    $runtimeRepairOutput = & $python @runtimeRepairArguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bundled OpenCV runtime relocation failed: $($runtimeRepairOutput -join [Environment]::NewLine)"
+    }
+
     Invoke-WorkspaceMigration
 
     $doctorArguments = @(

@@ -73,6 +73,8 @@ def validate_staging_tree(root: str | Path) -> None:
         raise ValueError(f"bundle staging root does not exist: {resolved}")
     for path in resolved.rglob("*"):
         relative = path.relative_to(resolved)
+        if relative.as_posix().casefold() == "runtime/.cadscene-relocated":
+            raise ValueError(f"forbidden bundle content: {relative.as_posix()}")
         if relative.parts and relative.parts[0].lower() in _FORBIDDEN_TOP_LEVEL:
             raise ValueError(f"forbidden bundle content: {relative.as_posix()}")
         if ".git" in {part.lower() for part in relative.parts}:

@@ -73,6 +73,18 @@ def test_empty_runtime_workspace_and_log_directories_are_allowed(tmp_path: Path)
     validate_staging_tree(layout.root)
 
 
+def test_validate_staging_tree_rejects_a_runtime_already_relocated_in_staging(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    marker = root / "runtime" / ".cadscene-relocated"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    with pytest.raises(ValueError, match="cadscene-relocated"):
+        validate_staging_tree(root)
+
+
 def test_backend_runtime_files_are_an_explicit_allowlist(tmp_path: Path) -> None:
     backend = tmp_path / "backend"
     wanted = (
@@ -208,6 +220,14 @@ def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor()
     assert '$env:PYTHONIOENCODING = "utf-8"' in source
     assert "Set-Location -LiteralPath $bundleRoot" in source
     assert source.index("Set-Location -LiteralPath $bundleRoot") < source.index("$doctorArguments")
+
+
+def test_start_launcher_repairs_opencv_paths_on_every_start_before_doctor() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    repair_command = '"-m", "cadscene.cli.runtime_relocation", "--runtime", $runtime'
+    assert repair_command in source
+    assert source.index(repair_command) < source.index("$doctorArguments")
 
 
 def test_start_launcher_migrates_copied_workspace_with_a_recoverable_junction() -> None:
