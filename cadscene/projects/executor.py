@@ -102,6 +102,15 @@ class ExecutionCoordinator(Protocol):
     ) -> None:
         ...
 
+    def reclaim_job_attempt(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        attempt_number: int,
+    ) -> object:
+        ...
+
 
 class LocalJobExecutor:
     """Runs one queue-reserved job; all durable state goes through the service."""
@@ -294,6 +303,15 @@ class LocalJobExecutor:
                     claim_token=claim_token,
                 )
             except ValueError:
+                pass
+            try:
+                self.coordinator.reclaim_job_attempt(
+                    job.project_id,
+                    job.job_id,
+                    attempt_number=attempt_number,
+                )
+            except Exception:
+                # 回收属于 best-effort 维护，不能覆盖已经持久化的任务结果。
                 pass
 
     def _wait_for_process(

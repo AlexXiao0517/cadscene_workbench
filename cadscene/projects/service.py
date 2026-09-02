@@ -64,6 +64,7 @@ from .media import (
 from .identifiers import is_safe_stable_id
 from .render_adapters import RenderAdapterRegistry
 from .render_adapters import RenderInputs
+from .retention import RetentionReport, reclaim_terminal_attempt
 from .source_fallback import SourceIntervalRenderAdapter, SourceIntervalRenderInputs
 from .scene_bridge_runner import (
     BRIDGE_ALGORITHM_VERSION,
@@ -4608,6 +4609,37 @@ class ProjectService:
                 attempt_number=attempt_number,
                 claim_token=claim_token,
             )
+
+    def reclaim_job_attempt(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        attempt_number: int,
+    ) -> RetentionReport:
+        """校验任务目录身份后，按终态策略回收可重建内容。"""
+
+        current = self.queue.get(job_id)
+        if current.project_id != project_id:
+            raise KeyError(f"job {job_id} does not belong to {project_id}")
+        attempt = next(
+            (item for item in current.attempts if item.number == attempt_number),
+            None,
+        )
+        if attempt is None:
+            raise ValueError(f"job attempt {attempt_number} does not exist")
+        expected = self._attempt_directory(
+            project_id, job_id, attempt_number
+        ).resolve(strict=False)
+        observed = Path(attempt.directory).resolve(strict=False)
+        if observed != expected:
+            raise ValueError("job attempt directory does not match its project identity")
+        return reclaim_terminal_attempt(
+            observed,
+            status=current.status,
+            job_type=current.job_type,
+            published_outputs=current.published_outputs,
+        )
 
     def retry_job(
         self,

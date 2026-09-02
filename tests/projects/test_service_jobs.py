@@ -1202,3 +1202,70 @@ def test_job_actions_check_expected_revision_inside_service_state_guard(
         )
 
     assert queue.status(job_id) == status_before
+
+
+def test_service_reclaims_failed_attempt_after_validating_attempt_identity(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    attempt = Path(lease.directory)
+    (attempt / "adapter.log").write_text("failure", encoding="utf-8")
+    (attempt / "partial.mp4").write_bytes(b"partial-video")
+    service.fail_job(
+        "p1",
+        claimed.job_id,
+        "failed on purpose",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    report = service.reclaim_job_attempt(
+        "p1", claimed.job_id, attempt_number=lease.number
+    )
+
+    assert report is not None
+    assert report.reclaimed_bytes == len(b"partial-video")
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "adapter.log").read_text(encoding="utf-8") == "failure"
+
+
+def test_service_rejects_unknown_attempt_number_before_cleanup(tmp_path: Path) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    job_id = queue.running_ids()[0]
+
+    with pytest.raises(ValueError, match="attempt"):
+        service.reclaim_job_attempt("p1", job_id, attempt_number=2)
+
+
+def test_service_preserves_successful_trajectory_attempt(tmp_path: Path) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    output = Path(lease.directory) / "trajectory.json"
+    output.write_text("{}", encoding="utf-8")
+    service.finish_job(
+        "p1",
+        claimed.job_id,
+        AdapterResult.success(
+            output_revision="trajectory-1",
+            output_fingerprint="trajectory-fingerprint",
+            outputs={"trajectory": str(output)},
+        ),
+        current_fingerprint=claimed.input_fingerprint,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    report = service.reclaim_job_attempt(
+        "p1", claimed.job_id, attempt_number=lease.number
+    )
+
+    assert report is not None and report.reclaimed_bytes == 0
+    assert output.read_text(encoding="utf-8") == "{}"
