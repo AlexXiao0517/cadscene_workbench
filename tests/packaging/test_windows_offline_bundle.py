@@ -143,6 +143,15 @@ def test_cmd_entry_points_are_bundle_relative_and_keep_errors_visible() -> None:
     assert "if errorlevel 1 pause" in stop
 
 
+def test_tester_instructions_explain_same_machine_workspace_upgrade() -> None:
+    instructions = (WINDOWS_PACKAGING / "使用说明.txt").read_text(encoding="utf-8")
+
+    assert "同一台电脑从旧版升级" in instructions
+    assert "完整复制旧版的 workspace" in instructions
+    assert "请勿删除旧版原位置自动建立的 workspace Junction" in instructions
+    assert "workspace.pre-0.1.3-" in instructions
+
+
 def test_start_launcher_uses_only_bundle_local_runtime_and_storage() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
