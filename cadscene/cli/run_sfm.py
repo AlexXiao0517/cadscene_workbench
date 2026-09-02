@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from cadscene.core.artifacts import ArtifactManager
+from cadscene.projects.retention import prune_sfm_workspace
 from cadscene.sfm.reconstruction import (
     ReconstructionConfig,
     export_mock_reconstruction,
@@ -54,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-reg-images", type=int, default=10)
     parser.add_argument("--reuse-database", action="store_true")
     parser.add_argument("--export-only", action="store_true")
+    parser.add_argument(
+        "--cleanup-workspace",
+        action="store_true",
+        help="正式结果发布后回收可重建的 COLMAP 中间文件。",
+    )
     parser.add_argument("--colmap-exe")
     parser.add_argument("--backend", choices=("auto", "pycolmap", "colmap_cli"), default="pycolmap")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="cpu")
@@ -153,6 +159,16 @@ def main(argv: list[str] | None = None) -> int:
             metrics=result.stats,
             status="success",
         )
+        if args.cleanup_workspace:
+            try:
+                report = prune_sfm_workspace(stage_dir)
+                if report.errors:
+                    print(
+                        "SfM workspace cleanup warning: " + "; ".join(report.errors),
+                        file=sys.stderr,
+                    )
+            except Exception as exc:  # 清理失败不得改变已发布 SfM 结果。
+                print(f"SfM workspace cleanup warning: {exc}", file=sys.stderr)
         status_store.update_stage(
             "sfm",
             status="success",

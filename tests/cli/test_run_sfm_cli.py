@@ -18,6 +18,7 @@ def test_default_backend_restores_legacy_pycolmap_cpu() -> None:
 
     assert args.backend == "pycolmap"
     assert args.device == "cpu"
+    assert args.cleanup_workspace is False
 
 
 def test_help_runs_without_pycolmap() -> None:
@@ -201,3 +202,97 @@ def test_sfm_cli_publishes_authoritative_stage_progress(
         "message": "正在进行顺序匹配",
         "fraction": 0.52,
     }
+
+
+@pytest.mark.parametrize("cleanup", (False, True))
+def test_sfm_cli_cleanup_is_opt_in_and_preserves_formal_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup: bool,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    output_root = tmp_path / "runs"
+
+    def fake_reconstruction(*, output_dir, **_kwargs):
+        for relative in (
+            "images/frame.jpg",
+            "masks/frame.png",
+            "database.db",
+            "sparse/0/cameras.bin",
+            "sparse_text_export/cameras.txt",
+        ):
+            path = output_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"scratch")
+        return SimpleNamespace(stats={})
+
+    def fake_write(stage_dir, *_args, **_kwargs):
+        trajectory = stage_dir / "camera_trajectory.json"
+        points = stage_dir / "sparse_points.ply"
+        trajectory.write_text("{}", encoding="utf-8")
+        points.write_text("ply", encoding="utf-8")
+        return {"trajectory": trajectory, "sparse_points": points}
+
+    monkeypatch.setattr(run_sfm_module, "run_reconstruction", fake_reconstruction)
+    monkeypatch.setattr(run_sfm_module, "write_reconstruction_outputs", fake_write)
+    argv = [
+        "--dataset",
+        "demo",
+        "--run-id",
+        "cleanup",
+        "--output-root",
+        str(output_root),
+        "--video",
+        str(video),
+    ]
+    if cleanup:
+        argv.append("--cleanup-workspace")
+
+    result = run_sfm_module.main(argv)
+
+    assert result == 0
+    stage = output_root / "demo/cleanup/02_sfm"
+    assert (stage / "camera_trajectory.json").read_text("utf-8") == "{}"
+    assert (stage / "sparse_points.ply").read_text("utf-8") == "ply"
+    assert (stage / "database.db").exists() is (not cleanup)
+    assert (stage / "images").exists() is (not cleanup)
+
+
+def test_sfm_cleanup_failure_does_not_change_successful_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(
+        run_sfm_module,
+        "run_reconstruction",
+        lambda **_kwargs: SimpleNamespace(stats={}),
+    )
+    monkeypatch.setattr(
+        run_sfm_module,
+        "write_reconstruction_outputs",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        run_sfm_module,
+        "prune_sfm_workspace",
+        lambda _stage: (_ for _ in ()).throw(OSError("cleanup denied")),
+    )
+
+    result = run_sfm_module.main(
+        [
+            "--dataset",
+            "demo",
+            "--run-id",
+            "cleanup-error",
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--video",
+            str(video),
+            "--cleanup-workspace",
+        ]
+    )
+
+    assert result == 0

@@ -205,6 +205,7 @@ class ExistingWorkflowAdapter:
             "--init-min-tri-angle",
             "2",
             "--no-mask",
+            "--cleanup-workspace",
         ]
         for key in ("backend", "device", "gpu_index"):
             value = inputs.parameters.get(key)

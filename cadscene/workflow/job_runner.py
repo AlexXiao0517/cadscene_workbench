@@ -359,6 +359,7 @@ def _build_stage_command_legacy(
             "--init-min-tri-angle",
             "2",
             "--no-mask",
+            "--cleanup-workspace",
         ]
     if stage == "quality":
         for label in ("trajectory", "sparse_ply", "manual_track"):
@@ -551,6 +552,7 @@ def build_stage_command(
             device,
             "--gpu-index",
             gpu_index,
+            "--cleanup-workspace",
         ]
         if opts.get("colmap_exe"):
             command.extend(["--colmap-exe", str(opts["colmap_exe"])])
