@@ -80,6 +80,7 @@ from .queue import (
     PreparedSubmissionBatch,
     QueueJob,
     RestoreCleanupReservation,
+    TERMINAL_STATUSES,
 )
 from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
 from cadscene.workflow.job_runner import read_workflow_log_text
@@ -4746,6 +4747,12 @@ class ProjectService:
                         error=cleanup_error,
                     )
                 self._publish_queue_locked(project_id)
+        terminal_job_ids = tuple(
+            job.job_id
+            for job in self.queue.jobs()
+            if job.project_id == project_id and job.status in TERMINAL_STATUSES
+        )
+        self._reclaim_jobs_best_effort(terminal_job_ids)
         return restored
 
     def _recover_restored_scene_bridge_jobs_locked(
@@ -5290,7 +5297,23 @@ class ProjectService:
                 raise RuntimeError(
                     f"job-state publication failed for one or more projects: {details}"
                 ) from failures[0][1]
-            return reaped
+        self._reclaim_jobs_best_effort(reaped)
+        return reaped
+
+    def _reclaim_jobs_best_effort(self, job_ids: Sequence[str]) -> None:
+        for job_id in job_ids:
+            try:
+                job = self.queue.get(job_id)
+                if not job.attempts:
+                    continue
+                self.reclaim_job_attempt(
+                    job.project_id,
+                    job.job_id,
+                    attempt_number=job.attempts[-1].number,
+                )
+            except Exception:
+                # 恢复流程必须优先保证队列和 manifest 可用，回收失败留待下次。
+                continue
 
     def _prepare_analysis_submission(
         self,

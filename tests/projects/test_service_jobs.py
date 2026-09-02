@@ -751,6 +751,8 @@ def test_adopted_exit_is_published_as_interrupted_by_project_service(
         attempt_number=lease.number,
         claim_token=str(lease.worker_claim_token),
     )
+    attempt = Path(lease.directory)
+    (attempt / "partial.mp4").write_bytes(b"abandoned-video")
     restarted = ProjectService(
         repositories,
         LocalResourceQueue(),
@@ -770,6 +772,32 @@ def test_adopted_exit_is_published_as_interrupted_by_project_service(
     )
     assert stored["status"] == "interrupted"
     assert "completion sidecar" in stored["error"]
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "retention_report.json").is_file()
+
+
+def test_restore_jobs_reclaims_attempt_marked_interrupted_during_startup(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    running = next(job for job in queue.jobs() if job.status == "running")
+    attempt = Path(running.attempts[-1].directory)
+    (attempt / "partial.mp4").write_bytes(b"startup-abandoned-video")
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    restored = restarted.queue.get(running.job_id)
+    assert restored.status == "interrupted"
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "retention_report.json").is_file()
 
 
 def test_adopted_reap_publishes_cross_project_job_scheduled_by_released_slot(
