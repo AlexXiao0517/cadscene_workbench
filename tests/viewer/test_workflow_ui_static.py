@@ -114,6 +114,11 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert 'li[data-stage="upload"]' in workflow
     assert 'li[data-stage="sfm"]' in workflow
     assert 'li[data-stage="quality"]' in workflow
+    assert (
+        "isFullPoseWorkflow() || isFixedTrackVisualPoseWorkflow()" in workflow
+    )
+    assert 'stateLabel.textContent = "轨迹已就绪"' in workflow
+    assert 'message.textContent = "SRT→CAD 固定轨迹已载入；位置锁定，仅姿态可微调。"' in workflow
 
     assert "window.cadsceneSetFixedTrackVisualPoseMode" in viewer
     assert 'for (const key of ["x", "y", "z"])' in viewer

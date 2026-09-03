@@ -1201,6 +1201,7 @@
   function maybeAutoApplySfmCameraInit() {
     if (!trajectoryWorkflowLoaded) return;
     if (!viewerReadyForSfmCameraInit || isPureRotationWorkflow()) return;
+    if (isFullPoseWorkflow() || isFixedTrackVisualPoseWorkflow()) return;
     if (projectWorkbenchTrajectoryIsPending()) {
       message.textContent = "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
       return;
@@ -1238,6 +1239,17 @@
       message.textContent = isPureRotationWorkflow()
         ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
         : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      return;
+    }
+    if (
+      projectWorkbenchToken
+      && projectWorkbenchSession
+      && isFixedTrackVisualPoseWorkflow()
+      && !runningStage
+    ) {
+      progress.value = 1;
+      stateLabel.textContent = "轨迹已就绪";
+      message.textContent = "SRT→CAD 固定轨迹已载入；位置锁定，仅姿态可微调。";
       return;
     }
     const path = runPath("job_status.json");
