@@ -20,6 +20,7 @@ from .json_repositories import ProjectRepositories
 from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
+from .workbench_drafts import AtomicWorkbenchDraftStore, WorkbenchDraft
 from .workbench_resume import AtomicWorkbenchResumeStore, WorkbenchResumeState
 from .scene_bridge_runner import validate_scene_bridge_candidate
 from .service import (
@@ -857,6 +858,7 @@ class ProjectWorkbenchService:
         self.projects_root = projects_root
         self.viewer_runs_root = viewer_runs_root.resolve(strict=False)
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.draft_store = AtomicWorkbenchDraftStore(projects_root, now=self.now)
         self.resume_store = AtomicWorkbenchResumeStore(projects_root, now=self.now)
         self.coordinator = WorkbenchSessionCoordinator(
             store=session_store,
@@ -1023,6 +1025,7 @@ class ProjectWorkbenchService:
                     self._restore_scene_bridge_to_run(project_id, clip)
                 else:
                     self._restore_workbench_seed_to_run(project_id, clip)
+            self._restore_compatible_draft_to_run(context)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -1284,14 +1287,14 @@ class ProjectWorkbenchService:
                 raise StaleWorkbenchSession(
                     "clip has no matching workbench session"
                 )
-            self.coordinator._validate_binding(
-                session, self.resolve_context(project_id, session.clip_id)
-            )
+            context = self.resolve_context(project_id, session.clip_id)
+            self.coordinator._validate_binding(session, context)
             self._require_session_reference(
                 session,
                 reference,
                 allow_saved_repair=session.state == "saved",
             )
+            self._restore_compatible_draft_to_run(context)
             return self.coordinator.inspect(project_id, token)
 
     def update_resume(
@@ -1523,7 +1526,19 @@ class ProjectWorkbenchService:
                     )
                 saved = existing_session
             else:
+                self._restore_compatible_draft_to_run(
+                    self.resolve_context(project_id, existing_session.clip_id)
+                )
                 saved = self.coordinator.save(project_id, token, receipt)
+                draft = self._compatible_draft_for_session(saved)
+                if draft is not None and saved.workbench_output_revision:
+                    self.draft_store.mark_promoted(
+                        project_id,
+                        saved.clip_id,
+                        expected_revision=draft.revision,
+                        operation_id=uuid4().hex,
+                        workbench_output_revision=saved.workbench_output_revision,
+                    )
             self._publish_clip_state(
                 current,
                 saved,
@@ -1531,6 +1546,47 @@ class ProjectWorkbenchService:
                 expected_revision=expected_clips_revision,
             )
             return saved
+
+    def save_draft(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        expected_draft_revision: int | None,
+        operation_id: str,
+        camera_track: Mapping[str, object],
+    ) -> WorkbenchDraft:
+        """原子保存用户已经通过按钮确认的关键帧，不改变正式片段状态。"""
+
+        with self.project_service._state_guard(project_id):
+            session = self.coordinator.inspect(project_id, token)
+            if session.state != "editing":
+                raise StaleWorkbenchSession("workbench session is not editable")
+            current = self.repositories.clips.load(project_id)
+            clip = next(
+                (item for item in current.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            if clip is None:
+                raise StaleWorkbenchSession("workbench session clip no longer exists")
+            self._require_session_reference(
+                session, self._workbench_reference(clip), allow_saved_repair=False
+            )
+            context = self.resolve_context(project_id, session.clip_id)
+            self.coordinator._validate_binding(session, context)
+            _validate_manual_camera_track(camera_track, require_keyframes=False)
+            return self.draft_store.update(
+                project_id,
+                session.clip_id,
+                expected_revision=expected_draft_revision,
+                operation_id=operation_id,
+                workflow=context.workflow,
+                project_input_revision=context.project_input_revision,
+                clip_input_revision=context.clip_input_revision,
+                trajectory_output_revision=context.trajectory_output_revision,
+                trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+                camera_track=camera_track,
+            )
 
     def close(
         self,
@@ -1777,6 +1833,7 @@ class ProjectWorkbenchService:
         return "/apps/web_camera_viewer/?" + urlencode(parameters)
 
     def session_payload(self, session: WorkbenchSession) -> dict[str, object]:
+        draft = self._draft_for_session(session)
         return {
             "token": session.token,
             "project_id": session.project_id,
@@ -1791,8 +1848,76 @@ class ProjectWorkbenchService:
             "save_permissions": list(session.save_permissions),
             "session_revision": session.revision,
             "workbench_output_revision": session.workbench_output_revision,
+            "draft_state": None if draft is None else draft.to_dict(),
             "resume_state": self._resume_payload(session),
         }
+
+    def _draft_for_session(self, session: WorkbenchSession) -> WorkbenchDraft | None:
+        draft = self.draft_store.load_optional(session.project_id, session.clip_id)
+        if draft is None:
+            return None
+        binding = (
+            session.workflow,
+            session.project_input_revision,
+            session.clip_input_revision,
+            session.trajectory_output_revision,
+            session.trajectory_output_fingerprint,
+        )
+        stored = (
+            draft.workflow,
+            draft.project_input_revision,
+            draft.clip_input_revision,
+            draft.trajectory_output_revision,
+            draft.trajectory_output_fingerprint,
+        )
+        return draft if stored == binding else None
+
+    def _compatible_draft_for_session(
+        self, session: WorkbenchSession
+    ) -> WorkbenchDraft | None:
+        draft = self._draft_for_session(session)
+        if draft is None or draft.promoted_to_workbench_output_revision is not None:
+            return None
+        return draft
+
+    def _compatible_draft_for_context(
+        self, context: WorkbenchContext
+    ) -> WorkbenchDraft | None:
+        return self.draft_store.load_compatible(
+            context.project_id,
+            context.clip_id,
+            workflow=context.workflow,
+            project_input_revision=context.project_input_revision,
+            clip_input_revision=context.clip_input_revision,
+            trajectory_output_revision=context.trajectory_output_revision,
+            trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+        )
+
+    def _restore_compatible_draft_to_run(self, context: WorkbenchContext) -> None:
+        draft = self._compatible_draft_for_context(context)
+        if draft is None or context.workflow == "pure_rotation":
+            return
+        _validate_manual_camera_track(draft.camera_track, require_keyframes=False)
+        dataset = self._workbench_dataset_id(context.project_id, context.clip_id)
+        manual = (
+            self.viewer_runs_root
+            / dataset
+            / context.trajectory_run_id
+            / "01_keyframes/camera_track_manual.json"
+        )
+        payload = (
+            json.dumps(
+                draft.camera_track, ensure_ascii=False, indent=2, sort_keys=True
+            )
+            + "\n"
+        ).encode("utf-8")
+        if manual.is_file():
+            try:
+                if manual.read_bytes() == payload:
+                    return
+            except OSError:
+                pass
+        _atomic_write_bytes(manual, payload)
 
     def _resume_payload(self, session: WorkbenchSession) -> dict[str, object] | None:
         state = self.resume_store.load_optional(session.project_id, session.clip_id)
@@ -2881,12 +3006,14 @@ def _valid_rotation_matrix(value: object) -> bool:
     )
 
 
-def _validate_manual_camera_track(payload: Mapping[str, object]) -> None:
+def _validate_manual_camera_track(
+    payload: Mapping[str, object], *, require_keyframes: bool = True
+) -> None:
     fps = payload.get("fps")
     keyframes = payload.get("keyframes")
     if not _valid_number(fps) or float(fps) <= 0:
         raise InvalidWorkbenchOutput("camera track fps must be finite and positive")
-    if not isinstance(keyframes, list) or not keyframes:
+    if not isinstance(keyframes, list) or (require_keyframes and not keyframes):
         raise InvalidWorkbenchOutput("camera track must contain keyframes")
     frames: set[int] = set()
     camera_fields = ("x", "y", "z", "yaw", "pitch", "roll", "fov")

@@ -271,6 +271,18 @@ def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     assert source.index("ExecutablePath") < source.index("Stop-Process")
 
 
+def test_stop_launcher_warns_before_interrupting_active_workbench_editing() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
+
+    assert "param([switch]$Force)" in source
+    assert 'Join-Path $workspace "projects"' in source
+    assert 'Join-Path $_.FullName "workbench_sessions"' in source
+    assert '$session.state -eq "editing"' in source
+    assert "expires_at" in source
+    assert "Read-Host" in source
+    assert "Stop-Process" in source
+
+
 def test_small_hotfix_script_backs_up_files_and_repairs_opencv_without_workspace_writes() -> None:
     source = (WINDOWS_PACKAGING / "hotfix" / "apply-hotfix.ps1").read_text(
         encoding="utf-8"

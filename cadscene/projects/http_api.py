@@ -79,7 +79,7 @@ _SCENE_BRIDGE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/scene-bridges$"
 )
 _WORKBENCH_SESSION = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready|resume))?$"
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready|resume|draft))?$"
 )
 
 
@@ -262,6 +262,10 @@ class ProjectApi:
                 )
             if match and method == "POST" and match["action"] == "resume":
                 return self._update_workbench_resume(
+                    match["project"], match["token"], payload
+                )
+            if match and method == "POST" and match["action"] == "draft":
+                return self._save_workbench_draft(
                     match["project"], match["token"], payload
                 )
             return ApiResponse(404, {"error": "project_api_not_found"})
@@ -1394,6 +1398,40 @@ class ProjectApi:
             {
                 **self.workbench.session_payload(session),
                 "resume_state": state.to_dict(),
+            },
+        )
+
+    def _save_workbench_draft(
+        self, project_id: str, token: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
+        expected = payload.get("expected_draft_revision")
+        if expected is not None and (
+            not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
+        ):
+            raise ValueError("expected_draft_revision must be null or non-negative")
+        operation_id = payload.get("operation_id")
+        camera_track = payload.get("camera_track")
+        if not isinstance(operation_id, str):
+            raise ValueError("operation_id is required")
+        if not isinstance(camera_track, Mapping):
+            raise ValueError("camera_track is required")
+        draft = self.workbench.save_draft(
+            project_id,
+            token,
+            expected_draft_revision=expected,
+            operation_id=operation_id,
+            camera_track=camera_track,
+        )
+        session = self.workbench.inspect(project_id, token)
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "draft_state": draft.to_dict(),
             },
         )
 

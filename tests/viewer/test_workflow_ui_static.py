@@ -160,6 +160,22 @@ def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:
     assert 'querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack())' in script
 
 
+def test_confirmed_keyframe_edits_are_persisted_as_project_drafts() -> None:
+    script = _read("workflow.js")
+
+    save_track = script[
+        script.index("async function saveCurrentCameraTrack") :
+        script.index("async function recoverStaleProjectWorkbenchSession")
+    ]
+    assert "/draft`" in save_track
+    assert "expected_draft_revision" in save_track
+    assert "camera_track" in save_track
+    assert "projectWorkbenchSession = { ...projectWorkbenchSession, ...draftPayload }" in save_track
+    assert "微调已保存到服务器" in script
+    assert 'querySelector("#saveAdjustedKeyframe")' in script
+    assert 'querySelector("#acceptPrediction")' in script
+
+
 def test_project_workbench_bootstraps_coordinates_save_and_returns() -> None:
     script = _read("workflow.js")
 

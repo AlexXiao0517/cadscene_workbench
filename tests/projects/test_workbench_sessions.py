@@ -809,6 +809,165 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
     return api, repositories, runs_root, job
 
 
+def _draft_manual_track(*, x: float = 1.0) -> dict[str, object]:
+    return {
+        "version": 1,
+        "fps": 25.0,
+        "keyframes": [
+            {
+                "frame": 0,
+                "time": 0.0,
+                "source": "manual_anchor",
+                "camera": {
+                    "x": x,
+                    "y": 2.0,
+                    "z": 3.0,
+                    "yaw": 4.0,
+                    "pitch": -20.0,
+                    "roll": 0.0,
+                    "fov": 60.0,
+                },
+            }
+        ],
+    }
+
+
+def _open_project_workbench(api: ProjectApi, repositories):
+    return api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+
+def test_confirmed_camera_draft_is_restored_after_session_close_and_reopen(
+    tmp_path: Path,
+) -> None:
+    api, repositories, runs_root, _ = _project_api_with_workbench(tmp_path)
+    opened = _open_project_workbench(api, repositories)
+    assert opened.status == 201
+    track = _draft_manual_track(x=12.0)
+
+    drafted = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/draft",
+        json_body={
+            "expected_draft_revision": None,
+            "operation_id": "draft-op-1",
+            "camera_track": track,
+        },
+    )
+    assert drafted.status == 200
+    assert drafted.body["draft_state"]["revision"] == 0
+
+    closed = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/close",
+        json_body={"expected_revision": repositories.clips.load("project-1").revision},
+    )
+    assert closed.status == 200
+    manual = (
+        runs_root
+        / "project-1-clip-1/clip-1/01_keyframes/camera_track_manual.json"
+    )
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text("{}", encoding="utf-8")
+
+    reopened = _open_project_workbench(api, repositories)
+
+    assert reopened.status == 201
+    assert json.loads(manual.read_text(encoding="utf-8")) == track
+    assert reopened.body["draft_state"]["revision"] == 0
+    assert reopened.body["draft_state"]["promoted_to_workbench_output_revision"] is None
+
+
+def test_active_session_refresh_repairs_run_from_server_draft(tmp_path: Path) -> None:
+    api, repositories, runs_root, _ = _project_api_with_workbench(tmp_path)
+    opened = _open_project_workbench(api, repositories)
+    track = _draft_manual_track(x=18.0)
+    drafted = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/draft",
+        json_body={
+            "expected_draft_revision": None,
+            "operation_id": "draft-op-refresh",
+            "camera_track": track,
+        },
+    )
+    assert drafted.status == 200
+    manual = (
+        runs_root
+        / "project-1-clip-1/clip-1/01_keyframes/camera_track_manual.json"
+    )
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text("{}", encoding="utf-8")
+
+    refreshed = api.handle(
+        "GET",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}",
+    )
+
+    assert refreshed.status == 200
+    assert json.loads(manual.read_text(encoding="utf-8")) == track
+
+
+def test_official_workbench_save_promotes_latest_server_draft(tmp_path: Path) -> None:
+    api, repositories, runs_root, _ = _project_api_with_workbench(tmp_path)
+    opened = _open_project_workbench(api, repositories)
+    track = _draft_manual_track(x=25.0)
+    drafted = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/draft",
+        json_body={
+            "expected_draft_revision": None,
+            "operation_id": "draft-op-1",
+            "camera_track": track,
+        },
+    )
+    assert drafted.status == 200
+    manual = (
+        runs_root
+        / "project-1-clip-1/clip-1/01_keyframes/camera_track_manual.json"
+    )
+
+    saved = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/save",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "existing_save": {"ok": True, "path": str(manual)},
+        },
+    )
+
+    assert saved.status == 200
+    assert saved.body["draft_state"]["promoted_to_workbench_output_revision"] == (
+        saved.body["workbench_output_revision"]
+    )
+    assert json.loads(manual.read_text(encoding="utf-8")) == track
+
+
+def test_server_draft_accepts_deleting_the_last_keyframe(tmp_path: Path) -> None:
+    api, repositories, _, _ = _project_api_with_workbench(tmp_path)
+    opened = _open_project_workbench(api, repositories)
+    empty_track = {"version": 1, "fps": 25.0, "keyframes": []}
+
+    drafted = api.handle(
+        "POST",
+        f"/api/projects/project-1/workbench-sessions/{opened.body['token']}/draft",
+        json_body={
+            "expected_draft_revision": None,
+            "operation_id": "delete-last-keyframe",
+            "camera_track": empty_track,
+        },
+    )
+
+    assert drafted.status == 200
+    assert drafted.body["draft_state"]["camera_track"] == empty_track
+
+
 def _add_same_scene_adjacent_clips(
     api: ProjectApi,
     repositories,
