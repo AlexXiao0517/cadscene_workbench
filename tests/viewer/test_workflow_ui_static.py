@@ -100,6 +100,28 @@ def test_full_pose_workbench_preserves_workflow_and_uses_no_sfm_artifacts() -> N
     assert "sfm" not in pipeline["stages"]
 
 
+def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert "function isFixedTrackVisualPoseWorkflow()" in workflow
+    assert '"srt_fixed_track_visual_pose"' in workflow
+    assert '02_srt_visual_pose/camera_trajectory_visual_pose.json' in workflow
+    assert 'keyframes: "render"' in workflow
+    assert 'stage === "quality" ? "render"' in workflow
+    assert 'stageTitles.keyframes = fixed ? "视觉姿态"' in workflow
+    assert 'stageTitles.render = fixed ? "微调与渲染"' in workflow
+    assert 'li[data-stage="upload"]' in workflow
+    assert 'li[data-stage="sfm"]' in workflow
+    assert 'li[data-stage="quality"]' in workflow
+
+    assert "window.cadsceneSetFixedTrackVisualPoseMode" in viewer
+    assert 'for (const key of ["x", "y", "z"])' in viewer
+    assert "fixedTrackPoseAtFrame" in viewer
+    assert "orientation_available !== false" in viewer
+    assert "setFrustumOrientationAvailable" in viewer
+
+
 def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> None:
     workflow = _read("workflow.js")
     viewer = _read("viewer_legacy.js")

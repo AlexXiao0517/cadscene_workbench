@@ -101,9 +101,12 @@
   let cadTextEntityCount = 0;
   const OVERLAY_INTERVAL_PLAYING_MS = 200;
   const controlInputs = new Map();
-  const lockableCameraFields = new Set(["z", "yaw", "pitch", "roll", "fov"]);
-  const lockedCameraFields = { z: false, yaw: false, pitch: false, roll: false, fov: false };
+  const lockableCameraFields = new Set(["x", "y", "z", "yaw", "pitch", "roll", "fov"]);
+  const lockedCameraFields = { x: false, y: false, z: false, yaw: false, pitch: false, roll: false, fov: false };
   const pureRotationRestrictedFields = new Set();
+  const fixedTrackRestrictedFields = new Set();
+  let fixedTrackVisualPoseMode = false;
+  let fixedTrackCurrentOrientationAvailable = true;
   let pureRotationPlaybackActive = false;
   let pureRotationAuthoritativeMatrix = null;
 
@@ -444,6 +447,49 @@
     return pose;
   }
 
+  function interpolateSceneTrackAtFrame(track, frame) {
+    if (!track || track.length === 0) return null;
+    if (frame <= track[0].frame_index) return { ...track[0] };
+    const last = track[track.length - 1];
+    if (frame >= last.frame_index) return { ...last };
+    let previous = track[0];
+    let next = last;
+    for (let index = 0; index < track.length - 1; index += 1) {
+      if (frame >= track[index].frame_index && frame <= track[index + 1].frame_index) {
+        previous = track[index];
+        next = track[index + 1];
+        break;
+      }
+    }
+    const t = (frame - previous.frame_index) / Math.max(1, next.frame_index - previous.frame_index);
+    const pose = {};
+    for (const key of ["x", "y", "z", "pitch", "roll", "fov"]) {
+      pose[key] = lerp(Number(previous[key]), Number(next[key]), t);
+    }
+    pose.yaw = Number(previous.yaw) + normalizeAngleDelta(Number(next.yaw) - Number(previous.yaw)) * t;
+    return pose;
+  }
+
+  function fixedTrackPoseAtFrame(frame) {
+    const route = (sfmScene && sfmScene.tracks && sfmScene.tracks.global_sfm_track) || [];
+    const position = interpolateSceneTrackAtFrame(route, frame);
+    if (!position) return null;
+    const attitudeEntries = (cameraTrack?.keyframes || [])
+      .filter((entry) => entry.camera && Number.isFinite(Number(entry.frame)))
+      .sort((a, b) => Number(a.frame) - Number(b.frame));
+    const insideAttitudeRange = attitudeEntries.length > 0
+      && frame >= Number(attitudeEntries[0].frame)
+      && frame <= Number(attitudeEntries[attitudeEntries.length - 1].frame);
+    const attitude = insideAttitudeRange ? interpolateCameraAtFrame(frame) : null;
+    fixedTrackCurrentOrientationAvailable = Boolean(attitude);
+    return {
+      ...(attitude || camera),
+      x: Number(position.x),
+      y: Number(position.y),
+      z: Number(position.z),
+    };
+  }
+
   // 纯 SfM 预测：直接用 sfm_viewer_scene.json 的 global_sfm_track（仅 global sim3，未分段锚定）
   // 逐帧插值出相机位姿，用于"把虚拟相机放到原始 SfM 轨迹上"对照观察。
   let sfmFollowMode = false;
@@ -487,6 +533,10 @@
 
   // 统一入口：SfM 跟随模式下用原始 SfM 轨迹，否则用已加载的（人工/预测）关键帧轨迹。
   function poseForFrame(frame) {
+    if (fixedTrackVisualPoseMode) {
+      const pose = fixedTrackPoseAtFrame(frame);
+      if (pose) return pose;
+    }
     if (sfmFollowMode) {
       const p = interpolateSfmPoseAtFrame(frame);
       if (p) return p;
@@ -503,10 +553,15 @@
       if (lockedCameraFields[key]) pose[key] = previousPose[key];
     }
     for (const key of pureRotationRestrictedFields) pose[key] = previousPose[key];
+    for (const key of fixedTrackRestrictedFields) pose[key] = previousPose[key];
     return pose;
   }
 
   function currentTrackAsAnchoredPath() {
+    if (fixedTrackVisualPoseMode) {
+      return ((sfmScene && sfmScene.tracks && sfmScene.tracks.global_sfm_track) || [])
+        .map((entry) => ({ ...entry }));
+    }
     // 右侧 3D 的“锚定后轨迹”应跟随当前 URL/导入的 track，而不是 sfm_scene 内嵌旧轨迹。
     const rows = (cameraTrack?.keyframes || [])
       .filter((kf) => kf.camera && Number.isFinite(Number(kf.frame)))
@@ -756,7 +811,9 @@
       const value = camera[def.key];
       pair.range.value = String(value);
       pair.number.value = Number.isInteger(value) ? String(value) : value.toFixed(3);
-      const disabled = pureRotationRestrictedFields.has(def.key) || Boolean(pair.lock?.checked);
+      const disabled = pureRotationRestrictedFields.has(def.key)
+        || fixedTrackRestrictedFields.has(def.key)
+        || Boolean(pair.lock?.checked);
       pair.range.disabled = disabled;
       pair.number.disabled = disabled;
     }
@@ -802,6 +859,7 @@
         lockInput = document.createElement("input");
         lockInput.type = "checkbox";
         lockInput.checked = !!lockedCameraFields[def.key];
+        lockInput.disabled = fixedTrackRestrictedFields.has(def.key);
         const lockIcon = document.createElement("span");
         lockIcon.className = "lock-icon";
         lockIcon.textContent = lockInput.checked ? "🔒" : "🔓";
@@ -809,8 +867,8 @@
         lockLabel.append(lockInput, lockIcon);
         lockInput.addEventListener("change", () => {
           lockedCameraFields[def.key] = lockInput.checked;
-          range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
-          number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
+          range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key);
+          number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key);
           lockIcon.textContent = lockInput.checked ? "🔒" : "🔓";
           setStatus(`${def.label} ${lockInput.checked ? "已锁定" : "已解锁"}`);
         });
@@ -820,7 +878,7 @@
         lockLabel.textContent = " ";
       }
       const update = (value) => {
-        if (lockedCameraFields[def.key] || pureRotationRestrictedFields.has(def.key)) return;
+        if (lockedCameraFields[def.key] || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key)) return;
         clearPureRotationAuthoritativeMatrix();
         camera[def.key] = Number(value);
         syncControls();
@@ -830,8 +888,8 @@
       range.addEventListener("input", () => update(range.value));
       number.addEventListener("input", () => update(number.value));
       if (lockInput) {
-        range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
-        number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key);
+        range.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key);
+        number.disabled = lockInput.checked || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key);
       }
       item.append(label, lockLabel, range, number);
       controlContainer.appendChild(item);
@@ -1240,6 +1298,8 @@
     const frustumMaterial = new THREE.LineBasicMaterial({ color: 0x56c2ff, transparent: true, opacity: 0.85 });
     const frustumLine = new THREE.LineSegments(new THREE.BufferGeometry(), frustumMaterial);
     cameraVisualGroup.add(frustumLine);
+    let frustumRequestedVisible = true;
+    let frustumOrientationAvailable = true;
 
     const transformControls = new THREE.TransformControls(inspectCamera, renderer.domElement);
     transformControls.attach(uavCameraRig);
@@ -1612,7 +1672,14 @@
     }
     function setSuggestionsVisible(v) { suggestionGroup.visible = v; }
     function setSfmSuggestions(suggestions) { refreshSuggestionMarkers(suggestions); }
-    function setFrustumVisible(v) { frustumLine.visible = v; }
+    function setFrustumVisible(v) {
+      frustumRequestedVisible = Boolean(v);
+      frustumLine.visible = frustumRequestedVisible && frustumOrientationAvailable;
+    }
+    function setFrustumOrientationAvailable(v) {
+      frustumOrientationAvailable = Boolean(v);
+      frustumLine.visible = frustumRequestedVisible && frustumOrientationAvailable;
+    }
     function setSfmPointSize(v) {
       sfmPointSize = Number(v);
       if (sfmPoints) { sfmPoints.material.size = sfmPointSize; sfmPoints.material.needsUpdate = true; }
@@ -1732,7 +1799,7 @@
       focusInspectOnCamera, focusInspectOnCameraAndCad, focusInspectOnCad, ensureCameraNearCad, transformControls,
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
-      setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
+      setFrustumOrientationAvailable, setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
       pickCadWorld, projectCadWorldToInspect,
     };
   }
@@ -1749,6 +1816,9 @@
       lastOverlayDrawAt = now;
     }
     if (threeScene && options.updateThree !== false) {
+      threeScene.setFrustumOrientationAvailable(
+        !fixedTrackVisualPoseMode || fixedTrackCurrentOrientationAvailable,
+      );
       threeScene.updateVirtualCamera(camera);
       if (followCamera) threeScene.focusInspectOnCamera(camera);
     }
@@ -1762,7 +1832,7 @@
       window.cadsceneRefreshPureRotationPose();
       return;
     }
-    if (!video.paused && (sfmFollowMode || cameraTrack.keyframes.length > 0)) {
+    if (!video.paused && (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
       camera = poseForFrame(currentFrame());
     }
     updateViews({ forceOverlay: false, updateThree: true, followCamera: followOnPlay });
@@ -1824,7 +1894,7 @@
 
   function applyFramePreview(targetFrame) {
     manualFrameOverride = targetFrame;
-    if (sfmFollowMode || cameraTrack.keyframes.length > 0) {
+    if (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0) {
       camera = poseForFrame(targetFrame);
       syncControls();
     }
@@ -2076,6 +2146,33 @@
     }
     syncControls();
     return { mode: correctionMode ? "correction" : "placement", restricted: [...pureRotationRestrictedFields] };
+  };
+
+  window.cadsceneSetFixedTrackVisualPoseMode = function (enabled) {
+    fixedTrackVisualPoseMode = Boolean(enabled);
+    fixedTrackRestrictedFields.clear();
+    for (const key of ["x", "y", "z"]) {
+      if (fixedTrackVisualPoseMode) fixedTrackRestrictedFields.add(key);
+      lockedCameraFields[key] = fixedTrackVisualPoseMode;
+      const pair = controlInputs.get(key);
+      if (pair?.lock) {
+        pair.lock.checked = fixedTrackVisualPoseMode;
+        pair.lock.disabled = fixedTrackVisualPoseMode;
+      }
+    }
+    const translateButton = document.querySelector("#translateMode");
+    if (translateButton) translateButton.disabled = fixedTrackVisualPoseMode;
+    if (fixedTrackVisualPoseMode && threeScene) {
+      threeScene.setMode("rotate");
+      const fixedPose = fixedTrackPoseAtFrame(currentFrame());
+      if (fixedPose) camera = fixedPose;
+    }
+    syncControls();
+    if (camera) updateViews({ forceOverlay: true, updateThree: true });
+    return {
+      enabled: fixedTrackVisualPoseMode,
+      position_fields: [...fixedTrackRestrictedFields],
+    };
   };
 
   window.cadsceneGetCurrentCameraPose = function () {
@@ -2513,6 +2610,8 @@
       roll: Number(cam.roll ?? 0),
       fov: Number(cam.fov ?? 70),
       source: entry.source || "",
+      position_available: entry.position_available !== false,
+      orientation_available: entry.orientation_available !== false,
     };
   }
 
@@ -2566,6 +2665,13 @@
       }
     }
     if (threeScene && sfmScene) threeScene.loadSfmScene(sfmScene);
+    if (fixedTrackVisualPoseMode) {
+      const fixedPose = fixedTrackPoseAtFrame(currentFrame());
+      if (fixedPose) {
+        camera = fixedPose;
+        syncControls();
+      }
+    }
     updateSfmInfoPanel();
     if (threeScene && sfmScene) {
       threeScene.updateSfmGhost(currentFrame());
@@ -2954,7 +3060,7 @@
       }
       const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       const targetFrame = manualFrameOverride ?? actualFrame;
-      if (sfmFollowMode || cameraTrack.keyframes.length > 0) {
+      if (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0) {
         camera = poseForFrame(targetFrame);
         syncControls();
       }

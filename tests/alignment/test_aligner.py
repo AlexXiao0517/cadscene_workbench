@@ -117,6 +117,143 @@ def _write_metric_full_pose_trajectory(path: Path) -> SfmTrajectory:
     return trajectory
 
 
+def _write_position_only_fixed_track(path: Path) -> np.ndarray:
+    centers = np.asarray(
+        [
+            [0.0, 0.0, 80.0],
+            [2.0, 0.0, 80.2],
+            [3.0, 1.5, 80.5],
+            [4.0, 3.0, 80.6],
+        ],
+        dtype=np.float64,
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "fps": 20.0,
+                "width": 1920,
+                "height": 1080,
+                "intrinsics": [
+                    {
+                        "model": "PINHOLE",
+                        "width": 1920,
+                        "height": 1080,
+                        "params": [960.0, 960.0, 960.0, 540.0],
+                    }
+                ],
+                "poses": [
+                    {
+                        "frame_index": frame,
+                        "registered": False,
+                        "position_available": True,
+                        "orientation_available": False,
+                        "center": center.tolist(),
+                    }
+                    for frame, center in zip((0, 10, 20, 30), centers)
+                ],
+                "meta": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                    "position_source": "srt_cad_locked",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return centers
+
+
+def test_fixed_track_alignment_keeps_centers_plus_one_translation_and_slerps_attitude(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "fixed-track.json"
+    centers = _write_position_only_fixed_track(trajectory_path)
+    offset = np.asarray([2.0, -3.0, 4.0])
+    track = _track_from_states(
+        {
+            0: CameraState(
+                camera_x=2.0,
+                camera_y=-3.0,
+                camera_z=84.0,
+                yaw_deg=170.0,
+                pitch_deg=-20.0,
+                fov_deg=72.0,
+            ),
+            20: CameraState(
+                camera_x=float(centers[2, 0] + offset[0]),
+                camera_y=float(centers[2, 1] + offset[1]),
+                camera_z=float(centers[2, 2] + offset[2]),
+                yaw_deg=-170.0,
+                pitch_deg=-20.0,
+                fov_deg=72.0,
+            ),
+        },
+        origin_xy=(0.0, 0.0),
+    )
+    track_path = tmp_path / "manual-track.json"
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+            frontend_track_step=10,
+        ),
+    )
+
+    actual_centers = np.asarray(
+        [
+            [row["camera_x"], row["camera_y"], row["camera_z"]]
+            for row in result.sfm_camera_path_rows
+        ]
+    )
+    np.testing.assert_allclose(actual_centers, centers + offset, atol=1e-12)
+    midpoint = next(row for row in result.sfm_camera_path_rows if row["frame_index"] == 10)
+    assert abs(abs(midpoint["yaw"]) - 180.0) < 1.0
+    assert result.alignment_json["sim3"]["scale"] == 1.0
+    np.testing.assert_allclose(
+        result.alignment_json["sim3"]["rotation"], np.eye(3), atol=1e-12
+    )
+    assert result.alignment_json["validation"]["position_source"] == (
+        "srt_cad_locked"
+    )
+    assert result.metrics["alignment_mode"] == "srt_fixed_track"
+
+
+def test_fixed_track_alignment_rejects_nonuniform_position_edits(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "fixed-track.json"
+    centers = _write_position_only_fixed_track(trajectory_path)
+    first = CameraState(camera_x=1.0, camera_y=0.0, camera_z=80.0, fov_deg=72.0)
+    second = CameraState(
+        camera_x=float(centers[2, 0] + 2.0),
+        camera_y=float(centers[2, 1]),
+        camera_z=float(centers[2, 2]),
+        fov_deg=72.0,
+    )
+    track_path = tmp_path / "nonuniform-track.json"
+    track_path.write_text(
+        json.dumps(
+            _track_from_states(
+                {0: first, 20: second}, origin_xy=(0.0, 0.0)
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="one whole-route XYZ offset"):
+        run_alignment(
+            trajectory_path=trajectory_path,
+            web_camera_track_path=track_path,
+            config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0)),
+        )
+
+
 def test_metric_full_pose_alignment_keeps_scale_one_with_single_manual_anchor(
     tmp_path: Path,
 ) -> None:

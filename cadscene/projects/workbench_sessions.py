@@ -1801,6 +1801,7 @@ class ProjectWorkbenchService:
             and session.trajectory_output_revision
             and session.trajectory_output_fingerprint
         )
+        fixed_track = session.workflow == "srt_fixed_track_visual_pose"
         if state is not None and state.trajectory_output_revision != (
             session.trajectory_output_revision or None
         ):
@@ -1811,6 +1812,8 @@ class ProjectWorkbenchService:
             return "keyframes"
         if not self._has_fitted_track(session):
             return "keyframes"
+        if fixed_track:
+            return "render"
         if requested == "quality":
             return "quality"
         if (

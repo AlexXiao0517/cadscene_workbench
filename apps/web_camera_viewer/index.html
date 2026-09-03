@@ -208,15 +208,15 @@
               <span>SfM 诊断场景（点云 + 双轨迹 + 建议）</span>
             </div>
             <div class="sfm-toggles">
-              <label><input type="checkbox" id="sfmShowPoints" checked /> SfM 点云</label>
-              <label><input type="checkbox" id="sfmShowGlobal" checked /> 原始 SfM 轨迹</label>
-              <label><input type="checkbox" id="sfmShowAnchored" checked /> 锚定后轨迹</label>
+              <label id="sfmPointsToggle"><input type="checkbox" id="sfmShowPoints" checked /> SfM 点云</label>
+              <label id="sfmGlobalToggle"><input type="checkbox" id="sfmShowGlobal" checked /> <span>原始 SfM 轨迹</span></label>
+              <label id="sfmAnchoredToggle"><input type="checkbox" id="sfmShowAnchored" checked /> <span>锚定后轨迹</span></label>
               <label><input type="checkbox" id="sfmShowFrustum" checked /> 相机视锥</label>
-              <label><input type="checkbox" id="sfmShowSuggestions" checked /> 建议补帧标记</label>
+              <label id="sfmSuggestionsToggle"><input type="checkbox" id="sfmShowSuggestions" checked /> 建议补帧标记</label>
               <label><input type="checkbox" id="sfmFollowOnPlay" /> 播放时跟随无人机</label>
-              <label><input type="checkbox" id="sfmUseSfmPose" /> 跟随原始 SfM 轨迹（纯 SfM 叠加）</label>
+              <label id="sfmUsePoseToggle"><input type="checkbox" id="sfmUseSfmPose" /> 跟随原始 SfM 轨迹（纯 SfM 叠加）</label>
             </div>
-            <div class="sfm-row">
+            <div class="sfm-row" id="sfmPointControls">
               <label>点大小 <input type="range" id="sfmPointSize" min="0.5" max="12" step="0.5" value="3" /></label>
               <label>颜色模式
                 <select id="sfmColorMode">

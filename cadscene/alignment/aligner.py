@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
+from scipy.spatial.transform import Rotation, Slerp
 
 from cadscene.alignment.keyframes import confirmed_keyframes, load_web_camera_track
 from cadscene.core.camera import (
@@ -22,6 +23,7 @@ from cadscene.sfm.trajectory import SfmTrajectory, load_sfm_trajectory
 MAX_GLOBAL_ANCHOR_RESIDUAL_M = 10.0
 MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
 MAX_METRIC_CORRECTION_ANGLE_RESIDUAL_DEG = 15.0
+MAX_FIXED_TRACK_OFFSET_RESIDUAL_M = 0.05
 MAX_FOCAL_ASPECT_RATIO = 2.0
 UPSTREAM_SFM_MANUAL_FOV_WARNING = (
     "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used."
@@ -87,6 +89,8 @@ class AnchoredAlignment:
     residual_angles_deg: np.ndarray
     position_mode: str = "sfm_residual"
     anchor_positions: np.ndarray | None = None
+    orientation_frames: np.ndarray | None = None
+    orientation_world_from_camera: np.ndarray | None = None
 
     def residual_at(self, frame_index: float) -> tuple[np.ndarray, np.ndarray]:
         f = float(frame_index)
@@ -114,8 +118,32 @@ class AnchoredAlignment:
             "scale_observable": self.position_mode not in {
                 "rotation_only",
                 "metric_direct",
+                "srt_fixed_track",
             },
         }
+
+    def absolute_orientation_at(self, frame_index: float) -> np.ndarray | None:
+        frames = self.orientation_frames
+        rotations = self.orientation_world_from_camera
+        if frames is None or rotations is None or len(frames) == 0:
+            return None
+        frame = float(frame_index)
+        exact = int(np.searchsorted(frames, frame, side="left"))
+        if exact < len(frames) and math.isclose(
+            float(frames[exact]), frame, rel_tol=0.0, abs_tol=1e-9
+        ):
+            return np.asarray(rotations[exact], dtype=np.float64).copy()
+        if frame < float(frames[0]) or frame > float(frames[-1]):
+            return None
+        second = int(np.searchsorted(frames, frame, side="right"))
+        first = second - 1
+        interpolator = Slerp(
+            [float(frames[first]), float(frames[second])],
+            Rotation.from_matrix(
+                np.asarray([rotations[first], rotations[second]], dtype=np.float64)
+            ),
+        )
+        return interpolator([frame]).as_matrix()[0]
 
     def anchor_position_at(self, frame_index: float) -> np.ndarray | None:
         if self.anchor_positions is None or len(self.anchor_positions) == 0:
@@ -296,6 +324,98 @@ def _is_metric_direct_trajectory(traj: SfmTrajectory) -> bool:
     return bool(
         traj.meta.get("coordinate_system") == "cad_local_m"
         and traj.meta.get("metric_scale_locked") is True
+    )
+
+
+def _is_fixed_track_trajectory(traj: SfmTrajectory) -> bool:
+    return bool(
+        _is_metric_direct_trajectory(traj)
+        and traj.meta.get("position_source") == "srt_cad_locked"
+    )
+
+
+def _build_fixed_track_correspondences(
+    track: Mapping[str, object],
+    traj: SfmTrajectory,
+    config: AlignmentConfig,
+) -> list[KeyframeCorrespondence]:
+    out: list[KeyframeCorrespondence] = []
+    for keyframe in confirmed_keyframes(dict(track)):
+        camera = keyframe.get("camera") or {}
+        if not all(name in camera for name in ("x", "y", "z")):
+            continue
+        frame = int(keyframe.get("frame", 0))
+        if frame < traj.frame_min or frame > traj.frame_max:
+            continue
+        state = web_camera_to_python_state(camera, config.origin_xy, config.cad_scale)
+        automatic = (
+            traj.orientation_at(frame)
+            if traj.is_orientation_available(frame)
+            else np.eye(3, dtype=np.float64)
+        )
+        out.append(
+            KeyframeCorrespondence(
+                frame_index=frame,
+                state=state,
+                center_cad=np.asarray(
+                    [state.camera_x, state.camera_y, state.camera_z],
+                    dtype=np.float64,
+                ),
+                center_sfm=traj.center_at(frame),
+                r_camfromworld_sfm=automatic,
+                source=str(keyframe.get("source") or "manual_keyframe"),
+            )
+        )
+    out.sort(key=lambda row: row.frame_index)
+    return out
+
+
+def _fixed_track_alignment(
+    correspondences: Sequence[KeyframeCorrespondence],
+    traj: SfmTrajectory,
+) -> tuple[Sim3, AnchoredAlignment]:
+    translations = np.asarray(
+        [row.center_cad - traj.center_at(row.frame_index) for row in correspondences],
+        dtype=np.float64,
+    ).reshape(-1, 3)
+    translation = (
+        np.median(translations, axis=0)
+        if len(translations)
+        else np.zeros(3, dtype=np.float64)
+    )
+    if len(translations):
+        deviation = np.linalg.norm(translations - translation, axis=1)
+        if float(np.max(deviation)) > MAX_FIXED_TRACK_OFFSET_RESIDUAL_M:
+            raise RuntimeError(
+                "fixed SRT positions only permit one whole-route XYZ offset"
+            )
+    sim3 = Sim3(
+        scale=1.0,
+        rotation=np.eye(3, dtype=np.float64),
+        translation=translation,
+    )
+    orientations: dict[int, np.ndarray] = {}
+    for frame in traj.frames:
+        value = int(frame)
+        orientations[value] = traj.orientation_at(value).T
+    for row in correspondences:
+        orientations[row.frame_index] = _camera_to_world_rotation(row.state)
+    orientation_frames = np.asarray(sorted(orientations), dtype=np.int64)
+    orientation_values = np.asarray(
+        [orientations[int(frame)] for frame in orientation_frames],
+        dtype=np.float64,
+    ).reshape(-1, 3, 3)
+    return sim3, AnchoredAlignment(
+        sim3=sim3,
+        frames=np.asarray(
+            [row.frame_index for row in correspondences], dtype=np.int64
+        ),
+        residual_positions=np.zeros((len(correspondences), 3), dtype=np.float64),
+        residual_angles_deg=np.zeros((len(correspondences), 3), dtype=np.float64),
+        position_mode="srt_fixed_track",
+        anchor_positions=None,
+        orientation_frames=orientation_frames,
+        orientation_world_from_camera=orientation_values,
     )
 
 
@@ -672,6 +792,24 @@ def aligned_state_at_frame(
     anchored: AnchoredAlignment | None,
     config: AlignmentConfig,
 ) -> CameraState:
+    if anchored is not None and anchored.position_mode == "srt_fixed_track":
+        world_from_camera = anchored.absolute_orientation_at(frame_index)
+        if world_from_camera is None:
+            raise ValueError(
+                f"trajectory orientation is unavailable at frame {float(frame_index):g}"
+            )
+        center_cad = traj.center_at(frame_index) + sim3.translation
+        yaw, pitch, roll = _decompose_world_from_cam(world_from_camera)
+        return CameraState(
+            camera_x=float(center_cad[0]),
+            camera_y=float(center_cad[1]),
+            camera_z=float(center_cad[2]),
+            yaw_deg=float(yaw),
+            pitch_deg=float(pitch),
+            roll_deg=float(roll),
+            fov_deg=_fov_for_path(traj, config),
+            cad_scale=float(config.cad_scale),
+        )
     global_state = _global_state_at_frame(frame_index, traj, sim3, config)
     if anchored is None:
         return global_state
@@ -707,7 +845,9 @@ def generate_aligned_camera_path(
 
     def path_source() -> str:
         return (
-            "metric_direct"
+            "srt_fixed_track"
+            if anchored is not None and anchored.position_mode == "srt_fixed_track"
+            else "metric_direct"
             if anchored is not None and anchored.position_mode == "metric_direct"
             else "rotation_only_anchor"
             if anchored is not None and anchored.position_mode == "rotation_only"
@@ -717,6 +857,31 @@ def generate_aligned_camera_path(
         )
 
     def row_at(frame: int) -> dict:
+        if anchored is not None and anchored.position_mode == "srt_fixed_track":
+            center = traj.center_at(frame) + sim3.translation
+            world_from_camera = anchored.absolute_orientation_at(frame)
+            if world_from_camera is None:
+                return {
+                    "frame_index": frame,
+                    "camera_x": float(center[0]),
+                    "camera_y": float(center[1]),
+                    "camera_z": float(center[2]),
+                    "yaw": 0.0,
+                    "pitch": 0.0,
+                    "roll": 0.0,
+                    "fov": _fov_for_path(traj, config),
+                    "cad_scale": float(config.cad_scale),
+                    "status": "unregistered",
+                    "position_available": True,
+                    "orientation_available": False,
+                    "path_source": path_source(),
+                }
+            state = aligned_state_at_frame(frame, traj, sim3, anchored, config)
+            row = state.to_row(frame_index=frame, status="ok")
+            row["position_available"] = True
+            row["orientation_available"] = True
+            row["path_source"] = path_source()
+            return row
         if not traj.is_frame_registered(frame):
             return {
                 "frame_index": frame,
@@ -740,6 +905,11 @@ def generate_aligned_camera_path(
     output_frames.update(
         int(frame)
         for frame in traj.unregistered_frames
+        if start <= int(frame) <= end
+    )
+    output_frames.update(
+        int(frame)
+        for frame in traj.position_frames
         if start <= int(frame) <= end
     )
     output_frames.add(end)
@@ -802,6 +972,12 @@ def _compute_metrics(correspondences: Sequence[KeyframeCorrespondence], traj: Sf
     global_errors: list[float] = []
     anchored_errors: list[float] = []
     for corr in correspondences:
+        if anchored.position_mode == "srt_fixed_track":
+            aligned_center = traj.center_at(corr.frame_index) + sim3.translation
+            error = float(np.linalg.norm(corr.center_cad - aligned_center))
+            global_errors.append(error)
+            anchored_errors.append(error)
+            continue
         global_state = _global_state_at_frame(corr.frame_index, traj, sim3, config)
         anchored_state = aligned_state_at_frame(corr.frame_index, traj, sim3, anchored, config)
         global_errors.append(
@@ -872,6 +1048,7 @@ def _alignment_json(
         "scale_observable": anchored.position_mode not in {
             "rotation_only",
             "metric_direct",
+            "srt_fixed_track",
         },
         "transform": sim3.to_dict(),
         "sim3": sim3.to_dict(),
@@ -891,7 +1068,15 @@ def _alignment_json(
                 intrinsics_warning=intrinsics_warning,
             ),
             "alignment_mode": anchored.position_mode,
-            "metric_scale_locked": anchored.position_mode == "metric_direct",
+            "metric_scale_locked": anchored.position_mode in {
+                "metric_direct",
+                "srt_fixed_track",
+            },
+            "position_source": (
+                "srt_cad_locked"
+                if anchored.position_mode == "srt_fixed_track"
+                else None
+            ),
         },
         "config": {
             "cad_scale": float(config.cad_scale),
@@ -989,11 +1174,18 @@ def run_alignment(
         fov_source = "config"
     if config.fov_from == "config":
         _validated_configured_fov(config.fov)
+    fixed_track = _is_fixed_track_trajectory(traj)
     metric_direct = _is_metric_direct_trajectory(traj)
-    correspondences = build_correspondences(
-        track, traj, config, allow_empty=metric_direct
-    )
-    if metric_direct:
+    if fixed_track:
+        correspondences = _build_fixed_track_correspondences(track, traj, config)
+        sim3, anchored = _fixed_track_alignment(correspondences, traj)
+    else:
+        correspondences = build_correspondences(
+            track, traj, config, allow_empty=metric_direct
+        )
+    if fixed_track:
+        pass
+    elif metric_direct:
         sim3, anchored = _metric_direct_alignment(correspondences, traj, config)
     else:
         sim3 = estimate_global_sim3(correspondences)

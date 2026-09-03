@@ -503,7 +503,7 @@ git commit -m "feat: prepare SRT trajectory before workbench entry"
 - Consumes: trajectory metadata `position_source=srt_cad_locked`, initial camera track, position-line viewer scene, manual camera-track keyframes.
 - Produces: a loader with independent position/orientation availability, three-stage fixed-track UI, and alignment output whose positions equal canonical centers plus one uniform translation.
 
-- [ ] **Step 1: Write failing position-only loader and alignment hard-lock tests**
+- [x] **Step 1: Write failing position-only loader and alignment hard-lock tests**
 
 ```python
 def test_fixed_track_loader_keeps_positions_when_no_orientation_is_available(tmp_path):
@@ -531,13 +531,13 @@ def test_fixed_track_alignment_rejects_nonuniform_position_edits(tmp_path):
         )
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/sfm/test_trajectory.py tests/alignment/test_aligner.py -k "fixed_track or position_only" -q`
 
 Expected: the loader raises because fewer than two registered poses exist, and fixed-track metadata currently uses the full-pose uniform-angle branch or permits the wrong UI behavior.
 
-- [ ] **Step 3: Separate position availability from orientation availability in the loader**
+- [x] **Step 3: Separate position availability from orientation availability in the loader**
 
 Extend `SfmTrajectory` with `position_frames` and `position_centers`, plus:
 
@@ -549,19 +549,19 @@ def orientation_at(self, frame_index: float) -> np.ndarray: ...
 
 For ordinary SfM trajectories these arrays mirror registered pose frames/centers. For `position_source=srt_cad_locked`, load every pose with `position_available=true` into the position arrays even when `registered=false` and no quaternion is present. Permit zero orientation poses only for this fixed-track mode with at least two positions. Existing `query` remains strict and raises on missing orientation so callers cannot accidentally render an invented pose.
 
-- [ ] **Step 4: Implement fixed-track alignment mode**
+- [x] **Step 4: Implement fixed-track alignment mode**
 
 Detect `position_source == "srt_cad_locked"`. Compute all manual-center minus `center_at(frame)` vectors, require their maximum deviation from the median to stay below the existing metric position tolerance, apply only that median translation, and set every positional residual to zero. Treat manual yaw/pitch/roll as absolute orientation anchors when no automatic orientation exists and as corrections where an automatic orientation exists; interpolate rotations with quaternion SLERP, never Euler interpolation across wrap boundaries. Set `position_mode="srt_fixed_track"`, `scale=1`, identity world rotation, and validation fields `metric_scale_locked=true`, `position_source=srt_cad_locked`. Generated path rows use `center_at(frame)+translation` for every position frame and are `unregistered` only where neither automatic nor bounded manual/interpolated orientation is available.
 
-- [ ] **Step 5: Implement the fixed-track UI layout and locks**
+- [x] **Step 5: Implement the fixed-track UI layout and locks**
 
 Add `isFixedTrackVisualPoseWorkflow()`. Hide upload/SfM and quality steps/panels, relabel keyframes to `视觉姿态`, relabel render to `微调与渲染`, and map `keyframes -> render`. Keep the position-line scene visible with zero points. While video time changes, take x/y/z from the fixed route rather than linearly interpolating sparse manual keyframe positions. Lock x/y/z in camera controls while adding or editing attitude keyframes; backend validation remains authoritative. Do not show frustums for scene entries with `orientation_available=false`.
 
-- [ ] **Step 6: Make resume rules skip SfM and quality**
+- [x] **Step 6: Make resume rules skip SfM and quality**
 
 For `srt_fixed_track_visual_pose`, `_resume_workflow_stage` returns `keyframes` whenever a trajectory is bound and `render` after a saved workbench output. `_validated_resume_stage` maps requested `sfm` to `keyframes` and requested `quality` to `render`; a session without a trajectory is not creatable.
 
-- [ ] **Step 7: Run workbench/alignment tests and commit**
+- [x] **Step 7: Run workbench/alignment tests and commit**
 
 Run: `python -m pytest tests/sfm/test_trajectory.py tests/alignment/test_aligner.py tests/viewer/test_workflow_ui_static.py tests/projects/test_workbench_sessions.py -q`
 

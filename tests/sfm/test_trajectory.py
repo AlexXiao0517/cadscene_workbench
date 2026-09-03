@@ -72,3 +72,47 @@ def test_full_pose_loader_preserves_explicit_unregistered_frames(
         trajectory.query(1)
     with pytest.raises(ValueError, match="crosses an unregistered gap"):
         trajectory.query(1.5)
+
+
+def test_fixed_track_loader_keeps_positions_without_available_orientation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "fixed-track.json"
+    path.write_text(
+        json.dumps(
+            {
+                "fps": 25.0,
+                "width": 1920,
+                "height": 1080,
+                "intrinsics": [
+                    {"model": "PINHOLE", "width": 1920, "params": [960, 960, 960, 540]}
+                ],
+                "poses": [
+                    {
+                        "frame_index": index,
+                        "registered": False,
+                        "position_available": True,
+                        "orientation_available": False,
+                        "center": [10.0 + index, 20.0, 80.0 + index],
+                    }
+                    for index in range(3)
+                ],
+                "meta": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                    "position_source": "srt_cad_locked",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    trajectory = load_sfm_trajectory(path)
+
+    assert trajectory.position_frames.tolist() == [0, 1, 2]
+    np.testing.assert_allclose(trajectory.center_at(1), [11.0, 20.0, 81.0])
+    np.testing.assert_allclose(trajectory.center_at(1.5), [11.5, 20.0, 81.5])
+    assert trajectory.is_orientation_available(1) is False
+    with pytest.raises(ValueError, match="orientation"):
+        trajectory.orientation_at(1)

@@ -108,6 +108,9 @@
     const implementation = String(workflow?.implementation_status || "ready");
     document.querySelector("#sfmPanel")?.toggleAttribute("hidden", mode === "pure_rotation");
     applyPureRotationWorkflowLayout(mode);
+    window.cadsceneSetFixedTrackVisualPoseMode?.(
+      mode === "srt_fixed_track_visual_pose",
+    );
     if (mode === "pure_rotation") {
       window.setTimeout(async () => {
         await initializePureRotationViewer();
@@ -148,8 +151,16 @@
     return trajectoryWorkflow?.trajectory_mode === "srt_full_pose";
   }
 
+  function isFixedTrackVisualPoseWorkflow() {
+    return trajectoryWorkflow?.trajectory_mode === "srt_fixed_track_visual_pose";
+  }
+
   function fullPoseTrajectoryPath() {
     return runPath("02_srt_full_pose/camera_trajectory_full_pose.json");
+  }
+
+  function fixedTrackVisualPoseTrajectoryPath() {
+    return runPath("02_srt_visual_pose/camera_trajectory_visual_pose.json");
   }
 
   function applyProjectWorkbenchSessionWorkflow(session) {
@@ -157,6 +168,7 @@
       "sfm_only",
       "srt_sfm_fused",
       "srt_full_pose",
+      "srt_fixed_track_visual_pose",
       "pure_rotation",
     ]);
     const mode = supported.has(session?.workflow) ? session.workflow : "sfm_only";
@@ -191,15 +203,28 @@
 
   function applyPureRotationWorkflowLayout(mode) {
     const pure = mode === "pure_rotation";
+    const fixed = mode === "srt_fixed_track_visual_pose";
     document.querySelector("#workflowSteps")?.classList.toggle("is-pure-rotation", pure);
+    document.querySelector("#workflowSteps")?.classList.toggle("is-fixed-track", fixed);
     stageTitles.sfm = pure ? "OpenGV 旋转轨迹恢复" : "SfM重建";
+    stageTitles.keyframes = fixed ? "视觉姿态" : (pure ? "调试" : "关键帧标定");
+    stageTitles.render = fixed ? "微调与渲染" : "渲染导出";
     const sfmLabel = document.querySelector("#workflowSfmStageLabel");
     if (sfmLabel) sfmLabel.textContent = pure ? "旋转轨迹恢复" : "SfM重建";
     const keyframeLabel = document.querySelector("#workflowKeyframeStageLabel");
-    if (keyframeLabel) keyframeLabel.textContent = pure ? "调试" : "关键帧标定";
-    document.querySelector('#workflowSteps li[data-stage="quality"]')?.toggleAttribute("hidden", pure);
+    if (keyframeLabel) keyframeLabel.textContent = stageTitles.keyframes;
+    document.querySelector('#workflowSteps li[data-stage="upload"]')?.toggleAttribute("hidden", fixed);
+    document.querySelector('#workflowSteps li[data-stage="sfm"]')?.toggleAttribute("hidden", fixed);
+    document.querySelector('#workflowSteps li[data-stage="quality"]')?.toggleAttribute("hidden", pure || fixed);
+    document.querySelector('.workflow-stage-panel[data-stage="upload"]')?.toggleAttribute("hidden", fixed);
+    document.querySelector('.workflow-stage-panel[data-stage="sfm"]')?.toggleAttribute("hidden", fixed);
+    document.querySelector('.workflow-stage-panel[data-stage="quality"]')?.toggleAttribute("hidden", pure || fixed);
+    const keyframeOrdinal = document.querySelector('#workflowSteps li[data-stage="keyframes"] span');
+    if (keyframeOrdinal) keyframeOrdinal.textContent = fixed ? "1" : "3";
     const renderOrdinal = document.querySelector('#workflowSteps li[data-stage="render"] span');
-    if (renderOrdinal) renderOrdinal.textContent = pure ? "4" : "5";
+    if (renderOrdinal) renderOrdinal.textContent = fixed ? "2" : (pure ? "4" : "5");
+    const renderStep = document.querySelector('#workflowSteps li[data-stage="render"]');
+    if (renderStep) renderStep.lastChild.textContent = stageTitles.render;
     document.querySelector("#workflowStartSfm")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationRecoveryActions")?.classList.toggle("is-pure-visible", pure);
     const pureRunButton = document.querySelector("#workflowStartPureRotation");
@@ -212,6 +237,19 @@
     document.querySelector("#standardKeyframeActions")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationKeyframeActions")?.classList.toggle("is-pure-visible", pure);
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
+    document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed);
+    const sfmHeading = document.querySelector("#sfmPanel .sfm-panel-head span");
+    if (sfmHeading) sfmHeading.textContent = fixed
+      ? "SRT→CAD 固定轨迹（无点云）"
+      : "SfM 诊断场景（点云 + 双轨迹 + 建议）";
+    document.querySelector("#sfmPointsToggle")?.toggleAttribute("hidden", fixed);
+    document.querySelector("#sfmPointControls")?.toggleAttribute("hidden", fixed);
+    document.querySelector("#sfmSuggestionsToggle")?.toggleAttribute("hidden", fixed);
+    document.querySelector("#sfmUsePoseToggle")?.toggleAttribute("hidden", fixed);
+    const globalTrackLabel = document.querySelector("#sfmGlobalToggle span");
+    if (globalTrackLabel) globalTrackLabel.textContent = fixed ? "SRT 固定轨迹" : "原始 SfM 轨迹";
+    const anchoredTrackLabel = document.querySelector("#sfmAnchoredToggle span");
+    if (anchoredTrackLabel) anchoredTrackLabel.textContent = fixed ? "姿态微调后轨迹" : "锚定后轨迹";
     setPureVisible(
       "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
         + "#workflowReturnPureCalibration",
@@ -234,6 +272,12 @@
     document.querySelectorAll("#cameraToolbar .dev-only-control").forEach((node) => {
       node.toggleAttribute("hidden", pure);
     });
+    const keyframeStep = document.querySelector("#workflowKeyframeStep")?.closest("label");
+    if (keyframeStep) keyframeStep.hidden = fixed;
+    document.querySelector("#workflowGenerateKeyframes")?.toggleAttribute("hidden", fixed);
+    document.querySelector("#workflowContinueKeyframes")?.toggleAttribute("hidden", fixed);
+    const finishKeyframes = document.querySelector("#workflowFinishKeyframes");
+    if (finishKeyframes) finishKeyframes.textContent = fixed ? "应用姿态微调并进入渲染" : "完成关键帧标定";
     const keyframeStatus = document.querySelector("#workflowKeyframePlanStatus");
     if (pure && keyframeStatus) {
       keyframeStatus.textContent = "调整固定相机的位置与方向，确认后播放视频检查整段旋转效果；满意后进入渲染导出。";
@@ -769,6 +813,7 @@
           "sfm_only",
           "srt_sfm_fused",
           "srt_full_pose",
+          "srt_fixed_track_visual_pose",
           "pure_rotation",
         ]);
         projectWorkbenchWorkflowMode = supported.has(projectWorkbenchSession.workflow)
@@ -829,6 +874,17 @@
   }
 
   function nextStageAfterSuccess(stage) {
+    if (isFixedTrackVisualPoseWorkflow()) {
+      const fixedTrackNext = {
+        upload: "keyframes",
+        sfm: "keyframes",
+        keyframes: "render",
+        alignment: "keyframes",
+        quality: "render",
+        render: "render",
+      };
+      return fixedTrackNext[stage] || "keyframes";
+    }
     if (isPureRotationWorkflow()) {
       const pureNext = {
         upload: "sfm",
@@ -900,6 +956,12 @@
 
   async function detectWorkflowStageFromArtifacts() {
     if (!dataset || !runId) return "upload";
+    if (isFixedTrackVisualPoseWorkflow()) {
+      const trajectoryReady = await resourceExists(fixedTrackVisualPoseTrajectoryPath());
+      if (!trajectoryReady) return "keyframes";
+      const fittedReady = await resourceExists(runPath("03_alignment/camera_track_pred.json"));
+      return fittedReady ? "keyframes" : "keyframes";
+    }
     if (isPureRotationWorkflow()) {
       const rawReady = await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"));
       if (rawReady) {
@@ -977,6 +1039,8 @@
     }
     if (stage === "keyframes" && isPureRotationWorkflow()) {
       message.textContent = "悬停旋转调试：移动固定相机并调整姿态；播放检查旋转效果，完成后直接进入渲染导出。";
+    } else if (stage === "keyframes" && isFixedTrackVisualPoseWorkflow()) {
+      message.textContent = "相机 XYZ 严格来自 SRT→CAD 固定轨迹；可检查并微调偏航、俯仰和滚转，完成后直接进入渲染。";
     } else if (
       stage === "keyframes" &&
       !isPureRotationWorkflow() &&
@@ -996,7 +1060,7 @@
   }
 
   function setWorkflowStage(stage) {
-    const requested = isPureRotationWorkflow() && stage === "quality" ? "render" : stage;
+    const requested = (isPureRotationWorkflow() || isFixedTrackVisualPoseWorkflow()) && stage === "quality" ? "render" : stage;
     selectedWorkflowStage = stageOrder.includes(requested) ? requested : "upload";
     const annotationPanel = document.querySelector("#annotationPanel");
     const cameraSettings = document.querySelector("#cameraSettingsDetails");
@@ -2046,6 +2110,13 @@
     const pending = Number(keyframePlan?.pending_count || 0);
     const completed = Number(keyframePlan?.completed_count || 0);
     const total = Array.isArray(keyframePlan?.frames) ? keyframePlan.frames.length : 0;
+    if (isFixedTrackVisualPoseWorkflow()) {
+      if (alignmentButton) alignmentButton.textContent = alignmentArtifactReady ? "重新应用姿态微调" : "应用姿态微调";
+      if (continueButton) continueButton.disabled = true;
+      if (finishButton) finishButton.disabled = trajectoryWorkflowActionsAreBlocked() || keyframeSaveInFlight;
+      if (planStatus) planStatus.textContent = "SRT→CAD 轨迹位置已锁定；当前环节只调整姿态。";
+      return;
+    }
     if (alignmentButton) alignmentButton.textContent = keyframePlan ? "重新路线拟合" : "路线拟合";
     if (continueButton) continueButton.disabled = trajectoryWorkflowActionsAreBlocked() || keyframeSaveInFlight || !keyframePlan || pending === 0;
     if (finishButton) finishButton.disabled = trajectoryWorkflowActionsAreBlocked() || keyframeSaveInFlight || !keyframePlan || pending > 0;
@@ -2122,6 +2193,16 @@
 
   async function finishKeyframePlan() {
     await saveCurrentCameraTrack();
+    if (isFixedTrackVisualPoseWorkflow()) {
+      sessionStorage.setItem(postAlignmentStageKey(), "render");
+      message.textContent = "正在应用姿态微调；成功后将直接进入微调与渲染。";
+      try {
+        return await startAlignmentStage();
+      } catch (error) {
+        sessionStorage.removeItem(postAlignmentStageKey());
+        throw error;
+      }
+    }
     if (!keyframePlan) throw new Error("请先在初步路线拟合后生成关键帧计划。");
     const pending = Number(keyframePlan.pending_count || 0);
     if (pending > 0) throw new Error(`关键帧计划还有 ${pending} 帧待标定，请继续完成后再拟合。`);

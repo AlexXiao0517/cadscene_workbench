@@ -1055,6 +1055,33 @@ def test_fixed_track_workbench_opens_only_with_validated_trajectory(
     ] == ["keyframes"]
 
 
+def test_fixed_track_resume_never_returns_to_sfm_or_quality(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=True
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    session = api.workbench.inspect("project-1", opened.body["token"])
+
+    assert api.workbench._validated_resume_stage(session, "sfm") == "keyframes"
+
+    run_root = api.workbench._bound_workbench_run_roots(session)[0]
+    fitted = run_root / "03_alignment/camera_track_pred.json"
+    fitted.parent.mkdir(parents=True, exist_ok=True)
+    fitted.write_text(json.dumps(_manual_track()), encoding="utf-8")
+
+    assert api.workbench._validated_resume_stage(session, "quality") == "render"
+
+
 def _add_same_scene_adjacent_clips(
     api: ProjectApi,
     repositories,

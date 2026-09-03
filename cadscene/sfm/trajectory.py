@@ -59,20 +59,39 @@ class SfmTrajectory:
     unregistered_frames: np.ndarray = field(
         default_factory=lambda: np.asarray([], dtype=np.int64)
     )
+    position_frames: np.ndarray = field(
+        default_factory=lambda: np.asarray([], dtype=np.int64)
+    )
+    position_centers: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 3), dtype=np.float64)
+    )
+
+    def __post_init__(self) -> None:
+        if len(self.position_frames) == 0 and len(self.frames):
+            object.__setattr__(self, "position_frames", self.frames.copy())
+            object.__setattr__(self, "position_centers", self.centers.copy())
+        if len(self.position_frames) != len(self.position_centers):
+            raise ValueError("position frames and centers must have matching lengths")
 
     @property
     def frame_min(self) -> int:
+        if len(self.position_frames):
+            return int(self.position_frames[0])
         if len(self.unregistered_frames):
             return min(int(self.frames[0]), int(self.unregistered_frames[0]))
         return int(self.frames[0])
 
     @property
     def frame_max(self) -> int:
+        if len(self.position_frames):
+            return int(self.position_frames[-1])
         if len(self.unregistered_frames):
             return max(int(self.frames[-1]), int(self.unregistered_frames[-1]))
         return int(self.frames[-1])
 
     def is_frame_registered(self, frame_index: float) -> bool:
+        if not len(self.frames):
+            return False
         if not len(self.unregistered_frames):
             return True
         frame = float(frame_index)
@@ -87,16 +106,47 @@ class SfmTrajectory:
             )
         )
 
+    def center_at(self, frame_index: float) -> np.ndarray:
+        if not len(self.position_frames):
+            raise ValueError("trajectory has no available camera positions")
+        frame = float(frame_index)
+        if frame <= self.position_frames[0]:
+            return self.position_centers[0].copy()
+        if frame >= self.position_frames[-1]:
+            return self.position_centers[-1].copy()
+        second = int(np.searchsorted(self.position_frames, frame, side="right"))
+        first = second - 1
+        first_frame = float(self.position_frames[first])
+        second_frame = float(self.position_frames[second])
+        alpha = (frame - first_frame) / max(second_frame - first_frame, 1e-9)
+        return (
+            self.position_centers[first] * (1.0 - alpha)
+            + self.position_centers[second] * alpha
+        )
+
+    def is_orientation_available(self, frame_index: float) -> bool:
+        return self.is_frame_registered(frame_index)
+
+    def orientation_at(self, frame_index: float) -> np.ndarray:
+        if not self.is_orientation_available(frame_index):
+            raise ValueError(
+                f"trajectory orientation is unavailable at frame {float(frame_index):g}"
+            )
+        _center, rotation = self.query(frame_index)
+        return rotation
+
     def query(self, frame_index: float) -> tuple[np.ndarray, np.ndarray]:
         f = float(frame_index)
+        if not len(self.frames):
+            raise ValueError(f"trajectory orientation is unavailable at frame {f:g}")
         if not self.is_frame_registered(f):
             raise ValueError(
                 f"trajectory frame {f:g} is explicitly unregistered"
             )
         if f <= self.frames[0]:
-            return self.centers[0].copy(), quat_wxyz_to_matrix(self.quats_c2w_wxyz[0])
+            return self.center_at(f), quat_wxyz_to_matrix(self.quats_c2w_wxyz[0])
         if f >= self.frames[-1]:
-            return self.centers[-1].copy(), quat_wxyz_to_matrix(self.quats_c2w_wxyz[-1])
+            return self.center_at(f), quat_wxyz_to_matrix(self.quats_c2w_wxyz[-1])
         j = int(np.searchsorted(self.frames, f, side="right"))
         i = j - 1
         fa, fb = float(self.frames[i]), float(self.frames[j])
@@ -112,7 +162,7 @@ class SfmTrajectory:
                     f"trajectory query at frame {f:g} crosses an unregistered gap"
                 )
         alpha = (f - fa) / max(fb - fa, 1e-9)
-        center = self.centers[i] * (1.0 - alpha) + self.centers[j] * alpha
+        center = self.center_at(f)
         quat = quat_slerp(self.quats_c2w_wxyz[i], self.quats_c2w_wxyz[j], alpha)
         return center, quat_wxyz_to_matrix(quat)
 
@@ -135,27 +185,48 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
     centers: list[list[float]] = []
     quats: list[list[float]] = []
     unregistered_frames: list[int] = []
+    position_frames: list[int] = []
+    position_centers: list[list[float]] = []
+    meta = dict(data.get("meta") or {})
+    fixed_track = meta.get("position_source") == "srt_cad_locked"
     for pose in data.get("poses", []):
-        if not pose.get("registered", True):
-            unregistered_frames.append(int(pose["frame_index"]))
+        frame_index = int(pose["frame_index"])
+        position_available = bool(
+            pose.get("position_available", pose.get("registered", True))
+        )
+        orientation_available = bool(
+            pose.get("orientation_available", pose.get("registered", True))
+        )
+        if position_available:
+            position_frames.append(frame_index)
+            position_centers.append([float(v) for v in pose["center"]])
+        if not orientation_available:
+            unregistered_frames.append(frame_index)
             continue
-        frames.append(int(pose["frame_index"]))
+        frames.append(frame_index)
         centers.append([float(v) for v in pose["center"]])
         quats.append([float(v) for v in pose["cam_from_world_quat_wxyz"]])
-    if len(frames) < 2:
+    if fixed_track and len(position_frames) < 2:
+        raise RuntimeError("fixed SRT track requires at least two camera positions")
+    if not fixed_track and len(frames) < 2:
         raise RuntimeError("SfM 轨迹至少需要 2 个已注册帧。")
     order = np.argsort(frames)
+    position_order = np.argsort(position_frames)
     intrinsics = (data.get("intrinsics") or [{}])[0]
     return SfmTrajectory(
         frames=np.asarray(frames, dtype=np.int64)[order],
-        centers=np.asarray(centers, dtype=np.float64)[order],
-        quats_c2w_wxyz=np.asarray(quats, dtype=np.float64)[order],
+        centers=np.asarray(centers, dtype=np.float64).reshape(-1, 3)[order],
+        quats_c2w_wxyz=np.asarray(quats, dtype=np.float64).reshape(-1, 4)[order],
         fps=float(data.get("fps", 25.0)),
         width=int(data.get("width", 0)),
         height=int(data.get("height", 0)),
         intrinsics=intrinsics,
-        meta=dict(data.get("meta") or {}),
+        meta=meta,
         unregistered_frames=np.asarray(
             sorted(set(unregistered_frames)), dtype=np.int64
         ),
+        position_frames=np.asarray(position_frames, dtype=np.int64)[position_order],
+        position_centers=np.asarray(
+            position_centers, dtype=np.float64
+        ).reshape(-1, 3)[position_order],
     )
