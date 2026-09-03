@@ -136,11 +136,11 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ### 对齐被拒绝、路线漂移，或 CAD / SfM 看起来不在同一平面
 
-**可能原因：** SfM world、CAD meters、查看器 `cad_world`、partial-SRT 的 local ENU 和 full-pose 的 CGCS2000 projected/CAD local metres 不是同一坐标系；比例、`origin_xy`、pitch 符号或人工锚点不一致。全姿态还可能选错中央经线、分带、带号或 CAD X/Y 轴序。可观测性不足、共线/退化锚点或过大残差也会导致拒绝。
+**可能原因：** SfM world、CAD meters、查看器 `cad_world`、partial-SRT 的 local ENU 和两个正式 SRT 分支的 CGCS2000 projected/CAD local metres 不是同一坐标系；比例、`origin_xy`、pitch 符号或人工锚点不一致。SRT 路线还可能选错中央经线、分带、带号或 CAD X/Y 轴序。可观测性不足、共线/退化锚点或过大残差也会导致拒绝。
 
-**检查：** 查看 `03_alignment/alignment.json` 的 `alignment_mode`、`scale_observable`、Sim3、残差、FOV 来源和 warnings，以及 `keyframe_correspondences.csv`。确认人工关键帧不是 `algorithm_prediction`，并核对 `cad_scale`、`origin_xy`。常规对齐至少需要两个位置可区分的人工锚点；partial-SRT 融合需要至少三个空间独立约束。full-pose 应显示 `metric_direct`、`metric_scale_locked=true` 和 `scale=1.0`，并在项目 snapshot 中保留与当前 CAD 指纹一致的 confirmed georeference。
+**检查：** 查看 `03_alignment/alignment.json` 的 `alignment_mode`、`position_mode`、`scale_observable`、Sim3、残差、FOV 来源和 warnings，以及 `keyframe_correspondences.csv`。确认人工关键帧不是 `algorithm_prediction`，并核对 `cad_scale`、`origin_xy`。常规对齐至少需要两个位置可区分的人工锚点；历史 partial-SRT 融合需要至少三个空间独立约束。full-pose 应显示 `metric_direct`，固定轨迹应显示 `position_mode=srt_fixed_track` 与 `position_source=srt_cad_locked`；两者都应有 `metric_scale_locked=true`、`scale=1.0` 和绑定当前 CAD 指纹的 confirmed georeference。
 
-**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。full-pose 先回到项目页比较 CAD bbox/轨迹预览并重新确认候选，不要靠放开自由 Sim3 尺度掩盖选错投影。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退；`metric_direct` 的 1.0 则是已投影米制轨迹的强制单位尺度。
+**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。两个 SRT 分支都应先回到项目页比较 CAD bbox/轨迹预览并重新确认候选，不要靠放开自由 Sim3 尺度掩盖选错投影。固定轨迹只允许调整整条路线共同的 XYZ 偏移，不能逐帧移动位置。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退；两个已投影米制分支的 1.0 是强制单位尺度。
 
 ### FOV 约为 29°、内参异常或对齐拒绝
 
@@ -152,13 +152,21 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 ## SRT 与 pure-rotation
 
-### 上传完整姿态 SRT 后仍无法启动，或轨迹预览不落在 CAD 上
+### 上传 SRT 后仍无法启动，或轨迹预览不落在 CAD 上
 
-**可能原因：** SRT 的 GPS/高度/云台 yaw-pitch-roll 共同覆盖不足；精确 frame map 缺失；当前 CAD 的 CGCS2000 候选尚未确认或已因 CAD revision 变化失效；水平 FOV 非法；候选投影、带号或 X/Y 轴序导致轨迹不落图；或安装环境缺少 `pyproj`/`proj.db`。
+**可能原因：** 固定轨迹分支的 GPS/`rel_alt` 覆盖不足，或完整姿态分支的云台 yaw-pitch-roll 共同覆盖不足；精确 frame map 缺失；当前 CAD 的 CGCS2000 候选尚未确认或已因 CAD revision 变化失效；水平 FOV 非法；候选投影、带号或 X/Y 轴序导致轨迹不落图；或安装环境缺少 `pyproj`/`proj.db`。
 
-**检查：** 查看项目 snapshot 的 `resolved_workflow`、`cad_georeference`、候选 evidence/preview、`can_run_trajectory` 与 blockers，以及片段 `srt_full_pose_settings.horizontal_fov_deg`。运行开发者指南中的 EPSG:4549 smoke 检查 PROJ 数据；它成功也不代表当前 CAD 应采用 120°中央经线。
+**检查：** 查看项目 snapshot 的 `resolved_workflow`、`cad_georeference`、候选 evidence/preview、`can_run_trajectory` 与 blockers，以及对应的 `srt_full_pose_settings` 或 `srt_fixed_track_visual_pose` 设置。运行开发者指南中的 EPSG:4549 smoke 检查 PROJ 数据；它成功也不代表当前 CAD 应采用 120°中央经线。
 
-**处理：** 水平 FOV 与中央经线分别填写：前者是镜头角度（例如 72°），后者是当前 CAD 的 CGCS2000 投影参数。中央经线可填 `120`、`118.833333` 或 `118°50′`；分必须小于 60。标准经线会生成 EPSG 候选，非标准经线会按精确输入生成自定义 CGCS2000 高斯—克吕格候选，其固定参数为 GRS80、纬度原点 0°、比例因子 1、假东 500000 米、假北 0 米且无带号。点击“生成候选”后观察输入校验、CRS 枚举、评分与预览进度；关闭再打开弹窗可恢复同一任务。任务失败时保留输入并重试，CAD/SRT 或中央经线变化后必须重新生成。在当前 CAD bbox 与投影轨迹预览证据一致后显式确认候选，并按相对高度设置 `cad_z_offset_m`。不要把 120°复制为其他 CAD 的默认中央经线，也不要把未经共同基准验证的绝对高度当作 CAD Z。若 SRT 不满足完整姿态门槛，`srt_sfm_fused` 仍为 Interface only；需要正式稳定路径时改用符合产品契约的 `sfm_only` 项目输入。
+**处理：** 水平 FOV 与中央经线分别填写：前者是镜头角度（例如 72°），后者是当前 CAD 的 CGCS2000 投影参数。中央经线可填 `120`、`118.833333` 或 `118°50′`；分必须小于 60。标准经线会生成 EPSG 候选，非标准经线会按精确输入生成自定义 CGCS2000 高斯—克吕格候选，其固定参数为 GRS80、纬度原点 0°、比例因子 1、假东 500000 米、假北 0 米且无带号。点击“生成候选”后观察输入校验、CRS 枚举、评分与预览进度；关闭再打开弹窗可恢复同一任务。任务失败时保留输入并重试，CAD/SRT 或中央经线变化后必须重新生成。在当前 CAD bbox 与投影轨迹预览证据一致后显式确认候选：完整姿态按相对高度设置 `cad_z_offset_m`，固定轨迹则设置唯一的 `route_offset_xyz_m`。不要把 120°复制为其他 CAD 的默认中央经线，也不要把未经共同基准验证的绝对高度当作 CAD Z。没有云台姿态但 GPS/`rel_alt` 足够时应走 `srt_fixed_track_visual_pose`，而不是历史 `srt_sfm_fused`。
+
+### 固定轨迹工作台有路线，但部分画面没有相机视锥
+
+**可能原因：** SRT 位置有效，但该段视频纹理不足、模糊、相邻帧匹配过少，或路线几何接近退化，视觉姿态不可观测。
+
+**检查：** 查看 `02_srt_visual_pose/orientation_diagnostics.json` 的状态、覆盖率、pair diagnostics 和 warnings。查看器中的路线应继续存在；只有 `orientation_available=true` 的帧才显示视锥。
+
+**处理：** 这不是位置丢失，也不会回退到 SfM。沿 SRT→CAD 轨迹补充或微调姿态关键帧；位置只能通过一个统一 XYZ 偏移移动整条路线。该路线跳过位置注册、三角化、BA 和点云维护，所以通常比完整 SfM 快；加速并不只是因为没有写出 PLY 文件。
 
 ### pure-rotation 后无法放置、没有轨迹或渲染位置不对
 

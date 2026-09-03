@@ -88,7 +88,8 @@ def test_pure_rotation_is_documented_as_an_automatic_analysis_recommendation() -
     )[0]
     assert workflow_select.count("<option") == 4
     assert 'value="sfm_only"' in workflow_select
-    assert 'value="srt_sfm_fused"' in workflow_select
+    assert 'value="srt_fixed_track_visual_pose"' in workflow_select
+    assert 'value="srt_sfm_fused"' not in workflow_select
     assert 'value="srt_full_pose"' in workflow_select
     assert 'value="pure_rotation"' in workflow_select
     assert "function visibleWorkflowChoice(clip, edit)" in workspace_script
@@ -100,7 +101,8 @@ def test_pure_rotation_is_documented_as_an_automatic_analysis_recommendation() -
     routing = _read("docs/workflow_routing.md")
     assert "单一逻辑片段且不足 60 秒" in routing
     assert "项目页的“最终工作流”选择器用于纠正推荐" in routing
-    assert "项目页保留 `sfm_only`、`pure_rotation`、`srt_sfm_fused` 与 `srt_full_pose` 的真实模式" in routing
+    assert "项目页为新项目显示 `sfm_only`、`pure_rotation`、`srt_fixed_track_visual_pose` 与" in routing
+    assert "`srt_sfm_fused` | 旧项目 manifest/产物 | **Legacy read-only**" in routing
     assert "不再把全姿态片段回显为 SfM" in routing
     assert "120°只属于当前项目确认，不是通用默认" in routing
 

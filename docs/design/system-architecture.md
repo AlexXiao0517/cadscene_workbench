@@ -25,8 +25,10 @@ stateDiagram-v2
     "片段轨迹任务" --> "工作台编辑"
     "工作台编辑" --> "SfM 关键帧与质量": "sfm_only"
     "工作台编辑" --> "旋转放置与校正": "pure_rotation"
+    "工作台编辑" --> "固定 SRT 轨迹与视觉姿态": "srt_fixed_track_visual_pose"
     "SfM 关键帧与质量" --> "保存工作台输出"
     "旋转放置与校正" --> "保存工作台输出"
+    "固定 SRT 轨迹与视觉姿态" --> "保存工作台输出"
     "保存工作台输出" --> "工程标牌与渲染"
     "工程标牌与渲染" --> "片段不可变渲染"
     "片段不可变渲染" --> "严格帧分区合并"
@@ -140,4 +142,4 @@ CAD 替换只有在至少一个片段存在可校验的保存工作台输出时�
 
 ## 运行依赖边界
 
-默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV，并由项目视频分析在严格旋转证据成立时自动推荐。正式上传界面的 CAD 输入是 DXF，依赖 DXF 解析器；兼容后端中的 DWG 转换能力不等于正式界面已支持 DWG。普通 SRT 只提供能力线索，不能作为 CAD 高程或高精度位姿真值。
+默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV。`srt_fixed_track_visual_pose` 依赖已确认的 CAD 投影、SRT GPS/`rel_alt` 和用户水平 FOV，位置由 SRT 锁定，OpenCV 视觉只估计姿态，不生成点云。正式上传界面的 CAD 输入是 DXF；兼容后端中的 DWG 转换能力不等于正式界面已支持 DWG。

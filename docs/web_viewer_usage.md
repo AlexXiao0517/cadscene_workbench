@@ -113,6 +113,9 @@ cad=/legacy/out/...
   该人工覆盖，不能据此推断 SRT 或 SfM 的绝对精度。
 - `pure_rotation` 是 Supported 工作流：它固定相机中心，只恢复旋转，随后由人工全局
   放置和局部姿态校正进入渲染；不恢复平移或尺度。自动路线推荐仍需人工复核。
+- `srt_fixed_track_visual_pose` 工作台只显示“视觉姿态 → 微调与渲染”。右侧路线包含
+  所有 SRT 位置，即使某些帧没有姿态；此时保留轨迹线并隐藏相机视锥。X/Y/Z 和平移
+  Gizmo 被锁定，偏航/俯仰/滚转可调整，质量时间轴和点云控件隐藏。
 
 ## 常见问题
 
@@ -121,6 +124,8 @@ cad=/legacy/out/...
 - 建议帧不显示：检查 `suggestions` 参数或 `04_quality/keyframe_suggestions.json` 是否存在。
 - 质量色带不显示：检查 `qualityTimeline` 参数或 `04_quality/quality_timeline.csv` 是否存在。
 - anchored path 与点云不重合：点云/global track 只用 global sim3，anchored path 是分段锚定结果。
+- 固定轨迹有路线但没有相机视锥：该帧 SRT 位置有效、视觉姿态不可观测；这是允许的
+  降级状态，不代表轨迹丢失。可在有视觉证据的区间补姿态锚点，不能逐帧移动 XYZ。
 - 正式项目从项目片段管理进入 Viewer 后视频或 CAD 丢失：确认服务使用项目创建时的
   `--storage-root`，从同一 `project_id` 重新进入工作台，并检查 Project snapshot、活动
   workbench session 和已保存 workbench output 引用；不要改用 `dataset + runId` 猜测路径。

@@ -9,6 +9,7 @@ _REQUIRED_RESOURCES = (
     Path("apps/project_library/index.html"),
     Path("apps/web_camera_viewer/index.html"),
     Path("configs/pipelines/sfm_overlay_existing_sfm.yaml"),
+    Path("configs/pipelines/srt_fixed_track_visual_pose_overlay.yaml"),
     Path("configs/pure_rotation/adapter-calibration/cameras.txt"),
 )
 

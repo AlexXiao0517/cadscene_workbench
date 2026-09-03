@@ -78,7 +78,9 @@ class ExistingWorkbenchRenderAdapter:
         else:
             trajectory = _required_path(inputs.parameters, "trajectory_path")
             pipeline_name = (
-                "srt_full_pose_overlay.yaml"
+                "srt_fixed_track_visual_pose_overlay.yaml"
+                if self.workflow == "srt_fixed_track_visual_pose"
+                else "srt_full_pose_overlay.yaml"
                 if self.workflow == "srt_full_pose"
                 else "sfm_overlay_existing_sfm.yaml"
             )
@@ -117,7 +119,10 @@ class ExistingWorkbenchRenderAdapter:
                 "--progress-file",
                 str(progress_path),
             ]
-            if self.workflow != "srt_full_pose":
+            if self.workflow not in {
+                "srt_full_pose",
+                "srt_fixed_track_visual_pose",
+            }:
                 run_root = trajectory.parent.parent
                 sparse_ply = run_root / "02_sfm" / "sparse_points.ply"
                 if not sparse_ply.is_file():
@@ -202,6 +207,7 @@ def default_workbench_render_adapters(
                 "sfm_only",
                 "srt_sfm_fused",
                 "srt_full_pose",
+                "srt_fixed_track_visual_pose",
                 "pure_rotation",
             )
         )

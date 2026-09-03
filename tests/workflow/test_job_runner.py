@@ -462,6 +462,55 @@ def test_full_pose_alignment_resolves_semantic_trajectory_without_sparse_ply(
     assert "--sparse-ply" not in command
 
 
+def test_fixed_track_alignment_uses_visual_pose_pipeline_without_sparse_ply(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data/demo"
+    data.mkdir(parents=True)
+    (data / "demo.mp4").write_bytes(b"video")
+    (data / "design.json").write_text("{}", encoding="utf-8")
+    (data / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "video": {"path": "data/demo/demo.mp4"},
+                "cad": {"design_json": "data/demo/design.json"},
+                "defaults": {"cad_scale": 1.0, "origin_xy": [0, 0]},
+                "workflow": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "implementation_status": "ready",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    run = tmp_path / "runs/demo/fixed-track"
+    trajectory = run / "02_srt_visual_pose/camera_trajectory_visual_pose.json"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text("{}", encoding="utf-8")
+    track = run / "01_keyframes/camera_track_manual.json"
+    track.parent.mkdir()
+    track.write_text('{"keyframes":[]}', encoding="utf-8")
+
+    resolved = resolve_stage_inputs(tmp_path, "demo", "fixed-track", {})
+    command = build_stage_command(
+        tmp_path,
+        "demo",
+        "fixed-track",
+        "alignment",
+        {},
+        application_root=Path.cwd(),
+    )
+
+    assert resolved["workflow"] == "srt_fixed_track_visual_pose"
+    assert resolved["trajectory"] == trajectory
+    assert resolved["sparse_ply"] is None
+    assert command[command.index("--stages") + 1] == "alignment"
+    assert command[command.index("--config") + 1].endswith(
+        "configs\\pipelines\\srt_fixed_track_visual_pose_overlay.yaml"
+    )
+    assert "--sparse-ply" not in command
+
+
 def test_alignment_command_allows_rotation_only_manual_anchor_positions(tmp_path: Path) -> None:
     root = tmp_path
     run_dir = root / "runs/demo/r-overlap"

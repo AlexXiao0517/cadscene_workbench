@@ -246,7 +246,14 @@ def test_execution_plan_requires_structured_adapter_result() -> None:
 
 
 @pytest.mark.parametrize(
-    "workflow", ("sfm_only", "srt_sfm_fused", "srt_full_pose", "pure_rotation")
+    "workflow",
+    (
+        "sfm_only",
+        "srt_sfm_fused",
+        "srt_full_pose",
+        "srt_fixed_track_visual_pose",
+        "pure_rotation",
+    ),
 )
 def test_default_workbench_render_adapters_cover_every_project_workflow(
     tmp_path: Path, workflow: str,
@@ -364,6 +371,50 @@ def test_full_pose_render_uses_metric_pipeline_without_sparse_point_cloud(
     )
     assert "--sparse-ply" not in command
     assert "02_sfm" not in " ".join(command)
+
+
+def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
+    tmp_path: Path,
+) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    trajectory = (
+        tmp_path
+        / "run"
+        / "02_srt_visual_pose"
+        / "camera_trajectory_visual_pose.json"
+    ).resolve()
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text('{"poses":[]}', encoding="utf-8")
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "workflow": "srt_fixed_track_visual_pose",
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 1.0,
+                "origin_xy": [499000.0, 3319000.0],
+                "trajectory_path": str(trajectory),
+            },
+        }
+    )
+
+    plan = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("srt_fixed_track_visual_pose").prepare(inputs)
+    command = plan.commands[0]
+    joined = " ".join(command)
+
+    assert "cadscene.cli.run_pipeline" in command
+    assert command[command.index("--config") + 1].endswith(
+        "configs\\pipelines\\srt_fixed_track_visual_pose_overlay.yaml"
+    )
+    assert command[command.index("--stages") + 1] == "alignment,render"
+    assert "--sparse-ply" not in command
+    assert "quality" not in joined
+    assert "road_surface" not in joined
+    assert "02_sfm" not in joined
 
 
 def test_workbench_render_draws_annotation_overlay_before_packaging(

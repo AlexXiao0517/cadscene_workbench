@@ -267,6 +267,8 @@ def resolve_stage_inputs(
         (dataset_manifest.get("workflow") or {}).get("trajectory_mode") or "sfm_only"
     )
     full_pose = workflow == "srt_full_pose"
+    fixed_track = workflow == "srt_fixed_track_visual_pose"
+    no_sparse_geometry = full_pose or fixed_track
 
     video_option = opts.get("video") or opts.get("video_path")
     video = _first_existing(
@@ -326,9 +328,17 @@ def resolve_stage_inputs(
         "trajectory": (
             run_dir / "02_srt_full_pose" / "camera_trajectory_full_pose.json"
             if full_pose
+            else run_dir
+            / "02_srt_visual_pose"
+            / "camera_trajectory_visual_pose.json"
+            if fixed_track
             else run_dir / "02_sfm" / "camera_trajectory.json"
         ),
-        "sparse_ply": None if full_pose else run_dir / "02_sfm" / "sparse_points.ply",
+        "sparse_ply": (
+            None
+            if no_sparse_geometry
+            else run_dir / "02_sfm" / "sparse_points.ply"
+        ),
         "manual_track": run_dir / "01_keyframes" / "camera_track_manual.json",
         "sfm_camera_path": run_dir / "03_alignment" / "sfm_camera_path.csv",
         "render_output": run_dir / "08_render" / "sfm_align_overlay.mp4",
@@ -567,12 +577,20 @@ def build_stage_command(
             command.append("--no-cpu-fallback")
         return command
     full_pose = resolved["workflow"] == "srt_full_pose"
+    fixed_track = resolved["workflow"] == "srt_fixed_track_visual_pose"
+    no_sparse_geometry = full_pose or fixed_track
     pipeline_config = (
-        "srt_full_pose_overlay.yaml" if full_pose else "sfm_overlay_existing_sfm.yaml"
+        "srt_fixed_track_visual_pose_overlay.yaml"
+        if fixed_track
+        else "srt_full_pose_overlay.yaml"
+        if full_pose
+        else "sfm_overlay_existing_sfm.yaml"
     )
     if stage in {"alignment", "quality"}:
+        if fixed_track and stage == "quality":
+            raise ValueError("fixed-track visual pose workflow has no quality stage")
         required = ["trajectory", "manual_track"]
-        if not full_pose:
+        if not no_sparse_geometry:
             required.append("sparse_ply")
         if stage == "quality":
             required.append("sfm_camera_path")
@@ -583,16 +601,18 @@ def build_stage_command(
                 if label == "sfm_camera_path":
                     raise FileNotFoundError("请先在关键帧标定阶段完成路线拟合。")
                 raise FileNotFoundError(f"manual camera track not found: {resolved[label]}")
-        if not full_pose:
+        if not no_sparse_geometry:
             _require_suitable_sfm(resolved["run_dir"])
-        if stage == "alignment" and not full_pose:
+        if stage == "alignment" and not no_sparse_geometry:
             anchor_count = _manual_keyframe_count(resolved["manual_track"])
             if anchor_count < 2:
                 raise ValueError(f"路线拟合至少需要 2 个人工关键帧；当前为 {anchor_count} 个。")
         if stage == "quality":
             validate_quality_plan(keyframe_plan_path(resolved["run_dir"]), resolved["sfm_camera_path"])
         selected_stages = (
-            "alignment,viewer_scene"
+            "alignment"
+            if fixed_track
+            else "alignment,viewer_scene"
             if stage == "alignment"
             else "quality,viewer_scene"
             if full_pose
@@ -621,7 +641,7 @@ def build_stage_command(
             str(resolved["origin_xy"][0]),
             str(resolved["origin_xy"][1]),
         ]
-        if not full_pose:
+        if not no_sparse_geometry:
             trajectory_index = command.index("--trajectory")
             command[trajectory_index:trajectory_index] = [
                 "--sparse-ply",
@@ -636,14 +656,14 @@ def build_stage_command(
             )
         return command
     required = ["trajectory", "manual_track"]
-    if not full_pose:
+    if not no_sparse_geometry:
         required.append("sparse_ply")
     for label in required:
         if not resolved[label].exists():
             if label in {"trajectory", "sparse_ply"}:
                 raise FileNotFoundError("请先完成 SfM 重建，或选择已有 SfM 结果。")
             raise FileNotFoundError(f"manual camera track not found: {resolved[label]}")
-    if not full_pose:
+    if not no_sparse_geometry:
         _require_suitable_sfm(resolved["run_dir"])
         anchor_count = _manual_keyframe_count(resolved["manual_track"])
         if anchor_count < 2:
@@ -671,7 +691,7 @@ def build_stage_command(
         str(resolved["origin_xy"][0]),
         str(resolved["origin_xy"][1]),
     ]
-    if not full_pose:
+    if not no_sparse_geometry:
         trajectory_index = command.index("--trajectory")
         command[trajectory_index:trajectory_index] = [
             "--sparse-ply",

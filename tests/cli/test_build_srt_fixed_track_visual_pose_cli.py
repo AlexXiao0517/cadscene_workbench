@@ -161,6 +161,24 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     assert len(scene["tracks"]["global_sfm_track"]) == 3
     assert scene["tracks"]["global_sfm_track"][2]["orientation_available"] is False
     assert not tuple(run_root.rglob("*.ply"))
+    diagnostics = json.loads(
+        (run_root / "02_srt_visual_pose/orientation_diagnostics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(diagnostics["phase_timings_seconds"]) == {
+        "parse_inputs",
+        "project_srt_track",
+        "estimate_visual_attitude",
+    }
+    assert all(
+        value >= 0.0 for value in diagnostics["phase_timings_seconds"].values()
+    )
+    report = (
+        run_root / "02_srt_visual_pose/visual_pose_report.md"
+    ).read_text(encoding="utf-8")
+    assert "跳过位置注册、三角化、BA 和点云维护" in report
+    assert "仅不写 PLY 并不是主要加速来源" in report
     progress_payload = json.loads(progress.read_text(encoding="utf-8"))
     assert progress_payload["stage"] == "completed"
     assert progress_payload["fraction"] == 1.0

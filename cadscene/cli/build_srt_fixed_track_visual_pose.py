@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from time import perf_counter
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -161,6 +162,7 @@ def _build_payloads(
     config: FixedTrackVisualPoseConfig,
     intrinsics: Mapping[str, object],
     video_metadata: tuple[int, int, float],
+    phase_timings_seconds: Mapping[str, float],
 ) -> dict[str, object]:
     width, height, fps = video_metadata
     poses: list[dict[str, object]] = []
@@ -354,7 +356,14 @@ def _build_payloads(
         "visual_pairs": [dict(item) for item in solution.diagnostics],
         "warnings": list(solution.warnings),
         "georeference": config.georeference.to_dict(),
+        "phase_timings_seconds": {
+            key: float(value) for key, value in phase_timings_seconds.items()
+        },
     }
+    timings_report = "\n".join(
+        f"  - {key}: {float(value):.6f} 秒"
+        for key, value in phase_timings_seconds.items()
+    )
     report = (
         "# SRT 固定轨迹 + 视觉姿态报告\n\n"
         f"- 轨迹帧数：{len(positions)}\n"
@@ -365,6 +374,9 @@ def _build_payloads(
         "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD，视觉不得修改。\n"
         "- 高度来源：SRT 相对高度；绝对高度只用于诊断。\n"
         "- 点云：不生成。\n"
+        "- 性能原因：跳过位置注册、三角化、BA 和点云维护；仅不写 PLY 并不是主要加速来源。\n"
+        "- 阶段耗时：\n"
+        f"{timings_report}\n"
     )
     return {
         "trajectory": trajectory,
@@ -413,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             if not path.is_file():
                 raise FileNotFoundError(f"physical {label} input is missing: {path}")
+        parse_started = perf_counter()
         payload = json.loads(args.config.read_text(encoding="utf-8-sig"))
         if not isinstance(payload, Mapping):
             raise ValueError("fixed-track configuration must be an object")
@@ -429,8 +442,11 @@ def main(argv: list[str] | None = None) -> int:
         _write_progress(args.progress_file, *STAGES[0])
         records = load_srt_records(args.srt)
         frame_map = json.loads(args.frame_map.read_text(encoding="utf-8-sig"))
+        parse_elapsed = perf_counter() - parse_started
         _write_progress(args.progress_file, *STAGES[1])
+        project_started = perf_counter()
         positions = build_fixed_track_positions(records, frame_map, config)
+        project_elapsed = perf_counter() - project_started
         _write_progress(args.progress_file, *STAGES[2])
 
         def visual_progress(value: float, message: str) -> None:
@@ -442,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
                 fraction,
             )
 
+        visual_started = perf_counter()
         solution = estimate_video_orientations(
             args.video,
             positions,
@@ -449,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
             config,
             progress=visual_progress,
         )
+        visual_elapsed = perf_counter() - visual_started
         _write_progress(args.progress_file, *STAGES[3])
         payloads = _build_payloads(
             dataset=args.dataset,
@@ -458,6 +476,11 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             intrinsics=intrinsics,
             video_metadata=metadata,
+            phase_timings_seconds={
+                "parse_inputs": parse_elapsed,
+                "project_srt_track": project_elapsed,
+                "estimate_visual_attitude": visual_elapsed,
+            },
         )
         run_root.mkdir(parents=True, exist_ok=True)
         staging_root = Path(

@@ -14,7 +14,7 @@ Prepare:
 
 - a clear, continuous MP4 site video;
 - a matching DXF drawing. The official upload UI currently supports only MP4 video and DXF drawings. Extra extensions accepted by compatibility-oriented backend endpoints are not a promise of current UI support or end-to-end qualification;
-- an optional DJI-style SRT file. Only files with sufficient GPS, height, and gimbal yaw/pitch/roll coverage can enter the full-pose route; ordinary or incomplete SRT remains metadata evidence rather than high-precision position, pose, or CAD elevation truth;
+- an optional DJI-style SRT file. GPS plus relative-height coverage can enter the fixed-track visual-pose route; sufficient gimbal yaw/pitch/roll coverage can instead enter the full-pose route. In both cases the CAD projection must be confirmed, and absolute SRT altitude remains diagnostic rather than CAD elevation truth;
 - someone familiar with the site and drawing who can confirm key images, the CAD coordinate system, and the horizontal field of view (horizontal FOV).
 
 DXF `TEXT`, `MTEXT`, and block-attribute text are imported into the CAD view with their layer, position, rotation, and text size. Station labels and other engineering notes can therefore be used while aligning keyframes.
@@ -60,20 +60,21 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 | `sfm_only` | Stable | The stable end-to-end path: video analysis, clip management, SfM, manual alignment, quality inspection, rendering, and concatenation. |
 | `pure_rotation` | Supported | Fixed-center rotation recovery, global placement, local correction, and rendering are in the supported workflow. A pinned external OpenGV backend is required; automatic scene classification still needs human review. |
 | partial-SRT core | Experimental CLI | Provides PTS, ENU, and robust Sim3 fusion helpers outside the formal project queue. |
+| `srt_fixed_track_visual_pose` | Supported with guard | SRT GPS/relative height locks every CAD-metric camera center; video estimates attitude only, a single whole-route XYZ offset is allowed, and no SfM point cloud or quality stage is produced. |
 | `srt_full_pose` | Supported with guard | Complete DJI SRT, a confirmed CGCS2000 projection, and a user-supplied horizontal FOV directly produce a metric camera trajectory without SfM; the height datum still needs separate review. |
-| `srt_sfm_fused` | Interface only | The portal can detect and describe partial-SRT, but formal stage launch remains blocked. |
+| `srt_sfm_fused` | Legacy read-only | Historical manifests and artifacts remain readable, but new projects do not recommend or create this route. |
 | SfM CUDA | Optional | Confirmed only for supported feature extraction and matching. Mapping and global BA are not represented as GPU processing. |
 | CAD-anchored engineering callout | Supported | Selects a CAD world point and projects it through the current effective camera trajectory in preview and final rendering. |
 | Video-target tracked callout | Hidden baseline | Backend and historical-data compatibility remain, but the creation control is hidden and this is not a supported user-facing capability. |
 
-The upload page no longer asks the user to preselect a rotation mode. When no executable complete-pose SRT is available, automatic motion analysis can conservatively recommend `sfm_only` or `pure_rotation`. A complete-pose clip must first confirm the current CAD's CGCS2000 projection candidate and horizontal FOV in Project Clip Management before `srt_full_pose` can run. For example, 120° is recommended only when the current drawing and trajectory evidence support that central meridian; it is never a default for other CAD files. `srt_sfm_fused` remains Interface only. A recommendation is routing evidence, not an accuracy guarantee.
+The upload page no longer asks the user to preselect a rotation mode. SRT with GPS and relative height but incomplete camera attitude routes to `srt_fixed_track_visual_pose`; complete gimbal attitude routes to `srt_full_pose`. When SRT coverage is insufficient, automatic motion analysis can conservatively recommend `sfm_only` or `pure_rotation`. Both SRT routes require the current CAD's CGCS2000 projection candidate and a user-supplied horizontal FOV. For example, 120° is valid only when the current drawing and trajectory evidence support that central meridian; it is never a default for other CAD files. `srt_sfm_fused` is retained only for historical reads. A recommendation is routing evidence, not an accuracy guarantee.
 
 ## From upload to project delivery
 
 1. Create a project in the upload portal and select video, CAD, and optional SRT. The service stores immutable inputs, then asynchronously performs video analysis, scene segmentation, clip export, and CAD import.
-2. Open Project Clip Management and review the detected motion mode and recommended workflow. Override `sfm_only`/`pure_rotation` when site knowledge requires it. For `srt_full_pose`, inspect the candidate-projection CAD bbox and SRT-path preview, explicitly confirm the current CAD coordinate configuration, then enter one horizontal FOV value and an optional CAD height offset for the clip.
-3. For an `sfm_only` clip, run SfM, save at least two valid manual keyframes, and fit the route before completing the keyframe plan. `srt_full_pose` instead consumes the confirmed metric position and DJI gimbal pose directly, locks Sim3 scale to 1.0, and does not run 3D reconstruction; manual workbench anchors may add only fixed translation or pose-zero corrections.
-4. Run quality inspection. After it passes, choose Complete Quality Inspection to enter Render and Export. If more frames are required, return to keyframe calibration.
+2. Open Project Clip Management and review the detected motion mode and recommended workflow. Override `sfm_only`/`pure_rotation` when site knowledge requires it. For either SRT route, inspect the candidate-projection CAD bbox and SRT-path preview, explicitly confirm the current CAD coordinate configuration, then enter one horizontal FOV value and the appropriate height/route offset.
+3. For an `sfm_only` clip, run SfM, save at least two valid manual keyframes, and fit the route before completing the keyframe plan. `srt_full_pose` consumes the confirmed metric position and DJI gimbal pose directly. `srt_fixed_track_visual_pose` locks SRT→CAD positions, estimates attitude from video, and permits only one uniform XYZ route offset. Neither SRT route runs SfM or emits a point cloud.
+4. Run quality inspection for `sfm_only`. The fixed-track route skips quality and proceeds from visual-attitude review to fine-tune/render.
 5. In Render and Export, either create CAD-anchored engineering callouts or render without callouts. Render Video binds the current annotation state into the immutable render revision.
 6. Return to Project Clip Management. When every delivery clip has a current render, run Merge Output. Concatenation uses each `render_frame_map.json` source-PTS partition and rejects duplicate or missing frames.
 7. After a refresh or service restart, use the same `--storage-root` and `project_id`. Saved workbench outputs, annotations, jobs, renders, and version history are restored from project manifests.
@@ -130,9 +131,9 @@ A workbench session token is temporary write authorization; a saved workbench ou
 
 ## Capability boundaries
 
-- `sfm_only` is the stable primary path. `srt_full_pose` is executable behind coordinate-confirmation guards and requires complete DJI gimbal pose, an exact frame map, a valid horizontal FOV, and a user-confirmed CGCS2000 projection. `srt_sfm_fused` still has no formal end-to-end route.
-- `pure_rotation` is a supported fixed-center route; automatic video analysis and route recommendation still require human review. Partial-SRT and video-target tracked callouts remain experimental or hidden.
-- The full-pose route solves horizontal projection, not the CAD elevation datum. Relative height needs `cad_z_offset_m`; unverified absolute height remains warning evidence.
+- `sfm_only` is the stable primary path. `srt_full_pose` and `srt_fixed_track_visual_pose` are executable behind coordinate-confirmation guards and require an exact frame map, valid horizontal FOV, and user-confirmed CGCS2000 projection. The fixed-track route additionally requires GPS and relative height; `srt_sfm_fused` is historical read-only.
+- `pure_rotation` is a supported fixed-center route; automatic video analysis and route recommendation still require human review. The old partial-SRT fusion core and video-target tracked callouts remain experimental or hidden.
+- The SRT routes solve horizontal projection, not the CAD elevation datum. Full pose uses `cad_z_offset_m`; fixed track uses one `route_offset_xyz_m`; unverified absolute height remains warning evidence.
 - CAD-anchored callouts do not infer real-object occlusion in the source video; they currently evaluate camera-facing, viewport, trajectory, and time-range visibility.
 - Cross-clip tracking, cross-scene label inheritance, semantic recognition, and large neural trackers are not supported.
 - Results require review by someone who understands the site and design intent. Experimental features do not replace engineering survey or professional acceptance.

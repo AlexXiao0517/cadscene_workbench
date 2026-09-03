@@ -587,7 +587,7 @@ git commit -m "feat: add fixed-track visual pose workbench"
 - Consumes: validated fixed-track trajectory, saved workbench camera track, physical video/frame map, CAD dataset.
 - Produces: packaged overlay video without sparse-point inputs, benchmark timing evidence, and updated operator documentation.
 
-- [ ] **Step 1: Write failing render isolation and integration tests**
+- [x] **Step 1: Write failing render isolation and integration tests**
 
 ```python
 def test_fixed_track_render_plan_has_no_sparse_ply_and_no_quality_stage(render_inputs):
@@ -605,21 +605,21 @@ def test_fixed_track_end_to_end_exports_track_without_point_cloud(tmp_path):
     assert not list(result.run_root.rglob("*.ply"))
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/projects/test_render_adapters.py tests/integration/test_srt_fixed_track_visual_pose_workflow.py -k fixed_track -q`
 
 Expected: no render adapter/config exists for the new workflow.
 
-- [ ] **Step 3: Add no-point render adapter and pipeline**
+- [x] **Step 3: Add no-point render adapter and pipeline**
 
 Register the new workflow in `default_workbench_render_adapters`. Select `srt_fixed_track_visual_pose_overlay.yaml`, call `run_pipeline --stages alignment,render`, and place no `--sparse-ply` argument. The pipeline contains only `alignment`, optional zero-point `viewer_scene`, and `render`; no `quality` or `road_surface` stage.
 
-- [ ] **Step 4: Add timing comparison and docs**
+- [x] **Step 4: Add timing comparison and docs**
 
 Record core CLI phase timings in diagnostics/report. In the integration smoke, compare reported fixed-track processing time with the same fixture’s SfM command plan without claiming a universal ratio. Document that speed comes from skipping position registration, triangulation, bundle adjustment, and point-cloud maintenance—not merely skipping PLY serialization.
 
-- [ ] **Step 5: Run focused and full verification**
+- [x] **Step 5: Run focused and full verification**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py tests/cli/test_build_srt_fixed_track_visual_pose_cli.py tests/projects/test_fixed_track_visual_pose_configuration.py tests/projects/test_workflow_adapters.py tests/projects/test_workbench_sessions.py tests/projects/test_render_adapters.py tests/viewer/test_project_workspace_static.py tests/viewer/test_workflow_ui_static.py tests/integration/test_srt_fixed_track_visual_pose_workflow.py -q`
 
@@ -629,11 +629,11 @@ Run: `python -m pytest -q`
 
 Expected: full suite passes with only the repository’s pre-existing documented skips.
 
-- [ ] **Step 6: Run the real local smoke and inspect artifacts**
+- [x] **Step 6: Run the real local smoke and inspect artifacts**
 
 Use project `p-2962f7bb456144d5` under the isolated UI-test storage root. Confirm the 12017-record SRT produces a CAD-contained trajectory, position Z preserves the observed `rel_alt` range around 84.926–91.846 metres before uniform offset, the workbench shows the route even if attitude coverage is partial, and the attempt contains no PLY.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```text
 git add cadscene/projects/workbench_render_adapter.py configs/pipelines/srt_fixed_track_visual_pose_overlay.yaml tests/projects/test_render_adapters.py tests/integration/test_srt_fixed_track_visual_pose_workflow.py tests/packaging/test_wheel_contents.py docs/current/05-architecture-and-flow.md docs/current/09-user-guide.md
@@ -649,16 +649,16 @@ git commit -m "feat: complete fixed-track visual pose workflow"
 - Consumes: completed branch, UI-test storage root, port 8310.
 - Produces: live project-library URL for manual upload/acceptance.
 
-- [ ] **Step 1: Stop only the previously identified port-8310 service process**
+- [x] **Step 1: Stop only the previously identified port-8310 service process**
 
 Resolve the listening PID for `127.0.0.1:8310`, verify its command line belongs to this worktree/service, and stop only that PID.
 
-- [ ] **Step 2: Start the service from the isolated worktree**
+- [x] **Step 2: Start the service from the isolated worktree**
 
 Run the existing viewer service command with storage root `D:\zjic2026\cadscene_workbench\work\srt-full-pose-ui-test` and bind `127.0.0.1:8310`.
 
 Expected: the process remains running and `/apps/project_library/` returns HTTP 200.
 
-- [ ] **Step 3: Open the project-library page and hand off acceptance steps**
+- [x] **Step 3: Open the project-library page and hand off acceptance steps**
 
 Open `http://127.0.0.1:8310/apps/project_library/`. Ask the user to create/upload the three-file project, confirm the CAD candidate and FOV, click `进入工作台`, and verify the progress sequence and CAD-contained trajectory.

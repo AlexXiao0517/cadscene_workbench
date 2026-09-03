@@ -73,6 +73,7 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
         "apps/web_camera_viewer/index.html",
         "apps/web_camera_viewer/vendor/three.min.js",
         "configs/pipelines/sfm_overlay_existing_sfm.yaml",
+        "configs/pipelines/srt_fixed_track_visual_pose_overlay.yaml",
         "configs/pipelines/srt_full_pose_overlay.yaml",
         "configs/pure_rotation/adapter-calibration/cameras.txt",
     ):
@@ -102,6 +103,7 @@ def test_extracted_wheel_finds_resources_away_from_the_checkout(tmp_path: Path) 
                 "assert (root / 'apps/project_library/index.html').is_file(); "
                 "assert (root / 'configs/pipelines/sfm_overlay_existing_sfm.yaml').is_file()"
                 "; assert (root / 'configs/pipelines/srt_full_pose_overlay.yaml').is_file()"
+                "; assert (root / 'configs/pipelines/srt_fixed_track_visual_pose_overlay.yaml').is_file()"
             ),
         ],
         cwd=outside,

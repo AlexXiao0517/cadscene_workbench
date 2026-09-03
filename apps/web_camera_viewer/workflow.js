@@ -212,7 +212,10 @@
     const sfmLabel = document.querySelector("#workflowSfmStageLabel");
     if (sfmLabel) sfmLabel.textContent = pure ? "旋转轨迹恢复" : "SfM重建";
     const keyframeLabel = document.querySelector("#workflowKeyframeStageLabel");
-    if (keyframeLabel) keyframeLabel.textContent = stageTitles.keyframes;
+    if (keyframeLabel) {
+      keyframeLabel.textContent = pure ? "调试" : "关键帧标定";
+      if (fixed) keyframeLabel.textContent = "视觉姿态";
+    }
     document.querySelector('#workflowSteps li[data-stage="upload"]')?.toggleAttribute("hidden", fixed);
     document.querySelector('#workflowSteps li[data-stage="sfm"]')?.toggleAttribute("hidden", fixed);
     document.querySelector('#workflowSteps li[data-stage="quality"]')?.toggleAttribute("hidden", pure || fixed);
@@ -222,7 +225,10 @@
     const keyframeOrdinal = document.querySelector('#workflowSteps li[data-stage="keyframes"] span');
     if (keyframeOrdinal) keyframeOrdinal.textContent = fixed ? "1" : "3";
     const renderOrdinal = document.querySelector('#workflowSteps li[data-stage="render"] span');
-    if (renderOrdinal) renderOrdinal.textContent = fixed ? "2" : (pure ? "4" : "5");
+    if (renderOrdinal) {
+      renderOrdinal.textContent = pure ? "4" : "5";
+      if (fixed) renderOrdinal.textContent = "2";
+    }
     const renderStep = document.querySelector('#workflowSteps li[data-stage="render"]');
     if (renderStep) renderStep.lastChild.textContent = stageTitles.render;
     document.querySelector("#workflowStartSfm")?.toggleAttribute("hidden", pure);
@@ -236,7 +242,6 @@
     document.querySelector("#standardSfmAdvanced")?.toggleAttribute("hidden", pure);
     document.querySelector("#standardKeyframeActions")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationKeyframeActions")?.classList.toggle("is-pure-visible", pure);
-    document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed);
     const sfmHeading = document.querySelector("#sfmPanel .sfm-panel-head span");
     if (sfmHeading) sfmHeading.textContent = fixed
@@ -959,8 +964,7 @@
     if (isFixedTrackVisualPoseWorkflow()) {
       const trajectoryReady = await resourceExists(fixedTrackVisualPoseTrajectoryPath());
       if (!trajectoryReady) return "keyframes";
-      const fittedReady = await resourceExists(runPath("03_alignment/camera_track_pred.json"));
-      return fittedReady ? "keyframes" : "keyframes";
+      return "keyframes";
     }
     if (isPureRotationWorkflow()) {
       const rawReady = await resourceExists(runPath("02_pure_rotation/camera_rotation_raw.json"));
