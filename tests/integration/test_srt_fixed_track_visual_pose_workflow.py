@@ -11,6 +11,29 @@ from cadscene.srt.fixed_track_visual_pose import OrientationSolution
 from cadscene.srt.georeference import CadGeoreference, project_wgs84_to_cad_raw
 
 
+def test_progress_write_retries_a_transient_windows_sharing_violation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    progress = tmp_path / "progress.json"
+    original = builder._atomic_write_json
+    calls = 0
+
+    def flaky_write(path: Path, value: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(5, "sharing violation", str(path))
+        original(path, value)
+
+    monkeypatch.setattr(builder, "_atomic_write_json", flaky_write)
+    monkeypatch.setattr(builder, "sleep", lambda _seconds: None, raising=False)
+
+    builder._write_progress(progress, "parse_srt", "正在解析 SRT", 0.08)
+
+    assert calls == 2
+    assert json.loads(progress.read_text(encoding="utf-8"))["stage"] == "parse_srt"
+
+
 def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
     tmp_path: Path, monkeypatch,
 ) -> None:

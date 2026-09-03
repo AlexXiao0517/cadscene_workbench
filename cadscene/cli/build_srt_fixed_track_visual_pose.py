@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -107,15 +107,20 @@ def _write_progress(
 ) -> None:
     if path is None:
         return
-    _atomic_write_json(
-        path,
-        {
-            "schema_version": "1.0",
-            "stage": stage,
-            "message": message,
-            "fraction": fraction,
-        },
-    )
+    payload = {
+        "schema_version": "1.0",
+        "stage": stage,
+        "message": message,
+        "fraction": fraction,
+    }
+    for attempt in range(5):
+        try:
+            _atomic_write_json(path, payload)
+            return
+        except PermissionError:
+            if attempt == 4:
+                return
+            sleep(0.01 * (2**attempt))
 
 
 def _video_metadata(value: object) -> tuple[int, int, float]:
