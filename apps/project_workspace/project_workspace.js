@@ -1328,6 +1328,11 @@
           ? "SRT 固定轨迹与视觉姿态生成失败，请重试"
           : "片段视频准备失败，请重试"));
       }
+      if (!preparingTrajectory && preparation?.status === "success") {
+        dialog.close();
+        await openWorkbench(clip, document.querySelector(`[data-clip-id="${CSS.escape(clipId)}"]`));
+        return;
+      }
       if (clip.capabilities?.can_open_workbench) {
         dialog.close();
         await openWorkbench(clip, document.querySelector(`[data-clip-id="${CSS.escape(clipId)}"]`));

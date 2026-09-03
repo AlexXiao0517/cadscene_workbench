@@ -1031,6 +1031,44 @@ def test_fixed_track_open_queues_trajectory_instead_of_workflow_start(
     ).exists()
 
 
+def test_fixed_track_open_reports_configuration_blocker_instead_of_reexporting_clip(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=False
+    )
+    project = repositories.project.load("project-1")
+    repositories.project.update(
+        "project-1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                key: item
+                for key, item in value.source_assets.items()
+                if key != "_cad_georeference"
+            },
+        ),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert response.status == 403
+    assert "confirmed CAD georeference" in response.body["error"]
+    assert not any(
+        item["job_type"] == "clip_export"
+        for item in repositories.jobs.load("project-1").jobs
+    )
+
+
 def test_fixed_track_workbench_opens_only_with_validated_trajectory(
     tmp_path: Path,
 ) -> None:

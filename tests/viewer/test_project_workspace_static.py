@@ -335,6 +335,8 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     assert "activeProgress?.message" in script
     assert "clip.status" in script
     assert "clip.error" in script
+    assert 'if (!preparingTrajectory && preparation?.status === "success")' in script
+    assert "await openWorkbench(clip," in script
 
 
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:

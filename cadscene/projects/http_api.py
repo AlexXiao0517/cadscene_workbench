@@ -1337,6 +1337,11 @@ class ProjectApi:
                             ).revision,
                         },
                     )
+                reason = preflight.reasons.get(
+                    clip_id, "SRT 固定轨迹配置尚未满足启动条件"
+                )
+                if reason != "physical MP4 source is missing":
+                    raise WorkbenchPermissionDenied(reason)
             job = self.service.enqueue_workbench_clip_export(
                 project_id,
                 clip_id,
