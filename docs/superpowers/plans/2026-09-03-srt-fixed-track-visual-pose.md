@@ -442,7 +442,7 @@ git commit -m "feat: configure fixed-track visual pose projects"
 - Consumes: new workflow preflight, project job revision, clip-export readiness, active validated trajectory job.
 - Produces: HTTP 202 `preparing_trajectory`, visible trajectory-job progress, and HTTP 201 only after trajectory materialization is ready.
 
-- [ ] **Step 1: Write failing workbench-entry tests**
+- [x] **Step 1: Write failing workbench-entry tests**
 
 ```python
 def test_fixed_track_open_queues_trajectory_instead_of_opening_sfm_workbench(api):
@@ -459,21 +459,21 @@ def test_fixed_track_workbench_only_opens_with_validated_trajectory(api):
     assert "workflowStage=keyframes" in response.body["workbench_url"]
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/projects/test_workbench_sessions.py -k fixed_track -q`
 
 Expected: current service creates a `workflow_start` session and returns an SfM-stage URL.
 
-- [ ] **Step 3: Gate fixed-track workbench creation and enqueue trajectory**
+- [x] **Step 3: Gate fixed-track workbench creation and enqueue trajectory**
 
 For this workflow, `resolve_context.can_open_workbench` requires a current validated trajectory. In `_create_workbench_session`, after physical clip preparation succeeds, call `enqueue_trajectory_jobs` for the selected clip when preflight is eligible; return state `preparing_trajectory`. Never create a fixed-track `workflow_start` session.
 
-- [ ] **Step 4: Show trajectory progress and auto-enter**
+- [x] **Step 4: Show trajectory progress and auto-enter**
 
 Generalize `waitForWorkbenchPreparation` so `preparing_trajectory` reads `clip.status`, `clip.stage`, and `clip.progress`. Display the adapter messages for SRT parse, CAD projection, visual constraints, attitude solve, and workbench publication. On success, call `openWorkbench` again; on failure show the exact job error.
 
-- [ ] **Step 5: Run workbench-entry tests and commit**
+- [x] **Step 5: Run workbench-entry tests and commit**
 
 Run: `python -m pytest tests/projects/test_workbench_sessions.py tests/viewer/test_project_workspace_static.py -q`
 

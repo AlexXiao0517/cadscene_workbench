@@ -410,6 +410,13 @@ class WorkbenchSessionCoordinator:
             and context.trajectory_job_id
             and context.trajectory_run_id
         )
+        if (
+            context.workflow == "srt_fixed_track_visual_pose"
+            and not trajectory_ready
+        ):
+            raise WorkbenchPermissionDenied(
+                "fixed-track workbench requires a validated trajectory"
+            )
         if not trajectory_ready and context.save_permissions:
             raise StaleWorkbenchSession("current trajectory output is unavailable")
         validated_return = validate_return_to(return_to, project_id, clip_id)
@@ -905,6 +912,10 @@ class ProjectWorkbenchService:
             clip.resolved_workflow is not None
             and physical_clip is not None
             and cad_design is not None
+            and (
+                clip.resolved_workflow != "srt_fixed_track_visual_pose"
+                or current_job is not None
+            )
         )
         return WorkbenchContext(
             project_id=project_id,

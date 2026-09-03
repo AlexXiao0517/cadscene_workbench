@@ -964,6 +964,9 @@ class ProjectApi:
                         None if display_job is None else display_job.get("stage")
                     ),
                     "progress": display_progress,
+                    "error": (
+                        None if display_job is None else display_job.get("error")
+                    ),
                     "render": {
                         "job_id": None
                         if render_job is None
@@ -1301,6 +1304,39 @@ class ProjectApi:
                 expected_jobs_revision, bool
             ):
                 raise ValueError("expected_jobs_revision is required")
+            if context.workflow == "srt_fixed_track_visual_pose":
+                preflight = self.service.preflight_trajectory_jobs(
+                    project_id, clip_ids=(clip_id,)
+                )
+                if clip_id in {
+                    *preflight.eligible,
+                    *preflight.needs_confirmation,
+                }:
+                    result = self.service.enqueue_trajectory_jobs(
+                        project_id,
+                        clip_ids=(clip_id,),
+                        confirmed_clip_ids=(
+                            (clip_id,)
+                            if clip_id in preflight.needs_confirmation
+                            else ()
+                        ),
+                        expected_jobs_revision=expected_jobs_revision,
+                    )
+                    if not result.job_ids:
+                        raise WorkbenchPermissionDenied(
+                            "固定轨迹准备任务未能入队"
+                        )
+                    return ApiResponse(
+                        202,
+                        {
+                            "state": "preparing_trajectory",
+                            "message": "正在生成 SRT 固定轨迹并估计视觉姿态",
+                            "job_id": result.job_ids[-1],
+                            "jobs_revision": self.repositories.jobs.load(
+                                project_id
+                            ).revision,
+                        },
+                    )
             job = self.service.enqueue_workbench_clip_export(
                 project_id,
                 clip_id,

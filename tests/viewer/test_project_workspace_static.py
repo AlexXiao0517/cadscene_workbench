@@ -330,6 +330,11 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     assert "/srt-fixed-track-visual-pose`" in script
     assert "route_offset_xyz_m" in script
     assert "state.srtConfigWorkflow" in script
+    assert 'body.state === "preparing_trajectory"' in script
+    assert "preparingTrajectory ? clip.progress" in script
+    assert "activeProgress?.message" in script
+    assert "clip.status" in script
+    assert "clip.error" in script
 
 
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:

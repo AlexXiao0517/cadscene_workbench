@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -23,9 +24,13 @@ from cadscene.projects.workbench_sessions import (
 from cadscene.projects.http_api import ProjectApi
 from cadscene.projects.json_repositories import project_repositories
 from cadscene.projects.models import ClipDefinition, register_analysis_revision
+from cadscene.projects.media import ProjectMediaSpec
 from cadscene.projects.queue import LocalResourceQueue
 from cadscene.projects.service import ProjectService
-from cadscene.projects.service import _validate_clip_export_outputs
+from cadscene.projects.service import (
+    _active_cad_asset_fingerprint,
+    _validate_clip_export_outputs,
+)
 from cadscene.projects.scene_bridge_runner import (
     SceneBridgeInputs,
     validate_scene_bridge_candidate,
@@ -807,6 +812,247 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         workbench=workbench,
     )
     return api, repositories, runs_root, job
+
+
+def _fixed_track_api_with_workbench(
+    tmp_path: Path, *, with_trajectory: bool
+) -> tuple[ProjectApi, object]:
+    api, repositories, _runs_root, _old_job = _project_api_with_workbench(
+        tmp_path, workflow="srt_fixed_track_visual_pose"
+    )
+    srt = tmp_path / "flight.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n"
+        "[latitude:30] [longitude:120] [rel_alt:80]\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\n"
+        "[latitude:30.00001] [longitude:120.00001] [rel_alt:80.2]\n",
+        encoding="utf-8",
+    )
+    frame_map = tmp_path / "clip-1-frame-map.json"
+    frame_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 25},
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "source_start_pts": 0,
+                        "source_end_pts_exclusive": 100,
+                        "frames": [{"pts": 0}, {"pts": 25}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cad_dataset = tmp_path / "cad-dataset"
+    project = repositories.project.load("project-1")
+    assets = {
+        **project.source_assets,
+        "srt_path": str(srt),
+        "cad": {
+            "path": str(tmp_path / "source.dxf"),
+            "sha256": "c" * 64,
+            "dataset_id": "cad-test",
+            "dataset_path": str(cad_dataset),
+        },
+    }
+    georeference = {
+        "schema_version": 1,
+        "horizontal_datum": "CGCS2000",
+        "projection_family": "gauss_kruger",
+        "zone_width_deg": 3,
+        "central_meridian_deg": 120.0,
+        "epsg": 4549,
+        "projected_axis_order": "easting_northing",
+        "cad_axis_mapping": "cad_x_easting_cad_y_northing",
+        "zone_prefix": False,
+        "linear_unit": "metre",
+        "source": "test_confirmed",
+        "confirmed": True,
+        "confidence": 1.0,
+        "cad_asset_fingerprint": _active_cad_asset_fingerprint(assets),
+        "revision": "cad-georef-test",
+    }
+    media = ProjectMediaSpec(
+        width=1920,
+        height=1080,
+        display_orientation_baked=True,
+        sample_aspect_ratio=Fraction(1, 1),
+        pixel_format="yuv420p",
+        codec_name="h264",
+        profile="High",
+        time_base=Fraction(1, 25),
+        color_range="tv",
+        color_space="bt709",
+        color_transfer="bt709",
+        color_primaries="bt709",
+        nominal_frame_rate=Fraction(25, 1),
+    )
+    repositories.project.update(
+        "project-1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={**assets, "_cad_georeference": georeference},
+            media_spec_revision="media-spec-test",
+            media_spec=media.to_dict(),
+        ),
+    )
+    clips = repositories.clips.load("project-1")
+    selected = clips.clips[0]
+    snapshot = dict(selected.analysis["input_snapshot"])
+    snapshot["srt"] = {"path": str(srt), "sha256": "s" * 64}
+    updated_clip = replace(
+        selected,
+        analysis={
+            **selected.analysis,
+            "frame_map_path": str(frame_map),
+            "srt_coverage": {
+                "kind": "partial",
+                "trajectory_coverage": 1.0,
+                "full_pose_coverage": 0.0,
+                "overlapping_record_count": 2,
+            },
+            "input_snapshot": snapshot,
+        },
+        manual_definition={
+            **selected.manual_definition,
+            "srt_fixed_track_visual_pose": {
+                "schema_version": 1,
+                "horizontal_fov_deg": 72.0,
+                "route_offset_xyz_m": [0.0, 0.0, 0.0],
+            },
+        },
+    )
+    clips = repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(value, clips=(updated_clip,)),
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+    if with_trajectory:
+        project = repositories.project.load("project-1")
+        adapter = api.service.adapters.for_workflow(
+            "srt_fixed_track_visual_pose"
+        )
+        job = api.service._new_job(
+            "project-1",
+            updated_clip,
+            job_type="trajectory",
+            resource_class="heavy_compute",
+            adapter_name=adapter.name,
+            adapter_version=adapter.version,
+            exclusive_key="trajectory:project-1:clip-1",
+            dependency_ids=(),
+            project_assets=project.source_assets,
+            project_revision=project.revision,
+            clips_revision=clips.revision,
+        )
+        trajectory = (
+            Path(job.attempts[-1].directory)
+            / "project-1/clip-1/02_srt_visual_pose/camera_trajectory_visual_pose.json"
+        )
+        trajectory.parent.mkdir(parents=True, exist_ok=True)
+        trajectory.write_text(
+            json.dumps(
+                {
+                    "poses": [
+                        {
+                            "frame_index": 0,
+                            "position_available": True,
+                            "orientation_available": False,
+                            "center": [0.0, 0.0, 80.0],
+                        },
+                        {
+                            "frame_index": 1,
+                            "position_available": True,
+                            "orientation_available": False,
+                            "center": [1.0, 0.0, 80.0],
+                        },
+                    ],
+                    "meta": {
+                        "trajectory_mode": "srt_fixed_track_visual_pose",
+                        "position_source": "srt_cad_locked",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        completed = replace(
+            job,
+            status="success",
+            stage="success",
+            output_revision="fixed-track-output-1",
+            output_fingerprint=sha256(trajectory.read_bytes()).hexdigest(),
+            output_validated=True,
+            validated_input_fingerprint=job.input_fingerprint,
+            published_outputs={"trajectory": str(trajectory)},
+        )
+        jobs = repositories.jobs.load("project-1")
+        repositories.jobs.update(
+            "project-1",
+            expected_revision=jobs.revision,
+            mutate=lambda value: replace(value, jobs=(completed.to_dict(),)),
+        )
+    return api, repositories
+
+
+def test_fixed_track_open_queues_trajectory_instead_of_workflow_start(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=False
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert response.status == 202
+    assert response.body["state"] == "preparing_trajectory"
+    queued = repositories.jobs.load("project-1")
+    job = next(item for item in queued.jobs if item["job_id"] == response.body["job_id"])
+    assert job["job_type"] == "trajectory"
+    assert job["adapter_name"] == "srt_fixed_track_visual_pose"
+    assert not (
+        api.service.projects_root / "project-1" / "workbench_sessions"
+    ).exists()
+
+
+def test_fixed_track_workbench_opens_only_with_validated_trajectory(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=True
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert response.status == 201
+    assert response.body["launch_mode"] == "trajectory_ready"
+    assert parse_qs(urlsplit(response.body["workbench_url"]).query)[
+        "workflowStage"
+    ] == ["keyframes"]
 
 
 def _add_same_scene_adjacent_clips(

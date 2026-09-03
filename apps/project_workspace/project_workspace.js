@@ -1205,7 +1205,10 @@
       );
       if (response.status === 202) {
         state.snapshot.component_revisions.jobs = body.jobs_revision;
-        await waitForWorkbenchPreparation(clip.clip_id);
+        const preparationState = body.state === "preparing_trajectory"
+          ? "preparing_trajectory"
+          : "preparing_clip";
+        await waitForWorkbenchPreparation(clip.clip_id, preparationState);
         return;
       }
       state.snapshot.component_revisions.clips = body.clips_revision;
@@ -1291,9 +1294,12 @@
     }
   }
 
-  async function waitForWorkbenchPreparation(clipId) {
+  async function waitForWorkbenchPreparation(clipId, initialState = "preparing_clip") {
     const dialog = $("#workbenchPreparationDialog");
-    $("#workbenchPreparationTitle").textContent = "正在准备片段工作台";
+    const preparingTrajectory = initialState === "preparing_trajectory";
+    $("#workbenchPreparationTitle").textContent = preparingTrajectory
+      ? "正在生成 SRT 轨迹与视觉姿态"
+      : "正在准备片段工作台";
     if (!dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;
@@ -1301,18 +1307,26 @@
       const clip = state.snapshot?.clips.find((item) => item.clip_id === clipId);
       if (!clip) throw new Error("片段已不存在，无法进入工作台");
       const preparation = clip.workbench?.preparation;
-      const fraction = preparation?.progress?.fraction;
+      const activeProgress = preparingTrajectory ? clip.progress : preparation?.progress;
+      const activeStatus = preparingTrajectory ? clip.status : preparation?.status;
+      const activeError = preparingTrajectory ? clip.error : preparation?.error;
+      const fraction = activeProgress?.fraction;
       const percent = typeof fraction === "number"
         ? Math.max(0, Math.min(100, Math.round(fraction * 100)))
         : null;
-      $("#workbenchPreparationMessage").textContent = preparation?.stage
-        ? (STATUS_LABELS[preparation.stage] || preparation.stage)
-        : "正在按原视频时间范围准备片段视频…";
+      $("#workbenchPreparationMessage").textContent = activeProgress?.message
+        || (preparingTrajectory
+          ? (STATUS_LABELS[clip.stage] || clip.stage || "正在准备固定轨迹…")
+          : (preparation?.stage
+            ? (STATUS_LABELS[preparation.stage] || preparation.stage)
+            : "正在按原视频时间范围准备片段视频…"));
       $("#workbenchPreparationFill").style.width = percent == null ? "0%" : `${percent}%`;
       $("#workbenchPreparationPercent").textContent = percent == null ? "—" : `${percent}%`;
-      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(preparation?.status)) {
+      if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(activeStatus)) {
         dialog.close();
-        throw new Error(preparation?.error || "片段视频准备失败，请重试");
+        throw new Error(activeError || (preparingTrajectory
+          ? "SRT 固定轨迹与视觉姿态生成失败，请重试"
+          : "片段视频准备失败，请重试"));
       }
       if (clip.capabilities?.can_open_workbench) {
         dialog.close();
