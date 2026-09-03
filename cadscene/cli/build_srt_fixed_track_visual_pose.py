@@ -315,6 +315,7 @@ def _build_payloads(
             "position_edit_policy": "uniform_xyz_offset_only",
             "orientation_source": "visual_fixed_center",
             "orientation_status": solution.status,
+            "point_cloud_generated": False,
             "horizontal_datum": "CGCS2000",
             "georeference": config.georeference.to_dict(),
             "cad_origin_xy": list(config.cad_origin_xy),
@@ -367,6 +368,7 @@ def _build_payloads(
             "workflow": "srt_fixed_track_visual_pose",
             "position_source": "srt_cad_locked",
             "orientation_status": solution.status,
+            "point_cloud_generated": False,
             **recommendation_meta,
         },
         "points": {
@@ -400,6 +402,7 @@ def _build_payloads(
         "orientation_count": len(solution.rotations),
         "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
         "orientation_status": solution.status,
+        "point_cloud_generated": False,
         **recommendation_meta,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
         "height_source": "rel_alt",

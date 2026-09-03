@@ -110,10 +110,13 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
         builder,
         "estimate_video_orientations",
         lambda *_args, **_kwargs: OrientationSolution(
-            status="orientation_partial",
-            rotations={0: np.eye(3)},
+            status="position_only",
+            rotations={},
+            relative_rotations={0: np.eye(3), 1: np.eye(3)},
+            component_ids={0: 0, 1: 0},
+            recommended_anchor_frame=0,
             diagnostics=(),
-            warnings=("frame 1 orientation unavailable",),
+            warnings=("absolute attitude awaits one manual anchor",),
         ),
     )
     output_root = tmp_path / "runs"
@@ -139,10 +142,27 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
             encoding="utf-8"
         )
     )
+    manual_camera = dict(scene["tracks"]["global_sfm_track"][0]["camera"])
+    manual_camera.update({"yaw": 25.0, "pitch": -10.0, "roll": 2.0})
+    track_path.write_text(
+        json.dumps(
+            {
+                "fps": 1.0,
+                "keyframes": [
+                    {
+                        "frame": 0,
+                        "source": "manual_anchor",
+                        "camera": manual_camera,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     alignment = run_alignment(
         trajectory_path=trajectory_path,
         web_camera_track_path=track_path,
-        config=AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0)),
+        config=AlignmentConfig(cad_scale=1.0, origin_xy=origin),
     )
 
     expected = np.asarray([pose["center"] for pose in trajectory["poses"]])
@@ -154,6 +174,10 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
     )
     np.testing.assert_allclose(actual, expected, atol=1e-12)
     assert trajectory["meta"]["position_source"] == "srt_cad_locked"
+    assert trajectory["meta"]["point_cloud_generated"] is False
+    assert trajectory["meta"]["relative_orientation_count"] == 2
+    assert alignment.alignment_json["validation"]["orientation_anchor_count"] == 1
+    assert all(row["orientation_available"] for row in alignment.sfm_camera_path_rows)
     assert scene["points"]["count_exported"] == 0
     assert scene["tracks"]["global_sfm_track"]
     assert not tuple(run_root.rglob("*.ply"))
