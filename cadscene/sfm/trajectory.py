@@ -65,6 +65,15 @@ class SfmTrajectory:
     position_centers: np.ndarray = field(
         default_factory=lambda: np.empty((0, 3), dtype=np.float64)
     )
+    relative_frames: np.ndarray = field(
+        default_factory=lambda: np.asarray([], dtype=np.int64)
+    )
+    relative_quats_c2local_wxyz: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 4), dtype=np.float64)
+    )
+    relative_component_ids: np.ndarray = field(
+        default_factory=lambda: np.asarray([], dtype=np.int64)
+    )
 
     def __post_init__(self) -> None:
         if len(self.position_frames) == 0 and len(self.frames):
@@ -72,6 +81,14 @@ class SfmTrajectory:
             object.__setattr__(self, "position_centers", self.centers.copy())
         if len(self.position_frames) != len(self.position_centers):
             raise ValueError("position frames and centers must have matching lengths")
+        if not (
+            len(self.relative_frames)
+            == len(self.relative_quats_c2local_wxyz)
+            == len(self.relative_component_ids)
+        ):
+            raise ValueError(
+                "relative orientation frames, quaternions and components must match"
+            )
 
     @property
     def frame_min(self) -> int:
@@ -135,6 +152,49 @@ class SfmTrajectory:
         _center, rotation = self.query(frame_index)
         return rotation
 
+    def relative_component_at(self, frame_index: float) -> int | None:
+        if not len(self.relative_frames):
+            return None
+        frame = float(frame_index)
+        if frame < float(self.relative_frames[0]) or frame > float(
+            self.relative_frames[-1]
+        ):
+            return None
+        exact = int(np.searchsorted(self.relative_frames, frame, side="left"))
+        if exact < len(self.relative_frames) and math.isclose(
+            float(self.relative_frames[exact]), frame, rel_tol=0.0, abs_tol=1e-9
+        ):
+            return int(self.relative_component_ids[exact])
+        second = int(np.searchsorted(self.relative_frames, frame, side="right"))
+        first = second - 1
+        first_component = int(self.relative_component_ids[first])
+        second_component = int(self.relative_component_ids[second])
+        return first_component if first_component == second_component else None
+
+    def relative_orientation_at(self, frame_index: float) -> np.ndarray:
+        component = self.relative_component_at(frame_index)
+        frame = float(frame_index)
+        if component is None:
+            raise ValueError(
+                f"relative visual orientation is unavailable at frame {frame:g}"
+            )
+        exact = int(np.searchsorted(self.relative_frames, frame, side="left"))
+        if exact < len(self.relative_frames) and math.isclose(
+            float(self.relative_frames[exact]), frame, rel_tol=0.0, abs_tol=1e-9
+        ):
+            return quat_wxyz_to_matrix(self.relative_quats_c2local_wxyz[exact])
+        second = int(np.searchsorted(self.relative_frames, frame, side="right"))
+        first = second - 1
+        first_frame = float(self.relative_frames[first])
+        second_frame = float(self.relative_frames[second])
+        alpha = (frame - first_frame) / max(second_frame - first_frame, 1e-9)
+        quaternion = quat_slerp(
+            self.relative_quats_c2local_wxyz[first],
+            self.relative_quats_c2local_wxyz[second],
+            alpha,
+        )
+        return quat_wxyz_to_matrix(quaternion)
+
     def query(self, frame_index: float) -> tuple[np.ndarray, np.ndarray]:
         f = float(frame_index)
         if not len(self.frames):
@@ -187,6 +247,9 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
     unregistered_frames: list[int] = []
     position_frames: list[int] = []
     position_centers: list[list[float]] = []
+    relative_frames: list[int] = []
+    relative_quats: list[list[float]] = []
+    relative_component_ids: list[int] = []
     meta = dict(data.get("meta") or {})
     fixed_track = meta.get("position_source") == "srt_cad_locked"
     for pose in data.get("poses", []):
@@ -200,6 +263,17 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
         if position_available:
             position_frames.append(frame_index)
             position_centers.append([float(v) for v in pose["center"]])
+        relative_quaternion = pose.get("cam_from_visual_local_quat_wxyz")
+        relative_component = pose.get("visual_component_id")
+        if relative_quaternion is not None and relative_component is not None:
+            values = [float(value) for value in relative_quaternion]
+            if len(values) != 4:
+                raise ValueError(
+                    "cam_from_visual_local_quat_wxyz must contain four values"
+                )
+            relative_frames.append(frame_index)
+            relative_quats.append(values)
+            relative_component_ids.append(int(relative_component))
         if not orientation_available:
             unregistered_frames.append(frame_index)
             continue
@@ -212,6 +286,7 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
         raise RuntimeError("SfM 轨迹至少需要 2 个已注册帧。")
     order = np.argsort(frames)
     position_order = np.argsort(position_frames)
+    relative_order = np.argsort(relative_frames)
     intrinsics = (data.get("intrinsics") or [{}])[0]
     return SfmTrajectory(
         frames=np.asarray(frames, dtype=np.int64)[order],
@@ -229,4 +304,11 @@ def load_sfm_trajectory(path: str | Path) -> SfmTrajectory:
         position_centers=np.asarray(
             position_centers, dtype=np.float64
         ).reshape(-1, 3)[position_order],
+        relative_frames=np.asarray(relative_frames, dtype=np.int64)[relative_order],
+        relative_quats_c2local_wxyz=np.asarray(
+            relative_quats, dtype=np.float64
+        ).reshape(-1, 4)[relative_order],
+        relative_component_ids=np.asarray(
+            relative_component_ids, dtype=np.int64
+        )[relative_order],
     )

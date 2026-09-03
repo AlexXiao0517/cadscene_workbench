@@ -94,6 +94,12 @@ def test_fixed_track_loader_keeps_positions_without_available_orientation(
                         "position_available": True,
                         "orientation_available": False,
                         "center": [10.0 + index, 20.0, 80.0 + index],
+                        "visual_component_id": 0,
+                        "cam_from_visual_local_quat_wxyz": (
+                            [1.0, 0.0, 0.0, 0.0]
+                            if index < 2
+                            else [0.7071067811865476, 0.0, 0.0, 0.7071067811865476]
+                        ),
                     }
                     for index in range(3)
                 ],
@@ -114,5 +120,13 @@ def test_fixed_track_loader_keeps_positions_without_available_orientation(
     np.testing.assert_allclose(trajectory.center_at(1), [11.0, 20.0, 81.0])
     np.testing.assert_allclose(trajectory.center_at(1.5), [11.5, 20.0, 81.5])
     assert trajectory.is_orientation_available(1) is False
+    assert trajectory.relative_component_at(1) == 0
+    np.testing.assert_allclose(
+        trajectory.relative_orientation_at(0.5), np.eye(3), atol=1e-12
+    )
+    expected = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    np.testing.assert_allclose(
+        trajectory.relative_orientation_at(2), expected, atol=1e-12
+    )
     with pytest.raises(ValueError, match="orientation"):
         trajectory.orientation_at(1)

@@ -110,6 +110,13 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
         return OrientationSolution(
             status="orientation_partial",
             rotations={0: np.eye(3), 1: np.eye(3)},
+            relative_rotations={
+                0: np.eye(3),
+                1: np.eye(3),
+                2: np.eye(3),
+            },
+            component_ids={0: 0, 1: 0, 2: 0},
+            recommended_anchor_frame=1,
             diagnostics=({"status": "accepted", "first_frame": 0, "second_frame": 1},),
             warnings=("frame 2 orientation unavailable",),
         )
@@ -152,6 +159,18 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     assert trajectory["poses"][2]["orientation_available"] is False
     assert trajectory["poses"][2]["registered"] is False
     assert "cam_from_world_quat_wxyz" not in trajectory["poses"][2]
+    assert trajectory["poses"][2]["visual_component_id"] == 0
+    assert trajectory["poses"][2]["cam_from_visual_local_quat_wxyz"] == [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert trajectory["meta"]["relative_orientation_count"] == 3
+    assert trajectory["meta"]["relative_orientation_coverage"] == 1.0
+    assert trajectory["meta"]["recommended_anchor_frame"] == 1
+    assert trajectory["meta"]["recommended_anchor_source_pts"] == 1000
+    assert trajectory["meta"]["recommended_anchor_time_sec"] == 1.0
     track_path = run_root / "03_alignment" / "camera_track_pred.json"
     track = json.loads(track_path.read_text(encoding="utf-8"))
     assert len(track["keyframes"]) == 2
@@ -160,6 +179,7 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     assert scene["points"]["count_exported"] == 0
     assert len(scene["tracks"]["global_sfm_track"]) == 3
     assert scene["tracks"]["global_sfm_track"][2]["orientation_available"] is False
+    assert scene["meta"]["recommended_anchor_frame"] == 1
     assert not tuple(run_root.rglob("*.ply"))
     diagnostics = json.loads(
         (run_root / "02_srt_visual_pose/orientation_diagnostics.json").read_text(

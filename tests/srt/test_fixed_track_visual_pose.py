@@ -197,7 +197,25 @@ def test_straight_track_reports_position_only_instead_of_guessing_attitude() -> 
 
     assert solution.status == "position_only"
     assert solution.rotations == {}
+    assert set(solution.relative_rotations) == set(centers)
+    assert solution.component_ids == {0: 0, 1: 0, 2: 0, 3: 0}
+    assert solution.recommended_anchor_frame == 1
+    np.testing.assert_allclose(solution.relative_rotations[0], np.eye(3), atol=1e-12)
     assert any("unobservable" in warning.lower() for warning in solution.warnings)
+
+
+def test_no_visual_pairs_do_not_create_a_false_anchor_recommendation() -> None:
+    solution = solve_fixed_center_rotations(
+        {
+            0: np.asarray([0.0, 0.0, 80.0]),
+            1: np.asarray([1.0, 0.0, 80.0]),
+        },
+        (),
+    )
+
+    assert solution.relative_rotations == {}
+    assert solution.component_ids == {}
+    assert solution.recommended_anchor_frame is None
 
 
 def test_orientation_interpolation_uses_slerp_only_inside_bounded_gap() -> None:
@@ -299,6 +317,8 @@ def test_video_orientation_estimation_samples_clip_and_preserves_srt_centers(
     )
 
     assert solution.status == "orientation_ready"
+    assert set(solution.relative_rotations) == set(centers)
+    assert solution.recommended_anchor_frame in centers
     assert observed_pairs == [(0, 1), (1, 2), (2, 3)]
     assert all(row["status"] == "accepted" for row in solution.diagnostics[-3:])
     for frame in centers:

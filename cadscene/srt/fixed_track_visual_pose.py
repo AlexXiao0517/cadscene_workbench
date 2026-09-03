@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from math import acos, degrees, hypot, isfinite
 from pathlib import Path
@@ -197,6 +197,9 @@ class PairRotationMeasurement:
 class OrientationSolution:
     status: str
     rotations: Mapping[int, np.ndarray]
+    relative_rotations: Mapping[int, np.ndarray] = field(default_factory=dict)
+    component_ids: Mapping[int, int] = field(default_factory=dict)
+    recommended_anchor_frame: int | None = None
     diagnostics: tuple[Mapping[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -350,9 +353,23 @@ def solve_fixed_center_rotations(
             warnings=("fixed-center world attitude is unobservable without a route",),
         )
     rotations: dict[int, np.ndarray] = {}
+    relative_rotations: dict[int, np.ndarray] = {}
+    component_ids: dict[int, int] = {}
     diagnostics: list[Mapping[str, object]] = []
     warnings: list[str] = []
-    for component, transforms in _measurement_components(measurements):
+    components = sorted(
+        _measurement_components(measurements),
+        key=lambda item: min(item[0]),
+    )
+    for component_id, (component, transforms) in enumerate(components):
+        for frame in sorted(component):
+            if frame not in fixed_centers:
+                continue
+            relative_rotations[frame] = _validated_rotation(
+                transforms[frame],
+                "relative camera rotation",
+            )
+            component_ids[frame] = component_id
         root_rotation, rows, warning = _component_world_anchor(
             component,
             transforms,
@@ -365,6 +382,8 @@ def solve_fixed_center_rotations(
                 warnings.append(warning)
             continue
         for frame in component:
+            if frame not in fixed_centers:
+                continue
             rotations[frame] = _validated_rotation(
                 transforms[frame] @ root_rotation,
                 "solved camera rotation",
@@ -379,12 +398,83 @@ def solve_fixed_center_rotations(
     )
     if not measurements:
         warnings.append("fixed-center world attitude is unobservable without visual pairs")
+    recommended_anchor_frame: int | None = None
+    available_components = [
+        (component_id, {frame for frame in component if frame in fixed_centers})
+        for component_id, (component, _transforms) in enumerate(components)
+        if any(frame in fixed_centers for frame in component)
+    ]
+    if available_components:
+        selected_component_id, selected_component = max(
+            available_components,
+            key=lambda item: (len(item[1]), -min(item[1])),
+        )
+        support = {frame: 0 for frame in selected_component}
+        degree = {frame: 0 for frame in selected_component}
+        for measurement in measurements:
+            if (
+                measurement.first_frame in selected_component
+                and measurement.second_frame in selected_component
+            ):
+                weight = max(1, int(measurement.inlier_count))
+                support[measurement.first_frame] += weight
+                support[measurement.second_frame] += weight
+                degree[measurement.first_frame] += 1
+                degree[measurement.second_frame] += 1
+        internal = [frame for frame in selected_component if degree[frame] >= 2]
+        candidates = internal or list(selected_component)
+        recommended_anchor_frame = max(
+            candidates,
+            key=lambda frame: (support[frame], -frame),
+        )
+        if component_ids.get(recommended_anchor_frame) != selected_component_id:
+            raise RuntimeError("recommended anchor component is inconsistent")
     return OrientationSolution(
         status=status,
         rotations=rotations,
+        relative_rotations=relative_rotations,
+        component_ids=component_ids,
+        recommended_anchor_frame=recommended_anchor_frame,
         diagnostics=tuple(diagnostics),
         warnings=tuple(dict.fromkeys(warnings)),
     )
+
+
+def _interpolate_relative_orientations(
+    rotations: Mapping[int, np.ndarray],
+    component_ids: Mapping[int, int],
+    frame_times: Mapping[int, float],
+    *,
+    max_gap_sec: float,
+) -> tuple[dict[int, np.ndarray], dict[int, int]]:
+    published: dict[int, np.ndarray] = {}
+    published_components: dict[int, int] = {}
+    for component_id in sorted(set(component_ids.values())):
+        component_rotations = {
+            frame: rotation
+            for frame, rotation in rotations.items()
+            if component_ids.get(frame) == component_id
+        }
+        if not component_rotations:
+            continue
+        first = min(component_rotations)
+        last = max(component_rotations)
+        component_times = {
+            frame: value
+            for frame, value in frame_times.items()
+            if first <= frame <= last
+        }
+        interpolated = interpolate_orientations(
+            component_rotations,
+            component_times,
+            max_gap_sec=max_gap_sec,
+        )
+        for frame, rotation in interpolated.items():
+            if rotation is None:
+                continue
+            published[frame] = rotation
+            published_components[frame] = component_id
+    return published, published_components
 
 
 def interpolate_orientations(
@@ -689,6 +779,12 @@ def estimate_video_orientations(
         for frame, rotation in interpolated.items()
         if rotation is not None
     }
+    relative_published, relative_components = _interpolate_relative_orientations(
+        solved.relative_rotations,
+        solved.component_ids,
+        times,
+        max_gap_sec=config.max_orientation_interpolation_gap_sec,
+    )
     coverage = len(published) / len(positions)
     status = (
         "orientation_ready"
@@ -700,6 +796,9 @@ def estimate_video_orientations(
     return OrientationSolution(
         status=status,
         rotations=published,
+        relative_rotations=relative_published,
+        component_ids=relative_components,
+        recommended_anchor_frame=solved.recommended_anchor_frame,
         diagnostics=tuple(solved.diagnostics) + tuple(extraction_diagnostics),
         warnings=tuple(dict.fromkeys((*solved.warnings, *warnings))),
     )

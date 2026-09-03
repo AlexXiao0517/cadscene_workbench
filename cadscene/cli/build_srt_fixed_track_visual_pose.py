@@ -174,6 +174,37 @@ def _build_payloads(
     path_rows: list[dict[str, object]] = []
     keyframes: list[dict[str, object]] = []
     viewer_track: list[dict[str, object]] = []
+    relative_count = len(solution.relative_rotations)
+    relative_coverage = relative_count / max(1, len(positions))
+    relative_status = (
+        "relative_ready"
+        if relative_coverage >= 0.8
+        else "relative_partial"
+        if relative_count
+        else "unavailable"
+    )
+    recommended_position = next(
+        (
+            item
+            for item in positions
+            if item.frame_index == solution.recommended_anchor_frame
+        ),
+        None,
+    )
+    recommendation_meta: dict[str, object] = {
+        "relative_orientation_status": relative_status,
+        "relative_orientation_count": relative_count,
+        "relative_orientation_coverage": relative_coverage,
+        "recommended_anchor_frame": (
+            recommended_position.frame_index if recommended_position else None
+        ),
+        "recommended_anchor_source_pts": (
+            recommended_position.source_pts if recommended_position else None
+        ),
+        "recommended_anchor_time_sec": (
+            recommended_position.pts_time_sec if recommended_position else None
+        ),
+    }
     for position in positions:
         quaternion, yaw, pitch, roll, orientation_available = _camera_values(
             position, solution, config
@@ -201,6 +232,13 @@ def _build_payloads(
             }
         if orientation_available:
             pose["cam_from_world_quat_wxyz"] = quaternion
+        relative_rotation = solution.relative_rotations.get(position.frame_index)
+        component_id = solution.component_ids.get(position.frame_index)
+        if relative_rotation is not None and component_id is not None:
+            pose["visual_component_id"] = int(component_id)
+            pose["cam_from_visual_local_quat_wxyz"] = (
+                rotation_matrix_to_quaternion_wxyz(relative_rotation)
+            )
         poses.append(pose)
         path_rows.append(
             {
@@ -217,6 +255,8 @@ def _build_payloads(
                 "path_source": "srt_cad_locked",
                 "position_available": True,
                 "orientation_available": orientation_available,
+                "relative_orientation_available": relative_rotation is not None,
+                "visual_component_id": component_id,
                 "status": "ok",
             }
         )
@@ -252,6 +292,8 @@ def _build_payloads(
                 "position_source": "srt_cad_locked",
                 "position_locked": True,
                 "orientation_available": orientation_available,
+                "relative_orientation_available": relative_rotation is not None,
+                "visual_component_id": component_id,
                 "camera": camera,
             }
         )
@@ -292,6 +334,7 @@ def _build_payloads(
             "position_count": len(positions),
             "orientation_count": len(solution.rotations),
             "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
+            **recommendation_meta,
         },
     }
     track = {
@@ -305,6 +348,7 @@ def _build_payloads(
             "position_source": "srt_cad_locked",
             "position_edit_policy": "uniform_xyz_offset_only",
             "orientation_status": solution.status,
+            **recommendation_meta,
         },
     }
     empty_bbox = {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
@@ -323,6 +367,7 @@ def _build_payloads(
             "workflow": "srt_fixed_track_visual_pose",
             "position_source": "srt_cad_locked",
             "orientation_status": solution.status,
+            **recommendation_meta,
         },
         "points": {
             "count_original": 0,
@@ -355,6 +400,7 @@ def _build_payloads(
         "orientation_count": len(solution.rotations),
         "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
         "orientation_status": solution.status,
+        **recommendation_meta,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
         "height_source": "rel_alt",
         "abs_alt_usage": "diagnostic_only",
@@ -374,6 +420,8 @@ def _build_payloads(
         f"- 轨迹帧数：{len(positions)}\n"
         f"- 可用姿态帧数：{len(solution.rotations)}\n"
         f"- 姿态状态：{solution.status}\n"
+        f"- 视觉相对姿态：{relative_status}（{relative_count}/{len(positions)}）\n"
+        f"- 推荐姿态锚点帧：{solution.recommended_anchor_frame}\n"
         f"- 水平 FOV：{config.horizontal_fov_deg:g}°（用户输入）\n"
         f"- 整条路线统一偏移：{list(config.route_offset_xyz_m)} 米\n"
         "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD，视觉不得修改。\n"
