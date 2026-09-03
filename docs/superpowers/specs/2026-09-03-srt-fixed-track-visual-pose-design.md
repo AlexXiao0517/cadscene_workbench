@@ -2,7 +2,7 @@
 
 ## 决策摘要
 
-对含有经纬度和高度、但没有可用云台姿态的 DJI SRT，现有 `srt_sfm_fused` 不再执行“完整 SfM 后与 SRT 融合”。它改为：
+对含有经纬度和相对高度、但没有可用云台姿态的 DJI SRT，新建独立的 `srt_fixed_track_visual_pose` 工作流。它不调用现有“不完整 SRT + 三维重建”的 `srt_sfm_fused`，而是：
 
 1. 将 SRT 经纬度按用户确认的 CGCS2000 投影转换到 CAD；
 2. 将每帧相机中心严格锁定为 SRT→CAD 的位置；
@@ -12,7 +12,9 @@
 6. 即使自动姿态求解不完整，也先发布并显示位置轨迹，不回退到 SfM；
 7. 该路线不进入三维重建工作台，不生成正式点云，也不经过质量检测环节。
 
-兼容现有项目数据和路由时，内部 workflow key 暂时保留为 `srt_sfm_fused`，但用户界面统一显示“`SRT 轨迹 + 视觉姿态`”。产物 metadata 必须明确声明 `position_source=srt_cad_locked` 和 `orientation_source=visual_fixed_center`，避免内部旧名称造成语义误解。
+用户界面统一显示“`SRT 轨迹 + 视觉姿态`”。产物 metadata 必须明确声明 `position_source=srt_cad_locked` 和 `orientation_source=visual_fixed_center`。
+
+旧 `srt_sfm_fused` adapter、命令和历史产物只作为旧项目的兼容读取能力保留：不删除旧数据、不改变旧 attempt 的含义，但从新项目的自动推荐和可选工作流中隐藏，且不得再创建新的 `srt_sfm_fused` job。已有项目若尚未执行旧 job，重新分析后推荐新 workflow；若已保存旧 workflow，进入工作台前明确提示迁移到新 workflow，不能静默执行旧三维重建。
 
 ## 背景与现状问题
 
@@ -48,10 +50,10 @@
 | 输入能力 | 工作流 | 位置来源 | 姿态来源 |
 | --- | --- | --- | --- |
 | SRT 含 GPS、高度和可解释的完整云台姿态 | `srt_full_pose` | SRT→CAD | SRT |
-| SRT 含 GPS、相对高度，但无完整云台姿态 | `srt_sfm_fused`（UI：SRT 轨迹 + 视觉姿态） | SRT→CAD，硬锁定 | 视觉固定中心求解 |
+| SRT 含 GPS、相对高度，但无完整云台姿态 | `srt_fixed_track_visual_pose`（UI：SRT 轨迹 + 视觉姿态） | SRT→CAD，硬锁定 | 视觉固定中心求解 |
 | 无可用 SRT 轨迹 | `sfm_only` | SfM | SfM |
 
-若用户手动选择与 capability 不兼容的工作流，预检必须给出明确阻塞原因，不允许执行后再自动换路。partial-SRT 不能伪装成 `srt_full_pose`，也不能因视觉姿态失败转成 `sfm_only`。
+若用户手动选择与 capability 不兼容的工作流，预检必须给出明确阻塞原因，不允许执行后再自动换路。partial-SRT 不能伪装成 `srt_full_pose`，也不能因视觉姿态失败转成 `sfm_only` 或旧 `srt_sfm_fused`。
 
 ## 坐标与高度契约
 
@@ -168,7 +170,7 @@ adapter 只要 SRT→CAD 位置校验成功，就应成功发布轨迹产物；�
 
 ## 产物与数据契约
 
-workflow adapter 版本必须提升，输出目录改为具有真实语义的新目录，例如：
+注册独立的 `srt_fixed_track_visual_pose` adapter v1，输出目录使用具有真实语义的新目录：
 
 - `02_srt_visual_pose/camera_trajectory_visual_pose.json`；
 - `02_srt_visual_pose/camera_path_srt_locked.csv`；
@@ -180,7 +182,7 @@ trajectory 保持现有 loader 的 `fps/width/height/intrinsics/poses` 主结构
 ```json
 {
   "meta": {
-    "workflow": "srt_sfm_fused",
+    "workflow": "srt_fixed_track_visual_pose",
     "workflow_label": "SRT 轨迹 + 视觉姿态",
     "trajectory_status": "orientation_partial",
     "metric_scale_locked": true,
@@ -258,7 +260,9 @@ job 输入必须包含源文件 hash、clip revision、frame-map revision、CAD 
 
 ## 性能验证
 
-速度收益必须通过同一片段、同一抽帧策略和同一硬件的实测给出，不预先承诺倍数。报告分别记录：解码、特征提取、匹配、固定中心旋转求解、插值和产物写出耗时，并与当前完整 SfM + fusion adapter 的 wall time 和峰值内存比较。
+新路线在计算步骤上少于纯 SfM，因此正常情况下应当更快：两者都需要视频解码、特征提取和匹配，但新路线不执行增量位置注册、自由相机位姿 bundle adjustment、正式三角化、点云维护和点云导出，只优化旋转。这里必须区分“不生成点云文件”和“不运行点云重建”：仅从原 SfM 流程中删除 PLY 导出几乎不会明显加速；本设计之所以能加速，是因为整个三维位置重建链路都不运行。
+
+实际加速幅度取决于视频长度、抽帧数、画面纹理和特征提取/匹配在总耗时中的占比。若特征阶段占绝大多数，wall time 的改善会小于求解空间的缩减，因此不能在实测前承诺固定倍数。速度收益必须通过同一片段、同一抽帧策略和同一硬件的实测给出。报告分别记录：解码、特征提取、匹配、固定中心旋转求解、插值和产物写出耗时，并与纯 SfM 及旧完整 SfM + fusion adapter 的 wall time 和峰值内存比较。
 
 预期优势来自不执行增量位置注册、自由相机位姿 BA、正式三角化和点云输出；若实测没有明显收益，仍不能以放松固定位置约束换速度或成功率。
 
@@ -266,7 +270,7 @@ job 输入必须包含源文件 hash、clip revision、frame-map revision、CAD 
 
 实现时测试至少覆盖：
 
-1. 路由：full-pose、partial-SRT 和 no-SRT 分别进入正确 workflow；partial-SRT 页面不出现“SRT + 三维重建”；
+1. 路由：full-pose、partial-SRT 和 no-SRT 分别进入正确 workflow；partial-SRT 推荐 `srt_fixed_track_visual_pose`，页面不出现“SRT + 三维重建”，新项目不能创建 `srt_sfm_fused` job；
 2. 工作台启动：缺配置打开配置页，配置完整创建 trajectory job，position artifact 出现后进入专用工作台，绝不恢复到 `sfm`；
 3. 高度：真实/合成 `rel_alt` 全部进入 Z，`abs_alt` 只进诊断；统一 Z 偏移对所有帧相同；
 4. 坐标：确认后的 `118°50′` 自定义中央经线能让测试轨迹落入 CAD，并正确经过 axis mapping、origin 和 scale；
@@ -276,7 +280,7 @@ job 输入必须包含源文件 hash、clip revision、frame-map revision、CAD 
 8. schema：position-only pose 可被 loader、ProjectService 和 Viewer 接收，路线可见而视锥隐藏；
 9. 人工微调：只能编辑统一 XYZ 偏移和姿态关键帧，API 拒绝逐帧 position edit；
 10. 渲染门禁：姿态覆盖不足时仍可保存/查看路线，但不可渲染；人工锚点补足后可进入渲染；
-11. 产物：adapter 命令不包含 `run_sfm`、`fuse_srt_sfm` 或正式 sparse point cloud 输出；
+11. 产物：新 adapter 与旧 `srt_sfm_fused` 分离，其命令不包含 `run_sfm`、`fuse_srt_sfm` 或正式 sparse point cloud 输出；
 12. stale/concurrency：FOV、georeference、源文件、frame map 和姿态锚点变化正确使旧输出失效；纯统一平移不重跑视觉求解；
 13. 回归：`srt_full_pose`、`sfm_only`、项目库、任务恢复和现有渲染测试通过；
 14. 真实 smoke：当前项目的 12017 条 SRT 记录生成落在 CAD 内的三维路线，Z 保持约 84.926～91.846 米的相对变化，未求得姿态时路线仍可在工作台查看。
