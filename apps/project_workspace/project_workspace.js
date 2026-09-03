@@ -19,6 +19,7 @@
     dismissedCandidateRevision: null,
     cadReplacementUploading: false,
     fullPoseClipId: null,
+    srtConfigWorkflow: null,
     georeferenceCandidates: [],
     georeferenceOperation: null,
     georeferencePollGeneration: 0,
@@ -188,7 +189,9 @@
     else progressPercent.textContent = "—";
     applyCapabilities(clip, row);
     const configureFullPose = $(".configure-full-pose", row);
-    configureFullPose.hidden = workflow.value !== "srt_full_pose";
+    const configurableSrt = workflow.value === "srt_full_pose"
+      || workflow.value === "srt_fixed_track_visual_pose";
+    configureFullPose.hidden = !configurableSrt;
     configureFullPose.addEventListener("click", () => openFullPoseDialog(clip));
     const bridgeStatus = clip.scene_bridge?.status;
     const hasSavedWorkbench = clip.workbench?.state === "saved";
@@ -198,7 +201,7 @@
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
     } else if (bridgeReason) {
       $(".row-error", row).textContent = bridgeReason;
-    } else if (workflow.value === "srt_full_pose" && clip.capabilities?.reason) {
+    } else if (["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow.value) && clip.capabilities?.reason) {
       $(".row-error", row).textContent = clip.capabilities.reason;
     }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
@@ -698,9 +701,22 @@
   function openFullPoseDialog(clip) {
     if (!clip) return;
     state.fullPoseClipId = clip.clip_id;
+    state.srtConfigWorkflow = clip.resolved_workflow;
     state.georeferenceCandidates = [];
     state.georeferenceOperation = null;
-    const settings = clip.srt_full_pose_settings || {};
+    const fixedTrack = state.srtConfigWorkflow === "srt_fixed_track_visual_pose";
+    const settings = fixedTrack
+      ? (clip.srt_fixed_track_visual_pose_settings || {})
+      : (clip.srt_full_pose_settings || {});
+    $("#srtConfigEyebrow").textContent = fixedTrack ? "SRT 固定轨迹" : "SRT 直接轨迹";
+    $("#srtConfigTitle").textContent = fixedTrack
+      ? "配置固定轨迹与视觉姿态"
+      : "配置无人机与 CAD 坐标";
+    $("#srtConfigDescription").textContent = fixedTrack
+      ? "SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建。"
+      : "大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。";
+    $("#cadZOffsetField").hidden = fixedTrack;
+    $("#routeOffsetFields").hidden = !fixedTrack;
     $("#srtCoverageSummary").textContent = formatSrtCoverage(clip.srt_coverage);
     $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
     const confirmedGeoreference = state.snapshot?.cad_georeference || {};
@@ -708,6 +724,12 @@
       ? formatCentralMeridian(confirmedGeoreference.central_meridian_deg)
       : "";
     $("#cadZOffsetInput").value = settings.cad_z_offset_m ?? 0;
+    const routeOffset = Array.isArray(settings.route_offset_xyz_m)
+      ? settings.route_offset_xyz_m
+      : [0, 0, 0];
+    $("#routeOffsetXInput").value = routeOffset[0] ?? 0;
+    $("#routeOffsetYInput").value = routeOffset[1] ?? 0;
+    $("#routeOffsetZInput").value = routeOffset[2] ?? 0;
     $("#cadGeoreferenceCandidates").replaceChildren(Object.assign(document.createElement("span"), {
       className: "empty-state",
       textContent: "填写中央经线后点击“生成候选”",
@@ -722,6 +744,7 @@
   function closeFullPoseDialog() {
     state.georeferencePollGeneration += 1;
     state.fullPoseClipId = null;
+    state.srtConfigWorkflow = null;
     $("#fullPoseDialog").close();
   }
 
@@ -731,35 +754,57 @@
     const fovInput = $("#horizontalFovInput");
     const horizontalFov = Number(fovInput.value);
     const cadZOffset = Number($("#cadZOffsetInput").value || 0);
+    const fixedTrack = state.srtConfigWorkflow === "srt_fixed_track_visual_pose";
+    const routeOffset = [
+      Number($("#routeOffsetXInput").value || 0),
+      Number($("#routeOffsetYInput").value || 0),
+      Number($("#routeOffsetZInput").value || 0),
+    ];
     if (!clipId || !Number.isFinite(horizontalFov) || horizontalFov <= 1 || horizontalFov >= 179) {
       fovInput.setCustomValidity("请输入 1° 到 179° 之间的水平视场角");
       fovInput.reportValidity();
       fovInput.setCustomValidity("");
       return;
     }
+    if (fixedTrack && routeOffset.some((value) => !Number.isFinite(value))) {
+      setMessage("整条路线的 XYZ 偏移必须是有效数值", true);
+      return;
+    }
     try {
+      const settingsEndpoint = fixedTrack
+        ? `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clipId)}/srt-fixed-track-visual-pose`
+        : `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clipId)}/srt-full-pose`;
       const { body } = await request(
-        `/api/projects/${encodeURIComponent(projectId)}/clips/${encodeURIComponent(clipId)}/srt-full-pose`,
+        settingsEndpoint,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision: state.snapshot.component_revisions.clips,
-            horizontal_fov_deg: horizontalFov,
-            cad_z_offset_m: cadZOffset,
-            attitude_profile: "dji_absolute_ned",
-          }),
+          body: JSON.stringify(fixedTrack
+            ? {
+                expected_revision: state.snapshot.component_revisions.clips,
+                horizontal_fov_deg: horizontalFov,
+                route_offset_xyz_m: routeOffset,
+              }
+            : {
+                expected_revision: state.snapshot.component_revisions.clips,
+                horizontal_fov_deg: horizontalFov,
+                cad_z_offset_m: cadZOffset,
+                attitude_profile: "dji_absolute_ned",
+              }),
         },
       );
       state.snapshot.component_revisions.clips = body.clips_revision;
       const selected = state.snapshot.clips.find((item) => item.clip_id === clipId);
-      if (selected) selected.srt_full_pose_settings = body.settings;
+      if (selected) {
+        if (fixedTrack) selected.srt_fixed_track_visual_pose_settings = body.settings;
+        else selected.srt_full_pose_settings = body.settings;
+      }
       state.etag = null;
       closeFullPoseDialog();
-      setMessage("SRT 全姿态配置已保存");
+      setMessage(fixedTrack ? "SRT 固定轨迹配置已保存" : "SRT 全姿态配置已保存");
       await pollSnapshot();
     } catch (error) {
-      setMessage(`SRT 全姿态配置保存失败：${error.message}`, true);
+      setMessage(`SRT 配置保存失败：${error.message}`, true);
     }
   }
 
@@ -910,7 +955,7 @@
       state.snapshot.component_revisions.clips = body.clips_revision;
       state.etag = null;
       await pollSnapshot();
-      if (workflow === "srt_full_pose") {
+      if (["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow)) {
         const refreshed = state.snapshot?.clips.find((item) => item.clip_id === clip.clip_id);
         openFullPoseDialog(refreshed || clip);
       }

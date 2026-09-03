@@ -1353,25 +1353,41 @@ class ProjectService:
                     adapter.unavailable_reason or "adapter unavailable"
                 )
                 continue
-            if adapter.name == "srt_full_pose":
+            if adapter.name in {
+                "srt_full_pose",
+                "srt_fixed_track_visual_pose",
+            }:
                 georeference = _confirmed_cad_georeference(project.source_assets)
                 if georeference is None:
                     skipped.append(clip.clip_id)
                     reasons[clip.clip_id] = (
                         "confirmed CAD georeference bound to the current CAD is "
-                        "required for srt_full_pose"
+                        f"required for {adapter.name}"
                     )
                     continue
-                settings = clip.manual_definition.get("srt_full_pose")
+                settings_key = adapter.name
+                settings = clip.manual_definition.get(settings_key)
                 if (
                     not isinstance(settings, Mapping)
                     or settings.get("horizontal_fov_deg") is None
                 ):
                     skipped.append(clip.clip_id)
                     reasons[clip.clip_id] = (
-                        "horizontal FOV is required for srt_full_pose"
+                        f"horizontal FOV is required for {adapter.name}"
                     )
                     continue
+                if adapter.name == "srt_fixed_track_visual_pose":
+                    coverage = clip.analysis.get("srt_coverage")
+                    if (
+                        not isinstance(coverage, Mapping)
+                        or float(coverage.get("trajectory_coverage", 0.0)) < 0.8
+                    ):
+                        skipped.append(clip.clip_id)
+                        reasons[clip.clip_id] = (
+                            "GPS and relative height coverage is insufficient "
+                            "for the fixed SRT track"
+                        )
+                        continue
                 frame_map_path = _clip_frame_map_path(clip)
                 if frame_map_path is None or not frame_map_path.is_file():
                     reasons[clip.clip_id] = (
@@ -2884,6 +2900,89 @@ class ProjectService:
                 ),
             )
 
+    def update_srt_fixed_track_visual_pose_settings(
+        self,
+        project_id: str,
+        clip_id: str,
+        *,
+        expected_revision: int,
+        horizontal_fov_deg: float,
+        route_offset_xyz_m: Sequence[float] = (0.0, 0.0, 0.0),
+    ) -> ClipsManifest:
+        """Store FOV and the only allowed whole-route XYZ position adjustment."""
+
+        fov = float(horizontal_fov_deg)
+        if not isfinite(fov) or not 1.0 < fov < 179.0:
+            raise ValueError("horizontal_fov_deg must be finite and inside (1, 179)")
+        if (
+            not isinstance(route_offset_xyz_m, Sequence)
+            or isinstance(route_offset_xyz_m, (str, bytes))
+            or len(route_offset_xyz_m) != 3
+        ):
+            raise ValueError("route_offset_xyz_m must contain exactly three values")
+        offset = [float(value) for value in route_offset_xyz_m]
+        if not all(isfinite(value) for value in offset):
+            raise ValueError("route_offset_xyz_m must contain finite values")
+        settings = {
+            "schema_version": 1,
+            "horizontal_fov_deg": fov,
+            "route_offset_xyz_m": offset,
+        }
+        with self._state_guard(project_id):
+            current = self.repositories.clips.load(project_id)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=current.revision,
+                )
+            selected = next(
+                (item for item in current.clips if item.clip_id == clip_id),
+                None,
+            )
+            if selected is None:
+                raise KeyError(f"unknown clip ID: {clip_id}")
+            if selected.manual_definition.get(
+                "srt_fixed_track_visual_pose"
+            ) == settings:
+                return current
+
+            def update_clip(item: ClipDefinition) -> ClipDefinition:
+                if item.clip_id != clip_id:
+                    return item
+                references = tuple(
+                    replace(
+                        reference,
+                        value={
+                            **reference.value,
+                            "previous_status": reference.value.get("status"),
+                            "status": "stale",
+                            "stale_reason": (
+                                "fixed_track_visual_pose_settings_changed"
+                            ),
+                        },
+                    )
+                    for reference in item.references
+                )
+                return replace(
+                    item,
+                    manual_definition={
+                        **item.manual_definition,
+                        "srt_fixed_track_visual_pose": settings,
+                    },
+                    references=references,
+                )
+
+            return self.repositories.clips.update(
+                project_id,
+                expected_revision=expected_revision,
+                mutate=lambda value: replace(
+                    value,
+                    updated_at=self.now(),
+                    clips=tuple(update_clip(item) for item in value.clips),
+                ),
+            )
+
     def cad_georeference_snapshot(self, project_id: str) -> Mapping[str, object]:
         return _cad_georeference_snapshot(
             self.repositories.project.load(project_id).source_assets
@@ -2919,7 +3018,11 @@ class ProjectService:
                 or not _clip_output_path(by_id[clip_id]).is_file()
                 or (
                     by_id[clip_id].resolved_workflow
-                    in {"sfm_only", "srt_full_pose"}
+                    in {
+                        "sfm_only",
+                        "srt_full_pose",
+                        "srt_fixed_track_visual_pose",
+                    }
                     and (
                         _clip_frame_map_path(by_id[clip_id]) is None
                         or not _clip_frame_map_path(by_id[clip_id]).is_file()
@@ -4803,7 +4906,13 @@ class ProjectService:
                     self.projects_root, project, clip
                 )
                 if adapter.name == "srt_full_pose"
-                else dict(clip.manual_definition)
+                else (
+                    _fixed_track_visual_pose_adapter_parameters(
+                        self.projects_root, project, clip
+                    )
+                    if adapter.name == "srt_fixed_track_visual_pose"
+                    else dict(clip.manual_definition)
+                )
             ),
             source_start_pts=int(clip.analysis["source_start_pts"]),
             source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
@@ -8258,6 +8367,39 @@ def _srt_full_pose_adapter_parameters(
     }
 
 
+def _fixed_track_visual_pose_adapter_parameters(
+    storage_root: Path,
+    project: ProjectManifest,
+    clip: ClipDefinition,
+) -> dict[str, object]:
+    georeference = _confirmed_cad_georeference(project.source_assets)
+    settings = clip.manual_definition.get("srt_fixed_track_visual_pose")
+    media_binding = _project_media_binding(project)
+    if georeference is None:
+        raise ValueError("confirmed CAD georeference is not bound to the current CAD")
+    if not isinstance(settings, Mapping):
+        raise ValueError("srt_fixed_track_visual_pose settings are unavailable")
+    if media_binding is None:
+        raise ValueError("project media specification is unavailable")
+    _media_revision, media = media_binding
+    if media.nominal_frame_rate is None:
+        raise ValueError("project nominal frame rate is unavailable")
+    render = _workbench_render_parameters(
+        storage_root, project.project_id, clip, project.source_assets
+    )
+    return {
+        "cad_georeference": dict(georeference),
+        "srt_fixed_track_visual_pose": dict(settings),
+        "cad_origin_xy": list(render["origin_xy"]),
+        "cad_scale": render["cad_scale"],
+        "video_metadata": {
+            "width": media.width,
+            "height": media.height,
+            "fps": float(media.nominal_frame_rate),
+        },
+    }
+
+
 def _job_identity_payload(
     *,
     job_type: str,
@@ -8279,7 +8421,7 @@ def _job_identity_payload(
         "adapter_version": adapter_version,
         "parameters": dict(clip.manual_definition),
     }
-    if adapter_name == "srt_full_pose":
+    if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
         payload["cad_georeference"] = _cad_georeference_snapshot(project_assets)
     if _clip_input_snapshot(clip) is None:
         payload.update(

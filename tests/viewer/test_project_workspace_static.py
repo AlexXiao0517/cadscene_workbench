@@ -312,6 +312,26 @@ def test_full_pose_dialog_accepts_degree_minute_central_meridian() -> None:
     assert "自定义 CGCS2000 高斯—克吕格" in script
 
 
+def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="srtConfigDescription"' in html
+    assert "SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建" in html
+    for element_id in (
+        "routeOffsetFields",
+        "routeOffsetXInput",
+        "routeOffsetYInput",
+        "routeOffsetZInput",
+    ):
+        assert f'id="{element_id}"' in html
+    assert 'workflow.value === "srt_fixed_track_visual_pose"' in script
+    assert "srt_fixed_track_visual_pose_settings" in script
+    assert "/srt-fixed-track-visual-pose`" in script
+    assert "route_offset_xyz_m" in script
+    assert "state.srtConfigWorkflow" in script
+
+
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

@@ -220,6 +220,12 @@ tbody tr:hover { background: var(--row-hover-background); }
 .srt-coverage-summary { margin: -3px 0 14px; color: var(--muted); font-size: 12px; }
 .full-pose-fields label { display: grid; gap: 7px; color: var(--text); font-weight: 600; }
 .full-pose-fields input { width: 100%; padding: 10px 11px; border: 1px solid var(--input-border); border-radius: 8px; color: var(--text); background: var(--input-background); }
+.route-offset-fields { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; margin: 18px 0; padding: 16px; border: 1px solid var(--panel-border); border-radius: 10px; }
+.route-offset-fields[hidden] { display: none; }
+.route-offset-fields legend { padding: 0 8px; color: var(--text); font-weight: 700; }
+.route-offset-fields label { display: grid; gap: 7px; font-weight: 600; }
+.route-offset-fields input { width: 100%; padding: 10px 11px; border: 1px solid var(--input-border); border-radius: 8px; color: var(--text); background: var(--input-background); }
+.route-offset-fields p { grid-column: 1 / -1; margin: 0; color: var(--muted); }
 .candidate-operation-progress { margin: 12px 0; display: grid; gap: 7px; }
 .candidate-operation-progress[hidden] { display: none; }
 .candidate-operation-progress > div:first-child { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font-size: 12px; }

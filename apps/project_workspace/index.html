@@ -115,16 +115,24 @@
   <dialog id="fullPoseDialog" class="dialog full-pose-dialog">
     <form id="fullPoseForm">
       <div class="full-pose-heading">
-        <div><p class="eyebrow">SRT 直接轨迹</p><h2>配置无人机与 CAD 坐标</h2></div>
+        <div><p id="srtConfigEyebrow" class="eyebrow">SRT 直接轨迹</p><h2 id="srtConfigTitle">配置无人机与 CAD 坐标</h2></div>
         <button id="closeFullPoseDialog" class="dialog-close" type="button" aria-label="关闭">×</button>
       </div>
-      <p>大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。</p>
+      <p id="srtConfigDescription">大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。</p>
+      <p id="fixedTrackDescription" hidden>SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建。</p>
       <p id="srtCoverageSummary" class="srt-coverage-summary"></p>
       <div class="full-pose-fields">
         <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="1.01" max="178.99" step="0.1" required placeholder="例如 72"></label>
         <label><span>CGCS2000 中央经线</span><input id="centralMeridianInput" type="text" inputmode="decimal" placeholder="例如 120 或 118°50′；留空自动推荐"></label>
-        <label><span>CAD 高程修正（米）</span><input id="cadZOffsetInput" type="number" step="0.1" value="0"></label>
+        <label id="cadZOffsetField"><span>CAD 高程修正（米）</span><input id="cadZOffsetInput" type="number" step="0.1" value="0"></label>
       </div>
+      <fieldset id="routeOffsetFields" class="route-offset-fields" hidden>
+        <legend>整条 SRT 路线统一偏移（米）</legend>
+        <label><span>X</span><input id="routeOffsetXInput" type="number" step="0.1" value="0"></label>
+        <label><span>Y</span><input id="routeOffsetYInput" type="number" step="0.1" value="0"></label>
+        <label><span>Z</span><input id="routeOffsetZInput" type="number" step="0.1" value="0"></label>
+        <p>只允许整体平移路线，不会逐帧修改 SRT→CAD 相机位置。</p>
+      </fieldset>
       <section class="georeference-section" aria-labelledby="georeferenceTitle">
         <div class="georeference-heading"><div><h3 id="georeferenceTitle">CAD 坐标系确认</h3><p id="cadGeoreferenceStatus">尚未确认</p></div><button id="loadCadGeoreferenceCandidates" class="button secondary" type="button">生成候选</button></div>
         <p class="georeference-help">系统用 SRT 的 WGS84 轨迹与 CAD 坐标范围排序候选；不会把某个中央经线自动套用到其他 CAD。</p>

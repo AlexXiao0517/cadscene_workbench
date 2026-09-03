@@ -51,6 +51,9 @@ _WORKFLOW = re.compile(
 _SRT_FULL_POSE_SETTINGS = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/srt-full-pose$"
 )
+_SRT_FIXED_TRACK_VISUAL_POSE_SETTINGS = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/srt-fixed-track-visual-pose$"
+)
 _CAD_GEOREFERENCE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/cad-georeference/(?P<action>candidates|confirm)$"
 )
@@ -197,6 +200,11 @@ class ProjectApi:
             match = _SRT_FULL_POSE_SETTINGS.fullmatch(path)
             if method == "PATCH" and match:
                 return self._update_srt_full_pose_settings(
+                    match["project"], match["clip"], payload
+                )
+            match = _SRT_FIXED_TRACK_VISUAL_POSE_SETTINGS.fullmatch(path)
+            if method == "PATCH" and match:
+                return self._update_srt_fixed_track_visual_pose_settings(
                     match["project"], match["clip"], payload
                 )
             match = _CAD_GEOREFERENCE.fullmatch(path)
@@ -936,6 +944,18 @@ class ProjectApi:
                         )
                         else {}
                     ),
+                    "srt_fixed_track_visual_pose_settings": dict(
+                        clip.manual_definition.get(
+                            "srt_fixed_track_visual_pose"
+                        )
+                        if isinstance(
+                            clip.manual_definition.get(
+                                "srt_fixed_track_visual_pose"
+                            ),
+                            Mapping,
+                        )
+                        else {}
+                    ),
                     "needs_review": bool(clip.analysis.get("needs_review", False)),
                     "status": (
                         "ready" if display_job is None else display_job.get("status")
@@ -1571,6 +1591,36 @@ class ProjectApi:
                 "clip_id": clip_id,
                 "clips_revision": manifest.revision,
                 "settings": dict(selected.manual_definition["srt_full_pose"]),
+            },
+        )
+
+    def _update_srt_fixed_track_visual_pose_settings(
+        self,
+        project_id: str,
+        clip_id: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        if "horizontal_fov_deg" not in payload:
+            raise ValueError("horizontal_fov_deg is required")
+        offset = payload.get("route_offset_xyz_m", (0.0, 0.0, 0.0))
+        if not isinstance(offset, (list, tuple)):
+            raise TypeError("route_offset_xyz_m must be an array")
+        manifest = self.service.update_srt_fixed_track_visual_pose_settings(
+            project_id,
+            clip_id,
+            expected_revision=_required_revision(payload),
+            horizontal_fov_deg=float(payload["horizontal_fov_deg"]),
+            route_offset_xyz_m=offset,
+        )
+        selected = next(item for item in manifest.clips if item.clip_id == clip_id)
+        return ApiResponse(
+            200,
+            {
+                "clip_id": clip_id,
+                "clips_revision": manifest.revision,
+                "settings": dict(
+                    selected.manual_definition["srt_fixed_track_visual_pose"]
+                ),
             },
         )
 

@@ -377,7 +377,7 @@ git commit -m "feat: add fixed-track visual pose adapter"
 - Consumes: confirmed project `_cad_georeference`, clip SRT capability, physical assets, source interval/frame map.
 - Produces: `manual_definition["srt_fixed_track_visual_pose"]`, PATCH endpoint `/api/projects/{project}/clips/{clip}/srt-fixed-track-visual-pose`, and adapter parameters.
 
-- [ ] **Step 1: Write failing service/API tests**
+- [x] **Step 1: Write failing service/API tests**
 
 ```python
 def test_fixed_track_preflight_requires_georeference_fov_and_relative_height(service):
@@ -394,13 +394,13 @@ def test_settings_persist_one_xyz_offset_and_stale_old_trajectory(service):
     assert all(ref.value["status"] == "stale" for ref in manifest.clips[0].references)
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/projects/test_fixed_track_visual_pose_configuration.py tests/cli/test_serve_viewer_project_api.py -k fixed_track -q`
 
 Expected: missing update method/route and preflight does not enforce the new contract.
 
-- [ ] **Step 3: Implement settings and adapter parameters**
+- [x] **Step 3: Implement settings and adapter parameters**
 
 Validate FOV and all three offsets as finite values. Store:
 
@@ -414,11 +414,11 @@ Validate FOV and all three offsets as finite values. Store:
 
 Build adapter parameters from current CAD georeference, CAD `origin_xy/cad_scale`, exact source interval/frame map, video metadata, and the saved settings. Include these values in `_trajectory_job_input_payload` and current fingerprint comparison.
 
-- [ ] **Step 4: Generalize the SRT configuration dialog**
+- [x] **Step 4: Generalize the SRT configuration dialog**
 
 Show the existing coordinate/FOV dialog conditionally for both `srt_full_pose` and `srt_fixed_track_visual_pose`. For the new route change the explanatory text to “SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建”，show X/Y/Z uniform offset inputs, and save to the new endpoint. Full-pose keeps its existing attitude profile and Z-only behavior.
 
-- [ ] **Step 5: Run configuration tests and commit**
+- [x] **Step 5: Run configuration tests and commit**
 
 Run: `python -m pytest tests/projects/test_fixed_track_visual_pose_configuration.py tests/projects/test_full_pose_configuration.py tests/cli/test_serve_viewer_project_api.py tests/viewer/test_project_workspace_static.py -q`
 
