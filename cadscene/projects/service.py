@@ -2628,7 +2628,7 @@ class ProjectService:
         *,
         candidate_job_id: str | None,
         candidate_input_fingerprint: str | None,
-    ) -> None:
+    ) -> Mapping[str, object]:
         if not candidate_job_id or not candidate_input_fingerprint:
             raise ValueError(
                 "candidate_job_id and candidate_input_fingerprint are required"
@@ -2652,13 +2652,12 @@ class ProjectService:
             raise ValueError("CAD georeference candidate result is stale or invalid")
         output = self._read_cad_georeference_candidate_output(latest)
         allowed = output["candidates"]
-        candidate_fingerprint = _fingerprint(dict(candidate))
-        if not any(
-            isinstance(item, Mapping)
-            and _fingerprint(dict(item)) == candidate_fingerprint
-            for item in allowed  # type: ignore[union-attr]
-        ):
-            raise ValueError("candidate does not belong to the current result")
+        for item in allowed:  # type: ignore[union-attr]
+            if isinstance(item, Mapping) and _json_values_equivalent(
+                item, candidate
+            ):
+                return item
+        raise ValueError("candidate does not belong to the current result")
 
     def _prepare_cad_georeference_candidate_plan(
         self, job: QueueJob
@@ -2776,7 +2775,7 @@ class ProjectService:
                 current_revision=project.revision,
             )
         if candidate_job_id is not None or candidate_input_fingerprint is not None:
-            self._validate_current_cad_georeference_candidate(
+            candidate = self._validate_current_cad_georeference_candidate(
                 project_id,
                 candidate,
                 candidate_job_id=candidate_job_id,
@@ -8080,6 +8079,27 @@ def _fingerprint(value: Mapping[str, object]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _json_values_equivalent(left: object, right: object) -> bool:
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return set(left) == set(right) and all(
+            _json_values_equivalent(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_values_equivalent(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return (
+            isfinite(float(left))
+            and isfinite(float(right))
+            and left == right
+        )
+    return type(left) is type(right) and left == right
 
 
 def _upload_descriptor(upload: PublishedUpload) -> dict[str, object]:

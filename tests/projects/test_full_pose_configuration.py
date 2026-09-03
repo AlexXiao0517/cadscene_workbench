@@ -19,6 +19,19 @@ from cadscene.projects.uploads import ValidatedUploadStore
 from .test_service_jobs import clip, service_with_clips
 
 
+def _javascript_json_number_roundtrip(value):
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_javascript_json_number_roundtrip(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _javascript_json_number_roundtrip(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _srt_text() -> str:
     return """1
 00:00:00,000 --> 00:00:00,040
@@ -249,6 +262,69 @@ def test_candidate_and_confirmation_routes_use_project_revision(tmp_path: Path) 
     assert candidate["confirmed"] is False
     assert confirm_response.status == 200
     assert confirm_response.body["cad_georeference"]["confirmed"] is True
+
+
+def test_candidate_confirmation_accepts_javascript_json_number_roundtrip(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    api = ProjectApi(
+        repositories=repositories,
+        service=service,
+        uploads=ValidatedUploadStore(tmp_path / "projects"),
+        now=lambda: "2026-09-01T00:00:00Z",
+    )
+    started = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "central_meridian_deg": 120.0,
+        },
+    )
+    assert started.status == 202
+    finished = LocalJobExecutor(service).run_next()
+    assert finished is not None and finished.status == "success"
+    operation = api.handle(
+        "GET", "/api/projects/p1/cad-georeference/candidates"
+    ).body["operation"]
+    browser_candidate = _javascript_json_number_roundtrip(
+        operation["candidates"][0]
+    )
+    assert isinstance(browser_candidate["score"], int)
+
+    tampered = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/confirm",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "candidate_job_id": operation["job_id"],
+            "candidate_input_fingerprint": operation["input_fingerprint"],
+            "candidate": {
+                **browser_candidate,
+                "central_meridian_deg": 119.0,
+            },
+        },
+    )
+    assert tampered.status == 400
+    assert "current result" in tampered.body["error"]
+
+    confirmed = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/confirm",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "candidate_job_id": operation["job_id"],
+            "candidate_input_fingerprint": operation["input_fingerprint"],
+            "candidate": browser_candidate,
+        },
+    )
+
+    assert confirmed.status == 200
+    assert confirmed.body["cad_georeference"]["confirmed"] is True
 
 
 def test_degree_minute_candidate_request_persists_custom_projection(
