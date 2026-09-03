@@ -11,7 +11,12 @@ from .full_pose import (
 from .fixed_track_visual_pose import (
     FixedTrackPosition,
     FixedTrackVisualPoseConfig,
+    OrientationSolution,
+    PairRotationMeasurement,
     build_fixed_track_positions,
+    estimate_video_orientations,
+    interpolate_orientations,
+    solve_fixed_center_rotations,
 )
 from .parser import analyze_srt_stream, load_srt_records
 
@@ -25,6 +30,11 @@ __all__ = [
     "horizontal_fov_intrinsics",
     "FixedTrackPosition",
     "FixedTrackVisualPoseConfig",
+    "OrientationSolution",
+    "PairRotationMeasurement",
     "build_fixed_track_positions",
+    "estimate_video_orientations",
+    "interpolate_orientations",
     "load_srt_records",
+    "solve_fixed_center_rotations",
 ]

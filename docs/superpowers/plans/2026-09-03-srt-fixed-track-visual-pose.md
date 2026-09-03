@@ -199,7 +199,7 @@ git commit -m "feat: build strict SRT CAD position tracks"
 - Consumes: `FixedTrackPosition`, fixed PINHOLE intrinsics, video frames.
 - Produces: `PairRotationMeasurement`, `OrientationSolution`, `solve_fixed_center_rotations(...)`, and `estimate_video_orientations(...)`.
 
-- [ ] **Step 1: Write failing synthetic geometry tests**
+- [x] **Step 1: Write failing synthetic geometry tests**
 
 ```python
 def test_rotation_solver_recovers_world_anchored_rotations_without_changing_centers():
@@ -217,13 +217,13 @@ def test_straight_track_reports_position_only_instead_of_guessing_attitude():
     assert "unobservable" in " ".join(solution.warnings).lower()
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py -k "rotation or straight" -q`
 
 Expected: missing solver types/functions.
 
-- [ ] **Step 3: Implement pair measurements and world anchoring**
+- [x] **Step 3: Implement pair measurements and world anchoring**
 
 ```python
 @dataclass(frozen=True)
@@ -250,11 +250,11 @@ normalize(A_j0ᵀ t_j) = R_0 normalize(C_i - C_j)
 
 Solve `R_0` with weighted `scipy.spatial.transform.Rotation.align_vectors`, require at least two non-collinear world-baseline directions by singular-value ratio, then recover `R_i=A_i0 R_0`. Reject non-finite matrices, determinant outside tolerance, inconsistent translation directions, and chains shorter than two usable pairs. Do not pass centers to an optimizer or return modified centers.
 
-- [ ] **Step 4: Implement OpenCV measurement extraction**
+- [x] **Step 4: Implement OpenCV measurement extraction**
 
 Decode the physical clip sequentially at `round(fps * keyframe_interval_sec)` spacing. Scale frames to at most 960 pixels wide, detect ORB features, match consecutive descriptors with Hamming KNN ratio 0.75, call `cv2.findEssentialMat(..., cv2.RANSAC, 0.999, 1.0)`, then `cv2.recoverPose`. Store only pairs with at least `min_pair_matches` ratio-test matches and at least 15 recover-pose inliers. All frame indexes come from the same authoritative frame-map ordinal.
 
-- [ ] **Step 5: Add bounded quaternion interpolation tests and implementation**
+- [x] **Step 5: Add bounded quaternion interpolation tests and implementation**
 
 ```python
 def test_orientation_interpolation_never_crosses_large_unobserved_gap():
@@ -268,7 +268,7 @@ def test_orientation_interpolation_uses_slerp_inside_bound():
 
 Use SciPy `Slerp` only inside each supported interval. Publish no quaternion for orientation-unavailable frames.
 
-- [ ] **Step 6: Run core tests and commit**
+- [x] **Step 6: Run core tests and commit**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py -q`
 
