@@ -464,6 +464,24 @@ def test_workspace_opens_server_session_and_focuses_returning_clip() -> None:
     assert '.open-workbench", row).addEventListener' in script
 
 
+def test_srt_workbench_entry_requires_confirmed_current_cad_georeference() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert "输入中央经线 → 生成候选 → 点击“确认此坐标系” → 保存配置" in html
+    assert "function srtConfigurationBlockReason(clip)" in script
+    assert "state.snapshot?.cad_georeference?.confirmed !== true" in script
+    assert "请先确认当前 CAD 坐标系，再保存配置" in script
+    assert "openFullPoseDialog(clip);" in script
+    assert "const srtConfigurationReason = srtConfigurationBlockReason(clip);" in script
+    assert "open.title = srtConfigurationReason" in script
+    assert "srtConfigurationReason || clip.capabilities?.reason" in script
+    assert script.index("srtConfigurationBlockReason(clip)", script.index("async function openWorkbench")) < script.index(
+        "/workbench-sessions`", script.index("async function openWorkbench")
+    )
+    assert '$("#saveFullPoseSettings").disabled = !confirmed;' in script
+
+
 def test_completed_route_can_bridge_previous_or_next_clip_from_source_row() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

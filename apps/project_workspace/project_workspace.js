@@ -116,12 +116,14 @@
   function applyCapabilities(clip, row) {
     const capabilities = clip.capabilities || {};
     const open = $(".open-workbench", row);
-    open.disabled = !(
+    const srtConfigurationReason = srtConfigurationBlockReason(clip);
+    open.disabled = !srtConfigurationReason && !(
       capabilities.can_open_workbench || capabilities.can_prepare_workbench
     );
-    open.title = capabilities.can_open_workbench
-      ? "进入片段工作台"
-      : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪");
+    open.title = srtConfigurationReason
+      || (capabilities.can_open_workbench
+        ? "进入片段工作台"
+        : (capabilities.can_prepare_workbench ? "准备片段视频后进入工作台" : "片段视频或 CAD 尚未就绪"));
     const bridgeUp = $(".bridge-up", row);
     bridgeUp.hidden = capabilities.can_bridge_up !== true;
     bridgeUp.disabled = capabilities.can_bridge_up !== true;
@@ -201,8 +203,9 @@
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
     } else if (bridgeReason) {
       $(".row-error", row).textContent = bridgeReason;
-    } else if (["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow.value) && clip.capabilities?.reason) {
-      $(".row-error", row).textContent = clip.capabilities.reason;
+    } else if (["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow.value)) {
+      const srtConfigurationReason = srtConfigurationBlockReason(clip);
+      $(".row-error", row).textContent = srtConfigurationReason || clip.capabilities?.reason || "";
     }
     $(".open-workbench", row).addEventListener("click", () => openWorkbench(clip, row));
     $(".bridge-up", row).addEventListener("click", () => bridgeAdjacent(clip, "up", row));
@@ -439,6 +442,12 @@
       : `EPSG:${config?.epsg}`;
   }
 
+  function syncSrtConfigurationSaveState() {
+    const confirmed = state.snapshot?.cad_georeference?.confirmed === true;
+    $("#saveFullPoseSettings").disabled = !confirmed;
+    $("#saveFullPoseSettings").title = confirmed ? "" : "请先确认当前 CAD 坐标系，再保存配置";
+  }
+
   function renderCadGeoreferenceStatus() {
     const config = state.snapshot?.cad_georeference || {};
     const status = $("#cadGeoreferenceStatus");
@@ -452,6 +461,7 @@
       status.textContent = "尚未确认；轨迹任务会保持禁用";
       status.classList.remove("is-confirmed");
     }
+    syncSrtConfigurationSaveState();
   }
 
   function svgElement(name, attributes = {}) {
@@ -760,6 +770,11 @@
       Number($("#routeOffsetYInput").value || 0),
       Number($("#routeOffsetZInput").value || 0),
     ];
+    if (state.snapshot?.cad_georeference?.confirmed !== true) {
+      setMessage("请先确认当前 CAD 坐标系，再保存配置", true);
+      $("#cadGeoreferenceStatus").scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     if (!clipId || !Number.isFinite(horizontalFov) || horizontalFov <= 1 || horizontalFov >= 179) {
       fovInput.setCustomValidity("请输入 1° 到 179° 之间的水平视场角");
       fovInput.reportValidity();
@@ -1185,7 +1200,30 @@
     }
   }
 
+  function srtConfigurationBlockReason(clip) {
+    if (!["srt_full_pose", "srt_fixed_track_visual_pose"].includes(clip.resolved_workflow)) {
+      return "";
+    }
+    if (state.snapshot?.cad_georeference?.confirmed !== true) {
+      return "请先确认当前 CAD 坐标系，再保存配置";
+    }
+    const settings = clip.resolved_workflow === "srt_fixed_track_visual_pose"
+      ? clip.srt_fixed_track_visual_pose_settings
+      : clip.srt_full_pose_settings;
+    if (!settings || !Number.isFinite(Number(settings.horizontal_fov_deg))) {
+      return "请先填写水平视场角并保存 SRT 配置";
+    }
+    return "";
+  }
+
   async function openWorkbench(clip, row) {
+    const configurationBlockReason = srtConfigurationBlockReason(clip);
+    if (configurationBlockReason) {
+      openFullPoseDialog(clip);
+      if (row) $(".row-error", row).textContent = configurationBlockReason;
+      setMessage(configurationBlockReason, true);
+      return;
+    }
     const returnParams = new URLSearchParams({
       projectId,
       focusClip: clip.clip_id,
