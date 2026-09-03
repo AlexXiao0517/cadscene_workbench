@@ -490,6 +490,26 @@
     };
   }
 
+  function fixedTrackVisualComponentAtFrame(frame) {
+    const route = (sfmScene && sfmScene.tracks && sfmScene.tracks.global_sfm_track) || [];
+    if (route.length === 0) return null;
+    const target = Math.round(Number(frame));
+    let lo = 0;
+    let hi = route.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (Number(route[mid].frame_index) < target) lo = mid + 1;
+      else hi = mid;
+    }
+    const candidates = [route[lo], route[Math.max(0, lo - 1)]].filter(Boolean);
+    const nearest = candidates.sort(
+      (a, b) => Math.abs(Number(a.frame_index) - target) - Math.abs(Number(b.frame_index) - target),
+    )[0];
+    if (!nearest || nearest.relative_orientation_available !== true) return null;
+    const component = Number(nearest.visual_component_id);
+    return Number.isInteger(component) ? component : null;
+  }
+
   // 纯 SfM 预测：直接用 sfm_viewer_scene.json 的 global_sfm_track（仅 global sim3，未分段锚定）
   // 逐帧插值出相机位姿，用于"把虚拟相机放到原始 SfM 轨迹上"对照观察。
   let sfmFollowMode = false;
@@ -1471,6 +1491,7 @@
     let sfmPointHeights = null;   // Float32Array 每点世界 z（高度着色用）
     let sfmHasRgb = false;
     let globalTrackLine = null;
+    let fixedTrackRelativeLine = null;
     let anchoredTrackLine = null;
     let ghostCamera = null;
     let suggestionMarkers = [];   // {mesh, frame, data}
@@ -1480,6 +1501,7 @@
     let sfmColorMode = "rgb";
     const sfmRaycaster = new THREE.Raycaster();
     const sfmPointer = new THREE.Vector2();
+    sfmRaycaster.params.Line.threshold = Math.max(0.5, maxSize * 0.0015);
 
     function disposeObject(obj) {
       if (!obj) return;
@@ -1493,6 +1515,7 @@
     function clearSfmScene() {
       if (sfmPoints) { sfmGroup.remove(sfmPoints); disposeObject(sfmPoints); sfmPoints = null; }
       if (globalTrackLine) { sfmGroup.remove(globalTrackLine); disposeObject(globalTrackLine); globalTrackLine = null; }
+      if (fixedTrackRelativeLine) { sfmGroup.remove(fixedTrackRelativeLine); disposeObject(fixedTrackRelativeLine); fixedTrackRelativeLine = null; }
       if (anchoredTrackLine) { sfmGroup.remove(anchoredTrackLine); disposeObject(anchoredTrackLine); anchoredTrackLine = null; }
       if (ghostCamera) { sfmGroup.remove(ghostCamera); disposeObject(ghostCamera); ghostCamera = null; }
       for (const m of suggestionMarkers) { suggestionGroup.remove(m.mesh); disposeObject(m.mesh); }
@@ -1509,6 +1532,33 @@
         color: new THREE.Color(colorHex), transparent: true, opacity,
       });
       return new THREE.Line(geometry, material);
+    }
+
+    function buildFixedTrackRelativeLine(track) {
+      if (!track || track.length < 2) return null;
+      const points = [];
+      for (let index = 1; index < track.length; index += 1) {
+        const previous = track[index - 1];
+        const current = track[index];
+        const sameComponent = Number.isInteger(Number(previous.visual_component_id))
+          && Number(previous.visual_component_id) === Number(current.visual_component_id);
+        if (
+          previous.relative_orientation_available === true
+          && current.relative_orientation_available === true
+          && sameComponent
+        ) {
+          points.push(worldToScene([previous.x, previous.y, previous.z], origin));
+          points.push(worldToScene([current.x, current.y, current.z], origin));
+        }
+      }
+      if (points.length < 2) return null;
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({
+        color: new THREE.Color(0x38d996), transparent: true, opacity: 0.95,
+      });
+      const line = new THREE.LineSegments(geometry, material);
+      line.visible = fixedTrackVisualPoseMode;
+      return line;
     }
 
     function trackPoseAtFrame(track, frame) {
@@ -1629,8 +1679,10 @@
       sfmGlobalTrack = (sceneData.tracks && sceneData.tracks.global_sfm_track) || [];
       sfmAnchoredTrack = (sceneData.tracks && sceneData.tracks.anchored_camera_path) || [];
       globalTrackLine = buildTrackLine(sfmGlobalTrack, 0x9aa6b6, 0.55);
+      fixedTrackRelativeLine = buildFixedTrackRelativeLine(sfmGlobalTrack);
       anchoredTrackLine = buildTrackLine(sfmAnchoredTrack, 0xffa500, 0.95);
       if (globalTrackLine) sfmGroup.add(globalTrackLine);
+      if (fixedTrackRelativeLine) sfmGroup.add(fixedTrackRelativeLine);
       if (anchoredTrackLine) sfmGroup.add(anchoredTrackLine);
       buildSuggestionMarkers(sceneData.suggestions || [],
         sfmAnchoredTrack.length ? sfmAnchoredTrack : sfmGlobalTrack);
@@ -1654,7 +1706,13 @@
     function setSfmPointsVisible(v) { if (sfmPoints) sfmPoints.visible = v; }
     function setGlobalTrackVisible(v) {
       if (globalTrackLine) globalTrackLine.visible = v;
+      if (fixedTrackRelativeLine) fixedTrackRelativeLine.visible = v && fixedTrackVisualPoseMode;
       if (ghostCamera) ghostCamera.visible = v && ghostCamera.visible;
+    }
+    function setFixedTrackMode(enabled) {
+      if (!fixedTrackRelativeLine) return;
+      const globalVisible = globalTrackLine ? globalTrackLine.visible : true;
+      fixedTrackRelativeLine.visible = Boolean(enabled) && globalVisible;
     }
     function setAnchoredTrackVisible(v) { if (anchoredTrackLine) anchoredTrackLine.visible = v; }
     function setAnchoredTrackData(track) {
@@ -1695,6 +1753,21 @@
       const hits = sfmRaycaster.intersectObjects(suggestionMarkers.map((m) => m.mesh), false);
       if (hits.length === 0) return null;
       return suggestionMarkers.find((m) => m.mesh === hits[0].object) || null;
+    }
+
+    function pickFixedTrackRoute(event) {
+      if (!fixedTrackVisualPoseMode || !globalTrackLine || sfmGlobalTrack.length === 0) return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      sfmPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      sfmPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      sfmRaycaster.setFromCamera(sfmPointer, inspectCamera);
+      const hit = sfmRaycaster.intersectObject(globalTrackLine, false)[0];
+      if (!hit) return null;
+      const index = Math.max(
+        0,
+        Math.min(sfmGlobalTrack.length - 1, Number.isInteger(hit.index) ? hit.index : 0),
+      );
+      return { frame: Number(sfmGlobalTrack[index].frame_index), data: sfmGlobalTrack[index] };
     }
 
     const cadPickRaycaster = new THREE.Raycaster();
@@ -1745,10 +1818,16 @@
 
     renderer.domElement.addEventListener("click", (event) => {
       const hit = pickSuggestion(event);
-      if (!hit) return;
-      const s = hit.data;
-      setStatus(`跳转到建议帧 ${hit.frame}（${s.priority || s.risk_level || ""}）`);
-      goToFrame(hit.frame);
+      if (hit) {
+        const s = hit.data;
+        setStatus(`跳转到建议帧 ${hit.frame}（${s.priority || s.risk_level || ""}）`);
+        goToFrame(hit.frame);
+        return;
+      }
+      const routeHit = pickFixedTrackRoute(event);
+      if (!routeHit) return;
+      setStatus(`已按 SRT 轨迹定位到帧 ${routeHit.frame}`);
+      goToFrame(routeHit.frame);
     });
 
     renderer.domElement.addEventListener("mousemove", (event) => {
@@ -1798,6 +1877,7 @@
       updateVirtualCamera: setRigFromCamera, setMode, setTransformSpace, setGizmoVisible, setCadTextVisible,
       focusInspectOnCamera, focusInspectOnCameraAndCad, focusInspectOnCad, ensureCameraNearCad, transformControls,
       loadSfmScene, updateSfmGhost, setSfmPointsVisible, setGlobalTrackVisible,
+      setFixedTrackMode,
       setAnchoredTrackVisible, setSuggestionsVisible, setFrustumVisible,
       setFrustumOrientationAvailable, setSfmPointSize, setSfmColorMode, setSfmSuggestions, setAnchoredTrackData,
       pickCadWorld, projectCadWorldToInspect,
@@ -2162,6 +2242,7 @@
     }
     const translateButton = document.querySelector("#translateMode");
     if (translateButton) translateButton.disabled = fixedTrackVisualPoseMode;
+    threeScene?.setFixedTrackMode?.(fixedTrackVisualPoseMode);
     if (fixedTrackVisualPoseMode && threeScene) {
       threeScene.setMode("rotate");
       const fixedPose = fixedTrackPoseAtFrame(currentFrame());
@@ -2173,6 +2254,32 @@
       enabled: fixedTrackVisualPoseMode,
       position_fields: [...fixedTrackRestrictedFields],
     };
+  };
+
+  window.cadsceneGetFixedTrackMetadata = function () {
+    return sfmScene?.meta ? JSON.parse(JSON.stringify(sfmScene.meta)) : null;
+  };
+
+  window.cadsceneFixedTrackVisualComponentAtFrame = function (frame = currentFrame()) {
+    return fixedTrackVisualComponentAtFrame(frame);
+  };
+
+  window.cadsceneGetFixedTrackStartFrame = function () {
+    const route = (sfmScene && sfmScene.tracks && sfmScene.tracks.global_sfm_track) || [];
+    return route.length > 0 ? Number(route[0].frame_index) : 0;
+  };
+
+  window.cadsceneSeekFrame = function (frame) {
+    return goToFrame(Math.max(0, Math.round(Number(frame) || 0)));
+  };
+
+  window.cadsceneConfirmCurrentCameraKeyframe = function () {
+    const frame = currentFrame();
+    if (fixedTrackVisualPoseMode && fixedTrackVisualComponentAtFrame(frame) === null) {
+      throw new Error("当前帧没有可传播的视觉相对姿态，请选择推荐帧或其他绿色姿态区段");
+    }
+    addOrUpdateKeyframe();
+    return frame;
   };
 
   window.cadsceneGetCurrentCameraPose = function () {
@@ -2612,6 +2719,8 @@
       source: entry.source || "",
       position_available: entry.position_available !== false,
       orientation_available: entry.orientation_available !== false,
+      relative_orientation_available: entry.relative_orientation_available === true,
+      visual_component_id: entry.visual_component_id ?? null,
     };
   }
 

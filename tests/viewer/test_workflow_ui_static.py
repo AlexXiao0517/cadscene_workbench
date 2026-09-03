@@ -101,6 +101,7 @@ def test_full_pose_workbench_preserves_workflow_and_uses_no_sfm_artifacts() -> N
 
 
 def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
+    html = _read("index.html")
     workflow = _read("workflow.js")
     viewer = _read("viewer_legacy.js")
 
@@ -125,6 +126,21 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert "fixedTrackPoseAtFrame" in viewer
     assert "orientation_available !== false" in viewer
     assert "setFrustumOrientationAvailable" in viewer
+    assert 'id="fixedTrackAnchorPanel"' in html
+    assert 'id="fixedTrackAnchorStatus"' in html
+    assert 'id="fixedTrackGoStart"' in html
+    assert 'id="fixedTrackGoRecommendedAnchor"' in html
+    assert 'id="fixedTrackConfirmAnchor"' in html
+    assert "function refreshFixedTrackAnchorPanel()" in workflow
+    assert "requiredAnchorCount = isFixedTrackVisualPoseWorkflow() ? 1 : 2" in workflow
+    assert "cadsceneGetFixedTrackMetadata" in viewer
+    assert "cadsceneFixedTrackVisualComponentAtFrame" in viewer
+    assert "cadsceneConfirmCurrentCameraKeyframe" in viewer
+    assert "pickFixedTrackRoute" in viewer
+    assert "goToFrame(hit.frame)" in viewer
+    assert "fixedTrackRelativeLine" in viewer
+    assert "buildFixedTrackRelativeLine" in viewer
+    assert "relative_orientation_available === true" in viewer
 
 
 def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> None:
@@ -742,7 +758,8 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'workflow.js?v=20260831-workbench-resume-v1' in index
+    assert 'viewer_legacy.js?v=20260903-fixed-track-anchor-v1' in index
+    assert 'workflow.js?v=20260903-fixed-track-anchor-v1' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:

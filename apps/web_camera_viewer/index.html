@@ -316,6 +316,18 @@
           <button id="ignoreCurrentSuggestion" type="button" disabled>忽略当前建议</button>
         </div>
         <div id="cameraControls" class="controls-grid"></div>
+        <section id="fixedTrackAnchorPanel" class="fixed-track-anchor-panel" hidden aria-label="SRT 固定轨迹姿态锚定">
+          <div class="fixed-track-anchor-copy">
+            <strong>姿态锚定</strong>
+            <p id="fixedTrackAnchorStatus">正在读取视觉相对姿态…</p>
+          </div>
+          <div class="button-row">
+            <button id="fixedTrackGoStart" type="button">回到轨迹起点</button>
+            <button id="fixedTrackGoRecommendedAnchor" type="button" disabled>跳到推荐帧</button>
+            <button id="fixedTrackConfirmAnchor" type="button" disabled>确认当前姿态锚点</button>
+          </div>
+          <small>位置和高度来自 SRT 并保持锁定；这里只调整 yaw、pitch、roll。一个锚点即可向视觉连通段的前后传播。</small>
+        </section>
         <section id="pureRotationCalibrationPanel" class="pure-rotation-calibration workflow-hidden-control" aria-label="固定相机位置与方向设置">
           <fieldset id="pureRotationPlacementSection">
             <legend>固定相机位置与方向</legend>
@@ -347,12 +359,12 @@
     <script src="./cad_text.js?v=20260812-dxf-text-v1"></script>
     <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
     <script src="./keyframe_sources.js?v=20260831-workbench-resume-v1"></script>
-    <script src="./viewer_legacy.js?v=20260831-workbench-resume-v1"></script>
+    <script src="./viewer_legacy.js?v=20260903-fixed-track-anchor-v1"></script>
     <script src="./annotation_pts.js?v=20260831-workbench-resume-v1"></script>
     <script src="./callout_layout.js?v=20260814-engineering-callout-v1"></script>
     <script src="./annotations.js?v=20260814-engineering-callout-v1"></script>
     <script src="./suggestion_sequence.js?v=20260831-quality-progress-v1"></script>
-    <script src="./workflow.js?v=20260831-workbench-resume-v1"></script>
+    <script src="./workflow.js?v=20260903-fixed-track-anchor-v1"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>
