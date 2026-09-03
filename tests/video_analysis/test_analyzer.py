@@ -7,6 +7,7 @@ import subprocess
 from cadscene.video_analysis.analyzer import (
     _candidate_verification_ranges,
     _mandatory_boundaries_for_source,
+    _plan_analysis_intervals,
     _rotation_evidence_verified,
     _scene_boundaries_for_segmentation,
     analyze_video,
@@ -16,6 +17,8 @@ from cadscene.video_analysis.models import MotionMode
 from cadscene.video_analysis.artifacts import REQUIRED_ARTIFACTS
 from cadscene.video_analysis.models import BoundaryEvidence
 from cadscene.video_analysis.pts import resolve_ffmpeg_executable
+from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
+from fractions import Fraction
 from cadscene.video_analysis.shot_detection import FramePairEvidence
 
 
@@ -138,6 +141,39 @@ def test_short_source_keeps_one_logical_clip_despite_detected_boundaries() -> No
         source_start_pts_sec=0.0,
         source_end_pts_exclusive_sec=37.78775,
     ) == []
+
+
+def test_analysis_keeps_long_srt_source_whole_but_still_segments_without_srt() -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1),
+        (
+            DecodedFrameTimestamp(0, 0, 30, "pts"),
+            DecodedFrameTimestamp(1, 30, 30, "pts"),
+            DecodedFrameTimestamp(2, 60, 1, "pts"),
+        ),
+    )
+
+    srt_clips = _plan_analysis_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[
+            BoundaryEvidence(30.0, ("image_discontinuity",), 0.99)
+        ],
+        cut_candidates=[],
+        has_srt=True,
+    )
+    non_srt_clips = _plan_analysis_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=[],
+        cut_candidates=[],
+        has_srt=False,
+    )
+
+    assert len(srt_clips) == 1
+    assert (srt_clips[0].source_start_pts, srt_clips[0].source_end_pts_exclusive) == (
+        0,
+        61,
+    )
+    assert len(non_srt_clips) == 2
 
 
 def test_short_sustained_rotation_is_verified_for_recommendation() -> None:

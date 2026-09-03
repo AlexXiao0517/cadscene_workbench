@@ -21,12 +21,19 @@ from .motion import (
     stabilize_motion_windows,
 )
 from .pts import (
+    DecodedFrameIndex,
     decode_indexed_sparse_frames,
     decode_sparse_frame_ranges,
     probe_video_pts,
 )
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
-from .segmentation import CutCandidate, SegmentationConfig, plan_clip_intervals
+from .segmentation import (
+    CutCandidate,
+    SegmentationConfig,
+    PlannedClip,
+    plan_clip_intervals,
+    plan_single_source_interval,
+)
 from .shot_detection import (
     FramePairEvidence,
     analyze_frame_pair,
@@ -280,6 +287,23 @@ def _report(
     return "\n".join(lines) + "\n"
 
 
+def _plan_analysis_intervals(
+    *,
+    frame_index: DecodedFrameIndex,
+    mandatory_boundaries: list[BoundaryEvidence],
+    cut_candidates: list[CutCandidate],
+    has_srt: bool,
+) -> list[PlannedClip]:
+    if has_srt:
+        return plan_single_source_interval(frame_index)
+    return plan_clip_intervals(
+        frame_index=frame_index,
+        mandatory_boundaries=mandatory_boundaries,
+        cut_candidates=cut_candidates,
+        config=SegmentationConfig(),
+    )
+
+
 def analyze_video(
     *,
     video_path: Path,
@@ -396,11 +420,11 @@ def analyze_video(
         )
         for item in pair_evidence
     ]
-    planned = plan_clip_intervals(
+    planned = _plan_analysis_intervals(
         frame_index=frame_index,
         mandatory_boundaries=mandatory_boundaries,
         cut_candidates=cut_candidates,
-        config=SegmentationConfig(),
+        has_srt=srt_path is not None,
     )
     shot_boundaries = coalesce_boundaries(
         shot_boundaries, within_sec=sample_interval_sec * 2.0

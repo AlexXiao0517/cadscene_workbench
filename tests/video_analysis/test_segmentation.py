@@ -9,6 +9,7 @@ from cadscene.video_analysis.segmentation import (
     CutCandidate,
     SegmentationConfig,
     plan_clip_intervals,
+    plan_single_source_interval,
 )
 
 
@@ -73,6 +74,28 @@ def test_nonzero_source_start_and_final_frame_are_partitioned_once() -> None:
     assert clips[0].source_start_pts == 5000
     assert clips[-1].source_end_pts_exclusive == 5120
     assert segmentation.frames_for_interval(frame_index, clips[-1])[-1] == 5080
+    segmentation.validate_frame_partition(frame_index, clips)
+
+
+def test_single_source_interval_ignores_duration_and_scene_boundaries() -> None:
+    frame_index = DecodedFrameIndex(
+        Fraction(1, 1),
+        (
+            DecodedFrameTimestamp(0, 100, 30, "pts"),
+            DecodedFrameTimestamp(1, 130, 30, "pts"),
+            DecodedFrameTimestamp(2, 160, 1, "pts"),
+        ),
+    )
+
+    clips = plan_single_source_interval(frame_index)
+
+    assert len(clips) == 1
+    assert clips[0].source_start_pts == 100
+    assert clips[0].source_end_pts_exclusive == 161
+    assert clips[0].start_boundary.reasons == ("source_start",)
+    assert clips[0].end_boundary.reasons == ("source_end",)
+    assert clips[0].scene_index == 1
+    assert clips[0].segment_index == 1
     segmentation.validate_frame_partition(frame_index, clips)
 
 

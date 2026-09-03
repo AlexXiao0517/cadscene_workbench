@@ -79,6 +79,32 @@ def plan_clip_intervals(
     )
 
 
+def plan_single_source_interval(
+    frame_index: DecodedFrameIndex,
+) -> list[PlannedClip]:
+    """Keep the complete decoded source as one authoritative logical clip."""
+
+    clip = PlannedClip(
+        start_pts_sec=frame_index.source_start_pts_sec,
+        end_pts_sec=frame_index.source_end_pts_exclusive_sec,
+        start_boundary=BoundaryEvidence(
+            frame_index.source_start_pts_sec, ("source_start",), 1.0
+        ),
+        end_boundary=BoundaryEvidence(
+            frame_index.source_end_pts_exclusive_sec, ("source_end",), 1.0
+        ),
+        needs_review=False,
+        source_start_pts=frame_index.source_start_pts,
+        source_end_pts_exclusive=frame_index.source_end_pts_exclusive,
+        source_time_base=frame_index.time_base,
+        scene_index=1,
+        segment_index=1,
+    )
+    clips = [clip]
+    validate_frame_partition(frame_index, clips)
+    return clips
+
+
 def _decoded_index_from_second_values(
     *,
     source_start_pts_sec: float,
