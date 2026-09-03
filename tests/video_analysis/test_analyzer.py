@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 
+import cadscene.video_analysis.analyzer as analyzer_module
 from cadscene.video_analysis.analyzer import (
     _candidate_verification_ranges,
     _mandatory_boundaries_for_source,
@@ -226,7 +227,9 @@ def test_rotation_recommendation_verification_rejects_general_motion_counterevid
     ) is False
 
 
-def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path) -> None:
+def test_end_to_end_full_pose_srt_skips_scene_visual_analysis(
+    tmp_path: Path, monkeypatch,
+) -> None:
     video = _make_short_video(tmp_path / "short-with-srt.mkv")
     progress: list[tuple[str, str, float | None]] = []
     blocks = []
@@ -243,6 +246,13 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
         )
     srt = tmp_path / "full.srt"
     srt.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        analyzer_module,
+        "decode_indexed_sparse_frames",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("SRT whole-source analysis must not decode scene samples")
+        ),
+    )
 
     analyze_video(
         video_path=video,
@@ -256,15 +266,30 @@ def test_end_to_end_full_pose_srt_coverage_precedes_visual_motion(tmp_path: Path
         ),
     )
 
+    analysis_root = tmp_path / "srt-run" / "v"
     clip = json.loads(
-        (tmp_path / "srt-run" / "v" / "clip_manifest.json").read_text(
+        (analysis_root / "clip_manifest.json").read_text(
             encoding="utf-8"
         )
     )["clips"][0]
+    manifest = json.loads(
+        (analysis_root / "video_analysis_manifest.json").read_text(encoding="utf-8")
+    )
+    metadata = json.loads(
+        (analysis_root / "video_metadata.json").read_text(encoding="utf-8")
+    )
     assert clip["srt_coverage"]["kind"] == "full_pose"
     assert clip["recommended_workflow"] == "srt_full_pose"
     assert clip["workflow_recommendation"]["auto_selected"] is False
+    assert manifest["single_source_interval_reason"] == "srt_present"
+    assert manifest["configuration"]["segmentation_strategy"] == (
+        "srt_whole_source_single_interval"
+    )
+    assert metadata["sampled_frame_count"] == 0
+    assert metadata["decode_pass_count"] == 0
     stages = [stage for stage, _message, _fraction in progress]
+    assert "sampling_frames" not in stages
+    assert "srt_whole_source" in stages
     assert stages.index("parsing_srt") < stages.index("routing_clips")
     assert stages.index("routing_clips") < stages.index("publishing")
 

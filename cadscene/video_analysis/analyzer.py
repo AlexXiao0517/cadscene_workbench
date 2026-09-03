@@ -24,6 +24,8 @@ from .pts import (
     DecodedFrameIndex,
     decode_indexed_sparse_frames,
     decode_sparse_frame_ranges,
+    probe_decoded_frame_index,
+    probe_fast_frame_index,
     probe_video_pts,
 )
 from .recommendation import assess_clip_srt_coverage, recommend_workflow
@@ -326,12 +328,24 @@ def analyze_video(
     report("probing_pts", "正在读取视频时间戳", 0.02)
     packet_index = probe_video_pts(source, ffmpeg_executable=ffmpeg_executable)
     report("probing_pts", "视频封装时间戳读取完成", 0.08)
-    frame_index, sparse_frames = decode_indexed_sparse_frames(
-        source,
-        interval_sec=sample_interval_sec,
-        packet_pts=frozenset(packet.pts for packet in packet_index.packets),
-        ffmpeg_executable=ffmpeg_executable,
-    )
+    if srt_path is not None:
+        frame_index = probe_fast_frame_index(
+            source,
+            ffprobe_executable=ffprobe_executable,
+            ffmpeg_executable=ffmpeg_executable,
+        ) or probe_decoded_frame_index(
+            source,
+            ffprobe_executable=ffprobe_executable,
+            ffmpeg_executable=ffmpeg_executable,
+        )
+        sparse_frames = []
+    else:
+        frame_index, sparse_frames = decode_indexed_sparse_frames(
+            source,
+            interval_sec=sample_interval_sec,
+            packet_pts=frozenset(packet.pts for packet in packet_index.packets),
+            ffmpeg_executable=ffmpeg_executable,
+        )
     report("probing_pts", "权威展示帧索引建立完成", 0.25)
     sampled_pts: list[float] = []
     sampled_lumas: list[float] = []
@@ -341,85 +355,98 @@ def analyze_video(
     duration_sec = (
         frame_index.source_end_pts_exclusive_sec - frame_index.source_start_pts_sec
     )
-    expected_samples = max(2, math.ceil(duration_sec / sample_interval_sec) + 1)
-    progress_stride = max(1, expected_samples // 100)
-    for frame in sparse_frames:
-        sampled_pts.append(frame.pts_sec)
-        if len(sampled_pts) == 1 or len(sampled_pts) % progress_stride == 0:
-            report(
-                "sampling_frames",
-                f"正在分析抽样画面 {len(sampled_pts)}/{expected_samples}",
-                min(0.80, 0.25 + 0.55 * len(sampled_pts) / expected_samples),
-            )
-        sampled_lumas.append(float(frame.image.mean()))
-        if previous_frame is not None:
-            evidence = analyze_frame_pair(previous_frame, frame)
-            pair_evidence.append(evidence)
-            coarse_shot_boundaries.extend(
-                detect_shot_boundaries(
-                    [previous_frame, frame],
-                    expected_interval_sec=sample_interval_sec,
-                    pair_evidence=[evidence],
-                )
-            )
-        previous_frame = frame
-    if len(sampled_pts) < 2:
-        raise ValueError("video analysis requires at least two decoded PTS samples")
-    raw_windows = build_motion_windows(pair_evidence, MotionAnalysisConfig())
-    stable_windows, motion_boundaries = stabilize_motion_windows(
-        raw_windows, MotionAnalysisConfig()
-    )
     verification_interval_sec = min(0.1, sample_interval_sec / 2.0)
-    decode_pass_count = 1
-    shot_boundaries = coarse_shot_boundaries
-    if duration_sec >= 60.0 and coarse_shot_boundaries:
-        report("verifying_scenes", "正在复核候选场景边界", 0.82)
-        candidate_ranges = _candidate_verification_ranges(
-            coarse_shot_boundaries,
-            pair_evidence,
-            margin_sec=verification_interval_sec,
+    if srt_path is not None:
+        report(
+            "srt_whole_source",
+            "检测到 SRT，按统一场景保留完整视频并跳过场景视觉分割",
+            0.84,
         )
-        dense_groups = decode_sparse_frame_ranges(
-            source,
-            index=frame_index,
-            ranges=candidate_ranges,
-            interval_sec=verification_interval_sec,
-            ffmpeg_executable=ffmpeg_executable,
+        stable_windows = []
+        motion_boundaries = []
+        shot_boundaries = []
+        mandatory_boundaries = []
+        cut_candidates = []
+        decode_pass_count = 0
+    else:
+        expected_samples = max(2, math.ceil(duration_sec / sample_interval_sec) + 1)
+        progress_stride = max(1, expected_samples // 100)
+        for frame in sparse_frames:
+            sampled_pts.append(frame.pts_sec)
+            if len(sampled_pts) == 1 or len(sampled_pts) % progress_stride == 0:
+                report(
+                    "sampling_frames",
+                    f"正在分析抽样画面 {len(sampled_pts)}/{expected_samples}",
+                    min(0.80, 0.25 + 0.55 * len(sampled_pts) / expected_samples),
+                )
+            sampled_lumas.append(float(frame.image.mean()))
+            if previous_frame is not None:
+                evidence = analyze_frame_pair(previous_frame, frame)
+                pair_evidence.append(evidence)
+                coarse_shot_boundaries.extend(
+                    detect_shot_boundaries(
+                        [previous_frame, frame],
+                        expected_interval_sec=sample_interval_sec,
+                        pair_evidence=[evidence],
+                    )
+                )
+            previous_frame = frame
+        if len(sampled_pts) < 2:
+            raise ValueError("video analysis requires at least two decoded PTS samples")
+        raw_windows = build_motion_windows(pair_evidence, MotionAnalysisConfig())
+        stable_windows, motion_boundaries = stabilize_motion_windows(
+            raw_windows, MotionAnalysisConfig()
         )
-        shot_boundaries = verify_candidate_boundaries(
-            dense_groups,
-            expected_interval_sec=verification_interval_sec,
-        )
-        decode_pass_count = 2
+        decode_pass_count = 1
+        shot_boundaries = coarse_shot_boundaries
+        if duration_sec >= 60.0 and coarse_shot_boundaries:
+            report("verifying_scenes", "正在复核候选场景边界", 0.82)
+            candidate_ranges = _candidate_verification_ranges(
+                coarse_shot_boundaries,
+                pair_evidence,
+                margin_sec=verification_interval_sec,
+            )
+            dense_groups = decode_sparse_frame_ranges(
+                source,
+                index=frame_index,
+                ranges=candidate_ranges,
+                interval_sec=verification_interval_sec,
+                ffmpeg_executable=ffmpeg_executable,
+            )
+            shot_boundaries = verify_candidate_boundaries(
+                dense_groups,
+                expected_interval_sec=verification_interval_sec,
+            )
+            decode_pass_count = 2
 
-    report("segmenting", "正在检测场景边界与规划片段", 0.84)
-    # Scene discontinuities are mandatory. Motion changes remain explainable
-    # analysis evidence, but do not create extra fragments by themselves.
-    assert previous_frame is not None
-    mandatory_boundaries = _scene_boundaries_for_segmentation(
-        shot_boundaries,
-        source_start_pts_sec=frame_index.source_start_pts_sec,
-        source_end_pts_sec=frame_index.source_end_pts_exclusive_sec,
-        recent_frame_lumas=sampled_lumas,
-        opening_guard_sec=max(3.0, sample_interval_sec * 6.0),
-        terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
-    )
-    mandatory_boundaries = _mandatory_boundaries_for_source(
-        mandatory_boundaries,
-        source_start_pts_sec=frame_index.source_start_pts_sec,
-        source_end_pts_exclusive_sec=frame_index.source_end_pts_exclusive_sec,
-    )
-    mandatory_boundaries = coalesce_boundaries(
-        mandatory_boundaries, within_sec=sample_interval_sec * 2.0
-    )
-    cut_candidates = [
-        CutCandidate(
-            item.to_pts_sec,
-            motion_magnitude_px=item.flow_magnitude_px,
-            clarity_score=item.clarity_score,
+        report("segmenting", "正在检测场景边界与规划片段", 0.84)
+        # Scene discontinuities are mandatory. Motion changes remain explainable
+        # analysis evidence, but do not create extra fragments by themselves.
+        assert previous_frame is not None
+        mandatory_boundaries = _scene_boundaries_for_segmentation(
+            shot_boundaries,
+            source_start_pts_sec=frame_index.source_start_pts_sec,
+            source_end_pts_sec=frame_index.source_end_pts_exclusive_sec,
+            recent_frame_lumas=sampled_lumas,
+            opening_guard_sec=max(3.0, sample_interval_sec * 6.0),
+            terminal_guard_sec=max(1.0, sample_interval_sec * 2.0),
         )
-        for item in pair_evidence
-    ]
+        mandatory_boundaries = _mandatory_boundaries_for_source(
+            mandatory_boundaries,
+            source_start_pts_sec=frame_index.source_start_pts_sec,
+            source_end_pts_exclusive_sec=frame_index.source_end_pts_exclusive_sec,
+        )
+        mandatory_boundaries = coalesce_boundaries(
+            mandatory_boundaries, within_sec=sample_interval_sec * 2.0
+        )
+        cut_candidates = [
+            CutCandidate(
+                item.to_pts_sec,
+                motion_magnitude_px=item.flow_magnitude_px,
+                clarity_score=item.clarity_score,
+            )
+            for item in pair_evidence
+        ]
     planned = _plan_analysis_intervals(
         frame_index=frame_index,
         mandatory_boundaries=mandatory_boundaries,
@@ -534,7 +561,11 @@ def analyze_video(
     }
     configuration = {
         "sample_interval_sec": sample_interval_sec,
-        "segmentation_strategy": "minimum_count_balanced_strict_lt_hard_max",
+        "segmentation_strategy": (
+            "srt_whole_source_single_interval"
+            if srt_path is not None
+            else "minimum_count_balanced_strict_lt_hard_max"
+        ),
         "motion_boundaries_create_clips": False,
         "terminal_fade_guard_sec": max(1.0, sample_interval_sec * 2.0),
         "opening_transition_guard_sec": max(3.0, sample_interval_sec * 6.0),
@@ -544,7 +575,9 @@ def analyze_video(
         "motion_min_sustain_sec": MotionAnalysisConfig().min_sustain_sec,
         "motion_static_merge_max_sec": MotionAnalysisConfig().static_merge_max_sec,
         "target_clip_sec": SegmentationConfig().target_sec,
-        "hard_max_clip_sec": SegmentationConfig().hard_max_sec,
+        "hard_max_clip_sec": (
+            None if srt_path is not None else SegmentationConfig().hard_max_sec
+        ),
         "min_clip_sec": SegmentationConfig().min_clip_sec,
     }
     payloads = {
@@ -559,6 +592,9 @@ def analyze_video(
                 "clip_count": len(clip_payloads),
                 "executes_workflow": False,
                 "physical_video_slices_created": False,
+                "single_source_interval_reason": (
+                    "srt_present" if srt_path is not None else None
+                ),
                 "elapsed_sec": elapsed,
             }
         ),

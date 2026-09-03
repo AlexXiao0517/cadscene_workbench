@@ -129,6 +129,50 @@ def test_publication_rejects_clip_over_hard_sixty_second_limit(tmp_path: Path) -
     assert not output.exists()
 
 
+def test_publication_allows_one_whole_source_srt_interval_over_sixty_seconds(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "02_video_analysis"
+    payloads = _valid_payloads("analysis-0001")
+    manifest = json.loads(payloads["video_analysis_manifest.json"])
+    manifest["single_source_interval_reason"] = "srt_present"
+    payloads["video_analysis_manifest.json"] = json.dumps(manifest)
+    metadata = json.loads(payloads["video_metadata.json"])
+    metadata["source_end_pts_sec"] = 200.48361666666668
+    metadata["source_end_pts_exclusive_sec"] = 200.48361666666668
+    payloads["video_metadata.json"] = json.dumps(metadata)
+    clip_manifest = json.loads(payloads["clip_manifest.json"])
+    clip_manifest["clips"][0]["source_end_pts_sec"] = 200.48361666666668
+    clip_manifest["clips"][0]["srt_coverage"] = {
+        "kind": "partial",
+        "trajectory_coverage": 1.0,
+    }
+    payloads["clip_manifest.json"] = json.dumps(clip_manifest)
+
+    published = publish_analysis_revision(output, "analysis-0001", payloads)
+
+    assert published.is_dir()
+
+
+def test_publication_rejects_srt_exemption_when_clip_is_not_the_whole_source(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "02_video_analysis"
+    payloads = _valid_payloads("analysis-0001")
+    manifest = json.loads(payloads["video_analysis_manifest.json"])
+    manifest["single_source_interval_reason"] = "srt_present"
+    payloads["video_analysis_manifest.json"] = json.dumps(manifest)
+    clip_manifest = json.loads(payloads["clip_manifest.json"])
+    clip_manifest["clips"][0]["source_end_pts_sec"] = 61.0
+    clip_manifest["clips"][0]["srt_coverage"] = {"trajectory_coverage": 1.0}
+    payloads["clip_manifest.json"] = json.dumps(clip_manifest)
+
+    with pytest.raises(ValueError, match="exceeds 60"):
+        publish_analysis_revision(output, "analysis-0001", payloads)
+
+    assert not output.exists()
+
+
 def test_copy_failure_rolls_back_revision_and_root_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -37,13 +37,31 @@ def _validate_payloads(revision: str, payloads: Mapping[str, str]) -> None:
         raise ValueError(f"unexpected artifacts: {sorted(extra)}")
     manifest = json.loads(payloads["video_analysis_manifest.json"])
     clips = json.loads(payloads["clip_manifest.json"])
+    metadata = json.loads(payloads["video_metadata.json"])
     if manifest.get("analysis_revision") != revision:
         raise ValueError("manifest analysis_revision mismatch")
     if clips.get("analysis_revision") != revision:
         raise ValueError("clip manifest analysis_revision mismatch")
-    for clip in clips.get("clips", []):
+    clip_rows = list(clips.get("clips", []))
+    whole_source_srt = False
+    if manifest.get("single_source_interval_reason") == "srt_present" and len(clip_rows) == 1:
+        only_clip = clip_rows[0]
+        coverage = only_clip.get("srt_coverage") or {}
+        source_start = float(metadata.get("source_start_pts_sec", 0.0))
+        source_end = float(
+            metadata.get(
+                "source_end_pts_exclusive_sec",
+                metadata.get("source_end_pts_sec", 0.0),
+            )
+        )
+        whole_source_srt = (
+            float(coverage.get("trajectory_coverage", 0.0)) > 0.0
+            and abs(float(only_clip["source_start_pts_sec"]) - source_start) <= 1e-9
+            and abs(float(only_clip["source_end_pts_sec"]) - source_end) <= 1e-9
+        )
+    for clip in clip_rows:
         duration = float(clip["source_end_pts_sec"]) - float(clip["source_start_pts_sec"])
-        if duration > 60.0 + 1e-9:
+        if duration > 60.0 + 1e-9 and not whole_source_srt:
             raise ValueError(f"clip {clip.get('clip_id', '')} exceeds 60 second hard limit")
         if duration <= 0:
             raise ValueError(f"clip {clip.get('clip_id', '')} has non-positive duration")
