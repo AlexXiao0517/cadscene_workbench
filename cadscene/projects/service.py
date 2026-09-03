@@ -4903,12 +4903,18 @@ class ProjectService:
             attempt_directory=Path(job.attempts[-1].directory),
             parameters=(
                 _srt_full_pose_adapter_parameters(
-                    self.projects_root, project, clip
+                    self.projects_root,
+                    project,
+                    clip,
+                    frame_map_path=frame_map_path,
                 )
                 if adapter.name == "srt_full_pose"
                 else (
                     _fixed_track_visual_pose_adapter_parameters(
-                        self.projects_root, project, clip
+                        self.projects_root,
+                        project,
+                        clip,
+                        frame_map_path=frame_map_path,
                     )
                     if adapter.name == "srt_fixed_track_visual_pose"
                     else dict(clip.manual_definition)
@@ -8338,6 +8344,8 @@ def _srt_full_pose_adapter_parameters(
     storage_root: Path,
     project: ProjectManifest,
     clip: ClipDefinition,
+    *,
+    frame_map_path: Path | None = None,
 ) -> dict[str, object]:
     georeference = _confirmed_cad_georeference(project.source_assets)
     settings = clip.manual_definition.get("srt_full_pose")
@@ -8349,8 +8357,6 @@ def _srt_full_pose_adapter_parameters(
     if media_binding is None:
         raise ValueError("project media specification is unavailable")
     _media_revision, media = media_binding
-    if media.nominal_frame_rate is None:
-        raise ValueError("project nominal frame rate is unavailable")
     render = _workbench_render_parameters(
         storage_root, project.project_id, clip, project.source_assets
     )
@@ -8362,7 +8368,7 @@ def _srt_full_pose_adapter_parameters(
         "video_metadata": {
             "width": media.width,
             "height": media.height,
-            "fps": float(media.nominal_frame_rate),
+            "fps": _srt_display_frame_rate(media, clip, frame_map_path),
         },
     }
 
@@ -8371,6 +8377,8 @@ def _fixed_track_visual_pose_adapter_parameters(
     storage_root: Path,
     project: ProjectManifest,
     clip: ClipDefinition,
+    *,
+    frame_map_path: Path | None = None,
 ) -> dict[str, object]:
     georeference = _confirmed_cad_georeference(project.source_assets)
     settings = clip.manual_definition.get("srt_fixed_track_visual_pose")
@@ -8382,8 +8390,6 @@ def _fixed_track_visual_pose_adapter_parameters(
     if media_binding is None:
         raise ValueError("project media specification is unavailable")
     _media_revision, media = media_binding
-    if media.nominal_frame_rate is None:
-        raise ValueError("project nominal frame rate is unavailable")
     render = _workbench_render_parameters(
         storage_root, project.project_id, clip, project.source_assets
     )
@@ -8395,9 +8401,33 @@ def _fixed_track_visual_pose_adapter_parameters(
         "video_metadata": {
             "width": media.width,
             "height": media.height,
-            "fps": float(media.nominal_frame_rate),
+            "fps": _srt_display_frame_rate(media, clip, frame_map_path),
         },
     }
+
+
+def _srt_display_frame_rate(
+    media: ProjectMediaSpec,
+    clip: ClipDefinition,
+    frame_map_path: Path | None,
+) -> float:
+    if media.nominal_frame_rate is not None:
+        return float(media.nominal_frame_rate)
+    if frame_map_path is None or not frame_map_path.is_file():
+        raise ValueError(
+            "exact frame map is required when nominal frame rate is unavailable"
+        )
+    frames = _load_authoritative_source_frames(clip, frame_map_path)
+    if len(frames) < 2:
+        raise ValueError(
+            "at least two exact frame timestamps are required to derive frame rate"
+        )
+    elapsed_pts = frames[-1].pts - frames[0].pts
+    elapsed_seconds = elapsed_pts * float(_fraction_time_base(clip))
+    frame_rate = (len(frames) - 1) / elapsed_seconds
+    if not isfinite(frame_rate) or frame_rate <= 0.0:
+        raise ValueError("exact frame map cannot provide a positive frame rate")
+    return float(frame_rate)
 
 
 def _job_identity_payload(

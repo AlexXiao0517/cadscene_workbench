@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import math
 from pathlib import Path
 
@@ -208,3 +209,53 @@ def test_adapter_parameters_bind_georeference_media_fov_and_offset(
         "horizontal_fov_deg": 72.0,
         "route_offset_xyz_m": [2.0, -1.0, 5.0],
     }
+
+
+def test_adapter_parameters_derive_display_fps_from_exact_frame_map(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = _confirmed_service(tmp_path)
+    clips = repositories.clips.load("p1")
+    service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=clips.revision,
+        horizontal_fov_deg=72.0,
+    )
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            media_spec={**value.media_spec, "nominal_frame_rate": None},
+        ),
+    )
+    frame_map = tmp_path / "clip-frame-map.json"
+    frame_map.write_text(
+        json.dumps(
+            {
+                "source_time_base": {"numerator": 1, "denominator": 25},
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "frames": [
+                            {"ordinal": 0, "pts": 0},
+                            {"ordinal": 1, "pts": 1},
+                            {"ordinal": 2, "pts": 2},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parameters = _fixed_track_visual_pose_adapter_parameters(
+        service.projects_root,
+        repositories.project.load("p1"),
+        repositories.clips.load("p1").clips[0],
+        frame_map_path=frame_map,
+    )
+
+    assert parameters["video_metadata"]["fps"] == 25.0
