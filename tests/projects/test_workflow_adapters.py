@@ -11,7 +11,13 @@ from cadscene.projects.workflow_adapters import default_workflow_adapters
 import cadscene.projects.workflow_adapters as workflow_adapters_module
 
 
-WORKFLOWS = ("sfm_only", "srt_sfm_fused", "srt_full_pose", "pure_rotation")
+WORKFLOWS = (
+    "sfm_only",
+    "srt_sfm_fused",
+    "srt_full_pose",
+    "srt_fixed_track_visual_pose",
+    "pure_rotation",
+)
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
@@ -30,6 +36,7 @@ def test_adapters_declare_physical_mp4_and_srt_requirements(workflow: str) -> No
         "sfm_only": "none",
         "srt_sfm_fused": "trajectory",
         "srt_full_pose": "full_pose",
+        "srt_fixed_track_visual_pose": "fixed_track",
         "pure_rotation": "none",
     }[workflow]
 
@@ -453,6 +460,130 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     assert result.outputs["report"] == str(report)
     assert result.validation_proof is not None
     assert result.validation_proof["metric_scale_locked"] is True
+
+
+def _fixed_track_inputs(tmp_path: Path, *, include_fov: bool = True) -> AdapterInputs:
+    inputs = _full_pose_inputs(tmp_path)
+    parameters = _full_pose_parameters()
+    settings = {
+        "horizontal_fov_deg": 72.0,
+        "route_offset_xyz_m": [1.0, -2.0, 5.0],
+    }
+    if not include_fov:
+        settings.pop("horizontal_fov_deg")
+    parameters.pop("srt_full_pose")
+    parameters["srt_fixed_track_visual_pose"] = settings
+    return AdapterInputs(
+        inputs.project_id,
+        inputs.clip_id,
+        inputs.video_path,
+        inputs.srt_path,
+        inputs.attempt_directory,
+        parameters=parameters,
+        source_start_pts=inputs.source_start_pts,
+        source_end_pts_exclusive=inputs.source_end_pts_exclusive,
+        source_time_base=inputs.source_time_base,
+        frame_map_path=inputs.frame_map_path,
+    )
+
+
+def test_fixed_track_adapter_never_invokes_sfm_or_legacy_fusion(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixed_track_inputs(tmp_path)
+    adapter = default_workflow_adapters().for_workflow(
+        "srt_fixed_track_visual_pose"
+    )
+
+    commands = adapter.build_commands(adapter.prepare_inputs(inputs))
+
+    assert adapter.version == "1"
+    assert len(commands) == 1
+    joined = " ".join(commands[0])
+    assert "cadscene.cli.build_srt_fixed_track_visual_pose" in joined
+    assert "cadscene.cli.run_sfm" not in joined
+    assert "cadscene.cli.fuse_srt_sfm" not in joined
+    config_path = Path(commands[0][commands[0].index("--config") + 1])
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["build"]["horizontal_fov_deg"] == 72.0
+    assert payload["build"]["route_offset_xyz_m"] == [1.0, -2.0, 5.0]
+
+
+def test_fixed_track_prepare_requires_user_fov(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="horizontal_fov_deg"):
+        default_workflow_adapters().for_workflow(
+            "srt_fixed_track_visual_pose"
+        ).prepare_inputs(_fixed_track_inputs(tmp_path, include_fov=False))
+
+
+def test_fixed_track_adapter_validates_route_without_sparse_points(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixed_track_inputs(tmp_path)
+    adapter = default_workflow_adapters().for_workflow(
+        "srt_fixed_track_visual_pose"
+    )
+    prepared = adapter.prepare_inputs(inputs)
+    output = (
+        inputs.attempt_directory
+        / "02_srt_visual_pose"
+        / "camera_trajectory_visual_pose.json"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "poses": [
+                    {
+                        "frame_index": 0,
+                        "registered": True,
+                        "position_available": True,
+                        "orientation_available": False,
+                        "center": [0.0, 0.0, 80.0],
+                    }
+                ],
+                "meta": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                    "position_source": "srt_cad_locked",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts = {
+        "camera_path": output.with_name("camera_path_srt_locked.csv"),
+        "diagnostics": output.with_name("orientation_diagnostics.json"),
+        "report": output.with_name("visual_pose_report.md"),
+        "initial_camera_track": (
+            inputs.attempt_directory / "03_alignment" / "camera_track_pred.json"
+        ),
+        "viewer_scene": (
+            inputs.attempt_directory / "05_viewer_scene" / "sfm_viewer_scene.json"
+        ),
+    }
+    artifacts["camera_path"].write_text(
+        "frame_index,camera_x,camera_y,camera_z\n0,0,0,80\n",
+        encoding="utf-8",
+    )
+    artifacts["diagnostics"].write_text("{}", encoding="utf-8")
+    artifacts["report"].write_text("# report\n", encoding="utf-8")
+    artifacts["initial_camera_track"].parent.mkdir(parents=True, exist_ok=True)
+    artifacts["initial_camera_track"].write_text("{}", encoding="utf-8")
+    artifacts["viewer_scene"].parent.mkdir(parents=True, exist_ok=True)
+    artifacts["viewer_scene"].write_text("{}", encoding="utf-8")
+
+    result = adapter.validate_outputs(prepared)
+
+    assert result.status == "success"
+    assert result.outputs["trajectory"] == str(output)
+    assert result.outputs["initial_camera_track"] == str(
+        artifacts["initial_camera_track"]
+    )
+    assert result.outputs["viewer_scene"] == str(artifacts["viewer_scene"])
+    assert "sparse_points" not in result.outputs
+    assert result.validation_proof["position_source"] == "srt_cad_locked"
 
 
 def test_pure_rotation_adapter_wraps_existing_cli(tmp_path: Path) -> None:

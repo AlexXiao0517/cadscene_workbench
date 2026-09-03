@@ -292,7 +292,7 @@ git commit -m "feat: estimate visual attitude on fixed SRT centers"
 - Consumes: JSON config written by the adapter, physical MP4/SRT, authoritative frame map.
 - Produces: `02_srt_visual_pose/camera_trajectory_visual_pose.json`, `camera_path_srt_locked.csv`, `orientation_diagnostics.json`, `visual_pose_report.md`, plus route-first viewer artifacts.
 
-- [ ] **Step 1: Write failing adapter isolation tests**
+- [x] **Step 1: Write failing adapter isolation tests**
 
 ```python
 def test_fixed_track_adapter_never_invokes_sfm_or_legacy_fusion(adapter_inputs):
@@ -310,13 +310,13 @@ def test_new_adapter_has_no_sparse_point_output(adapter_inputs):
     assert "sparse_points" not in result.outputs
 ```
 
-- [ ] **Step 2: Verify adapter tests fail**
+- [x] **Step 2: Verify adapter tests fail**
 
 Run: `python -m pytest tests/projects/test_workflow_adapters.py -k fixed_track -q`
 
 Expected: registry has no adapter named `srt_fixed_track_visual_pose`.
 
-- [ ] **Step 3: Implement CLI orchestration and progress**
+- [x] **Step 3: Implement CLI orchestration and progress**
 
 CLI arguments are exactly `--dataset`, `--run-id`, `--output-root`, `--video`, `--srt`, `--frame-map`, `--config`, and `--progress-file`. Emit atomic progress stages with monotonic fractions:
 
@@ -333,11 +333,11 @@ STAGES = (
 
 Trajectory metadata contains `workflow`, `trajectory_mode`, `trajectory_status`, `metric_scale_locked`, `position_source`, `orientation_source`, `height_source`, `absolute_height_usage`, `route_offset_xyz_m`, FOV, georeference, counts, coverage, and warnings. Every pose has a center; only orientation-available poses set `registered=true` and include `cam_from_world_quat_wxyz`.
 
-- [ ] **Step 4: Publish route-first viewer artifacts**
+- [x] **Step 4: Publish route-first viewer artifacts**
 
 Write `03_alignment/camera_track_pred.json` from orientation-available frames and `05_viewer_scene/sfm_viewer_scene.json` with empty points and every position-available frame in `tracks.global_sfm_track`. Convert local CAD metres to web CAD coordinates with existing `cad_meters_to_web_camera`; set `orientation_available=false` on line-only entries so the UI does not draw a frustum for them.
 
-- [ ] **Step 5: Register and validate adapter v1**
+- [x] **Step 5: Register and validate adapter v1**
 
 ```python
 ExistingWorkflowAdapter(
@@ -351,7 +351,7 @@ ExistingWorkflowAdapter(
 
 Write `srt_fixed_track_visual_pose_config.json` inside the immutable attempt and include its hash plus trajectory, diagnostics, CSV, report, frame map, initial camera track, and viewer scene in validation proof.
 
-- [ ] **Step 6: Run CLI/adapter tests and commit**
+- [x] **Step 6: Run CLI/adapter tests and commit**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py tests/cli/test_build_srt_fixed_track_visual_pose_cli.py tests/projects/test_workflow_adapters.py tests/packaging/test_wheel_contents.py -q`
 
