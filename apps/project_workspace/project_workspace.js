@@ -386,11 +386,61 @@
       : "CAD X=东坐标，Y=北坐标";
   }
 
+  function parseCentralMeridianInput(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return null;
+    const decimal = text.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:°|度)?$/u);
+    let value;
+    if (decimal) {
+      value = Number(decimal[1]);
+    } else {
+      const degreeMinute = text.match(/^([+-]?\d{1,3})(?:\s*(?:°|度)\s*|\s+)(\d+(?:\.\d+)?)\s*(?:′|'|分)?$/u);
+      if (!degreeMinute) {
+        throw new Error("请输入十进制度或度分，例如 120 或 118°50′");
+      }
+      const minutes = Number(degreeMinute[2]);
+      if (!Number.isFinite(minutes) || minutes < 0 || minutes >= 60) {
+        throw new Error("中央经线的分必须大于等于 0 且小于 60");
+      }
+      const sign = degreeMinute[1].startsWith("-") ? -1 : 1;
+      value = sign * (Math.abs(Number(degreeMinute[1])) + minutes / 60);
+    }
+    if (!Number.isFinite(value) || value < -180 || value > 180) {
+      throw new Error("中央经线必须位于 -180° 到 180°");
+    }
+    return value;
+  }
+
+  function formatCentralMeridian(degrees) {
+    const value = Number(degrees);
+    if (!Number.isFinite(value)) return "";
+    const sign = value < 0 ? "-" : "";
+    let wholeDegrees = Math.floor(Math.abs(value));
+    const rawMinutes = (Math.abs(value) - wholeDegrees) * 60;
+    let minutes = Math.round(rawMinutes);
+    if (Math.abs(rawMinutes - minutes) < 1e-8) {
+      if (minutes === 60) {
+        wholeDegrees += 1;
+        minutes = 0;
+      }
+      return minutes === 0
+        ? `${sign}${wholeDegrees}°`
+        : `${sign}${wholeDegrees}°${minutes}′`;
+    }
+    return String(Number(value.toFixed(10)));
+  }
+
+  function cadGeoreferenceLabel(config) {
+    return config?.crs_source === "custom"
+      ? "自定义 CGCS2000 高斯—克吕格"
+      : `EPSG:${config?.epsg}`;
+  }
+
   function renderCadGeoreferenceStatus() {
     const config = state.snapshot?.cad_georeference || {};
     const status = $("#cadGeoreferenceStatus");
     if (config.confirmed === true) {
-      status.textContent = `已确认 EPSG:${config.epsg} · 中央经线 ${config.central_meridian_deg}° · ${axisMappingLabel(config.cad_axis_mapping)}`;
+      status.textContent = `已确认 ${cadGeoreferenceLabel(config)} · 中央经线 ${formatCentralMeridian(config.central_meridian_deg)} · ${axisMappingLabel(config.cad_axis_mapping)}`;
       status.classList.add("is-confirmed");
     } else if (config.stale_reason === "cad_asset_changed") {
       status.textContent = "CAD 已更换，请为当前图纸重新确认坐标系";
@@ -475,12 +525,14 @@
       const title = document.createElement("div");
       title.className = "crs-candidate-title";
       const code = document.createElement("strong");
-      code.textContent = `EPSG:${candidate.epsg}`;
+      code.textContent = candidate.crs_source === "custom"
+        ? "自定义 CGCS2000 高斯—克吕格"
+        : `EPSG:${candidate.epsg}`;
       const rank = document.createElement("span");
       rank.textContent = index === 0 ? "推荐" : "备选";
       title.append(code, rank);
       const projection = document.createElement("p");
-      projection.textContent = `${candidate.crs_name} · 中央经线 ${candidate.central_meridian_deg}°`;
+      projection.textContent = `${candidate.crs_name} · 中央经线 ${formatCentralMeridian(candidate.central_meridian_deg)}`;
       const mapping = document.createElement("p");
       mapping.textContent = axisMappingLabel(candidate.cad_axis_mapping);
       const evidence = document.createElement("p");
@@ -564,7 +616,7 @@
         const operation = body.operation || { status: "not_started", candidates: [] };
         const input = $("#centralMeridianInput");
         if (input.value === "" && operation.requested_central_meridian_deg != null) {
-          input.value = String(operation.requested_central_meridian_deg);
+          input.value = formatCentralMeridian(operation.requested_central_meridian_deg);
         }
         renderCadGeoreferenceOperation(operation);
         if (!["queued", "running", "preparing", "validating"].includes(operation.status)) return;
@@ -581,10 +633,11 @@
   async function loadCadGeoreferenceCandidates() {
     const button = $("#loadCadGeoreferenceCandidates");
     const input = $("#centralMeridianInput");
-    const rawMeridian = input.value.trim();
-    const centralMeridian = rawMeridian === "" ? null : Number(rawMeridian);
-    if (centralMeridian != null && (!Number.isFinite(centralMeridian) || centralMeridian < -180 || centralMeridian > 180)) {
-      input.setCustomValidity("请输入 -180° 到 180° 之间的中央经线，或留空自动推荐");
+    let centralMeridian;
+    try {
+      centralMeridian = parseCentralMeridianInput(input.value);
+    } catch (error) {
+      input.setCustomValidity(error.message);
       input.reportValidity();
       input.setCustomValidity("");
       return;
@@ -636,7 +689,7 @@
       state.snapshot.cad_georeference = body.cad_georeference;
       state.etag = null;
       renderCadGeoreferenceStatus();
-      setMessage(`已确认 EPSG:${body.cad_georeference.epsg}，仅绑定当前 CAD`);
+      setMessage(`已确认 ${cadGeoreferenceLabel(body.cad_georeference)}，仅绑定当前 CAD`);
     } catch (error) {
       setMessage(`坐标系确认失败：${error.message}`, true);
     }
@@ -652,7 +705,7 @@
     $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
     const confirmedGeoreference = state.snapshot?.cad_georeference || {};
     $("#centralMeridianInput").value = confirmedGeoreference.confirmed
-      ? (confirmedGeoreference.central_meridian_deg ?? "")
+      ? formatCentralMeridian(confirmedGeoreference.central_meridian_deg)
       : "";
     $("#cadZOffsetInput").value = settings.cad_z_offset_m ?? 0;
     $("#cadGeoreferenceCandidates").replaceChildren(Object.assign(document.createElement("span"), {

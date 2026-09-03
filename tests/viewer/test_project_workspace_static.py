@@ -277,11 +277,11 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert "水平视场角（°）" in html
     assert 'id="horizontalFovInput"' in html
     assert 'id="centralMeridianInput"' in html
-    assert "CGCS2000 中央经线（°）" in html
+    assert "CGCS2000 中央经线" in html
     assert 'id="horizontalFovInput" type="number"' in html
     assert 'placeholder="例如 72"' in html
-    assert 'id="centralMeridianInput" type="number"' in html
-    assert 'placeholder="例如 120；留空则自动推荐"' in html
+    assert 'id="centralMeridianInput" type="text" inputmode="decimal"' in html
+    assert 'placeholder="例如 120 或 118°50′；留空自动推荐"' in html
     assert "fovType" not in html and "FOV 类型" not in html
     assert 'id="cadGeoreferenceCandidates"' in html
     assert 'id="cadGeoreferencePreview"' in html
@@ -296,6 +296,18 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert "trajectory_polyline_raw" in script
     assert ".full-pose-dialog" in css
     assert ".crs-candidate" in css
+
+
+def test_full_pose_dialog_accepts_degree_minute_central_meridian() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="centralMeridianInput" type="text"' in html
+    assert "例如 120 或 118°50′；留空自动推荐" in html
+    assert "function parseCentralMeridianInput" in script
+    assert "function formatCentralMeridian" in script
+    assert 'candidate.crs_source === "custom"' in script
+    assert "自定义 CGCS2000 高斯—克吕格" in script
 
 
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:
