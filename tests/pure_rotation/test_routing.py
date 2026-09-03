@@ -52,9 +52,9 @@ def test_srt_routing_overrides_hovering_selection(tmp_path: Path) -> None:
         io.BytesIO((SRT_FIXTURES / "no_attitude_partial.srt").read_bytes()),
     )
 
-    assert manifest["workflow"]["trajectory_mode"] == "srt_sfm_fused"
+    assert manifest["workflow"]["trajectory_mode"] == "srt_fixed_track_visual_pose"
     assert manifest["workflow"]["hovering_declared"] is True
-    assert load_dataset_manifest(tmp_path, "srt")["workflow"]["trajectory_mode"] == "srt_sfm_fused"
+    assert load_dataset_manifest(tmp_path, "srt")["workflow"]["trajectory_mode"] == "srt_fixed_track_visual_pose"
 
 
 def test_legacy_manifest_without_motion_fields_is_normalized_to_sfm_only(tmp_path: Path) -> None:

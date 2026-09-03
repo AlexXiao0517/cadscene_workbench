@@ -1,7 +1,7 @@
 1
 00:00:00,000 --> 00:00:01,000
-[latitude:30.0001] [longitude:120.0001] [altitude:54.2] [drone_yaw:12.0] [drone_pitch:-2.0] [drone_roll:0.5]
+[latitude:30.0001] [longitude:120.0001] [rel_alt:54.2] [abs_alt:204.2] [drone_yaw:12.0] [drone_pitch:-2.0] [drone_roll:0.5]
 
 2
 00:00:01,000 --> 00:00:02,000
-[latitude:30.0002] [longitude:120.0002] [altitude:54.4] [drone_yaw:13.0] [drone_pitch:-2.1] [drone_roll:0.4]
+[latitude:30.0002] [longitude:120.0002] [rel_alt:54.4] [abs_alt:204.4] [drone_yaw:13.0] [drone_pitch:-2.1] [drone_roll:0.4]

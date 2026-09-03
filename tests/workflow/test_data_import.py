@@ -93,10 +93,10 @@ def test_srt_import_writes_analysis_and_manifest(tmp_path: Path) -> None:
     saved = load_dataset_manifest(tmp_path, "demo")
     analysis = load_srt_analysis(tmp_path, "demo")
 
-    assert manifest["workflow"]["trajectory_mode"] == "srt_sfm_fused"
+    assert manifest["workflow"]["trajectory_mode"] == "srt_fixed_track_visual_pose"
     assert saved["srt"]["status"] == "partial"
     assert saved["srt"]["path"] == "data/demo/telemetry/partial.srt"
-    assert analysis["detected_mode"] == "srt_sfm_fused"
+    assert analysis["detected_mode"] == "srt_fixed_track_visual_pose"
     assert (tmp_path / "data/demo/srt_analysis.json").exists()
     assert (tmp_path / "data/demo/srt_analysis_report.md").exists()
 

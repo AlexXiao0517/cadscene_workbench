@@ -17,6 +17,7 @@ def _records(*, full_pose: bool, start: int = 0, end: int = 10) -> list[SrtRecor
             latitude=30.0 + second * 1e-5,
             longitude=120.0 + second * 1e-5,
             altitude=50.0,
+            rel_alt=50.0,
             gimbal_yaw=1.0 if full_pose else None,
             gimbal_pitch=-20.0 if full_pose else None,
             gimbal_roll=0.0 if full_pose else None,
@@ -52,7 +53,7 @@ def test_partial_srt_coverage_recommends_fusion_before_motion_workflow() -> None
     recommendation = recommend_workflow(MotionMode.ROTATION_DOMINANT, 0.9, coverage)
 
     assert coverage.kind is SrtCoverageKind.PARTIAL
-    assert recommendation.recommended_workflow == "srt_sfm_fused"
+    assert recommendation.recommended_workflow == "srt_fixed_track_visual_pose"
 
 
 def test_srt_file_without_temporal_clip_coverage_does_not_override_motion() -> None:

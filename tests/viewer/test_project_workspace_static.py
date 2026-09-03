@@ -96,7 +96,8 @@ def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> Non
     assert ".workflow-recommendation" in css
     assert "font-size: var(--font-size-body)" in css
     assert 'sfm_only: "三维重建"' in script
-    assert 'srt_sfm_fused: "SRT 定位 + 三维重建（实验）"' in script
+    assert 'srt_fixed_track_visual_pose: "SRT 轨迹 + 视觉姿态"' in script
+    assert 'srt_sfm_fused: "SRT 定位 + 三维重建（实验）"' not in script
     assert 'srt_full_pose: "SRT 全姿态（跳过三维重建）"' in script
     assert 'pure_rotation: "旋转估计"' in script
     assert 'WORKFLOW_LABELS[clip.recommended_workflow]' in script
@@ -247,7 +248,8 @@ def test_final_workflow_selector_preserves_all_four_workflows() -> None:
     )[0]
     assert workflow_select.count("<option") == 4
     assert '<option value="sfm_only">三维重建（SfM）</option>' in workflow_select
-    assert '<option value="srt_sfm_fused">SRT 定位 + 三维重建（实验）</option>' in workflow_select
+    assert '<option value="srt_fixed_track_visual_pose">SRT 轨迹 + 视觉姿态</option>' in workflow_select
+    assert '<option value="srt_sfm_fused">' not in workflow_select
     assert '<option value="srt_full_pose">SRT 全姿态（跳过三维重建）</option>' in workflow_select
     assert '<option value="pure_rotation">旋转估计（OpenGV）</option>' in workflow_select
     assert "使用系统推荐" not in workflow_select

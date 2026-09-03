@@ -332,12 +332,12 @@ def test_upload_srt_api_returns_partial_mode_and_persists_upload_status(tmp_path
         assert set(payload) == {"ok", "dataset", "srt_status", "trajectory_mode", "analysis", "message"}
         assert payload["dataset"] == "demo"
         assert payload["srt_status"] == "partial"
-        assert payload["trajectory_mode"] == "srt_sfm_fused"
-        assert payload["analysis"]["detected_mode"] == "srt_sfm_fused"
-        assert "pending activation" in payload["message"]
+        assert payload["trajectory_mode"] == "srt_fixed_track_visual_pose"
+        assert payload["analysis"]["detected_mode"] == "srt_fixed_track_visual_pose"
+        assert "fixed-track visual-pose" in payload["message"]
         job = json.loads((tmp_path / "runs/demo/r-srt/job_status.json").read_text(encoding="utf-8"))
         assert job["stages"]["upload"]["status"] == "pending"
-        assert "pending activation" in job["stages"]["upload"]["message"]
+        assert "fixed-track visual-pose" in job["stages"]["upload"]["message"]
         assert not (tmp_path / "runs/demo/r-srt/02_sfm").exists()
     finally:
         server.terminate()

@@ -2273,7 +2273,13 @@ class ProjectService:
     ) -> ClipsManifest:
         """Change the user layer and stale old derived references without deletion."""
 
-        allowed = {"sfm_only", "srt_sfm_fused", "srt_full_pose", "pure_rotation"}
+        allowed = {
+            "sfm_only",
+            "srt_sfm_fused",
+            "srt_fixed_track_visual_pose",
+            "srt_full_pose",
+            "pure_rotation",
+        }
         if workflow_override is not None and workflow_override not in allowed:
             raise ValueError(f"unsupported workflow override: {workflow_override}")
         with self._state_guard(project_id):

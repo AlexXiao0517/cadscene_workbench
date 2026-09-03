@@ -140,13 +140,23 @@ def _ensure_srt_workflow(manifest: dict[str, Any]) -> bool:
     if not isinstance(workflow_source, Mapping) and legacy_srt_mode is not None:
         workflow_source = {"trajectory_mode": legacy_srt_mode}
     workflow = _with_defaults(_default_workflow(), workflow_source)
-    if legacy_srt_mode is not None:
+    if legacy_srt_mode == "srt_full_pose":
         # Telemetry has exclusive routing precedence.  A persisted hovering
         # declaration remains audit metadata but can never alter the SRT path.
         workflow["trajectory_mode"] = legacy_srt_mode
+    elif legacy_srt_mode == "srt_sfm_fused" and str(
+        workflow.get("trajectory_mode")
+    ) not in {"srt_sfm_fused", "srt_fixed_track_visual_pose"}:
+        workflow["trajectory_mode"] = legacy_srt_mode
     mode = str(workflow.get("trajectory_mode", "sfm_only"))
     workflow["implementation_status"] = (
-        "experimental" if mode == "pure_rotation" else ("ready" if mode == "sfm_only" else "interface_only")
+        "experimental"
+        if mode == "pure_rotation"
+        else (
+            "ready"
+            if mode in {"sfm_only", "srt_fixed_track_visual_pose"}
+            else "interface_only"
+        )
     )
     changed = manifest.get("srt") != srt or manifest.get("workflow") != workflow
     manifest["srt"] = srt
@@ -448,7 +458,11 @@ def import_srt(
     workflow.update(
         {
             "trajectory_mode": mode,
-            "implementation_status": "ready" if mode == "sfm_only" else "interface_only",
+            "implementation_status": (
+                "ready"
+                if mode in {"sfm_only", "srt_fixed_track_visual_pose"}
+                else "interface_only"
+            ),
         }
     )
     manifest["workflow"] = workflow

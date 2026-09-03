@@ -7,6 +7,8 @@ from typing import Any
 from .schema import SrtRecord
 
 
+FIXED_TRACK_VISUAL_POSE = "srt_fixed_track_visual_pose"
+
 _POSITION_FIELDS = ("latitude", "longitude")
 _GIMBAL_FIELDS = ("gimbal_yaw", "gimbal_pitch", "gimbal_roll")
 _DRONE_FIELDS = ("drone_yaw", "drone_pitch", "drone_roll")
@@ -48,7 +50,12 @@ def detect_trajectory_capability(
     """
 
     total = len(records)
-    tracked = _POSITION_FIELDS + ("altitude",) + _GIMBAL_FIELDS + _DRONE_FIELDS
+    tracked = (
+        _POSITION_FIELDS
+        + ("altitude", "rel_alt", "abs_alt")
+        + _GIMBAL_FIELDS
+        + _DRONE_FIELDS
+    )
     coverage = {
         field: (sum(_valid(record, field) for record in records) / total if total else 0.0)
         for field in tracked
@@ -68,6 +75,7 @@ def detect_trajectory_capability(
 
     gps_coverage = min(coverage[field] for field in _POSITION_FIELDS)
     altitude_coverage = coverage["altitude"]
+    relative_height_coverage = coverage["rel_alt"]
     trajectory_ready = total >= _MIN_TRAJECTORY_RECORDS and gps_coverage >= _MIN_COVERAGE and altitude_coverage >= _MIN_COVERAGE
     if total == 0:
         warnings.append("SRT parse produced no usable metadata records.")
@@ -75,6 +83,14 @@ def detect_trajectory_capability(
         warnings.append("GPS coverage is insufficient for SRT trajectory fusion.")
     if altitude_coverage < _MIN_COVERAGE:
         warnings.append("Altitude coverage is insufficient for SRT trajectory fusion.")
+    if (
+        total >= _MIN_TRAJECTORY_RECORDS
+        and gps_coverage >= _MIN_COVERAGE
+        and relative_height_coverage < _MIN_COVERAGE
+    ):
+        warnings.append(
+            "Relative height coverage is insufficient for the fixed SRT track."
+        )
 
     gimbal_complete = all(coverage[field] >= _MIN_COVERAGE for field in _GIMBAL_FIELDS)
     full_pose_coverage = (
@@ -89,8 +105,12 @@ def detect_trajectory_capability(
 
     if trajectory_ready and gimbal_complete and full_pose_coverage >= _MIN_COVERAGE:
         mode = "srt_full_pose"
-    elif trajectory_ready:
-        mode = "srt_sfm_fused"
+    elif (
+        total >= _MIN_TRAJECTORY_RECORDS
+        and gps_coverage >= _MIN_COVERAGE
+        and relative_height_coverage >= _MIN_COVERAGE
+    ):
+        mode = FIXED_TRACK_VISUAL_POSE
     else:
         mode = "sfm_only"
 

@@ -101,8 +101,8 @@ def assess_clip_srt_coverage(
     trajectory_intervals: list[tuple[float, float]] = []
     full_pose_intervals: list[tuple[float, float]] = []
     overlapping = 0
-    trajectory_fields = ("latitude", "longitude", "altitude")
-    full_pose_fields = trajectory_fields + ("gimbal_yaw", "gimbal_pitch", "gimbal_roll")
+    trajectory_fields = ("latitude", "longitude", "rel_alt")
+    full_pose_fields = ("latitude", "longitude", "altitude", "gimbal_yaw", "gimbal_pitch", "gimbal_roll")
     for record in records:
         start = float(_value(record, "start_sec") or 0.0)
         end = float(_value(record, "end_sec") or start)
@@ -137,7 +137,7 @@ def recommend_workflow(
         workflow = "srt_full_pose"
         reasons.append("valid_full_pose_srt_coverage")
     elif srt_coverage.kind is SrtCoverageKind.PARTIAL:
-        workflow = "srt_sfm_fused"
+        workflow = "srt_fixed_track_visual_pose"
         reasons.append("valid_partial_srt_coverage")
     elif motion_mode is MotionMode.ROTATION_DOMINANT and pure_rotation_verified:
         workflow = "pure_rotation"

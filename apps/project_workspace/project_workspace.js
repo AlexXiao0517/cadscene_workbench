@@ -41,7 +41,7 @@
   };
   const WORKFLOW_LABELS = {
     sfm_only: "三维重建",
-    srt_sfm_fused: "SRT 定位 + 三维重建（实验）",
+    srt_fixed_track_visual_pose: "SRT 轨迹 + 视觉姿态",
     srt_full_pose: "SRT 全姿态（跳过三维重建）",
     pure_rotation: "旋转估计",
   };

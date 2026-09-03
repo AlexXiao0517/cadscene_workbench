@@ -562,7 +562,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         else:
             message = "等待上传视频和 CAD assets"
         trajectory_mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
-        if not failed and trajectory_mode == "srt_sfm_fused":
+        if not failed and trajectory_mode == "srt_fixed_track_visual_pose":
+            message = "SRT fixed-track visual-pose workflow is ready for project configuration"
+        elif not failed and trajectory_mode == "srt_sfm_fused":
             message = "SRT/SfM fusion functionality pending activation"
         elif not failed and trajectory_mode == "srt_full_pose":
             message = "SRT full-pose functionality pending activation"
@@ -578,7 +580,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     def _srt_api_payload(dataset: str, manifest: dict, analysis: dict) -> dict:
         srt = manifest.get("srt") or {}
         mode = str((manifest.get("workflow") or {}).get("trajectory_mode", "sfm_only"))
-        if mode == "srt_sfm_fused":
+        if mode == "srt_fixed_track_visual_pose":
+            message = "SRT fixed-track visual-pose workflow is ready for project configuration"
+        elif mode == "srt_sfm_fused":
             message = "SRT/SfM fusion functionality pending activation"
         elif mode == "srt_full_pose":
             message = "SRT full-pose functionality pending activation"

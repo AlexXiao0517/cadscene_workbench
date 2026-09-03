@@ -41,7 +41,7 @@
 - Consumes: existing SRT coverage fields `gps_coverage`, `rel_alt_coverage`, and `full_pose_coverage`.
 - Produces: `recommended_workflow/resolved_workflow == "srt_fixed_track_visual_pose"` for GPS + relative-height SRT without complete gimbal attitude.
 
-- [ ] **Step 1: Write failing routing tests**
+- [x] **Step 1: Write failing routing tests**
 
 ```python
 def test_partial_srt_with_relative_height_routes_to_fixed_track_visual_pose():
@@ -59,13 +59,13 @@ def test_project_selector_exposes_new_workflow_and_hides_legacy_workflow():
     assert '<option value="srt_sfm_fused">' not in html
 ```
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
 Run: `python -m pytest tests/srt/test_capability.py tests/video_analysis/test_recommendation.py tests/workflow/test_data_import.py tests/viewer/test_project_workspace_static.py -q`
 
 Expected: failures show that partial SRT still resolves to `srt_sfm_fused` and the new selector option is absent.
 
-- [ ] **Step 3: Implement the new route without deleting legacy reads**
+- [x] **Step 3: Implement the new route without deleting legacy reads**
 
 Use one shared literal in routing branches:
 
@@ -82,13 +82,13 @@ else:
 
 Add the new value to project-service validation, map partial imports/recommendations to it, add `srt_fixed_track_visual_pose: "SRT 轨迹 + 视觉姿态"` to `WORKFLOW_LABELS`, replace the legacy dropdown option, and retain the legacy adapter registry entry solely so old manifests remain readable.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run: `python -m pytest tests/srt/test_capability.py tests/video_analysis/test_recommendation.py tests/workflow/test_data_import.py tests/projects/test_models.py tests/viewer/test_project_workspace_static.py -q`
 
 Expected: all selected tests pass and no test expects a new partial-SRT recommendation of `srt_sfm_fused`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add cadscene/srt/capability.py cadscene/video_analysis/recommendation.py cadscene/workflow/data_import.py cadscene/projects/service.py apps/project_workspace/index.html apps/project_workspace/project_workspace.js tests/srt/test_capability.py tests/video_analysis/test_recommendation.py tests/workflow/test_data_import.py tests/projects/test_models.py tests/viewer/test_project_workspace_static.py
