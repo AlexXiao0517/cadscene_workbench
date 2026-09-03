@@ -106,7 +106,7 @@ git commit -m "feat: route partial SRT to fixed-track visual pose"
 - Consumes: `SrtRecord`, authoritative frame-map payload, `CadGeoreference`, existing `project_wgs84_to_cad_raw`, `cad_raw_to_local_m`, and `horizontal_fov_intrinsics`.
 - Produces: `FixedTrackVisualPoseConfig`, `FixedTrackPosition`, `build_fixed_track_positions(...) -> tuple[FixedTrackPosition, ...]`.
 
-- [ ] **Step 1: Write failing position-contract tests**
+- [x] **Step 1: Write failing position-contract tests**
 
 ```python
 def test_positions_use_projected_xy_relative_alt_and_one_route_offset():
@@ -132,13 +132,13 @@ def test_abs_alt_only_is_rejected_instead_of_becoming_z():
         build_fixed_track_positions(abs_alt_only_records(), frame_map(), config())
 ```
 
-- [ ] **Step 2: Verify red tests**
+- [x] **Step 2: Verify red tests**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py -q`
 
 Expected: import failure for the new module.
 
-- [ ] **Step 3: Implement strict config and position records**
+- [x] **Step 3: Implement strict config and position records**
 
 ```python
 @dataclass(frozen=True)
@@ -176,13 +176,13 @@ class FixedTrackPosition:
 
 Validate all config numbers, require confirmed georeference, derive XY through existing projection helpers, reject every frame sample without finite `rel_alt`, preserve `abs_alt` only on the audit record, and reject total position coverage below `minimum_position_coverage`.
 
-- [ ] **Step 4: Run position tests**
+- [x] **Step 4: Run position tests**
 
 Run: `python -m pytest tests/srt/test_fixed_track_visual_pose.py -q`
 
 Expected: position-contract, offset, axis mapping, bounded interpolation, invalid FOV, and abs-alt rejection tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add cadscene/srt/fixed_track_visual_pose.py cadscene/srt/__init__.py tests/srt/test_fixed_track_visual_pose.py
