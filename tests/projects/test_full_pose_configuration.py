@@ -251,6 +251,77 @@ def test_candidate_and_confirmation_routes_use_project_revision(tmp_path: Path) 
     assert confirm_response.body["cad_georeference"]["confirmed"] is True
 
 
+def test_degree_minute_candidate_request_persists_custom_projection(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+    _configure_project_inputs(tmp_path, repositories)
+    api = ProjectApi(
+        repositories=repositories,
+        service=service,
+        uploads=ValidatedUploadStore(tmp_path / "projects"),
+        now=lambda: "2026-09-01T00:00:00Z",
+    )
+    project_revision = repositories.project.load("p1").revision
+
+    started = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": project_revision,
+            "central_meridian_deg": "118°50′",
+        },
+    )
+    repeated = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/candidates",
+        json_body={
+            "expected_revision": project_revision,
+            "central_meridian_deg": 118.0 + 50.0 / 60.0,
+        },
+    )
+
+    assert started.status == 202
+    assert repeated.body["operation"]["job_id"] == started.body["operation"][
+        "job_id"
+    ]
+    assert started.body["operation"][
+        "requested_central_meridian_deg"
+    ] == pytest.approx(118.0 + 50.0 / 60.0)
+
+    finished = LocalJobExecutor(service).run_next()
+    assert finished is not None and finished.status == "success"
+    operation = api.handle(
+        "GET", "/api/projects/p1/cad-georeference/candidates"
+    ).body["operation"]
+    candidate = operation["candidates"][0]
+    assert candidate["crs_source"] == "custom"
+    assert candidate["epsg"] is None
+    assert candidate["central_meridian_deg"] == pytest.approx(
+        118.0 + 50.0 / 60.0
+    )
+
+    confirmed = api.handle(
+        "POST",
+        "/api/projects/p1/cad-georeference/confirm",
+        json_body={
+            "expected_revision": repositories.project.load("p1").revision,
+            "candidate_job_id": operation["job_id"],
+            "candidate_input_fingerprint": operation["input_fingerprint"],
+            "candidate": candidate,
+        },
+    )
+
+    assert confirmed.status == 200
+    config = confirmed.body["cad_georeference"]
+    assert config["crs_source"] == "custom"
+    assert config["epsg"] is None
+    assert config["false_easting_m"] == 500_000.0
+    assert config["ellipsoid"] == "GRS80"
+
+
 def test_candidate_request_recovers_cad_dataset_from_active_clip_snapshot(
     tmp_path: Path,
 ) -> None:

@@ -36,6 +36,23 @@ def _georeference(*, confirmed: bool = True) -> CadGeoreference:
     )
 
 
+def _custom_georeference() -> CadGeoreference:
+    payload = _georeference().to_dict()
+    payload.update(
+        {
+            "central_meridian_deg": 118.0 + 50.0 / 60.0,
+            "epsg": None,
+            "crs_source": "custom",
+            "latitude_of_origin_deg": 0.0,
+            "scale_factor": 1.0,
+            "false_easting_m": 500_000.0,
+            "false_northing_m": 0.0,
+            "ellipsoid": "GRS80",
+        }
+    )
+    return CadGeoreference.from_dict(payload)
+
+
 def _write_srt(
     path: Path,
     *,
@@ -142,6 +159,24 @@ def test_builder_emits_local_cad_metric_centers_and_user_fov(
         "height_source_counts": {"rel_alt": 3},
         "warnings": [],
     }
+
+
+def test_builder_report_names_custom_projection_without_fake_epsg(
+    tmp_path: Path,
+) -> None:
+    records = load_srt_records(_write_srt(tmp_path / "flight.srt"))
+
+    result = build_full_pose_trajectory(
+        records,
+        _frame_map(),
+        {"width": 3840, "height": 2160, "fps": 1.0},
+        _config(georeference=_custom_georeference()),
+        tmp_path / "output",
+    )
+
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "坐标系：CGCS2000 自定义高斯—克吕格" in report
+    assert "EPSG:None" not in report
 
 
 def test_builder_rejects_frame_map_interval_disagreement(tmp_path: Path) -> None:

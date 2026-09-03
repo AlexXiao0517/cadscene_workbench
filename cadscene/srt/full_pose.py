@@ -559,12 +559,17 @@ def build_full_pose_trajectory(
         "vertical_validation": vertical_validation,
         "georeference": config.georeference.to_dict(),
     }
+    coordinate_system_label = (
+        f"EPSG:{config.georeference.epsg}"
+        if config.georeference.crs_source == "epsg"
+        else "CGCS2000 自定义高斯—克吕格"
+    )
     report = (
         "# SRT 全姿态轨迹报告\n\n"
         f"- 总帧数：{len(poses)}\n"
         f"- 已注册帧数：{registered_count}\n"
         f"- 完整覆盖率：{coverage:.3f}\n"
-        f"- 坐标系：EPSG:{config.georeference.epsg}\n"
+        f"- 坐标系：{coordinate_system_label}\n"
         f"- 中央经线：{config.georeference.central_meridian_deg:g}°\n"
         f"- 水平 FOV：{config.horizontal_fov_deg:g}°（用户输入）\n"
         f"- 最大水平速度：{max_speed:.3f} m/s\n"

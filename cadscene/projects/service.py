@@ -87,6 +87,7 @@ from cadscene.application_resources import application_root
 from cadscene.srt.georeference import (
     CadGeoreference,
     CrsCandidate,
+    parse_central_meridian,
     recommend_cgcs2000_candidates,
 )
 from cadscene.srt.parser import load_srt_records
@@ -94,7 +95,7 @@ from cadscene.srt.parser import load_srt_records
 
 ANALYSIS_IDENTITY_SCHEMA = 2
 CAD_GEOREFERENCE_CANDIDATE_ADAPTER_NAME = "cad_georeference_candidates"
-CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION = "1"
+CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION = "2"
 
 
 def _has_exact_success_proof(job: QueueJob) -> bool:
@@ -2428,7 +2429,7 @@ class ProjectService:
         project_id: str,
         *,
         expected_revision: int,
-        central_meridian_deg: float | None = None,
+        central_meridian_deg: object | None = None,
         limit: int = 6,
     ) -> QueueJob:
         """Queue one fingerprinted, project-level CRS candidate operation."""
@@ -2704,7 +2705,7 @@ class ProjectService:
         project_id: str,
         *,
         limit: int = 6,
-        central_meridian_deg: float | None = None,
+        central_meridian_deg: object | None = None,
         progress_callback: Callable[[str, str, float | None], None] | None = None,
     ) -> tuple[CrsCandidate, ...]:
         """Rank CGCS2000 Gauss-Kruger candidates without confirming one."""
@@ -2730,7 +2731,7 @@ class ProjectService:
             [item[1] for item in gps],
             _active_cad_coordinate_bbox(request_assets),
             limit=limit,
-            central_meridian_deg=central_meridian_deg,
+            central_meridian_deg=parse_central_meridian(central_meridian_deg),
             progress_callback=progress_callback,
         )
 
@@ -2790,6 +2791,17 @@ class ProjectService:
                 "confirmed": True,
                 "confidence": confidence,
                 "validation": validation,
+                "crs_source": candidate.get(
+                    "crs_source",
+                    "custom" if candidate.get("epsg") is None else "epsg",
+                ),
+                "latitude_of_origin_deg": candidate.get(
+                    "latitude_of_origin_deg", 0.0
+                ),
+                "scale_factor": candidate.get("scale_factor", 1.0),
+                "false_easting_m": candidate.get("false_easting_m", 500_000.0),
+                "false_northing_m": candidate.get("false_northing_m", 0.0),
+                "ellipsoid": candidate.get("ellipsoid", "GRS80"),
             }
         )
         payload = {
@@ -8054,16 +8066,10 @@ def _cad_georeference_candidate_request(
     project_id: str,
     project_assets: Mapping[str, object],
     *,
-    central_meridian_deg: float | None,
+    central_meridian_deg: object | None,
     limit: int,
 ) -> dict[str, object]:
-    requested_meridian = None
-    if central_meridian_deg is not None:
-        requested_meridian = float(central_meridian_deg)
-        if not isfinite(requested_meridian) or not -180.0 <= requested_meridian <= 180.0:
-            raise ValueError(
-                "central_meridian_deg must be finite and between -180 and 180"
-            )
+    requested_meridian = parse_central_meridian(central_meridian_deg)
     candidate_limit = int(limit)
     if candidate_limit <= 0:
         raise ValueError("candidate limit must be positive")

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from cadscene.cli.build_cad_georeference_candidates import main
 
 
@@ -73,6 +75,44 @@ def test_candidate_cli_publishes_fingerprinted_candidates_and_progress(
     }
     assert progress_payload["stage"] == "complete"
     assert progress_payload["fraction"] == 1.0
+
+
+def test_candidate_cli_normalizes_degree_minute_custom_projection(
+    tmp_path: Path,
+) -> None:
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm_version": "1",
+                "input_fingerprint": "custom-candidate-input",
+                "srt_path": str(_write_srt(tmp_path / "flight.srt")),
+                "cad_bbox_raw": [0.0, 0.0, 1.0, 1.0],
+                "central_meridian_deg": "118°50′",
+                "limit": 6,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "attempt" / "cad_georeference_candidates.json"
+
+    result = main(
+        [
+            "--request",
+            str(request),
+            "--output",
+            str(output),
+            "--progress-file",
+            str(tmp_path / "attempt" / "progress.json"),
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["central_meridian_deg"] == pytest.approx(118.0 + 50.0 / 60.0)
+    assert payload["candidates"][0]["crs_source"] == "custom"
+    assert payload["candidates"][0]["epsg"] is None
 
 
 def test_candidate_cli_rejects_request_without_matching_fingerprint(

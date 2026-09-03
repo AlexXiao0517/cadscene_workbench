@@ -10,7 +10,10 @@ from typing import Mapping
 from uuid import uuid4
 
 from cadscene.cli._progress import write_progress_sidecar
-from cadscene.srt.georeference import recommend_cgcs2000_candidates
+from cadscene.srt.georeference import (
+    parse_central_meridian,
+    recommend_cgcs2000_candidates,
+)
 from cadscene.srt.parser import load_srt_records
 
 
@@ -30,8 +33,8 @@ def _load_request(path: Path) -> Mapping[str, object]:
         raise ValueError("candidate request root must be an object")
     if int(value.get("schema_version", 0)) != 1:
         raise ValueError("candidate request schema_version must be 1")
-    if str(value.get("algorithm_version") or "") != "1":
-        raise ValueError("candidate algorithm_version must be 1")
+    if str(value.get("algorithm_version") or "") not in {"1", "2"}:
+        raise ValueError("candidate algorithm_version must be 1 or 2")
     if not str(value.get("input_fingerprint") or ""):
         raise ValueError("candidate input_fingerprint must not be empty")
     return value
@@ -66,15 +69,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not gps:
             raise ValueError("SRT contains no usable WGS84 longitude/latitude samples")
-        central_meridian = request.get("central_meridian_deg")
+        central_meridian = parse_central_meridian(
+            request.get("central_meridian_deg")
+        )
         candidates = recommend_cgcs2000_candidates(
             [item[0] for item in gps],
             [item[1] for item in gps],
             request["cad_bbox_raw"],  # type: ignore[arg-type]
             limit=int(request.get("limit", 6)),
-            central_meridian_deg=(
-                None if central_meridian is None else float(central_meridian)
-            ),
+            central_meridian_deg=central_meridian,
             progress_callback=lambda stage, message, fraction: write_progress_sidecar(
                 args.progress_file, stage, message, fraction
             ),
@@ -83,11 +86,9 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             {
                 "schema_version": 1,
-                "algorithm_version": "1",
+                "algorithm_version": str(request["algorithm_version"]),
                 "input_fingerprint": str(request["input_fingerprint"]),
-                "central_meridian_deg": (
-                    None if central_meridian is None else float(central_meridian)
-                ),
+                "central_meridian_deg": central_meridian,
                 "limit": int(request.get("limit", 6)),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "candidates": [item.to_dict() for item in candidates],

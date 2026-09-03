@@ -29,6 +29,7 @@ from .workbench_sessions import (
     StaleWorkbenchSession,
     WorkbenchPermissionDenied,
 )
+from cadscene.srt.georeference import parse_central_meridian
 
 
 _SAFE_ID = r"[A-Za-z0-9_.-]+"
@@ -1479,9 +1480,7 @@ class ProjectApi:
         job = self.service.enqueue_cad_georeference_candidates(
             project_id,
             expected_revision=_required_revision(payload),
-            central_meridian_deg=(
-                None if raw_meridian is None else float(raw_meridian)
-            ),
+            central_meridian_deg=parse_central_meridian(raw_meridian),
         )
         return ApiResponse(
             202,
