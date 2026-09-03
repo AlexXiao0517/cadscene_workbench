@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 from math import hypot, isfinite
+import re
 from statistics import median
 from typing import Callable, Mapping, Sequence
 
@@ -20,6 +21,44 @@ _AXIS_MAPPINGS = frozenset(
         "cad_x_northing_cad_y_easting",
     }
 )
+_DECIMAL_MERIDIAN_PATTERN = re.compile(
+    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:°|度)?$"
+)
+_DEGREE_MINUTE_MERIDIAN_PATTERN = re.compile(
+    r"^([+-]?\d{1,3})(?:\s*(?:°|度)\s*|\s+)(\d+(?:\.\d+)?)\s*(?:′|'|分)?$"
+)
+
+
+def parse_central_meridian(value: object | None) -> float | None:
+    """Normalize decimal or degree-minute central-meridian input."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("central meridian format is invalid")
+    if isinstance(value, (int, float)):
+        result = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        decimal_match = _DECIMAL_MERIDIAN_PATTERN.fullmatch(text)
+        if decimal_match is not None:
+            result = float(decimal_match.group(1))
+        else:
+            degree_minute_match = _DEGREE_MINUTE_MERIDIAN_PATTERN.fullmatch(text)
+            if degree_minute_match is None:
+                raise ValueError("central meridian format is invalid")
+            degree_text, minute_text = degree_minute_match.groups()
+            minutes = float(minute_text)
+            if not isfinite(minutes) or not 0.0 <= minutes < 60.0:
+                raise ValueError("central meridian minutes must be between 0 and 60")
+            degrees = abs(float(degree_text))
+            sign = -1.0 if degree_text.startswith("-") else 1.0
+            result = sign * (degrees + minutes / 60.0)
+    if not isfinite(result) or not -180.0 <= result <= 180.0:
+        raise ValueError("central meridian must be between -180 and 180")
+    return result
 
 
 class GeoreferenceEnvironmentError(RuntimeError):
@@ -33,7 +72,7 @@ class CadGeoreference:
     projection_family: str
     zone_width_deg: int
     central_meridian_deg: float
-    epsg: int
+    epsg: int | None
     projected_axis_order: str
     cad_axis_mapping: str
     zone_prefix: bool
@@ -42,17 +81,24 @@ class CadGeoreference:
     confirmed: bool
     confidence: float
     validation: Mapping[str, object] = field(default_factory=dict)
+    crs_source: str = "epsg"
+    latitude_of_origin_deg: float = 0.0
+    scale_factor: float = 1.0
+    false_easting_m: float = 500_000.0
+    false_northing_m: float = 0.0
+    ellipsoid: str = "GRS80"
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "CadGeoreference":
         try:
+            raw_epsg = value.get("epsg")
             config = cls(
                 schema_version=int(value["schema_version"]),
                 horizontal_datum=str(value["horizontal_datum"]),
                 projection_family=str(value["projection_family"]),
                 zone_width_deg=int(value["zone_width_deg"]),
                 central_meridian_deg=float(value["central_meridian_deg"]),
-                epsg=int(value["epsg"]),
+                epsg=None if raw_epsg is None else int(raw_epsg),
                 projected_axis_order=str(value["projected_axis_order"]),
                 cad_axis_mapping=str(value["cad_axis_mapping"]),
                 zone_prefix=bool(value["zone_prefix"]),
@@ -61,6 +107,17 @@ class CadGeoreference:
                 confirmed=bool(value["confirmed"]),
                 confidence=float(value["confidence"]),
                 validation=dict(value.get("validation") or {}),
+                crs_source=str(
+                    value.get("crs_source")
+                    or ("custom" if raw_epsg is None else "epsg")
+                ),
+                latitude_of_origin_deg=float(
+                    value.get("latitude_of_origin_deg", 0.0)
+                ),
+                scale_factor=float(value.get("scale_factor", 1.0)),
+                false_easting_m=float(value.get("false_easting_m", 500_000.0)),
+                false_northing_m=float(value.get("false_northing_m", 0.0)),
+                ellipsoid=str(value.get("ellipsoid", "GRS80")),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid cad georeference payload: {exc}") from exc
@@ -89,28 +146,52 @@ class CadGeoreference:
         if not isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be between zero and one")
 
-        crs = _crs_from_epsg(self.epsg)
-        if not crs.is_projected or not crs.name.startswith("CGCS2000 /"):
-            raise ValueError("epsg must identify a projected CGCS2000 CRS")
-        if "Gauss-Kruger" not in crs.name:
-            raise ValueError("epsg must identify a CGCS2000 Gauss-Kruger CRS")
-        units = {str(axis.unit_name).lower() for axis in crs.axis_info}
-        if not units or any(unit not in {"metre", "meter"} for unit in units):
-            raise ValueError("epsg projected axes must use metres")
-        actual_meridian = _central_meridian(crs)
-        if abs(actual_meridian - self.central_meridian_deg) > 1e-9:
-            raise ValueError(
-                "central_meridian_deg disagrees with the configured epsg"
+        if self.crs_source == "epsg":
+            if self.epsg is None:
+                raise ValueError("epsg is required for an EPSG-backed projection")
+            crs = _crs_from_epsg(self.epsg)
+            if not crs.is_projected or not crs.name.startswith("CGCS2000 /"):
+                raise ValueError("epsg must identify a projected CGCS2000 CRS")
+            if "Gauss-Kruger" not in crs.name:
+                raise ValueError("epsg must identify a CGCS2000 Gauss-Kruger CRS")
+            units = {str(axis.unit_name).lower() for axis in crs.axis_info}
+            if not units or any(unit not in {"metre", "meter"} for unit in units):
+                raise ValueError("epsg projected axes must use metres")
+            actual_meridian = _central_meridian(crs)
+            if abs(actual_meridian - self.central_meridian_deg) > 1e-9:
+                raise ValueError(
+                    "central_meridian_deg disagrees with the configured epsg"
+                )
+            actual_zone_width = 3 if "3-degree" in crs.name else 6
+            if actual_zone_width != self.zone_width_deg:
+                raise ValueError("zone_width_deg disagrees with the configured epsg")
+            actual_zone_prefix = " zone " in f" {crs.name.lower()} "
+            if actual_zone_prefix != self.zone_prefix:
+                raise ValueError("zone_prefix disagrees with the configured epsg")
+        elif self.crs_source == "custom":
+            if self.epsg is not None:
+                raise ValueError("custom projection must not declare an epsg")
+            if self.zone_prefix:
+                raise ValueError("custom projection does not support a zone prefix")
+            fixed_parameters = (
+                ("latitude_of_origin_deg", self.latitude_of_origin_deg, 0.0),
+                ("scale_factor", self.scale_factor, 1.0),
+                ("false_easting_m", self.false_easting_m, 500_000.0),
+                ("false_northing_m", self.false_northing_m, 0.0),
             )
-        actual_zone_width = 3 if "3-degree" in crs.name else 6
-        if actual_zone_width != self.zone_width_deg:
-            raise ValueError("zone_width_deg disagrees with the configured epsg")
-        actual_zone_prefix = " zone " in f" {crs.name.lower()} "
-        if actual_zone_prefix != self.zone_prefix:
-            raise ValueError("zone_prefix disagrees with the configured epsg")
+            for name, actual, expected in fixed_parameters:
+                if not isfinite(actual) or abs(actual - expected) > 1e-9:
+                    raise ValueError(
+                        f"custom projection {name} must equal {expected:g}"
+                    )
+            if self.ellipsoid != "GRS80":
+                raise ValueError("custom projection ellipsoid must be GRS80")
+            _custom_crs(self.central_meridian_deg)
+        else:
+            raise ValueError("crs_source must be epsg or custom")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "horizontal_datum": self.horizontal_datum,
             "projection_family": self.projection_family,
@@ -125,12 +206,24 @@ class CadGeoreference:
             "confirmed": self.confirmed,
             "confidence": self.confidence,
             "validation": dict(self.validation),
+            "crs_source": self.crs_source,
         }
+        if self.crs_source == "custom":
+            payload.update(
+                {
+                    "latitude_of_origin_deg": self.latitude_of_origin_deg,
+                    "scale_factor": self.scale_factor,
+                    "false_easting_m": self.false_easting_m,
+                    "false_northing_m": self.false_northing_m,
+                    "ellipsoid": self.ellipsoid,
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True)
 class CrsCandidate:
-    epsg: int
+    epsg: int | None
     crs_name: str
     zone_width_deg: int
     central_meridian_deg: float
@@ -139,9 +232,15 @@ class CrsCandidate:
     score: float
     evidence: Mapping[str, object]
     confirmed: bool = False
+    crs_source: str = "epsg"
+    latitude_of_origin_deg: float = 0.0
+    scale_factor: float = 1.0
+    false_easting_m: float = 500_000.0
+    false_northing_m: float = 0.0
+    ellipsoid: str = "GRS80"
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "epsg": self.epsg,
             "crs_name": self.crs_name,
             "zone_width_deg": self.zone_width_deg,
@@ -151,7 +250,19 @@ class CrsCandidate:
             "score": self.score,
             "evidence": dict(self.evidence),
             "confirmed": False,
+            "crs_source": self.crs_source,
         }
+        if self.crs_source == "custom":
+            payload.update(
+                {
+                    "latitude_of_origin_deg": self.latitude_of_origin_deg,
+                    "scale_factor": self.scale_factor,
+                    "false_easting_m": self.false_easting_m,
+                    "false_northing_m": self.false_northing_m,
+                    "ellipsoid": self.ellipsoid,
+                }
+            )
+        return payload
 
 
 @lru_cache(maxsize=64)
@@ -175,6 +286,37 @@ def _transformer(epsg: int) -> Transformer:
     except Exception as exc:  # pragma: no cover - environment-specific failure
         raise GeoreferenceEnvironmentError(
             f"PROJ cannot create the EPSG:4326 to EPSG:{epsg} transformer: {exc}"
+        ) from exc
+
+
+@lru_cache(maxsize=64)
+def _custom_crs(central_meridian_deg: float) -> CRS:
+    meridian = parse_central_meridian(central_meridian_deg)
+    if meridian is None:
+        raise ValueError("custom central meridian is required")
+    try:
+        return CRS.from_proj4(
+            "+proj=tmerc +lat_0=0 "
+            f"+lon_0={meridian:.15g} "
+            "+k=1 +x_0=500000 +y_0=0 +ellps=GRS80 +units=m +no_defs +type=crs"
+        )
+    except Exception as exc:
+        raise GeoreferenceEnvironmentError(
+            f"PROJ cannot create custom CGCS2000 projection: {exc}"
+        ) from exc
+
+
+@lru_cache(maxsize=64)
+def _custom_transformer(central_meridian_deg: float) -> Transformer:
+    try:
+        return Transformer.from_crs(
+            CRS.from_epsg(4326),
+            _custom_crs(central_meridian_deg),
+            always_xy=True,
+        )
+    except Exception as exc:
+        raise GeoreferenceEnvironmentError(
+            f"PROJ cannot create a custom CGCS2000 transformer: {exc}"
         ) from exc
 
 
@@ -219,7 +361,12 @@ def project_wgs84_to_cad_raw(
     lat = float(latitude)
     if not isfinite(lon) or not isfinite(lat) or not -180.0 <= lon <= 180.0 or not -90.0 <= lat <= 90.0:
         raise ValueError("longitude/latitude must be finite WGS84 coordinates")
-    easting, northing = _transformer(resolved.epsg).transform(lon, lat)
+    transformer = (
+        _transformer(resolved.epsg)
+        if resolved.crs_source == "epsg" and resolved.epsg is not None
+        else _custom_transformer(resolved.central_meridian_deg)
+    )
+    easting, northing = transformer.transform(lon, lat)
     if not isfinite(easting) or not isfinite(northing):
         raise ValueError("coordinate projection produced non-finite values")
     return _mapped_xy(easting, northing, resolved.cad_axis_mapping)
@@ -360,7 +507,7 @@ def recommend_cgcs2000_candidates(
             f"PROJ cannot query CGCS2000 candidates: {exc}"
         ) from exc
 
-    descriptors: list[tuple[object, int, float, int, bool]] = []
+    descriptors: list[tuple[str, int | None, float, int, bool, str]] = []
     for info in infos:
         if not info.name.startswith("CGCS2000 /") or "Gauss-Kruger" not in info.name:
             continue
@@ -375,19 +522,29 @@ def recommend_cgcs2000_candidates(
         zone_width = 3 if "3-degree" in info.name else 6
         zone_prefix = " zone " in f" {info.name.lower()} "
         descriptors.append(
-            (info, epsg, central_meridian, zone_width, zone_prefix)
+            (info.name, epsg, central_meridian, zone_width, zone_prefix, "epsg")
         )
     if requested_meridian is not None and not descriptors:
-        raise ValueError(
-            "no CGCS2000 Gauss-Kruger EPSG candidate matches central meridian "
-            f"{requested_meridian:g}"
+        descriptors.append(
+            (
+                "CGCS2000 / custom Gauss-Kruger",
+                None,
+                requested_meridian,
+                3,
+                False,
+                "custom",
+            )
         )
 
     candidates: list[CrsCandidate] = []
     total_variants = len(descriptors) * len(_AXIS_MAPPINGS)
     processed_variants = 0
-    for info, epsg, central_meridian, zone_width, zone_prefix in descriptors:
-        transformer = _transformer(epsg)
+    for crs_name, epsg, central_meridian, zone_width, zone_prefix, crs_source in descriptors:
+        transformer = (
+            _transformer(epsg)
+            if crs_source == "epsg" and epsg is not None
+            else _custom_transformer(central_meridian)
+        )
         projected = [transformer.transform(lon, lat) for lon, lat in samples]
         if any(not isfinite(east) or not isfinite(north) for east, north in projected):
             processed_variants += len(_AXIS_MAPPINGS)
@@ -411,13 +568,14 @@ def recommend_cgcs2000_candidates(
             candidates.append(
                 CrsCandidate(
                     epsg=epsg,
-                    crs_name=info.name,
+                    crs_name=crs_name,
                     zone_width_deg=zone_width,
                     central_meridian_deg=central_meridian,
                     cad_axis_mapping=mapping,
                     zone_prefix=zone_prefix,
                     score=float(score),
                     evidence=evidence,
+                    crs_source=crs_source,
                 )
             )
             processed_variants += 1
@@ -433,7 +591,7 @@ def recommend_cgcs2000_candidates(
             abs(item.central_meridian_deg - median(lon_values)),
             item.zone_prefix,
             item.zone_width_deg,
-            item.epsg,
+            -1 if item.epsg is None else item.epsg,
             item.cad_axis_mapping,
         )
     )

@@ -2,12 +2,46 @@ from __future__ import annotations
 
 import pytest
 
+import cadscene.srt.georeference as georeference
 from cadscene.srt.georeference import (
     CadGeoreference,
     cad_raw_to_local_m,
     project_wgs84_to_cad_raw,
     recommend_cgcs2000_candidates,
 )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["118°50′", "118°50'", "118 50", "118.83333333333333", 118.83333333333333],
+)
+def test_degree_minute_central_meridian_normalizes_to_decimal(
+    raw: object,
+) -> None:
+    assert georeference.parse_central_meridian(raw) == pytest.approx(
+        118.0 + 50.0 / 60.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("118°60′", "minutes"),
+        ("181°0′", "between -180 and 180"),
+        ("invalid", "format"),
+    ],
+)
+def test_invalid_central_meridian_text_is_rejected(
+    raw: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        georeference.parse_central_meridian(raw)
+
+
+def test_blank_central_meridian_keeps_automatic_recommendation() -> None:
+    assert georeference.parse_central_meridian(None) is None
+    assert georeference.parse_central_meridian("  ") is None
 
 
 def _config(
@@ -32,6 +66,35 @@ def _config(
         "confirmed": confirmed,
         "confidence": 0.95,
         "validation": {"trajectory_inside_cad_ratio": 1.0},
+    }
+
+
+def _custom_config(
+    *,
+    mapping: str = "cad_x_easting_cad_y_northing",
+    confirmed: bool = True,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "horizontal_datum": "CGCS2000",
+        "projection_family": "gauss_kruger",
+        "zone_width_deg": 3,
+        "central_meridian_deg": 118.0 + 50.0 / 60.0,
+        "epsg": None,
+        "projected_axis_order": "easting_northing",
+        "cad_axis_mapping": mapping,
+        "zone_prefix": False,
+        "linear_unit": "metre",
+        "source": "user_confirmed",
+        "confirmed": confirmed,
+        "confidence": 0.95,
+        "validation": {"trajectory_inside_cad_ratio": 1.0},
+        "crs_source": "custom",
+        "latitude_of_origin_deg": 0.0,
+        "scale_factor": 1.0,
+        "false_easting_m": 500_000.0,
+        "false_northing_m": 0.0,
+        "ellipsoid": "GRS80",
     }
 
 
@@ -198,11 +261,47 @@ def test_manual_meridian_must_be_finite_and_in_range(
         )
 
 
-def test_manual_meridian_without_epsg_candidate_is_explicit() -> None:
-    with pytest.raises(ValueError, match="no CGCS2000.*120.5"):
-        recommend_cgcs2000_candidates(
-            [120.0, 120.001],
-            [30.0, 30.001],
-            cad_bbox_raw=(0.0, 0.0, 1.0, 1.0),
-            central_meridian_deg=120.5,
-        )
+def test_custom_118_degrees_50_minutes_candidate_uses_fixed_projection() -> None:
+    central_meridian = georeference.parse_central_meridian("118°50′")
+
+    candidates = recommend_cgcs2000_candidates(
+        [119.071873],
+        [28.896830],
+        cad_bbox_raw=(484_000.0, 3_189_000.0, 550_000.0, 3_211_000.0),
+        central_meridian_deg=central_meridian,
+    )
+
+    assert candidates
+    assert candidates[0].crs_source == "custom"
+    assert candidates[0].epsg is None
+    assert candidates[0].central_meridian_deg == pytest.approx(118.0 + 50.0 / 60.0)
+    assert candidates[0].evidence["trajectory_inside_cad_ratio"] == 1.0
+    assert candidates[0].to_dict()["false_easting_m"] == 500_000.0
+
+
+def test_confirmed_custom_projection_reuses_candidate_parameters() -> None:
+    candidate = recommend_cgcs2000_candidates(
+        [119.071873],
+        [28.896830],
+        cad_bbox_raw=(484_000.0, 3_189_000.0, 550_000.0, 3_211_000.0),
+        central_meridian_deg=118.0 + 50.0 / 60.0,
+    )[0]
+    config = CadGeoreference.from_dict(
+        {
+            **_custom_config(),
+            **{
+                key: value
+                for key, value in candidate.to_dict().items()
+                if key not in {"crs_name", "score", "evidence"}
+            },
+            "confirmed": True,
+        }
+    )
+
+    projected = project_wgs84_to_cad_raw(119.071873, 28.896830, config)
+
+    assert projected == pytest.approx(
+        candidate.evidence["trajectory_polyline_raw"][0]
+    )
+    assert 484_000.0 < projected[0] < 550_000.0
+    assert 3_189_000.0 < projected[1] < 3_211_000.0
