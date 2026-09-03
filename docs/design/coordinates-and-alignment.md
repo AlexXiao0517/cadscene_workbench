@@ -10,7 +10,7 @@
 | CAD meters | 对齐模块使用的本地 CAD 米制坐标。 | 由人工关键帧的 Web 坐标通过 `origin_xy` 和 `cad_scale` 转换得到。 |
 | Web `cad_world` | 查看器保存/读取的相机坐标。 | 用于界面和下载/导入兼容；它不是自动地理参考坐标。 |
 | local ENU | partial-SRT CLI 将经纬度变换得到的东、北、天局部坐标。 | East/North 基于 WGS84 本地 ENU；Up 是单独记录的相对高度，不宣称为 CAD 绝对高程。 |
-| CGCS2000 projected / CAD raw | full-pose 将 WGS84 SRT 位置按用户确认的 EPSG/高斯—克吕格参数投影，并按 CAD 轴序映射。 | 候选绑定当前 CAD 指纹；中央经线、3°/6°分带、带号和 X/Y 轴序都不能跨项目猜测。 |
+| CGCS2000 projected / CAD raw | full-pose 将 WGS84 SRT 位置按用户确认的标准 EPSG 或受控自定义高斯—克吕格参数投影，并按 CAD 轴序映射。 | 候选绑定当前 CAD 指纹；中央经线、分带/自定义参数、带号和 X/Y 轴序都不能跨项目猜测。 |
 | CAD local metres | full-pose 通过 `origin_xy` 与 `cad_scale` 把 CAD raw/projected 坐标变为内部局部米制轨迹。 | 轨迹标记 `metric_scale_locked=true`，不得进入自由尺度 Sim3。 |
 
 Web 到 CAD meters 的位置换算为：
@@ -41,6 +41,13 @@ p_cad = scale × R × p_sfm + t
 对齐固定单位旋转和 `scale=1.0`；无人工修正时直接发布，存在人工锚点时只稳健估计一个
 固定 XYZ 平移以及独立的 wrapped yaw/pitch/roll 零偏。彼此矛盾的修正会被拒绝。该路线
 允许 viewer scene 没有 sparse PLY，且不运行依赖点云的道路表面诊断。
+
+中央经线输入先统一为十进制度。`120` 等能精确匹配 PROJ 数据库 CGCS2000
+高斯—克吕格定义的值继续保存 EPSG 编号；`118°50′` 等非标准值则保存
+`crs_source=custom`、`epsg=null` 并按精确的 `118.833333…°` 重建投影。受控自定义路径
+只允许 GRS80 椭球、纬度原点 0°、比例因子 1、假东 500000 米、假北 0 米、米制单位和
+无带号，候选评分与确认后的轨迹构建调用同一投影函数。该路径不包含七参数、四参数或
+控制点拟合；如果 CAD 并非上述 CGCS2000 约定，预览不一致时必须停止确认并查明图纸基准。
 
 ## FOV 优先级
 

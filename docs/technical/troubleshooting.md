@@ -158,7 +158,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 **检查：** 查看项目 snapshot 的 `resolved_workflow`、`cad_georeference`、候选 evidence/preview、`can_run_trajectory` 与 blockers，以及片段 `srt_full_pose_settings.horizontal_fov_deg`。运行开发者指南中的 EPSG:4549 smoke 检查 PROJ 数据；它成功也不代表当前 CAD 应采用 120°中央经线。
 
-**处理：** 水平 FOV 与中央经线分别填写：前者是镜头角度（例如 72°），后者是当前 CAD 的 CGCS2000 投影参数（例如 120°）。点击“生成候选”后观察输入校验、CRS 枚举、评分与预览进度；关闭再打开弹窗可恢复同一任务。任务失败时保留输入并重试，CAD/SRT 或中央经线变化后必须重新生成。在当前 CAD bbox 与投影轨迹预览证据一致后显式确认候选，并按相对高度设置 `cad_z_offset_m`。不要把 120°复制为其他 CAD 的默认中央经线，也不要把未经共同基准验证的绝对高度当作 CAD Z。若 SRT 不满足完整姿态门槛，`srt_sfm_fused` 仍为 Interface only；需要正式稳定路径时改用符合产品契约的 `sfm_only` 项目输入。
+**处理：** 水平 FOV 与中央经线分别填写：前者是镜头角度（例如 72°），后者是当前 CAD 的 CGCS2000 投影参数。中央经线可填 `120`、`118.833333` 或 `118°50′`；分必须小于 60。标准经线会生成 EPSG 候选，非标准经线会按精确输入生成自定义 CGCS2000 高斯—克吕格候选，其固定参数为 GRS80、纬度原点 0°、比例因子 1、假东 500000 米、假北 0 米且无带号。点击“生成候选”后观察输入校验、CRS 枚举、评分与预览进度；关闭再打开弹窗可恢复同一任务。任务失败时保留输入并重试，CAD/SRT 或中央经线变化后必须重新生成。在当前 CAD bbox 与投影轨迹预览证据一致后显式确认候选，并按相对高度设置 `cad_z_offset_m`。不要把 120°复制为其他 CAD 的默认中央经线，也不要把未经共同基准验证的绝对高度当作 CAD Z。若 SRT 不满足完整姿态门槛，`srt_sfm_fused` 仍为 Interface only；需要正式稳定路径时改用符合产品契约的 `sfm_only` 项目输入。
 
 ### pure-rotation 后无法放置、没有轨迹或渲染位置不对
 
