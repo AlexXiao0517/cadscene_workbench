@@ -24,6 +24,7 @@ MAX_GLOBAL_ANCHOR_RESIDUAL_M = 10.0
 MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
 MAX_METRIC_CORRECTION_ANGLE_RESIDUAL_DEG = 15.0
 MAX_FIXED_TRACK_OFFSET_RESIDUAL_M = 0.05
+MAX_FIXED_TRACK_ORIENTATION_DRIFT_DEG = 5.0
 MAX_FOCAL_ASPECT_RATIO = 2.0
 UPSTREAM_SFM_MANUAL_FOV_WARNING = (
     "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used."
@@ -91,6 +92,10 @@ class AnchoredAlignment:
     anchor_positions: np.ndarray | None = None
     orientation_frames: np.ndarray | None = None
     orientation_world_from_camera: np.ndarray | None = None
+    orientation_component_ids: np.ndarray | None = None
+    orientation_anchor_count: int = 0
+    orientation_anchor_residual_max_deg: float = 0.0
+    drift_corrected: bool = False
 
     def residual_at(self, frame_index: float) -> tuple[np.ndarray, np.ndarray]:
         f = float(frame_index)
@@ -120,6 +125,11 @@ class AnchoredAlignment:
                 "metric_direct",
                 "srt_fixed_track",
             },
+            "orientation_anchor_count": int(self.orientation_anchor_count),
+            "orientation_anchor_residual_max_deg": float(
+                self.orientation_anchor_residual_max_deg
+            ),
+            "drift_corrected": bool(self.drift_corrected),
         }
 
     def absolute_orientation_at(self, frame_index: float) -> np.ndarray | None:
@@ -137,6 +147,13 @@ class AnchoredAlignment:
             return None
         second = int(np.searchsorted(frames, frame, side="right"))
         first = second - 1
+        components = self.orientation_component_ids
+        if (
+            components is not None
+            and len(components) == len(frames)
+            and int(components[first]) != int(components[second])
+        ):
+            return None
         interpolator = Slerp(
             [float(frames[first]), float(frames[second])],
             Rotation.from_matrix(
@@ -395,11 +412,79 @@ def _fixed_track_alignment(
         translation=translation,
     )
     orientations: dict[int, np.ndarray] = {}
+    orientation_components: dict[int, int] = {}
     for frame in traj.frames:
         value = int(frame)
         orientations[value] = traj.orientation_at(value).T
+        component = traj.relative_component_at(value)
+        orientation_components[value] = 0 if component is None else component
+
+    relative_anchor_count = 0
+    maximum_anchor_residual = 0.0
+    drift_corrected = False
+    for component_id in sorted(set(int(value) for value in traj.relative_component_ids)):
+        component_frames = [
+            int(frame)
+            for frame, value in zip(
+                traj.relative_frames, traj.relative_component_ids
+            )
+            if int(value) == component_id
+        ]
+        component_anchors = [
+            row
+            for row in correspondences
+            if traj.relative_component_at(row.frame_index) == component_id
+        ]
+        if not component_anchors:
+            continue
+        component_anchors.sort(key=lambda row: row.frame_index)
+        corrections = [
+            _camera_to_world_rotation(row.state)
+            @ traj.relative_orientation_at(row.frame_index)
+            for row in component_anchors
+        ]
+        relative_anchor_count += len(component_anchors)
+        reference = corrections[0]
+        residuals = [
+            math.degrees(
+                float(Rotation.from_matrix(value @ reference.T).magnitude())
+            )
+            for value in corrections
+        ]
+        component_residual = max(residuals, default=0.0)
+        maximum_anchor_residual = max(maximum_anchor_residual, component_residual)
+        interpolate_correction = (
+            len(component_anchors) > 1
+            and component_residual > MAX_FIXED_TRACK_ORIENTATION_DRIFT_DEG
+        )
+        drift_corrected = drift_corrected or interpolate_correction
+        correction_interpolator = (
+            Slerp(
+                [float(row.frame_index) for row in component_anchors],
+                Rotation.from_matrix(np.asarray(corrections, dtype=np.float64)),
+            )
+            if interpolate_correction
+            else None
+        )
+        for frame in component_frames:
+            correction = reference
+            if correction_interpolator is not None:
+                bounded_frame = min(
+                    max(float(frame), float(component_anchors[0].frame_index)),
+                    float(component_anchors[-1].frame_index),
+                )
+                correction = correction_interpolator([bounded_frame]).as_matrix()[0]
+            camera_from_local = traj.relative_orientation_at(frame)
+            orientations[frame] = correction @ camera_from_local.T
+            orientation_components[frame] = component_id
+
     for row in correspondences:
         orientations[row.frame_index] = _camera_to_world_rotation(row.state)
+        component = traj.relative_component_at(row.frame_index)
+        if component is None:
+            orientation_components[row.frame_index] = -1
+        else:
+            orientation_components[row.frame_index] = component
     orientation_frames = np.asarray(sorted(orientations), dtype=np.int64)
     orientation_values = np.asarray(
         [orientations[int(frame)] for frame in orientation_frames],
@@ -416,6 +501,13 @@ def _fixed_track_alignment(
         anchor_positions=None,
         orientation_frames=orientation_frames,
         orientation_world_from_camera=orientation_values,
+        orientation_component_ids=np.asarray(
+            [orientation_components[int(frame)] for frame in orientation_frames],
+            dtype=np.int64,
+        ),
+        orientation_anchor_count=relative_anchor_count,
+        orientation_anchor_residual_max_deg=maximum_anchor_residual,
+        drift_corrected=drift_corrected,
     )
 
 
@@ -1077,6 +1169,11 @@ def _alignment_json(
                 if anchored.position_mode == "srt_fixed_track"
                 else None
             ),
+            "orientation_anchor_count": int(anchored.orientation_anchor_count),
+            "orientation_anchor_residual_max_deg": float(
+                anchored.orientation_anchor_residual_max_deg
+            ),
+            "drift_corrected": bool(anchored.drift_corrected),
         },
         "config": {
             "cad_scale": float(config.cad_scale),

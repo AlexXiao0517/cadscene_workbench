@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from cadscene.alignment import aligner
 from cadscene.alignment.aligner import (
@@ -162,6 +163,177 @@ def _write_position_only_fixed_track(path: Path) -> np.ndarray:
         encoding="utf-8",
     )
     return centers
+
+
+def _write_relative_fixed_track(path: Path) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+    centers = np.asarray(
+        [
+            [0.0, 0.0, 80.0],
+            [2.0, 0.0, 80.2],
+            [3.0, 1.5, 80.5],
+            [4.0, 3.0, 80.6],
+        ],
+        dtype=np.float64,
+    )
+    local_rotations = {
+        frame: Rotation.from_euler("z", angle, degrees=True).as_matrix()
+        for frame, angle in zip((0, 10, 20, 30), (0.0, 10.0, 20.0, 30.0))
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "fps": 20.0,
+                "width": 1920,
+                "height": 1080,
+                "intrinsics": [
+                    {
+                        "model": "PINHOLE",
+                        "width": 1920,
+                        "height": 1080,
+                        "params": [960.0, 960.0, 960.0, 540.0],
+                    }
+                ],
+                "poses": [
+                    {
+                        "frame_index": frame,
+                        "registered": False,
+                        "position_available": True,
+                        "orientation_available": False,
+                        "center": center.tolist(),
+                        "visual_component_id": 0,
+                        "cam_from_visual_local_quat_wxyz": _matrix_to_quat_wxyz(
+                            local_rotations[frame]
+                        ),
+                    }
+                    for frame, center in zip((0, 10, 20, 30), centers)
+                ],
+                "meta": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                    "position_source": "srt_cad_locked",
+                    "recommended_anchor_frame": 10,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return centers, local_rotations
+
+
+def _state_from_world_rotation(
+    center: np.ndarray, world_from_camera: np.ndarray
+) -> CameraState:
+    yaw, pitch, roll = aligner._decompose_world_from_cam(world_from_camera)
+    return CameraState(
+        camera_x=float(center[0]),
+        camera_y=float(center[1]),
+        camera_z=float(center[2]),
+        yaw_deg=yaw,
+        pitch_deg=pitch,
+        roll_deg=roll,
+        fov_deg=72.0,
+    )
+
+
+def _row_world_rotation(row: dict) -> np.ndarray:
+    return _camera_to_world_rotation(CameraState.from_row(row, cad_scale=1.0))
+
+
+def test_fixed_track_one_anchor_propagates_relative_orientation_and_keeps_xyz(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "relative-fixed-track.json"
+    centers, local_rotations = _write_relative_fixed_track(trajectory_path)
+    manual_world_from_camera = _camera_to_world_rotation(
+        CameraState(yaw_deg=42.0, pitch_deg=-18.0, roll_deg=3.0)
+    )
+    anchor = _state_from_world_rotation(centers[1], manual_world_from_camera)
+    track_path = tmp_path / "manual-track.json"
+    track_path.write_text(
+        json.dumps(_track_from_states({10: anchor}, origin_xy=(0.0, 0.0))),
+        encoding="utf-8",
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+            frontend_track_step=10,
+        ),
+    )
+
+    actual_centers = np.asarray(
+        [
+            [row["camera_x"], row["camera_y"], row["camera_z"]]
+            for row in result.sfm_camera_path_rows
+        ]
+    )
+    np.testing.assert_allclose(actual_centers, centers, atol=1e-12)
+    assert all(row["orientation_available"] for row in result.sfm_camera_path_rows)
+    rows = {row["frame_index"]: row for row in result.sfm_camera_path_rows}
+    np.testing.assert_allclose(
+        _row_world_rotation(rows[10]), manual_world_from_camera, atol=1e-8
+    )
+    world_from_local = manual_world_from_camera @ local_rotations[10]
+    np.testing.assert_allclose(
+        _row_world_rotation(rows[20]),
+        world_from_local @ local_rotations[20].T,
+        atol=1e-8,
+    )
+    assert result.alignment_json["validation"]["orientation_anchor_count"] == 1
+    assert result.alignment_json["validation"]["drift_corrected"] is False
+
+
+def test_fixed_track_second_anchor_corrects_large_orientation_drift(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "relative-fixed-track.json"
+    centers, local_rotations = _write_relative_fixed_track(trajectory_path)
+    first_world = _camera_to_world_rotation(
+        CameraState(yaw_deg=35.0, pitch_deg=-25.0, roll_deg=2.0)
+    )
+    first_correction = first_world @ local_rotations[0]
+    second_correction = (
+        Rotation.from_euler("z", 12.0, degrees=True).as_matrix()
+        @ first_correction
+    )
+    second_world = second_correction @ local_rotations[30].T
+    track_path = tmp_path / "manual-track.json"
+    track_path.write_text(
+        json.dumps(
+            _track_from_states(
+                {
+                    0: _state_from_world_rotation(centers[0], first_world),
+                    30: _state_from_world_rotation(centers[3], second_world),
+                },
+                origin_xy=(0.0, 0.0),
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+            frontend_track_step=10,
+        ),
+    )
+
+    rows = {row["frame_index"]: row for row in result.sfm_camera_path_rows}
+    np.testing.assert_allclose(_row_world_rotation(rows[0]), first_world, atol=1e-8)
+    np.testing.assert_allclose(_row_world_rotation(rows[30]), second_world, atol=1e-8)
+    validation = result.alignment_json["validation"]
+    assert validation["orientation_anchor_count"] == 2
+    assert validation["orientation_anchor_residual_max_deg"] == pytest.approx(12.0)
+    assert validation["drift_corrected"] is True
 
 
 def test_fixed_track_alignment_keeps_centers_plus_one_translation_and_slerps_attitude(
