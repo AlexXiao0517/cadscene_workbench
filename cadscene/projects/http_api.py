@@ -27,6 +27,7 @@ from .workbench_sessions import (
     ProjectWorkbenchService,
     ReplayedWorkbenchSave,
     StaleWorkbenchSession,
+    TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS,
     WorkbenchPermissionDenied,
 )
 from cadscene.srt.georeference import parse_central_meridian
@@ -1304,7 +1305,8 @@ class ProjectApi:
                 expected_jobs_revision, bool
             ):
                 raise ValueError("expected_jobs_revision is required")
-            if context.workflow == "srt_fixed_track_visual_pose":
+            if context.workflow in TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS:
+                full_pose = context.workflow == "srt_full_pose"
                 preflight = self.service.preflight_trajectory_jobs(
                     project_id, clip_ids=(clip_id,)
                 )
@@ -1324,13 +1326,21 @@ class ProjectApi:
                     )
                     if not result.job_ids:
                         raise WorkbenchPermissionDenied(
-                            "固定轨迹准备任务未能入队"
+                            (
+                                "全姿态轨迹准备任务未能入队"
+                                if full_pose
+                                else "固定轨迹准备任务未能入队"
+                            )
                         )
                     return ApiResponse(
                         202,
                         {
                             "state": "preparing_trajectory",
-                            "message": "正在生成 SRT 固定轨迹并估计视觉姿态",
+                            "message": (
+                                "正在生成 SRT 全姿态轨迹"
+                                if full_pose
+                                else "正在生成 SRT 固定轨迹并估计视觉姿态"
+                            ),
                             "job_id": result.job_ids[-1],
                             "jobs_revision": self.repositories.jobs.load(
                                 project_id
@@ -1338,7 +1348,12 @@ class ProjectApi:
                         },
                     )
                 reason = preflight.reasons.get(
-                    clip_id, "SRT 固定轨迹配置尚未满足启动条件"
+                    clip_id,
+                    (
+                        "SRT 全姿态配置尚未满足启动条件"
+                        if full_pose
+                        else "SRT 固定轨迹配置尚未满足启动条件"
+                    ),
                 )
                 if reason != "physical MP4 source is missing":
                     raise WorkbenchPermissionDenied(reason)

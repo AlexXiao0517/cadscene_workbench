@@ -1332,11 +1332,18 @@
     }
   }
 
+  function trajectoryPreparationLabel(clip) {
+    return clip?.resolved_workflow === "srt_full_pose"
+      ? "SRT 全姿态轨迹"
+      : "SRT 固定轨迹与视觉姿态";
+  }
+
   async function waitForWorkbenchPreparation(clipId, initialState = "preparing_clip") {
     const dialog = $("#workbenchPreparationDialog");
     const preparingTrajectory = initialState === "preparing_trajectory";
+    const initialClip = state.snapshot?.clips.find((item) => item.clip_id === clipId);
     $("#workbenchPreparationTitle").textContent = preparingTrajectory
-      ? "正在生成 SRT 轨迹与视觉姿态"
+      ? `正在生成 ${trajectoryPreparationLabel(initialClip)}`
       : "正在准备片段工作台";
     if (!dialog.open) dialog.showModal();
     while (true) {
@@ -1344,6 +1351,10 @@
       await pollSnapshot();
       const clip = state.snapshot?.clips.find((item) => item.clip_id === clipId);
       if (!clip) throw new Error("片段已不存在，无法进入工作台");
+      const trajectoryLabel = trajectoryPreparationLabel(clip);
+      if (preparingTrajectory) {
+        $("#workbenchPreparationTitle").textContent = `正在生成 ${trajectoryLabel}`;
+      }
       const preparation = clip.workbench?.preparation;
       const activeProgress = preparingTrajectory ? clip.progress : preparation?.progress;
       const activeStatus = preparingTrajectory ? clip.status : preparation?.status;
@@ -1354,7 +1365,7 @@
         : null;
       $("#workbenchPreparationMessage").textContent = activeProgress?.message
         || (preparingTrajectory
-          ? (STATUS_LABELS[clip.stage] || clip.stage || "正在准备固定轨迹…")
+          ? (STATUS_LABELS[clip.stage] || clip.stage || `正在准备${trajectoryLabel}…`)
           : (preparation?.stage
             ? (STATUS_LABELS[preparation.stage] || preparation.stage)
             : "正在按原视频时间范围准备片段视频…"));
@@ -1363,7 +1374,7 @@
       if (["failed", "interrupted", "cancelled", "stale_input", "superseded"].includes(activeStatus)) {
         dialog.close();
         throw new Error(activeError || (preparingTrajectory
-          ? "SRT 固定轨迹与视觉姿态生成失败，请重试"
+          ? `${trajectoryLabel}生成失败，请重试`
           : "片段视频准备失败，请重试"));
       }
       if (!preparingTrajectory && preparation?.status === "success") {

@@ -558,3 +558,11 @@ def test_ready_clip_prepares_inputs_then_opens_workbench_with_chinese_status() -
         ("failed", "失败"),
     ):
         assert f'{source}: "{translated}"' in script
+
+
+def test_full_pose_workbench_preparation_has_workflow_specific_progress_copy() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'clip?.resolved_workflow === "srt_full_pose"' in script
+    assert '"SRT 全姿态轨迹"' in script
+    assert '"SRT 固定轨迹与视觉姿态"' in script

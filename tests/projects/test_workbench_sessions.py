@@ -1061,6 +1061,52 @@ def _fixed_track_api_with_workbench(
     return api, repositories
 
 
+def _full_pose_api_without_trajectory(tmp_path: Path) -> tuple[ProjectApi, object]:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path,
+        with_trajectory=False,
+    )
+    project = repositories.project.load("project-1")
+    srt_path = Path(project.source_assets["srt_path"])
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n"
+        "[latitude:30] [longitude:120] [rel_alt:80] "
+        "[gimbal_yaw:1] [gimbal_pitch:-90] [gimbal_roll:0]\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\n"
+        "[latitude:30.00001] [longitude:120.00001] [rel_alt:80.2] "
+        "[gimbal_yaw:2] [gimbal_pitch:-89] [gimbal_roll:0]\n",
+        encoding="utf-8",
+    )
+    clips = repositories.clips.load("project-1")
+    selected = clips.clips[0]
+    analysis = dict(selected.analysis)
+    analysis["recommended_workflow"] = "srt_full_pose"
+    analysis["srt_coverage"] = {
+        **analysis["srt_coverage"],
+        "kind": "full_pose",
+        "full_pose_coverage": 1.0,
+    }
+    updated = replace(
+        selected,
+        analysis=analysis,
+        recommended_workflow="srt_full_pose",
+        resolved_workflow="srt_full_pose",
+        manual_definition={
+            "srt_full_pose": {
+                "horizontal_fov_deg": 59.0,
+                "cad_z_offset_m": 0.0,
+                "attitude_profile": "dji_absolute_ned",
+            }
+        },
+    )
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(value, clips=(updated,)),
+    )
+    return api, repositories
+
+
 def test_fixed_track_open_queues_trajectory_instead_of_workflow_start(
     tmp_path: Path,
 ) -> None:
@@ -1084,6 +1130,33 @@ def test_fixed_track_open_queues_trajectory_instead_of_workflow_start(
     job = next(item for item in queued.jobs if item["job_id"] == response.body["job_id"])
     assert job["job_type"] == "trajectory"
     assert job["adapter_name"] == "srt_fixed_track_visual_pose"
+    assert not (
+        api.service.projects_root / "project-1" / "workbench_sessions"
+    ).exists()
+
+
+def test_full_pose_open_queues_trajectory_instead_of_workflow_start(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _full_pose_api_without_trajectory(tmp_path)
+
+    response = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+
+    assert response.status == 202
+    assert response.body["state"] == "preparing_trajectory"
+    assert "SRT 全姿态轨迹" in response.body["message"]
+    queued = repositories.jobs.load("project-1")
+    job = next(item for item in queued.jobs if item["job_id"] == response.body["job_id"])
+    assert job["job_type"] == "trajectory"
+    assert job["adapter_name"] == "srt_full_pose"
     assert not (
         api.service.projects_root / "project-1" / "workbench_sessions"
     ).exists()
