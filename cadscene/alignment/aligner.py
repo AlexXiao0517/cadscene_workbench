@@ -9,6 +9,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 from cadscene.alignment.keyframes import confirmed_keyframes, load_web_camera_track
+from cadscene.alignment.pose_prior_refinement import (
+    ManualPose,
+    PosePrior,
+    fit_pose_prior_residuals,
+)
 from cadscene.core.camera import (
     CameraState,
     camera_to_world_rotation,
@@ -122,10 +127,11 @@ class AnchoredAlignment:
             "residual_pos_m_mean": float(mag.mean()) if len(mag) else 0.0,
             "alignment_mode": self.position_mode,
             "scale_observable": self.position_mode not in {
-                "rotation_only",
-                "metric_direct",
-                "srt_fixed_track",
-            },
+            "rotation_only",
+            "metric_direct",
+            "srt_fixed_track",
+            "srt_pose_prior_residual",
+        },
             "orientation_anchor_count": int(self.orientation_anchor_count),
             "orientation_anchor_residual_max_deg": float(
                 self.orientation_anchor_residual_max_deg
@@ -349,6 +355,66 @@ def _is_metric_direct_trajectory(traj: SfmTrajectory) -> bool:
     return bool(
         traj.meta.get("coordinate_system") == "cad_local_m"
         and traj.meta.get("metric_scale_locked") is True
+    )
+
+
+def _is_srt_pose_prior_trajectory(traj: SfmTrajectory) -> bool:
+    return bool(
+        _is_metric_direct_trajectory(traj)
+        and traj.meta.get("pose_prior_schema") == "srt_pose_prior_v1"
+        and traj.meta.get("trajectory_mode")
+        in {"srt_full_pose", "srt_fixed_track_visual_pose"}
+    )
+
+
+def _srt_pose_prior_alignment(
+    correspondences: Sequence[KeyframeCorrespondence],
+    traj: SfmTrajectory,
+) -> tuple[Sim3, AnchoredAlignment]:
+    base = [
+        PosePrior(
+            frame_index=int(frame),
+            center=traj.center_at(int(frame)),
+            world_from_camera=traj.orientation_at(int(frame)).T,
+        )
+        for frame in traj.frames
+        if traj.is_orientation_available(int(frame))
+    ]
+    manual = [
+        ManualPose(
+            frame_index=int(row.frame_index),
+            center=np.asarray(row.center_cad, dtype=np.float64),
+            world_from_camera=_camera_to_world_rotation(row.state),
+        )
+        for row in correspondences
+    ]
+    fit = fit_pose_prior_residuals(base, manual)
+    orientation_frames = np.asarray(
+        [pose.frame_index for pose in base], dtype=np.int64
+    )
+    orientation_values = np.asarray(
+        [fit.pose_at(int(frame))[1] for frame in orientation_frames],
+        dtype=np.float64,
+    ).reshape(-1, 3, 3)
+    residual_angles = np.asarray(
+        [
+            _decompose_world_from_cam(rotation)
+            for rotation in fit.rotation_residuals
+        ],
+        dtype=np.float64,
+    ).reshape(-1, 3)
+    identity = Sim3.identity()
+    return identity, AnchoredAlignment(
+        sim3=identity,
+        frames=fit.key_frames,
+        residual_positions=fit.position_residuals,
+        residual_angles_deg=residual_angles,
+        position_mode="srt_pose_prior_residual",
+        anchor_positions=None,
+        orientation_frames=orientation_frames,
+        orientation_world_from_camera=orientation_values,
+        orientation_component_ids=np.zeros(len(orientation_frames), dtype=np.int64),
+        orientation_anchor_count=len(manual),
     )
 
 
@@ -951,6 +1017,25 @@ def aligned_state_at_frame(
     anchored: AnchoredAlignment | None,
     config: AlignmentConfig,
 ) -> CameraState:
+    if anchored is not None and anchored.position_mode == "srt_pose_prior_residual":
+        world_from_camera = anchored.absolute_orientation_at(frame_index)
+        if world_from_camera is None:
+            raise ValueError(
+                f"trajectory orientation is unavailable at frame {float(frame_index):g}"
+            )
+        residual_position, _residual_angles = anchored.residual_at(frame_index)
+        center_cad = traj.center_at(frame_index) + residual_position
+        yaw, pitch, roll = _decompose_world_from_cam(world_from_camera)
+        return CameraState(
+            camera_x=float(center_cad[0]),
+            camera_y=float(center_cad[1]),
+            camera_z=float(center_cad[2]),
+            yaw_deg=float(yaw),
+            pitch_deg=float(pitch),
+            roll_deg=float(roll),
+            fov_deg=_fov_for_path(traj, config),
+            cad_scale=float(config.cad_scale),
+        )
     if anchored is not None and anchored.position_mode == "srt_fixed_track":
         world_from_camera = anchored.absolute_orientation_at(frame_index)
         if world_from_camera is None:
@@ -1004,7 +1089,10 @@ def generate_aligned_camera_path(
 
     def path_source() -> str:
         return (
-            "srt_fixed_track"
+            "srt_pose_prior_residual"
+            if anchored is not None
+            and anchored.position_mode == "srt_pose_prior_residual"
+            else "srt_fixed_track"
             if anchored is not None and anchored.position_mode == "srt_fixed_track"
             else "metric_direct"
             if anchored is not None and anchored.position_mode == "metric_direct"
@@ -1016,6 +1104,32 @@ def generate_aligned_camera_path(
         )
 
     def row_at(frame: int) -> dict:
+        if anchored is not None and anchored.position_mode == "srt_pose_prior_residual":
+            residual_position, _residual_angles = anchored.residual_at(frame)
+            center = traj.center_at(frame) + residual_position
+            world_from_camera = anchored.absolute_orientation_at(frame)
+            if world_from_camera is None:
+                return {
+                    "frame_index": frame,
+                    "camera_x": float(center[0]),
+                    "camera_y": float(center[1]),
+                    "camera_z": float(center[2]),
+                    "yaw": 0.0,
+                    "pitch": 0.0,
+                    "roll": 0.0,
+                    "fov": _fov_for_path(traj, config),
+                    "cad_scale": float(config.cad_scale),
+                    "status": "unregistered",
+                    "position_available": True,
+                    "orientation_available": False,
+                    "path_source": path_source(),
+                }
+            state = aligned_state_at_frame(frame, traj, sim3, anchored, config)
+            row = state.to_row(frame_index=frame, status="ok")
+            row["position_available"] = True
+            row["orientation_available"] = True
+            row["path_source"] = path_source()
+            return row
         if anchored is not None and anchored.position_mode == "srt_fixed_track":
             center = traj.center_at(frame) + sim3.translation
             world_from_camera = anchored.absolute_orientation_at(frame)
@@ -1208,6 +1322,7 @@ def _alignment_json(
             "rotation_only",
             "metric_direct",
             "srt_fixed_track",
+            "srt_pose_prior_residual",
         },
         "transform": sim3.to_dict(),
         "sim3": sim3.to_dict(),
@@ -1230,10 +1345,12 @@ def _alignment_json(
             "metric_scale_locked": anchored.position_mode in {
                 "metric_direct",
                 "srt_fixed_track",
+                "srt_pose_prior_residual",
             },
             "position_source": (
                 "srt_cad_locked"
-                if anchored.position_mode == "srt_fixed_track"
+                if anchored.position_mode
+                in {"srt_fixed_track", "srt_pose_prior_residual"}
                 else None
             ),
             "orientation_anchor_count": int(anchored.orientation_anchor_count),
@@ -1338,16 +1455,22 @@ def run_alignment(
         fov_source = "config"
     if config.fov_from == "config":
         _validated_configured_fov(config.fov)
-    fixed_track = _is_fixed_track_trajectory(traj)
+    pose_prior = _is_srt_pose_prior_trajectory(traj)
+    fixed_track = _is_fixed_track_trajectory(traj) and not pose_prior
     metric_direct = _is_metric_direct_trajectory(traj)
-    if fixed_track:
+    if pose_prior:
+        correspondences = build_correspondences(
+            track, traj, config, allow_empty=True
+        )
+        sim3, anchored = _srt_pose_prior_alignment(correspondences, traj)
+    elif fixed_track:
         correspondences = _build_fixed_track_correspondences(track, traj, config)
         sim3, anchored = _fixed_track_alignment(correspondences, traj)
     else:
         correspondences = build_correspondences(
             track, traj, config, allow_empty=metric_direct
         )
-    if fixed_track:
+    if pose_prior or fixed_track:
         pass
     elif metric_direct:
         if _is_authoritative_full_pose_track(track, traj):

@@ -620,6 +620,117 @@ def test_metric_full_pose_never_calls_free_sim3(
     assert result.metrics["alignment_mode"] == "metric_direct"
 
 
+def test_srt_pose_prior_accepts_nonuniform_six_dof_keyframe_residuals(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "full_pose_prior.json"
+    trajectory = _trajectory()
+    _write_trajectory(
+        trajectory_path,
+        trajectory,
+        meta={
+            "trajectory_mode": "srt_full_pose",
+            "coordinate_system": "cad_local_m",
+            "metric_scale_locked": True,
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "edit_policy": "six_dof_keyframe_residuals",
+        },
+    )
+    states = {
+        0: CameraState(
+            camera_x=1.0,
+            camera_y=0.0,
+            camera_z=0.0,
+            yaw_deg=10.0,
+            fov_deg=70.0,
+        ),
+        20: CameraState(
+            camera_x=4.0,
+            camera_y=3.0,
+            camera_z=0.0,
+            yaw_deg=30.0,
+            fov_deg=70.0,
+        ),
+    }
+    track = _track_from_states(states, origin_xy=(0.0, 0.0))
+    track["meta"] = {
+        "workflow": "srt_full_pose",
+        "edit_policy": "srt_pose_residual_keyframes_v1",
+    }
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+        ),
+    )
+
+    assert result.metrics["alignment_mode"] == "srt_pose_prior_residual"
+    middle = next(row for row in result.sfm_camera_path_rows if row["frame_index"] == 10)
+    assert middle["camera_x"] == pytest.approx(3.0)
+    assert middle["camera_y"] == pytest.approx(1.0)
+    assert middle["yaw"] == pytest.approx(20.0)
+    first = result.sfm_camera_path_rows[0]
+    assert first["camera_x"] == pytest.approx(1.0)
+    assert first["yaw"] == pytest.approx(10.0)
+
+
+def test_srt_pose_prior_without_manual_keys_keeps_original_route(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "fixed_track_prior.json"
+    trajectory = _trajectory()
+    _write_trajectory(
+        trajectory_path,
+        trajectory,
+        meta={
+            "trajectory_mode": "srt_fixed_track_visual_pose",
+            "coordinate_system": "cad_local_m",
+            "metric_scale_locked": True,
+            "position_source": "srt_cad_locked",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "edit_policy": "six_dof_keyframe_residuals",
+        },
+    )
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(
+        json.dumps(
+            {
+                "keyframes": [],
+                "meta": {
+                    "workflow": "srt_fixed_track_visual_pose",
+                    "edit_policy": "srt_pose_residual_keyframes_v1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=10,
+        ),
+    )
+
+    assert result.metrics["alignment_mode"] == "srt_pose_prior_residual"
+    np.testing.assert_allclose(
+        [
+            [row["camera_x"], row["camera_y"], row["camera_z"]]
+            for row in result.sfm_camera_path_rows
+        ],
+        trajectory.centers,
+    )
+
+
 def test_metric_full_pose_alignment_preserves_unregistered_frame_gaps() -> None:
     trajectory = SfmTrajectory(
         frames=np.asarray([0, 3], dtype=np.int64),
