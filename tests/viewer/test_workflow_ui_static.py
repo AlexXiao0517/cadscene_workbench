@@ -214,6 +214,9 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     )
     assert 'stateLabel.textContent = "轨迹已就绪"' in workflow
     assert 'message.textContent = "SRT 基准轨迹和 COLMAP 姿态已载入；可添加六自由度关键帧并拟合路线。"' in workflow
+    assert "姿态解算：${solveResolution}" in viewer
+    assert "${solveSize[0]}×${solveSize[1]}" in viewer
+    assert "源视频/渲染：${sourceSize[0]}×${sourceSize[1]}" in viewer
 
     assert "window.cadsceneSetFixedTrackVisualPoseMode" in viewer
     fixed_mode_start = viewer.index("window.cadsceneSetFixedTrackVisualPoseMode")
@@ -851,7 +854,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'viewer_legacy.js?v=20260904-srt-pose-prior-v2' in index
+    assert 'viewer_legacy.js?v=20260904-srt-resolution-v1' in index
     assert 'workflow.js?v=20260904-srt-pose-prior-v2' in index
 
 

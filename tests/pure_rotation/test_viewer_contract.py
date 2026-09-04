@@ -173,7 +173,7 @@ def test_pure_rotation_so3_assets_are_cache_busted_and_not_stored() -> None:
 
     assert "style.css?v=20260813-stage9-label-editor-v1" in html
     assert "pure_rotation_math.js?v=20260729-local-camera-v8" in html
-    assert "viewer_legacy.js?v=20260904-srt-pose-prior-v2" in html
+    assert "viewer_legacy.js?v=20260904-srt-resolution-v1" in html
     assert "workflow.js?v=20260904-srt-pose-prior-v2" in html
     assert '"Cache-Control", "no-store"' in server
 

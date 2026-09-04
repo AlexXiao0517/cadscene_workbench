@@ -2873,6 +2873,17 @@
       ].join("\n");
       return;
     }
+    const solveSize = Array.isArray(sfmScene.meta?.reconstruction_image_size)
+      ? sfmScene.meta.reconstruction_image_size
+      : null;
+    const sourceSize = Array.isArray(sfmScene.meta?.source_video_size)
+      ? sfmScene.meta.source_video_size
+      : null;
+    const solveResolution = sfmScene.meta?.reconstruction_resolution || "未记录";
+    const fixedTrackSolveInfo = workflow === "srt_fixed_track_visual_pose"
+      && solveSize && sourceSize
+      ? `姿态解算：${solveResolution} / ${solveSize[0]}×${solveSize[1]}；源视频/渲染：${sourceSize[0]}×${sourceSize[1]}`
+      : "";
     const globalTrackName = isSrtPosePriorScene ? "SRT基准轨迹帧" : "原始SfM轨迹帧";
     const anchoredTrackName = isSrtPosePriorScene ? "六自由度拟合轨迹帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();
@@ -2883,6 +2894,7 @@
     info.textContent = [
       `点云：${p.count_exported || 0} / 原始 ${p.count_original || 0}（${p.sample_mode || "-"}，RGB ${p.has_rgb ? "有" : "无"}）`,
       `${globalTrackName}：${g.length}　${anchoredTrackName}：${a.length}　建议：${sug.length}`,
+      fixedTrackSolveInfo,
       ...sceneWarnings.map((item) => `警告：${item}`),
       warn,
     ].filter(Boolean).join("\n");
