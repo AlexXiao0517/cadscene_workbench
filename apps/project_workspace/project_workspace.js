@@ -728,7 +728,9 @@
     $("#cadZOffsetField").hidden = fixedTrack;
     $("#routeOffsetFields").hidden = !fixedTrack;
     $("#srtCoverageSummary").textContent = formatSrtCoverage(clip.srt_coverage);
-    $("#horizontalFovInput").value = settings.horizontal_fov_deg ?? "";
+    $("#horizontalFovInput").value = Number.isFinite(Number(settings.horizontal_fov_deg))
+      ? Math.round(Number(settings.horizontal_fov_deg))
+      : "";
     const confirmedGeoreference = state.snapshot?.cad_georeference || {};
     $("#centralMeridianInput").value = confirmedGeoreference.confirmed
       ? formatCentralMeridian(confirmedGeoreference.central_meridian_deg)
@@ -762,7 +764,7 @@
     event.preventDefault();
     const clipId = state.fullPoseClipId;
     const fovInput = $("#horizontalFovInput");
-    const horizontalFov = Number(fovInput.value);
+    const horizontalFov = Math.round(Number(fovInput.value));
     const cadZOffset = Number($("#cadZOffsetInput").value || 0);
     const fixedTrack = state.srtConfigWorkflow === "srt_fixed_track_visual_pose";
     const routeOffset = [
@@ -775,8 +777,8 @@
       $("#cadGeoreferenceStatus").scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-    if (!clipId || !Number.isFinite(horizontalFov) || horizontalFov <= 1 || horizontalFov >= 179) {
-      fovInput.setCustomValidity("请输入 1° 到 179° 之间的水平视场角");
+    if (!clipId || !Number.isFinite(horizontalFov) || horizontalFov < 2 || horizontalFov > 178) {
+      fovInput.setCustomValidity("请输入 2° 到 178° 之间的整数水平视场角");
       fovInput.reportValidity();
       fovInput.setCustomValidity("");
       return;

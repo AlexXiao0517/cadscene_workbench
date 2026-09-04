@@ -122,7 +122,7 @@
       <p id="fixedTrackDescription" hidden>SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建。</p>
       <p id="srtCoverageSummary" class="srt-coverage-summary"></p>
       <div class="full-pose-fields">
-        <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="1.01" max="178.99" step="0.1" required placeholder="例如 72"></label>
+        <label><span>水平视场角（°）</span><input id="horizontalFovInput" type="number" min="2" max="178" step="1" required placeholder="例如 72"></label>
         <label><span>CGCS2000 中央经线</span><input id="centralMeridianInput" type="text" inputmode="decimal" placeholder="例如 120 或 118°50′；留空自动推荐"></label>
         <label id="cadZOffsetField"><span>CAD 高程修正（米）</span><input id="cadZOffsetInput" type="number" step="0.1" value="0"></label>
       </div>

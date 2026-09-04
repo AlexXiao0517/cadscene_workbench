@@ -281,6 +281,7 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert 'id="centralMeridianInput"' in html
     assert "CGCS2000 中央经线" in html
     assert 'id="horizontalFovInput" type="number"' in html
+    assert 'id="horizontalFovInput" type="number" min="2" max="178" step="1"' in html
     assert 'placeholder="例如 72"' in html
     assert 'id="centralMeridianInput" type="text" inputmode="decimal"' in html
     assert 'placeholder="例如 120 或 118°50′；留空自动推荐"' in html
@@ -298,6 +299,14 @@ def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation(
     assert "trajectory_polyline_raw" in script
     assert ".full-pose-dialog" in css
     assert ".crs-candidate" in css
+
+
+def test_srt_horizontal_fov_rounds_historical_and_submitted_values() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert "Math.round(Number(settings.horizontal_fov_deg))" in script
+    assert "const horizontalFov = Math.round(Number(fovInput.value));" in script
+    assert "请输入 2° 到 178° 之间的整数水平视场角" in script
 
 
 def test_full_pose_dialog_accepts_degree_minute_central_meridian() -> None:

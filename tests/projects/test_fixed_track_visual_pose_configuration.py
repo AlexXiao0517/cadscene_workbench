@@ -130,6 +130,23 @@ def test_settings_store_one_xyz_offset_and_stale_old_references(
     )
 
 
+def test_fixed_track_fov_is_rounded_and_stored_as_an_integer(tmp_path: Path) -> None:
+    service, repositories, _queue = _confirmed_service(tmp_path)
+
+    updated = service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=59.11,
+    )
+
+    stored = updated.clips[0].manual_definition[
+        "srt_fixed_track_visual_pose"
+    ]["horizontal_fov_deg"]
+    assert stored == 59
+    assert isinstance(stored, int)
+
+
 @pytest.mark.parametrize(
     "fov,offset",
     [

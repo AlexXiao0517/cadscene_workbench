@@ -198,6 +198,43 @@ def test_updates_single_horizontal_fov_and_exposes_versioned_api_snapshot(
     assert snapshot["clips"][0]["srt_full_pose_settings"] == response.body["settings"]
 
 
+def test_full_pose_fov_is_rounded_and_stored_as_an_integer(tmp_path: Path) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+
+    updated = service.update_srt_full_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=59.11,
+    )
+
+    stored = updated.clips[0].manual_definition["srt_full_pose"][
+        "horizontal_fov_deg"
+    ]
+    assert stored == 59
+    assert isinstance(stored, int)
+
+
+@pytest.mark.parametrize("horizontal_fov_deg", [1.49, 178.51])
+def test_full_pose_fov_rejects_values_that_round_outside_integer_range(
+    tmp_path: Path,
+    horizontal_fov_deg: float,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("clip-1", workflow="srt_full_pose"),)
+    )
+
+    with pytest.raises(ValueError, match=r"\[2, 178\]"):
+        service.update_srt_full_pose_settings(
+            "p1",
+            "clip-1",
+            expected_revision=repositories.clips.load("p1").revision,
+            horizontal_fov_deg=horizontal_fov_deg,
+        )
+
+
 def test_candidate_and_confirmation_routes_use_project_revision(tmp_path: Path) -> None:
     service, repositories, _queue = service_with_clips(
         tmp_path, (clip("clip-1", workflow="srt_full_pose"),)

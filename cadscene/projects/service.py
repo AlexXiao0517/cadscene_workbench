@@ -6,7 +6,7 @@ from datetime import datetime
 from fractions import Fraction
 from hashlib import sha256
 import json
-from math import isfinite
+from math import floor, isfinite
 import os
 from pathlib import Path
 import shutil
@@ -2855,10 +2855,8 @@ class ProjectService:
     ) -> ClipsManifest:
         """Store the deliberately small user contract for DJI full-pose SRT."""
 
-        fov = float(horizontal_fov_deg)
+        fov = _normalize_horizontal_fov_deg(horizontal_fov_deg)
         z_offset = float(cad_z_offset_m)
-        if not isfinite(fov) or not 1.0 < fov < 179.0:
-            raise ValueError("horizontal_fov_deg must be finite and inside (1, 179)")
         if not isfinite(z_offset):
             raise ValueError("cad_z_offset_m must be finite")
         if attitude_profile != "dji_absolute_ned":
@@ -2910,9 +2908,7 @@ class ProjectService:
     ) -> ClipsManifest:
         """Store FOV and the only allowed whole-route XYZ position adjustment."""
 
-        fov = float(horizontal_fov_deg)
-        if not isfinite(fov) or not 1.0 < fov < 179.0:
-            raise ValueError("horizontal_fov_deg must be finite and inside (1, 179)")
+        fov = _normalize_horizontal_fov_deg(horizontal_fov_deg)
         if (
             not isinstance(route_offset_xyz_m, Sequence)
             or isinstance(route_offset_xyz_m, (str, bytes))
@@ -8079,6 +8075,16 @@ def _fingerprint(value: Mapping[str, object]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _normalize_horizontal_fov_deg(value: float) -> int:
+    fov = float(value)
+    if not isfinite(fov):
+        raise ValueError("horizontal_fov_deg must be finite")
+    rounded = floor(fov + 0.5)
+    if not 2 <= rounded <= 178:
+        raise ValueError("horizontal_fov_deg must round inside [2, 178]")
+    return int(rounded)
 
 
 def _json_values_equivalent(left: object, right: object) -> bool:
