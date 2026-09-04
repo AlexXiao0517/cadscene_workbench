@@ -1312,6 +1312,10 @@ class ProjectService:
     ) -> TrajectoryPreflight:
         project = self.repositories.project.load(project_id)
         clips_manifest = self.repositories.clips.load(project_id)
+        stored_jobs = tuple(
+            QueueJob.from_dict(item)
+            for item in self.repositories.jobs.load(project_id).jobs
+        )
         selected = _select_clips(clips_manifest.clips, clip_ids)
         analysis = project.source_assets.get("_analysis")
         if (
@@ -1390,9 +1394,21 @@ class ProjectService:
                         continue
                 frame_map_path = _clip_frame_map_path(clip)
                 if frame_map_path is None or not frame_map_path.is_file():
-                    reasons[clip.clip_id] = (
-                        "exact frame map is missing; clip export will regenerate it"
-                    )
+                    try:
+                        exported_video, exported_frame_map = _render_physical_inputs(
+                            clip, stored_jobs
+                        )
+                    except ValueError:
+                        exported_video = exported_frame_map = None
+                    if (
+                        exported_video is None
+                        or not exported_video.is_file()
+                        or exported_frame_map is None
+                        or not exported_frame_map.is_file()
+                    ):
+                        reasons[clip.clip_id] = (
+                            "exact frame map is missing; clip export will regenerate it"
+                        )
             if adapter.requires_physical_mp4 and (
                 video_path is None or not video_path.is_file()
             ):

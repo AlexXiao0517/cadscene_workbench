@@ -254,6 +254,51 @@ def test_fixed_track_srt_does_not_require_legacy_clip_analysis_confirmation(
     assert result.needs_confirmation == ()
     assert result.reasons["srt-track"] != "clip analysis requires confirmation"
 
+    exported_video = tmp_path / "srt-track.mp4"
+    exported_video.write_bytes(b"mp4")
+    exported_frame_map = tmp_path / "clip_frame_map.json"
+    exported_frame_map.write_text("{}", encoding="utf-8")
+    export_job = QueueJob(
+        job_id="export-srt-track",
+        project_id="p1",
+        clip_id="srt-track",
+        job_type="clip_export",
+        resource_class="media_io",
+        status="success",
+        stage="success",
+        priority=0,
+        depends_on_job_ids=(),
+        exclusive_key="export:p1",
+        idempotency_key="export-srt-track",
+        input_revision="analysis-1",
+        input_fingerprint="export-input",
+        adapter_name="clip_export",
+        adapter_version="2",
+        output_revision="clip-export-1",
+        operation_id="export-operation",
+        attempts=(AttemptRecord(number=1, directory=str(tmp_path / "attempt")),),
+        output_validated=True,
+        validated_input_fingerprint="export-input",
+        published_outputs={
+            "video:srt-track": str(exported_video),
+            "frame_map:srt-track": str(exported_frame_map),
+        },
+    )
+    jobs = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=jobs.revision,
+        mutate=lambda current: replace(
+            current,
+            jobs=(export_job.to_dict(),),
+            queue_order=(export_job.job_id,),
+        ),
+    )
+
+    after_export = service.preflight_trajectory_jobs("p1")
+
+    assert "srt-track" not in after_export.reasons
+
 
 def test_project_package_exports_task3_public_interfaces() -> None:
     import cadscene.projects as projects

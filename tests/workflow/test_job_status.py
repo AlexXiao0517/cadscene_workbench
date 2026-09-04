@@ -2,8 +2,32 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 from cadscene.workflow.job_status import JobStatusStore, create_job_status
+
+
+def test_job_status_import_does_not_require_optional_srt_georeference_dependencies(
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.modules['pyproj'] = None; "
+                "from cadscene.workflow.job_status import JobStatusStore; "
+                "assert JobStatusStore is not None"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_job_status_schema_contains_all_workflow_stages() -> None:
