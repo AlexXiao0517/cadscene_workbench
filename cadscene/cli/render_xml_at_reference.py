@@ -284,6 +284,13 @@ def build_render_report(
             "start_frame": int(start_frame),
             "end_frame": int(end_frame),
         },
+        "sampled_source_frames": {
+            "first_frame": int(start_frame),
+            "last_frame": int(
+                start_frame + max(0, rendered_frame_count - 1) * sample_every
+            ),
+            "count": int(rendered_frame_count),
+        },
         "camera_model": {
             "type": "Perspective",
             "orientation": "XRightYDown",

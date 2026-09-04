@@ -115,6 +115,11 @@ def test_build_render_report_identifies_adjusted_xml_and_calibration_sources() -
     assert report["orientation_source"] == "xml_pose_rotation"
     assert report["distortion_source"] == "xml_photogroup"
     assert report["source_interval"] == {"start_frame": 300, "end_frame": 11439}
+    assert report["sampled_source_frames"] == {
+        "first_frame": 300,
+        "last_frame": 11435,
+        "count": 2228,
+    }
     assert report["render"]["output_size"] == [100, 50]
     assert report["render"]["duration_sec"] == pytest.approx(
         2228 / (59.94005994 / 5)
