@@ -1235,6 +1235,13 @@ button.is-active {
   margin-bottom: 6px;
 }
 
+#sfmPointsToggle[hidden],
+#sfmSuggestionsToggle[hidden],
+#sfmUsePoseToggle[hidden],
+#sfmPointControls[hidden] {
+  display: none;
+}
+
 .sfm-row input[type="range"] {
   width: 120px;
   vertical-align: middle;

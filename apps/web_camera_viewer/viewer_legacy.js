@@ -2904,6 +2904,17 @@
     const a = t.anchored_camera_path || [];
     const sug = sfmScene.suggestions || [];
     const workflow = sfmScene.meta?.workflow || "";
+    if (workflow === "srt_full_pose") {
+      const attitudeCount = g.filter(
+        (entry) => entry.orientation_available !== false,
+      ).length;
+      info.textContent = [
+        `SRT 原始轨迹：${g.length} 帧`,
+        `当前微调轨迹：${a.length} 帧`,
+        `SRT 姿态帧：${attitudeCount}　点云：此工作流不生成`,
+      ].join("\n");
+      return;
+    }
     const globalTrackName = workflow === "srt_full_pose" ? "SRT轨迹帧" : "原始SfM轨迹帧";
     const anchoredTrackName = workflow === "srt_full_pose" ? "整轨微调后帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();
@@ -2935,7 +2946,10 @@
     const a = nearest((sfmScene.tracks || {}).anchored_camera_path);
     const nsug = nearest(sfmScene.suggestions);
     const parts = [`帧 ${frame}`];
-    if (a) parts.push(`锚定 xy=(${a.x.toFixed(1)}, ${a.y.toFixed(1)}) z=${a.z.toFixed(1)}`);
+    if (a) {
+      const label = sfmScene.meta?.workflow === "srt_full_pose" ? "轨迹" : "锚定";
+      parts.push(`${label} xy=(${a.x.toFixed(1)}, ${a.y.toFixed(1)}) z=${a.z.toFixed(1)}`);
+    }
     if (nsug) parts.push(`最近建议 ${nsug.frame_index}（${nsug.priority || nsug.risk_level || ""}）`);
     el.textContent = parts.join("　");
   }

@@ -177,6 +177,27 @@ def test_full_pose_workbench_shows_live_position_attitude_and_integer_fov() -> N
     ]
 
 
+def test_full_pose_hides_legacy_sfm_controls_and_quality_timeline() -> None:
+    css = _read("style.css")
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    for element_id in (
+        "sfmPointsToggle",
+        "sfmSuggestionsToggle",
+        "sfmUsePoseToggle",
+        "sfmPointControls",
+    ):
+        assert f"#{element_id}[hidden]" in css
+    assert (
+        'querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed || full)'
+        in workflow
+    )
+    assert 'if (workflow === "srt_full_pose")' in viewer
+    assert "SRT 姿态帧" in viewer
+    assert "当前微调轨迹" in viewer
+
+
 def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
