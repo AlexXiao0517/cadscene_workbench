@@ -335,8 +335,33 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     assert "activeProgress?.message" in script
     assert "clip.status" in script
     assert "clip.error" in script
+    assert "preparationFailed" in script
+    assert "preparation?.error" in script
     assert 'if (!preparingTrajectory && preparation?.status === "success")' in script
     assert "await openWorkbench(clip," in script
+
+
+def test_full_pose_workbench_has_only_uniform_route_offset_controls() -> None:
+    viewer = ROOT / "apps" / "web_camera_viewer"
+    html = (viewer / "index.html").read_text(encoding="utf-8")
+    script = (viewer / "viewer_legacy.js").read_text(encoding="utf-8")
+
+    assert "full_pose_adjustment.js" in html
+    assert html.index("full_pose_adjustment.js") < html.index("viewer_legacy.js")
+    assert 'id="fullPoseAdjustmentPanel"' in html
+    for element_id in (
+        "fullPoseOffsetX",
+        "fullPoseOffsetY",
+        "fullPoseOffsetZ",
+        "fullPoseApplyOffset",
+        "fullPoseResetOffset",
+        "fullPoseOffsetStatus",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "window.cadsceneApplyFullPoseRouteOffset" in script
+    assert "window.cadsceneGetFullPoseRouteOffset" in script
+    assert "window.cadsceneResetFullPoseRouteOffset" in script
+    assert "syncSfmAnchoredTrackFromCurrentTrack();" in script
 
 
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:

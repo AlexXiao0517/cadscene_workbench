@@ -79,6 +79,7 @@ def test_full_pose_workbench_payload_preserves_positions_attitudes_and_fov() -> 
         "position_source": "srt_full_pose",
         "attitude_source": "srt_full_pose",
         "position_edit_policy": "uniform_xyz_offset_only",
+        "cad_scale": 1.0,
     }
     assert trajectory == original
 

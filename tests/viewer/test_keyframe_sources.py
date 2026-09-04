@@ -129,3 +129,26 @@ def test_track_merge_keeps_single_available_payload_compatible() -> None:
     assert _merge_tracks(None, manual) == manual
     assert _merge_tracks({"keyframes": []}, manual) == manual
     assert _merge_tracks(None, None) is None
+
+
+def test_authoritative_full_pose_workbench_track_replaces_initial_track() -> None:
+    fitted = {
+        "meta": {"workflow": "srt_full_pose"},
+        "keyframes": [
+            {"frame": 0, "source": "srt_full_pose", "camera": {"x": 10}}
+        ],
+    }
+    manual = {
+        "meta": {
+            "workflow": "srt_full_pose",
+            "authoritative_workbench_track": True,
+            "route_offset_xyz_m": [3, 0, 0],
+        },
+        "keyframes": [
+            {"frame": 0, "source": "srt_full_pose", "camera": {"x": 13}}
+        ],
+    }
+
+    merged = _merge_tracks(fitted, manual)
+
+    assert merged == manual

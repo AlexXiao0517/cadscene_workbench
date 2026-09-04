@@ -42,6 +42,10 @@
     const manual = manualTrack && typeof manualTrack === "object" ? manualTrack : null;
     if (!fitted) return manual;
     if (!manual) return fitted;
+    if (
+      manual?.meta?.workflow === "srt_full_pose"
+      && manual?.meta?.authoritative_workbench_track === true
+    ) return manual;
 
     const fittedFrames = Array.isArray(fitted.keyframes) ? fitted.keyframes : [];
     if (fittedFrames.length === 0) return manual;

@@ -274,6 +274,24 @@
         </div>
       </section>
 
+      <section id="fullPoseAdjustmentPanel" class="control-panel full-pose-adjustment-panel" hidden aria-label="SRT 全姿态轨迹微调">
+        <div class="panel-title">
+          <div>
+            <h2>SRT 全姿态轨迹微调</h2>
+            <p>SRT 的逐帧位置、姿态和项目 FOV 保持锁定；这里只对整条路线统一平移，不会改变路线形状。</p>
+          </div>
+          <span id="fullPoseOffsetStatus">累计偏移 X 0.000 / Y 0.000 / Z 0.000 米</span>
+        </div>
+        <div class="full-pose-offset-grid">
+          <label>东向 X（米）<input id="fullPoseOffsetX" type="number" step="0.01" value="0" /></label>
+          <label>北向 Y（米）<input id="fullPoseOffsetY" type="number" step="0.01" value="0" /></label>
+          <label>高程 Z（米）<input id="fullPoseOffsetZ" type="number" step="0.01" value="0" /></label>
+          <button id="fullPoseApplyOffset" type="button">应用整轨偏移</button>
+          <button id="fullPoseResetOffset" type="button">偏移归零</button>
+        </div>
+        <small>右侧灰线是 SRT 原始轨迹，橙线是当前微调结果；播放视频时蓝色视锥会沿当前轨迹移动。</small>
+      </section>
+
       <details id="cameraSettingsDetails" class="control-panel camera-settings-details" open>
         <summary class="camera-settings-summary">
           <span>虚拟相机参数设置</span>
@@ -359,12 +377,13 @@
     <script src="./cad_text.js?v=20260812-dxf-text-v1"></script>
     <script src="./pure_rotation_math.js?v=20260729-local-camera-v8"></script>
     <script src="./keyframe_sources.js?v=20260831-workbench-resume-v1"></script>
-    <script src="./viewer_legacy.js?v=20260903-fixed-track-anchor-v1"></script>
+    <script src="./full_pose_adjustment.js?v=20260904-full-pose-offset-v1"></script>
+    <script src="./viewer_legacy.js?v=20260904-full-pose-offset-v1"></script>
     <script src="./annotation_pts.js?v=20260831-workbench-resume-v1"></script>
     <script src="./callout_layout.js?v=20260814-engineering-callout-v1"></script>
     <script src="./annotations.js?v=20260814-engineering-callout-v1"></script>
     <script src="./suggestion_sequence.js?v=20260831-quality-progress-v1"></script>
-    <script src="./workflow.js?v=20260903-fixed-track-anchor-v1"></script>
+    <script src="./workflow.js?v=20260904-full-pose-offset-v1"></script>
     <script src="./sfm_backend_ui.js?v=20260715-pycolmap-cpu-default"></script>
   </body>
 </html>

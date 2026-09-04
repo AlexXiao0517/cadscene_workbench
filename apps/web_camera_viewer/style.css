@@ -17,6 +17,52 @@
   --log-text: #cdd7e3;
 }
 
+.full-pose-adjustment-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.full-pose-adjustment-panel[hidden] {
+  display: none;
+}
+
+.full-pose-adjustment-panel .panel-title {
+  align-items: start;
+}
+
+.full-pose-adjustment-panel h2,
+.full-pose-adjustment-panel p {
+  margin: 0;
+}
+
+.full-pose-adjustment-panel p,
+.full-pose-adjustment-panel small,
+#fullPoseOffsetStatus {
+  color: var(--muted);
+}
+
+.full-pose-offset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr)) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.full-pose-offset-grid label {
+  display: grid;
+  gap: 5px;
+}
+
+.full-pose-offset-grid input {
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .full-pose-offset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 :root[data-theme="light"] {
   color-scheme: light;
   --bg: #f4f7fb;

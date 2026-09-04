@@ -106,6 +106,7 @@ def build_full_pose_workbench_payloads(
             "position_source": "srt_full_pose",
             "attitude_source": "srt_full_pose",
             "position_edit_policy": "uniform_xyz_offset_only",
+            "cad_scale": cad_scale,
         },
     }
     empty_bbox = {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}

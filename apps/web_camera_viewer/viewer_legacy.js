@@ -91,6 +91,7 @@
   let defaultCamera = null;
   let threeScene = null;
   let cameraTrack = null;
+  let fullPoseRouteOffset = { x: 0, y: 0, z: 0 };
   let loadedAuthoritativeCameraTrack = false;
   let cameraDraftDirty = false;
   let reviewPacket = null;
@@ -2083,6 +2084,31 @@
     return JSON.parse(JSON.stringify(cameraTrack));
   };
 
+  window.cadsceneApplyFullPoseRouteOffset = function (offset) {
+    const result = window.CadsceneFullPoseAdjustment.applyAbsoluteOffset(
+      cameraTrack,
+      fullPoseRouteOffset,
+      offset,
+    );
+    cameraTrack = result.track;
+    fullPoseRouteOffset = result.offset;
+    camera = interpolateCameraAtFrame(currentFrame());
+    syncControls();
+    syncSfmAnchoredTrackFromCurrentTrack();
+    cameraDraftDirty = true;
+    updateTrackStatus();
+    updateViews({ forceOverlay: true, updateThree: true });
+    return { ...fullPoseRouteOffset };
+  };
+
+  window.cadsceneGetFullPoseRouteOffset = function () {
+    return { ...fullPoseRouteOffset };
+  };
+
+  window.cadsceneResetFullPoseRouteOffset = function () {
+    return window.cadsceneApplyFullPoseRouteOffset({ x: 0, y: 0, z: 0 });
+  };
+
   window.cadsceneHasLoadedCameraTrack = function () {
     return loadedAuthoritativeCameraTrack;
   };
@@ -2332,8 +2358,12 @@
       version: payload.version || 1,
       video: payload.video || VIDEO_PATH,
       fps: Number(payload.fps || DEFAULT_FPS),
+      meta: payload.meta && typeof payload.meta === "object" ? { ...payload.meta } : {},
       keyframes: Array.isArray(payload.keyframes) ? payload.keyframes : [],
     };
+    fullPoseRouteOffset = window.CadsceneFullPoseAdjustment.offsetFromTrack(
+      cameraTrack,
+    );
     cameraTrack.keyframes = cameraTrack.keyframes.map((keyframe) => ({
       frame: Number(keyframe.frame),
       time: Number(keyframe.time ?? frameToTime(Number(keyframe.frame))),
