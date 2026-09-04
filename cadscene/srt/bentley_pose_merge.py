@@ -30,6 +30,32 @@ class BentleyPoseSample:
     pitch_deg: float
     roll_deg: float
     metadata_lon_lat_alt: tuple[float, float, float] | None
+    adjusted_lon_lat_alt: tuple[float, float, float] | None = None
+
+
+@dataclass(frozen=True)
+class BentleyCameraModel:
+    image_size: tuple[int, int]
+    focal_length_mm: float
+    sensor_size_mm: float
+    principal_point_px: tuple[float, float]
+    distortion: tuple[float, float, float, float, float]
+    aspect_ratio: float
+    skew: float
+
+    @property
+    def focal_pixels(self) -> tuple[float, float]:
+        fx = self.focal_length_mm / self.sensor_size_mm * self.image_size[0]
+        return float(fx), float(fx * self.aspect_ratio)
+
+    @property
+    def horizontal_fov_deg(self) -> float:
+        return float(
+            np.degrees(
+                2.0
+                * np.arctan(self.sensor_size_mm / (2.0 * self.focal_length_mm))
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -61,6 +87,18 @@ def _metadata_center(
     )  # type: ignore[return-value]
 
 
+def _adjusted_center(
+    photo: ElementTree.Element,
+) -> tuple[float, float, float] | None:
+    center = photo.find("./Pose/Center")
+    if center is None:
+        return None
+    return tuple(
+        _required_finite_float(photo, f"./Pose/Center/{axis}")
+        for axis in ("x", "y", "z")
+    )  # type: ignore[return-value]
+
+
 def _photo_sample(photo: ElementTree.Element) -> BentleyPoseSample:
     image_path = str(photo.findtext("./ImagePath") or "").strip()
     match = _FRAME_NAME.search(image_path)
@@ -73,6 +111,7 @@ def _photo_sample(photo: ElementTree.Element) -> BentleyPoseSample:
         pitch_deg=_required_finite_float(photo, "./Pose/Rotation/Pitch"),
         roll_deg=_required_finite_float(photo, "./Pose/Rotation/Roll"),
         metadata_lon_lat_alt=_metadata_center(photo),
+        adjusted_lon_lat_alt=_adjusted_center(photo),
     )
 
 
@@ -96,6 +135,57 @@ def load_bentley_pose_samples(
     ):
         raise ValueError("Bentley pose samples require unique frame indices")
     return samples
+
+
+def load_bentley_camera_model(path: str | Path) -> BentleyCameraModel:
+    """Load the single calibrated Perspective camera from a BlocksExchange XML."""
+
+    root = ElementTree.parse(Path(path)).getroot()
+    photogroups = root.findall(".//Photogroup")
+    if len(photogroups) != 1:
+        raise ValueError("Bentley XML requires exactly one calibrated Photogroup")
+    group = photogroups[0]
+
+    model_type = str(group.findtext("./CameraModelType") or "").strip()
+    if model_type != "Perspective":
+        raise ValueError("Bentley camera model must be Perspective")
+    orientation = str(group.findtext("./CameraOrientation") or "").strip()
+    if orientation != "XRightYDown":
+        raise ValueError("Bentley camera orientation must be XRightYDown")
+
+    width_value = _required_finite_float(group, "./ImageDimensions/Width")
+    height_value = _required_finite_float(group, "./ImageDimensions/Height")
+    width = int(width_value)
+    height = int(height_value)
+    if width <= 0 or height <= 0 or width != width_value or height != height_value:
+        raise ValueError("Bentley camera image dimensions must be positive integers")
+
+    focal_length_mm = _required_finite_float(group, "./FocalLength")
+    sensor_size_mm = _required_finite_float(group, "./SensorSize")
+    aspect_ratio = _required_finite_float(group, "./AspectRatio")
+    skew = _required_finite_float(group, "./Skew")
+    if focal_length_mm <= 0.0 or sensor_size_mm <= 0.0 or aspect_ratio <= 0.0:
+        raise ValueError("Bentley focal length, sensor size, and aspect ratio must be positive")
+    if skew != 0.0:
+        raise ValueError("Bentley camera skew must be zero for this renderer")
+
+    principal_point = tuple(
+        _required_finite_float(group, f"./PrincipalPoint/{axis}")
+        for axis in ("x", "y")
+    )
+    distortion = tuple(
+        _required_finite_float(group, f"./Distortion/{name}")
+        for name in ("K1", "K2", "K3", "P1", "P2")
+    )
+    return BentleyCameraModel(
+        image_size=(width, height),
+        focal_length_mm=focal_length_mm,
+        sensor_size_mm=sensor_size_mm,
+        principal_point_px=principal_point,  # type: ignore[arg-type]
+        distortion=distortion,  # type: ignore[arg-type]
+        aspect_ratio=aspect_ratio,
+        skew=skew,
+    )
 
 
 def _split_blocks_losslessly(text: str) -> list[tuple[str, str]]:

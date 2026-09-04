@@ -7,7 +7,9 @@ import re
 import pytest
 
 from cadscene.srt.bentley_pose_merge import (
+    BentleyCameraModel,
     BentleyPoseSample,
+    load_bentley_camera_model,
     load_bentley_pose_samples,
     merge_bentley_orientations_into_srt,
 )
@@ -28,7 +30,11 @@ def _write_bentley_xml(path: Path, *, frames: tuple[int, ...]) -> Path:
                   <Pitch>{-45.0 + index}</Pitch>
                   <Roll>{1.5 + index}</Roll>
                 </Rotation>
-                <Center><x>999</x><y>998</y><z>997</z></Center>
+                <Center>
+                  <x>{119.071793042404 + index * 0.0001}</x>
+                  <y>28.896799226944</y>
+                  <z>{228.399947432801 + index * 0.1}</z>
+                </Center>
                 <Metadata>
                   <Center>
                     <x>{118.8 + index * 0.0001}</x>
@@ -44,6 +50,22 @@ def _write_bentley_xml(path: Path, *, frames: tuple[int, ...]) -> Path:
         """<?xml version="1.0" encoding="utf-8"?>
         <BlocksExchange version="3.2">
           <Block><Photogroups><Photogroup>
+            <ImageDimensions><Width>1920</Width><Height>1080</Height></ImageDimensions>
+            <CameraModelType>Perspective</CameraModelType>
+            <CameraModelBand>Visible</CameraModelBand>
+            <FocalLength>14.9438489018156</FocalLength>
+            <SensorSize>17.3</SensorSize>
+            <CameraOrientation>XRightYDown</CameraOrientation>
+            <PrincipalPoint>
+              <x>954.760480832254</x><y>519.684612262061</y>
+            </PrincipalPoint>
+            <Distortion>
+              <K1>-0.0124025934908946</K1>
+              <K2>0.0171692916163385</K2>
+              <K3>0.0449273882850133</K3>
+              <P1>0</P1><P2>0</P2>
+            </Distortion>
+            <AspectRatio>1</AspectRatio><Skew>0</Skew>
         """
         + "".join(photos)
         + "</Photogroup></Photogroups></Block></BlocksExchange>",
@@ -93,6 +115,41 @@ def test_load_bentley_pose_samples_uses_image_frame_rotation_and_metadata(
     assert samples[0].pitch_deg == pytest.approx(-45.0)
     assert samples[0].roll_deg == pytest.approx(1.5)
     assert samples[0].metadata_lon_lat_alt == pytest.approx((118.8, 30.1, 230.0))
+    assert samples[0].adjusted_lon_lat_alt == pytest.approx(
+        (119.071793042404, 28.896799226944, 228.399947432801)
+    )
+
+
+def test_load_bentley_camera_model_uses_exact_photogroup_calibration(
+    tmp_path: Path,
+) -> None:
+    xml = _write_bentley_xml(tmp_path / "block.xml", frames=(0, 120))
+
+    model = load_bentley_camera_model(xml)
+
+    assert isinstance(model, BentleyCameraModel)
+    assert model.image_size == (1920, 1080)
+    assert model.horizontal_fov_deg == pytest.approx(60.12739034017952)
+    assert model.focal_pixels == pytest.approx((1658.508086213, 1658.508086213))
+    assert model.principal_point_px == pytest.approx(
+        (954.760480832254, 519.684612262061)
+    )
+    assert model.distortion == pytest.approx(
+        (-0.0124025934908946, 0.0171692916163385, 0.0449273882850133, 0.0, 0.0)
+    )
+
+
+def test_load_bentley_camera_model_rejects_unsupported_orientation(
+    tmp_path: Path,
+) -> None:
+    xml = _write_bentley_xml(tmp_path / "block.xml", frames=(0,))
+    xml.write_text(
+        xml.read_text(encoding="utf-8").replace("XRightYDown", "XRightYUp"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="XRightYDown"):
+        load_bentley_camera_model(xml)
 
 
 def test_load_bentley_pose_samples_rejects_duplicate_frames(tmp_path: Path) -> None:
