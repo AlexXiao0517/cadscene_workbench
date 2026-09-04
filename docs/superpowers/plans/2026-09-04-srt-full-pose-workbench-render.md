@@ -48,7 +48,7 @@
 - Consumes: `build_full_pose_workbench_payloads(trajectory: Mapping[str, object]) -> FullPoseWorkbenchPayloads` and `publish_full_pose_workbench_payloads(run_root: Path, payloads: FullPoseWorkbenchPayloads) -> tuple[Path, Path]`.
 - Produces: `03_alignment/camera_track_pred.json` and `05_viewer_scene/sfm_viewer_scene.json`, both expressed in `web_cad_world`, with every registered SRT pose represented and `point_cloud_generated: false`.
 
-- [ ] **Step 1: Write failing payload-contract tests**
+- [x] **Step 1: Write failing payload-contract tests**
 
 ```python
 def test_full_pose_workbench_payload_preserves_positions_attitudes_and_fov():
@@ -63,13 +63,13 @@ def test_full_pose_workbench_payload_preserves_positions_attitudes_and_fov():
     assert payloads.viewer_scene["meta"]["workflow"] == "srt_full_pose"
 ```
 
-- [ ] **Step 2: Run the payload test and verify RED**
+- [x] **Step 2: Run the payload test and verify RED**
 
 Run: `python -m pytest tests/srt/test_full_pose_workbench.py -q`
 
 Expected: collection fails because `cadscene.srt.full_pose_workbench` does not exist.
 
-- [ ] **Step 3: Implement quaternion-to-web-track conversion**
+- [x] **Step 3: Implement quaternion-to-web-track conversion**
 
 Implement `FullPoseWorkbenchPayloads`, validate `meta.trajectory_mode == "srt_full_pose"`, skip unregistered poses, decompose `cam_from_world_quat_wxyz` with the repository camera convention, convert CAD metres through `python_state_to_web_camera`, and build:
 
@@ -90,27 +90,27 @@ camera_track = {
 
 and a `cadscene_sfm_viewer_scene_v1` payload with an empty point set and `tracks.global_sfm_track` containing the same web cameras.
 
-- [ ] **Step 4: Run the payload tests and verify GREEN**
+- [x] **Step 4: Run the payload tests and verify GREEN**
 
 Run: `python -m pytest tests/srt/test_full_pose_workbench.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Write failing CLI and adapter validation tests**
+- [x] **Step 5: Write failing CLI and adapter validation tests**
 
 Extend the CLI test to assert both new files are published and extend the adapter test to delete each file in turn and assert validation fails with `full-pose artifact output is missing`.
 
-- [ ] **Step 6: Run CLI/adapter tests and verify RED**
+- [x] **Step 6: Run CLI/adapter tests and verify RED**
 
 Run: `python -m pytest tests/cli/test_build_srt_full_pose_cli.py tests/projects/test_workflow_adapters.py -q`
 
 Expected: failures show the full-pose CLI and adapter do not yet publish/require the viewer artifacts.
 
-- [ ] **Step 7: Atomically publish and fingerprint the artifacts**
+- [x] **Step 7: Atomically publish and fingerprint the artifacts**
 
 Build the payloads from the staged trajectory, write them under staged `03_alignment` and `05_viewer_scene`, then atomically move all three stage directories. Add `initial_camera_track` and `viewer_scene` to full-pose adapter outputs and validation proof hashes.
 
-- [ ] **Step 8: Run focused tests and commit**
+- [x] **Step 8: Run focused tests and commit**
 
 Run: `python -m pytest tests/srt/test_full_pose_workbench.py tests/cli/test_build_srt_full_pose_cli.py tests/projects/test_workflow_adapters.py -q`
 
@@ -135,7 +135,7 @@ git commit -m "feat: publish full-pose workbench artifacts"
 - Consumes: a standard camera-track payload and an absolute offset object `{x, y, z}`.
 - Produces: `window.CadsceneFullPoseAdjustment.applyAbsoluteOffset(track, previousOffset, nextOffset)` and live APIs `cadsceneApplyFullPoseRouteOffset`, `cadsceneGetFullPoseRouteOffset`, and `cadsceneResetFullPoseRouteOffset`.
 
-- [ ] **Step 1: Write failing Node behavior tests**
+- [x] **Step 1: Write failing Node behavior tests**
 
 ```javascript
 const shifted = api.applyAbsoluteOffset(track, {x: 1, y: 2, z: 3}, {x: 4, y: 6, z: 8});
@@ -146,37 +146,37 @@ assert.deepStrictEqual(track, original); // pure function
 
 Also assert non-finite offsets are rejected and non-position camera fields are byte-for-byte preserved.
 
-- [ ] **Step 2: Run the Node wrapper and verify RED**
+- [x] **Step 2: Run the Node wrapper and verify RED**
 
 Run: `python -m pytest tests/viewer/test_full_pose_adjustment_node.py -q`
 
 Expected: failure because `full_pose_adjustment.js` does not exist.
 
-- [ ] **Step 3: Implement the pure absolute-offset helper**
+- [x] **Step 3: Implement the pure absolute-offset helper**
 
 Use UMD style consistent with the other viewer helpers. Compute `delta = nextOffset - previousOffset`, deep-clone the track, translate only every keyframe camera's `x/y/z`, and store the normalized finite next offset.
 
-- [ ] **Step 4: Run Node tests and verify GREEN**
+- [x] **Step 4: Run Node tests and verify GREEN**
 
 Run: `python -m pytest tests/viewer/test_full_pose_adjustment_node.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Write failing static integration assertions**
+- [x] **Step 5: Write failing static integration assertions**
 
 Assert `index.html` loads `full_pose_adjustment.js`, contains `#fullPoseAdjustmentPanel`, numeric `#fullPoseOffsetX/Y/Z`, apply/reset buttons, and that `viewer_legacy.js` exposes the three live APIs and calls `syncSfmAnchoredTrackFromCurrentTrack()` after applying an offset.
 
-- [ ] **Step 6: Run static tests and verify RED**
+- [x] **Step 6: Run static tests and verify RED**
 
 Run: `python -m pytest tests/viewer/test_project_workspace_static.py -q`
 
 Expected: failures identify the missing controls and live APIs.
 
-- [ ] **Step 7: Implement live offset application and focused controls**
+- [x] **Step 7: Implement live offset application and focused controls**
 
 Load the helper before `viewer_legacy.js`. In `cadsceneApplyFullPoseRouteOffset`, replace `cameraTrack` with the helper result, update the current interpolated camera, refresh controls, synchronize the anchored path, mark the draft dirty, and redraw both panes. The reset API applies `{x: 0, y: 0, z: 0}`. Add a compact panel explaining that SRT position/attitude are locked and only a route-wide XYZ translation is changed.
 
-- [ ] **Step 8: Run viewer tests and commit**
+- [x] **Step 8: Run viewer tests and commit**
 
 Run: `python -m pytest tests/viewer/test_full_pose_adjustment_node.py tests/viewer/test_project_workspace_static.py -q`
 
@@ -197,7 +197,7 @@ git commit -m "feat: add full-pose route offset controls"
 - Consumes: the live viewer route-offset APIs and existing `saveCurrentCameraTrack`, `finalizeProjectWorkbenchSave`, `startRenderStage`, and workflow-stage rendering functions.
 - Produces: full-pose-only workflow layout and `finishFullPoseAdjustment()`.
 
-- [ ] **Step 1: Write failing static workflow tests**
+- [x] **Step 1: Write failing static workflow tests**
 
 Assert the full-pose branch:
 
@@ -208,21 +208,21 @@ stageTitles.render = "渲染导出";
 
 hides upload/SfM/quality steps and panels, shows `#fullPoseAdjustmentPanel`, hides `#cameraSettingsDetails` and standard keyframe actions, labels ordinals `1` and `2`, and maps `keyframes -> render` without quality. Assert `finishFullPoseAdjustment()` saves/finalizes the project workbench output and then selects render, rather than running alignment.
 
-- [ ] **Step 2: Run the static workflow test and verify RED**
+- [x] **Step 2: Run the static workflow test and verify RED**
 
 Run: `python -m pytest tests/viewer/test_workflow_ui_static.py -q`
 
 Expected: failures show full-pose still inherits SfM/keyframe/quality UI behavior.
 
-- [ ] **Step 3: Implement the two-stage layout and control wiring**
+- [x] **Step 3: Implement the two-stage layout and control wiring**
 
 Refactor the layout function to derive `full = mode === "srt_full_pose"`. For full pose, hide upload/SfM/quality, use `轨迹微调` and `渲染导出`, show only the full-pose adjustment panel, and keep annotation/render controls available at render. Wire apply/reset buttons to the live viewer APIs, update a cumulative-offset label, and persist the track. Route the existing finish button to `finishFullPoseAdjustment()`.
 
-- [ ] **Step 4: Make stage transitions explicit**
+- [x] **Step 4: Make stage transitions explicit**
 
 Add a full-pose `nextStageAfterSuccess` table with `sfm -> keyframes`, `keyframes -> render`, `alignment -> render`, and no quality transition. Make `startQualityStage()` throw `SRT 全姿态工作流不包含质量检测阶段` if invoked defensively.
 
-- [ ] **Step 5: Run viewer workflow regressions and commit**
+- [x] **Step 5: Run viewer workflow regressions and commit**
 
 Run: `python -m pytest tests/viewer/test_workflow_ui_static.py tests/viewer/test_project_workspace_static.py tests/viewer/test_full_pose_adjustment_node.py -q`
 
@@ -245,28 +245,28 @@ git commit -m "feat: add full-pose adjustment workflow"
 - Consumes: session workflow `srt_full_pose`, trajectory-ready revision/fingerprint, and saved workbench output state.
 - Produces: resume stage `keyframes` before adjustment save, `render` after save, and a backend error for any full-pose quality-stage request.
 
-- [ ] **Step 1: Write failing resume-state tests**
+- [x] **Step 1: Write failing resume-state tests**
 
 Create a trajectory-ready full-pose session and assert requested `quality` normalizes to `keyframes` before a saved workbench output, then to `render` after a valid save. Assert stale resume data cannot restore `quality`.
 
-- [ ] **Step 2: Write failing job-runner test**
+- [x] **Step 2: Write failing job-runner test**
 
 ```python
 with pytest.raises(ValueError, match="full-pose workflow has no quality stage"):
     build_stage_command(root, dataset, run_id, "quality")
 ```
 
-- [ ] **Step 3: Run both test groups and verify RED**
+- [x] **Step 3: Run both test groups and verify RED**
 
 Run: `python -m pytest tests/projects/test_workbench_sessions.py tests/workflow/test_job_runner.py -q`
 
 Expected: full-pose currently resumes into quality and the job runner accepts a quality command.
 
-- [ ] **Step 4: Implement explicit full-pose normalization and rejection**
+- [x] **Step 4: Implement explicit full-pose normalization and rejection**
 
 In `_validated_resume_stage`, treat full pose like a two-stage workflow: return `keyframes` until both workbench output revision and fingerprint exist, otherwise `render`. In the job runner, reject `quality` for both full-pose and fixed-track workflows before artifact preflight.
 
-- [ ] **Step 5: Run backend tests and commit**
+- [x] **Step 5: Run backend tests and commit**
 
 Run: `python -m pytest tests/projects/test_workbench_sessions.py tests/workflow/test_job_runner.py -q`
 
@@ -286,33 +286,32 @@ git commit -m "fix: enforce full-pose workflow stages"
 - Consumes: merged SRT path, existing project CAD/video inputs, confirmed georeference, and FOV `59.109`.
 - Produces: evidence that trajectory construction publishes preview artifacts, workbench save is renderable, and the project-library service is reachable at port `8310`.
 
-- [ ] **Step 1: Run focused full-pose and render integration tests**
+- [x] **Step 1: Run focused full-pose and render integration tests**
 
 Run: `python -m pytest tests/integration/test_srt_full_pose_workflow.py tests/projects/test_render_adapters.py tests/projects/test_executor.py tests/projects/test_render_jobs.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 2: Run all affected regression suites**
+- [x] **Step 2: Run all affected regression suites**
 
 Run: `python -m pytest tests/srt tests/cli tests/projects tests/workflow tests/viewer -q`
 
 Expected: all tests pass; any pre-existing Windows timing flake must be rerun alone and reported, never hidden.
 
-- [ ] **Step 3: Run the complete test suite**
+- [x] **Step 3: Run the complete test suite**
 
 Run: `python -m pytest -q`
 
 Expected: all tests pass, allowing only documented pre-existing non-reproducible timing failures that pass immediately in isolation.
 
-- [ ] **Step 4: Validate the merged SRT through the real classifier**
+- [x] **Step 4: Validate the merged SRT through the real classifier**
 
 Run the existing SRT inspection entry point against `D:/zjic2026/cadscene_workbench/dji/yjq/K181+932-K184+575/DJI_20260826113512_0013_D_FULL_POSE_FROM_BLOCK_AT.SRT` and confirm `srt_full_pose`, 12,017 records, and 100% yaw/pitch/roll coverage.
 
-- [ ] **Step 5: Start and probe the project-library service**
+- [x] **Step 5: Start and probe the project-library service**
 
 Start the repository's project-library server on `127.0.0.1:8310` in a hidden background process, then request `/apps/project_library/` and assert HTTP 200. Keep the process alive for user testing.
 
-- [ ] **Step 6: Present the test artifact and UI test procedure**
+- [x] **Step 6: Present the test artifact and UI test procedure**
 
 Give the user the clickable merged SRT path and the project-library URL. Instruct them to create a new project with the merged SRT, video, and CAD, set FOV `59.109`, confirm the CAD coordinate candidate, enter the workbench, verify route/frustum visibility, apply a uniform XYZ offset if needed, save adjustment, then start render.
-
