@@ -2902,6 +2902,9 @@
     const g = t.global_sfm_track || [];
     const a = t.anchored_camera_path || [];
     const sug = sfmScene.suggestions || [];
+    const workflow = sfmScene.meta?.workflow || "";
+    const globalTrackName = workflow === "srt_full_pose" ? "SRT轨迹帧" : "原始SfM轨迹帧";
+    const anchoredTrackName = workflow === "srt_full_pose" ? "整轨微调后帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();
     if ((p.count_exported || 0) > 200000) {
       setStatus("点云数量较大，建议用 --max-points 降采样后重新导出。");
@@ -2909,7 +2912,7 @@
     const warn = sfmTrackBboxSpanWarn();
     info.textContent = [
       `点云：${p.count_exported || 0} / 原始 ${p.count_original || 0}（${p.sample_mode || "-"}，RGB ${p.has_rgb ? "有" : "无"}）`,
-      `原始SfM轨迹帧：${g.length}　锚定轨迹帧：${a.length}　建议：${sug.length}`,
+      `${globalTrackName}：${g.length}　${anchoredTrackName}：${a.length}　建议：${sug.length}`,
       ...sceneWarnings.map((item) => `警告：${item}`),
       warn,
     ].filter(Boolean).join("\n");

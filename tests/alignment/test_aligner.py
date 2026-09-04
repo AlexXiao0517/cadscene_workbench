@@ -471,6 +471,132 @@ def test_metric_full_pose_alignment_keeps_scale_one_with_single_manual_anchor(
     assert result.alignment_json["validation"]["metric_scale_locked"] is True
 
 
+def test_metric_full_pose_alignment_applies_authoritative_uniform_route_offset(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "full_pose.json"
+    trajectory = _write_metric_full_pose_trajectory(trajectory_path)
+    offset = np.asarray([4.0, -3.0, 1.5], dtype=np.float64)
+    config = AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10)
+    states = {}
+    for frame in trajectory.frames:
+        original = aligned_state_at_frame(
+            int(frame), trajectory, Sim3.identity(), None, config
+        )
+        states[int(frame)] = replace(
+            original,
+            camera_x=original.camera_x + float(offset[0]),
+            camera_y=original.camera_y + float(offset[1]),
+            camera_z=original.camera_z + float(offset[2]),
+        )
+    track = _track_from_states(states, origin_xy=(0.0, 0.0))
+    for keyframe in track["keyframes"]:
+        keyframe["source"] = "srt_full_pose"
+    track["meta"] = {
+        "workflow": "srt_full_pose",
+        "position_edit_policy": "uniform_xyz_offset_only",
+        "authoritative_workbench_track": True,
+        "route_offset_xyz_m": offset.tolist(),
+    }
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=config,
+    )
+
+    assert result.alignment_json["sim3"]["scale"] == 1.0
+    assert result.alignment_json["sim3"]["translation"] == pytest.approx(
+        offset.tolist()
+    )
+    assert result.alignment_json["validation"]["alignment_mode"] == "metric_direct"
+
+
+def test_metric_full_pose_rejects_non_uniform_authoritative_track_edits(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "full_pose.json"
+    trajectory = _write_metric_full_pose_trajectory(trajectory_path)
+    config = AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10)
+    states = {}
+    for frame in trajectory.frames:
+        original = aligned_state_at_frame(
+            int(frame), trajectory, Sim3.identity(), None, config
+        )
+        states[int(frame)] = replace(original, camera_x=original.camera_x + 2.0)
+    track = _track_from_states(states, origin_xy=(0.0, 0.0))
+    for keyframe in track["keyframes"]:
+        keyframe["source"] = "srt_full_pose"
+    track["keyframes"][-1]["camera"]["x"] += 0.2
+    track["meta"] = {
+        "workflow": "srt_full_pose",
+        "position_edit_policy": "uniform_xyz_offset_only",
+        "authoritative_workbench_track": True,
+        "route_offset_xyz_m": [2.0, 0.0, 0.0],
+    }
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="uniform XYZ offset"):
+        run_alignment(
+            trajectory_path=trajectory_path,
+            web_camera_track_path=track_path,
+            config=config,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "delta", "message"),
+    (("yaw", 1.0, "attitude"), ("fov", 1.0, "FOV")),
+)
+def test_metric_full_pose_rejects_authoritative_attitude_or_fov_edits(
+    tmp_path: Path,
+    field: str,
+    delta: float,
+    message: str,
+) -> None:
+    trajectory_path = tmp_path / "full_pose.json"
+    trajectory = _write_metric_full_pose_trajectory(trajectory_path)
+    trajectory_payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory_payload["meta"]["horizontal_fov_deg"] = 67.0
+    trajectory_payload["intrinsics"][0]["params"][0] = (
+        0.5 * trajectory.width / math.tan(math.radians(67.0) * 0.5)
+    )
+    trajectory_path.write_text(json.dumps(trajectory_payload), encoding="utf-8")
+    config = AlignmentConfig(cad_scale=1.0, origin_xy=(0.0, 0.0), frame_step=10)
+    states = {}
+    for frame in trajectory.frames:
+        original = aligned_state_at_frame(
+            int(frame), trajectory, Sim3.identity(), None, config
+        )
+        states[int(frame)] = replace(
+            original,
+            camera_x=original.camera_x + 2.0,
+            fov_deg=67.0,
+        )
+    track = _track_from_states(states, origin_xy=(0.0, 0.0))
+    for keyframe in track["keyframes"]:
+        keyframe["source"] = "srt_full_pose"
+        keyframe["camera"][field] += delta
+    track["meta"] = {
+        "workflow": "srt_full_pose",
+        "position_edit_policy": "uniform_xyz_offset_only",
+        "authoritative_workbench_track": True,
+        "route_offset_xyz_m": [2.0, 0.0, 0.0],
+    }
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps(track), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=message):
+        run_alignment(
+            trajectory_path=trajectory_path,
+            web_camera_track_path=track_path,
+            config=config,
+        )
+
+
 def test_metric_full_pose_never_calls_free_sim3(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

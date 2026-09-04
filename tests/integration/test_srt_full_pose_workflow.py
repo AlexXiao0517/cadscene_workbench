@@ -124,8 +124,22 @@ def test_srt_full_pose_runs_without_sfm_and_exports_no_pointcloud_scene(
     assert result.status == "success", result.error
 
     trajectory = Path(result.outputs["trajectory"])
+    route_offset = [5.0, -2.0, 1.0]
+    saved_track = json.loads(
+        Path(result.outputs["initial_camera_track"]).read_text(encoding="utf-8")
+    )
+    for keyframe in saved_track["keyframes"]:
+        keyframe["camera"]["x"] += route_offset[0]
+        keyframe["camera"]["y"] += route_offset[1]
+        keyframe["camera"]["z"] += route_offset[2]
+    saved_track["meta"].update(
+        {
+            "authoritative_workbench_track": True,
+            "route_offset_xyz_m": route_offset,
+        }
+    )
     track = tmp_path / "camera_track_manual.json"
-    track.write_text(json.dumps({"keyframes": []}), encoding="utf-8")
+    track.write_text(json.dumps(saved_track), encoding="utf-8")
     cad_dir = tmp_path / "cad"
     cad_dir.mkdir()
     pipeline_command = [
@@ -173,8 +187,15 @@ def test_srt_full_pose_runs_without_sfm_and_exports_no_pointcloud_scene(
         )
     )
     assert alignment["sim3"]["scale"] == 1.0
+    assert alignment["sim3"]["translation"] == route_offset
     assert alignment["validation"]["alignment_mode"] == "metric_direct"
     assert scene["meta"]["workflow"] == "srt_full_pose"
     assert scene["points"]["count_exported"] == 0
     assert scene["points"]["data"] == []
     assert len(scene["tracks"]["global_sfm_track"]) == 3
+    assert scene["tracks"]["global_sfm_track"][0]["camera"] == saved_track[
+        "keyframes"
+    ][0]["camera"]
+    assert scene["tracks"]["anchored_camera_path"][0]["camera"] == saved_track[
+        "keyframes"
+    ][0]["camera"]

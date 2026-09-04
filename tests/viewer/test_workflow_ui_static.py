@@ -102,6 +102,7 @@ def test_full_pose_workbench_preserves_workflow_and_uses_no_sfm_artifacts() -> N
 
 def test_full_pose_workbench_is_adjustment_then_render_without_quality() -> None:
     script = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
 
     assert 'const full = mode === "srt_full_pose"' in script
     assert 'stageTitles.keyframes = "轨迹微调"' in script
@@ -125,6 +126,11 @@ def test_full_pose_workbench_is_adjustment_then_render_without_quality() -> None
     assert "window.cadsceneResetFullPoseRouteOffset" in script
     assert 'querySelector("#fullPoseFinishAdjustment")' in script
     assert 'id="fullPoseFinishAdjustment"' in _read("index.html")
+    assert 'full ? "SRT 全姿态轨迹（无点云）"' in script
+    assert 'full ? "SRT 原始轨迹"' in script
+    assert 'full ? "整轨微调后轨迹"' in script
+    assert 'workflow === "srt_full_pose" ? "SRT轨迹帧"' in viewer
+    assert 'workflow === "srt_full_pose" ? "整轨微调后帧"' in viewer
 
 
 def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:

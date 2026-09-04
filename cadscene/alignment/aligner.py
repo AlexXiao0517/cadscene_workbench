@@ -25,6 +25,7 @@ MAX_BASELINE_DIRECTION_ERROR_DEG = 0.1
 MAX_METRIC_CORRECTION_ANGLE_RESIDUAL_DEG = 15.0
 MAX_FIXED_TRACK_OFFSET_RESIDUAL_M = 0.05
 MAX_FIXED_TRACK_ORIENTATION_DRIFT_DEG = 5.0
+MAX_FULL_POSE_LOCK_TOLERANCE = 1e-4
 MAX_FOCAL_ASPECT_RATIO = 2.0
 UPSTREAM_SFM_MANUAL_FOV_WARNING = (
     "Upstream SfM intrinsics/geometry are unreliable; manual FOV is being used."
@@ -312,7 +313,14 @@ def build_correspondences(
     allow_empty: bool = False,
 ) -> list[KeyframeCorrespondence]:
     out: list[KeyframeCorrespondence] = []
-    for keyframe in confirmed_keyframes(dict(track)):
+    raw_keyframes = track.get("keyframes", [])
+    keyframes = (
+        [item for item in raw_keyframes if isinstance(item, Mapping)]
+        if _is_authoritative_full_pose_track(track, traj)
+        and isinstance(raw_keyframes, list)
+        else confirmed_keyframes(dict(track))
+    )
+    for keyframe in keyframes:
         camera = keyframe.get("camera") or {}
         if not all(name in camera for name in ("x", "y", "z")):
             continue
@@ -342,6 +350,65 @@ def _is_metric_direct_trajectory(traj: SfmTrajectory) -> bool:
         traj.meta.get("coordinate_system") == "cad_local_m"
         and traj.meta.get("metric_scale_locked") is True
     )
+
+
+def _is_authoritative_full_pose_track(
+    track: Mapping[str, object], traj: SfmTrajectory
+) -> bool:
+    meta = track.get("meta")
+    return bool(
+        _is_metric_direct_trajectory(traj)
+        and traj.meta.get("trajectory_mode") == "srt_full_pose"
+        and isinstance(meta, Mapping)
+        and meta.get("workflow") == "srt_full_pose"
+        and meta.get("position_edit_policy") == "uniform_xyz_offset_only"
+        and meta.get("authoritative_workbench_track") is True
+    )
+
+
+def _validate_authoritative_full_pose_track(
+    track: Mapping[str, object],
+    correspondences: Sequence[KeyframeCorrespondence],
+    traj: SfmTrajectory,
+    config: AlignmentConfig,
+) -> None:
+    if len(correspondences) != len(traj.frames):
+        raise RuntimeError(
+            "authoritative full-pose track must cover every registered pose"
+        )
+    meta = track.get("meta")
+    raw_offset = meta.get("route_offset_xyz_m") if isinstance(meta, Mapping) else None
+    if not isinstance(raw_offset, (list, tuple)) or len(raw_offset) != 3:
+        raise RuntimeError("authoritative full-pose track requires a uniform XYZ offset")
+    offset = np.asarray(raw_offset, dtype=np.float64)
+    if not np.all(np.isfinite(offset)):
+        raise RuntimeError("authoritative full-pose uniform XYZ offset must be finite")
+    expected_fov = traj.horizontal_fov_deg()
+    for row in correspondences:
+        position_delta = row.center_cad - row.center_sfm
+        if float(np.linalg.norm(position_delta - offset)) > MAX_FULL_POSE_LOCK_TOLERANCE:
+            raise RuntimeError(
+                "authoritative full-pose camera centers must use one uniform XYZ offset"
+            )
+        automatic = _global_state_at_frame(
+            row.frame_index, traj, Sim3.identity(), config
+        )
+        angle_error = max(
+            abs(_normalize_angle(manual - original))
+            for manual, original in (
+                (row.state.yaw_deg, automatic.yaw_deg),
+                (row.state.pitch_deg, automatic.pitch_deg),
+                (row.state.roll_deg, automatic.roll_deg),
+            )
+        )
+        if angle_error > MAX_FULL_POSE_LOCK_TOLERANCE:
+            raise RuntimeError("authoritative full-pose attitude must remain locked")
+        if (
+            expected_fov is not None
+            and abs(float(row.state.fov_deg) - expected_fov)
+            > MAX_FULL_POSE_LOCK_TOLERANCE
+        ):
+            raise RuntimeError("authoritative full-pose FOV must remain locked")
 
 
 def _is_fixed_track_trajectory(traj: SfmTrajectory) -> bool:
@@ -1283,6 +1350,10 @@ def run_alignment(
     if fixed_track:
         pass
     elif metric_direct:
+        if _is_authoritative_full_pose_track(track, traj):
+            _validate_authoritative_full_pose_track(
+                track, correspondences, traj, config
+            )
         sim3, anchored = _metric_direct_alignment(correspondences, traj, config)
     else:
         sim3 = estimate_global_sim3(correspondences)

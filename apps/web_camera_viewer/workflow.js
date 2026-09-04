@@ -325,17 +325,17 @@
     document.querySelector("#fixedTrackAnchorPanel")?.toggleAttribute("hidden", !fixed);
     document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed);
     const sfmHeading = document.querySelector("#sfmPanel .sfm-panel-head span");
-    if (sfmHeading) sfmHeading.textContent = fixed
+    if (sfmHeading) sfmHeading.textContent = full ? "SRT 全姿态轨迹（无点云）" : (fixed
       ? "SRT→CAD 固定轨迹（无点云）"
-      : "SfM 诊断场景（点云 + 双轨迹 + 建议）";
+      : "SfM 诊断场景（点云 + 双轨迹 + 建议）");
     document.querySelector("#sfmPointsToggle")?.toggleAttribute("hidden", fixed || full);
     document.querySelector("#sfmPointControls")?.toggleAttribute("hidden", fixed || full);
     document.querySelector("#sfmSuggestionsToggle")?.toggleAttribute("hidden", fixed || full);
     document.querySelector("#sfmUsePoseToggle")?.toggleAttribute("hidden", fixed || full);
     const globalTrackLabel = document.querySelector("#sfmGlobalToggle span");
-    if (globalTrackLabel) globalTrackLabel.textContent = fixed ? "SRT 固定轨迹" : "原始 SfM 轨迹";
+    if (globalTrackLabel) globalTrackLabel.textContent = full ? "SRT 原始轨迹" : (fixed ? "SRT 固定轨迹" : "原始 SfM 轨迹");
     const anchoredTrackLabel = document.querySelector("#sfmAnchoredToggle span");
-    if (anchoredTrackLabel) anchoredTrackLabel.textContent = fixed ? "姿态微调后轨迹" : "锚定后轨迹";
+    if (anchoredTrackLabel) anchoredTrackLabel.textContent = full ? "整轨微调后轨迹" : (fixed ? "姿态微调后轨迹" : "锚定后轨迹");
     setPureVisible(
       "#pureRotationCalibrationPanel, #pureRotationControlNotice, "
         + "#workflowReturnPureCalibration",
