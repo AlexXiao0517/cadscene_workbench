@@ -1802,6 +1802,7 @@ class ProjectWorkbenchService:
             and session.trajectory_output_fingerprint
         )
         fixed_track = session.workflow == "srt_fixed_track_visual_pose"
+        full_pose = session.workflow == "srt_full_pose"
         if state is not None and state.trajectory_output_revision != (
             session.trajectory_output_revision or None
         ):
@@ -1810,6 +1811,18 @@ class ProjectWorkbenchService:
             return "sfm"
         if requested in {"sfm", "keyframes"}:
             return "keyframes"
+        if full_pose:
+            return (
+                "render"
+                if session.workbench_output_revision
+                and session.workbench_output_fingerprint
+                and (
+                    state is None
+                    or state.workbench_output_revision
+                    == session.workbench_output_revision
+                )
+                else "keyframes"
+            )
         if not self._has_fitted_track(session):
             return "keyframes"
         if fixed_track:

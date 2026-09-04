@@ -587,6 +587,8 @@ def build_stage_command(
         else "sfm_overlay_existing_sfm.yaml"
     )
     if stage in {"alignment", "quality"}:
+        if full_pose and stage == "quality":
+            raise ValueError("full-pose workflow has no quality stage")
         if fixed_track and stage == "quality":
             raise ValueError("fixed-track visual pose workflow has no quality stage")
         required = ["trajectory", "manual_track"]

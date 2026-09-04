@@ -461,6 +461,18 @@ def test_full_pose_alignment_resolves_semantic_trajectory_without_sparse_ply(
     )
     assert "--sparse-ply" not in command
 
+    with pytest.raises(
+        ValueError, match="full-pose workflow has no quality stage"
+    ):
+        build_stage_command(
+            tmp_path,
+            "demo",
+            "full-pose",
+            "quality",
+            {},
+            application_root=Path.cwd(),
+        )
+
 
 def test_fixed_track_alignment_uses_visual_pose_pipeline_without_sparse_ply(
     tmp_path: Path,

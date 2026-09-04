@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+import cadscene.projects.service as service_module
 from cadscene.projects.workbench_sessions import (
     AtomicWorkbenchSessionStore,
     InvalidWorkbenchOutput,
@@ -756,6 +757,8 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         / (
             "02_pure_rotation/camera_rotation_raw.json"
             if workflow == "pure_rotation"
+            else "02_srt_full_pose/camera_trajectory_full_pose.json"
+            if workflow == "srt_full_pose"
             else "02_sfm/camera_trajectory.json"
         )
     )
@@ -767,6 +770,14 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
                 **(
                     {"trajectory_mode": "pure_rotation_only"}
                     if workflow == "pure_rotation"
+                    else {
+                        "meta": {
+                            "trajectory_mode": "srt_full_pose",
+                            "coordinate_system": "cad_local_m",
+                            "metric_scale_locked": True,
+                        }
+                    }
+                    if workflow == "srt_full_pose"
                     else {}
                 ),
             }
@@ -812,6 +823,36 @@ def _project_api_with_workbench(tmp_path: Path, *, workflow: str = "sfm_only"):
         workbench=workbench,
     )
     return api, repositories, runs_root, job
+
+
+def test_full_pose_resume_has_only_adjustment_and_render_stages(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(
+        tmp_path, workflow="srt_full_pose"
+    )
+    opened = api.handle(
+        "POST",
+        "/api/projects/project-1/clips/clip-1/workbench-sessions",
+        json_body={
+            "expected_revision": repositories.clips.load("project-1").revision,
+            "return_to": "/apps/project_workspace/?projectId=project-1",
+        },
+    )
+    session = api.workbench.inspect("project-1", opened.body["token"])
+
+    assert opened.status == 201
+    assert session.launch_mode == "trajectory_ready"
+    assert api.workbench._validated_resume_stage(session, "quality") == "keyframes"
+
+    saved = replace(
+        session,
+        workbench_output_revision="workbench-output-1",
+        workbench_output_fingerprint="f" * 64,
+    )
+
+    assert api.workbench._validated_resume_stage(saved, "quality") == "render"
+    assert api.workbench._validated_resume_stage(saved, "render") == "render"
 
 
 def _fixed_track_api_with_workbench(
@@ -1029,6 +1070,171 @@ def test_fixed_track_open_queues_trajectory_instead_of_workflow_start(
     assert not (
         api.service.projects_root / "project-1" / "workbench_sessions"
     ).exists()
+
+
+def test_fixed_track_open_retries_failed_clip_export_dependency(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=False
+    )
+    clips = repositories.clips.load("project-1")
+    selected = clips.clips[0]
+    analysis = dict(selected.analysis)
+    analysis.pop("physical_mp4_path", None)
+    analysis.pop("frame_map_path", None)
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(selected, analysis=analysis),)
+        ),
+    )
+    endpoint = "/api/projects/project-1/clips/clip-1/workbench-sessions"
+    payload = {
+        "expected_revision": repositories.clips.load("project-1").revision,
+        "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        "return_to": "/apps/project_workspace/?projectId=project-1",
+    }
+
+    first = api.handle("POST", endpoint, json_body=payload)
+    export = next(
+        job for job in api.service.queue.jobs() if job.job_type == "clip_export"
+    )
+    trajectory = next(
+        job for job in api.service.queue.jobs() if job.job_type == "trajectory"
+    )
+    claimed = api.service.queue.claim_next_unstarted()
+    assert first.status == 202
+    assert first.body["job_id"] == trajectory.job_id
+    assert claimed is not None and claimed.job_id == export.job_id
+    lease = claimed.attempts[-1]
+    api.service.fail_job(
+        "project-1",
+        claimed.job_id,
+        "simulated whole-video export failure",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    api.service.queue.release_execution_claim(
+        claimed.job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    payload["expected_jobs_revision"] = repositories.jobs.load("project-1").revision
+    retried = api.handle("POST", endpoint, json_body=payload)
+
+    assert retried.status == 202
+    assert retried.body["job_id"] == trajectory.job_id
+    retried_export = api.service.queue.get(export.job_id)
+    assert retried_export.status in {"queued", "preparing", "running"}
+    assert [attempt.number for attempt in retried_export.attempts] == [1, 2]
+
+
+def test_fixed_track_retry_rebinds_trajectory_to_new_export_adapter_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=False
+    )
+    clips = repositories.clips.load("project-1")
+    selected = clips.clips[0]
+    analysis = dict(selected.analysis)
+    analysis.pop("physical_mp4_path", None)
+    analysis.pop("frame_map_path", None)
+    repositories.clips.update(
+        "project-1",
+        expected_revision=clips.revision,
+        mutate=lambda value: replace(
+            value, clips=(replace(selected, analysis=analysis),)
+        ),
+    )
+    endpoint = "/api/projects/project-1/clips/clip-1/workbench-sessions"
+    payload = {
+        "expected_revision": repositories.clips.load("project-1").revision,
+        "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        "return_to": "/apps/project_workspace/?projectId=project-1",
+    }
+    monkeypatch.setattr(service_module, "CLIP_EXPORT_ADAPTER_VERSION", "1")
+
+    first = api.handle("POST", endpoint, json_body=payload)
+    old_export = next(
+        job for job in api.service.queue.jobs() if job.job_type == "clip_export"
+    )
+    trajectory = next(
+        job for job in api.service.queue.jobs() if job.job_type == "trajectory"
+    )
+    claimed = api.service.queue.claim_next_unstarted()
+    assert first.status == 202
+    assert claimed is not None and claimed.job_id == old_export.job_id
+    lease = claimed.attempts[-1]
+    api.service.fail_job(
+        "project-1",
+        claimed.job_id,
+        "simulated legacy export failure",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    api.service.queue.release_execution_claim(
+        claimed.job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    monkeypatch.setattr(service_module, "CLIP_EXPORT_ADAPTER_VERSION", "2")
+    payload["expected_jobs_revision"] = repositories.jobs.load("project-1").revision
+
+    retried = api.handle("POST", endpoint, json_body=payload)
+
+    assert retried.status == 202
+    exports = [
+        job for job in api.service.queue.jobs() if job.job_type == "clip_export"
+    ]
+    assert len(exports) == 2
+    new_export = next(job for job in exports if job.job_id != old_export.job_id)
+    retried_trajectory = api.service.queue.get(trajectory.job_id)
+    assert retried_trajectory.depends_on_job_ids == (new_export.job_id,)
+
+
+def test_fixed_track_open_retries_failed_trajectory(
+    tmp_path: Path,
+) -> None:
+    api, repositories = _fixed_track_api_with_workbench(
+        tmp_path, with_trajectory=False
+    )
+    endpoint = "/api/projects/project-1/clips/clip-1/workbench-sessions"
+    payload = {
+        "expected_revision": repositories.clips.load("project-1").revision,
+        "expected_jobs_revision": repositories.jobs.load("project-1").revision,
+        "return_to": "/apps/project_workspace/?projectId=project-1",
+    }
+
+    first = api.handle("POST", endpoint, json_body=payload)
+    claimed = api.service.queue.claim_next_unstarted()
+    assert first.status == 202
+    assert claimed is not None and claimed.job_id == first.body["job_id"]
+    lease = claimed.attempts[-1]
+    api.service.fail_job(
+        "project-1",
+        claimed.job_id,
+        "simulated visual attitude failure",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+    api.service.queue.release_execution_claim(
+        claimed.job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    payload["expected_jobs_revision"] = repositories.jobs.load("project-1").revision
+    retried = api.handle("POST", endpoint, json_body=payload)
+
+    assert retried.status == 202
+    assert retried.body["job_id"] == first.body["job_id"]
+    retried_trajectory = api.service.queue.get(claimed.job_id)
+    assert retried_trajectory.status in {"queued", "preparing", "running"}
+    assert [attempt.number for attempt in retried_trajectory.attempts] == [1, 2]
 
 
 def test_fixed_track_open_reports_configuration_blocker_instead_of_reexporting_clip(
@@ -2819,7 +3025,7 @@ def test_workflow_start_session_is_not_allowed_to_save_before_trajectory(
 
 
 def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api, repositories, _runs_root, _job = _project_api_with_workbench(tmp_path)
     jobs = repositories.jobs.load("project-1")
@@ -2877,6 +3083,7 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     (output_dir / "clip_frame_map.json").write_text(
         json.dumps(
             {
+                "source_time_base": {"numerator": 1, "denominator": 25},
                 "clips": [
                     {
                         "clip_id": "clip-1",
@@ -2899,6 +3106,16 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
         claim_token=str(attempt.worker_claim_token),
     )
 
+    exported_video = output_dir / "clip-1.mp4"
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path.resolve() == exported_video.resolve():
+            pytest.fail("snapshot preflight must not load the whole MP4 into memory")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
     ready = api.handle("GET", "/api/projects/project-1/snapshot")
     assert ready.body["clips"][0]["capabilities"]["can_open_workbench"] is True
     opened = api.handle(
@@ -2915,6 +3132,54 @@ def test_open_workbench_enqueues_on_demand_clip_export_before_creating_session(
     assert (
         tmp_path / "data/project-1-clip-1/video/project-1-clip-1.mp4"
     ).read_bytes() == b"exported-58-second-clip"
+
+
+def test_clip_export_validation_streams_video_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "clip_inputs"
+    output_dir.mkdir()
+    video_path = output_dir / "clip-1.mp4"
+    video_path.write_bytes(b"large-video-placeholder")
+    (output_dir / "clip_frame_map.json").write_text(
+        json.dumps(
+            {
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "source_start_pts": 0,
+                        "source_end_pts_exclusive": 100,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    definition = ClipDefinition.from_analysis(
+        {
+            "project_id": "project-1",
+            "clip_id": "clip-1",
+            "analysis_revision": "analysis-1",
+            "source_start_pts": 0,
+            "source_end_pts_exclusive": 100,
+            "source_time_base": {"numerator": 1, "denominator": 25},
+            "interval_semantics": "half_open",
+            "recommended_workflow": "srt_fixed_track_visual_pose",
+            "needs_review": False,
+        }
+    )
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == video_path:
+            pytest.fail("whole-video validation must not load the MP4 into memory")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    result = _validate_clip_export_outputs((definition,), output_dir)
+
+    assert result.status == "success"
 
 
 def test_open_workbench_retries_failed_on_demand_clip_export(
