@@ -27,6 +27,23 @@ def test_run_sfm_help_lists_backend_and_device_controls() -> None:
     assert "--no-refine-focal-length" in result.stdout
 
 
+def test_run_sfm_accepts_reconstruction_height() -> None:
+    from cadscene.cli.run_sfm import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--dataset",
+            "demo",
+            "--run-id",
+            "resolution",
+            "--reconstruction-height",
+            "1080",
+        ]
+    )
+
+    assert args.reconstruction_height == 1080
+
+
 def test_custom_ba_values_are_recorded_in_manifest_inputs(tmp_path) -> None:
     fixture = tmp_path / "mock_reconstruction.json"
     fixture.write_text(

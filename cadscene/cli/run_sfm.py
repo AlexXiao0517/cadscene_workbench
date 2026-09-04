@@ -40,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--num-frames", type=int, default=0)
     parser.add_argument("--frame-step", type=int, default=5)
+    parser.add_argument(
+        "--reconstruction-height",
+        type=int,
+        choices=(720, 1080),
+        default=None,
+        help=(
+            "Resize extracted frames to this height before COLMAP; "
+            "smaller sources are not upscaled."
+        ),
+    )
     parser.add_argument("--max-image-size", type=int, default=2048)
     parser.add_argument("--max-num-features", type=int, default=12000)
     parser.add_argument("--camera-model", default="OPENCV")
@@ -103,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         start_frame=args.start_frame,
         num_frames=args.num_frames,
         frame_step=args.frame_step,
+        reconstruction_height=args.reconstruction_height,
         max_image_size=args.max_image_size,
         max_num_features=args.max_num_features,
         camera_model=args.camera_model,
@@ -137,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         "gpu_index": args.gpu_index,
         "colmap_exe": args.colmap_exe,
         "camera_params": list(camera_params) if camera_params is not None else None,
+        "reconstruction_height": args.reconstruction_height,
         "refine_focal_length": not args.no_refine_focal_length,
         "ba_global_frames_ratio": args.ba_global_frames_ratio,
         "ba_global_points_ratio": args.ba_global_points_ratio,

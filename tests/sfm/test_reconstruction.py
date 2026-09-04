@@ -212,6 +212,58 @@ def test_extract_frames_selects_requested_original_frames(tmp_path: Path) -> Non
     ]
 
 
+def test_extract_frames_resizes_before_writing_without_changing_frame_indices(
+    tmp_path: Path,
+) -> None:
+    cv2 = pytest.importorskip("cv2")
+    video = tmp_path / "resized.mp4"
+    writer = cv2.VideoWriter(
+        str(video), cv2.VideoWriter_fourcc(*"mp4v"), 5.0, (64, 48)
+    )
+    for value in range(4):
+        writer.write(np.full((48, 64, 3), value * 20, dtype=np.uint8))
+    writer.release()
+
+    from cadscene.sfm.reconstruction import extract_frames
+
+    extracted = extract_frames(
+        video, tmp_path / "resized-images", [1, 3], output_size=(32, 24)
+    )
+
+    assert [item.frame_index for item in extracted] == [1, 3]
+    assert cv2.imread(str(extracted[0].path)).shape[:2] == (24, 32)
+
+
+def test_stats_record_source_and_actual_reconstruction_dimensions() -> None:
+    config = ReconstructionConfig(
+        reconstruction_height=1080,
+        camera_model="PINHOLE",
+        camera_params=(1321.32664365, 1321.32664365, 960.0, 540.0),
+    )
+    stats = build_sfm_stats(
+        frame_count=100,
+        extracted_frame_count=20,
+        registered_count=18,
+        point_count=5000,
+        mean_reprojection_error=0.5,
+        config=config,
+        backend="colmap_cli",
+        runtime={
+            "source_image_size": [3840, 2160],
+            "reconstruction_image_size": [1920, 1080],
+        },
+    )
+
+    assert stats["source_image_size"] == [3840, 2160]
+    assert stats["reconstruction_image_size"] == [1920, 1080]
+    assert stats["camera_params"] == [
+        1321.32664365,
+        1321.32664365,
+        960.0,
+        540.0,
+    ]
+
+
 def test_reconstruction_outputs_persist_source_frame_pts_table(tmp_path: Path) -> None:
     result = ReconstructionResult(
         trajectory={"poses": []},
@@ -292,14 +344,18 @@ def test_colmap_cli_cpu_retry_preserves_all_ba_kwargs(
         },
     )
     monkeypatch.setattr(reconstruction, "_video_metadata", lambda path: (3, 25.0, 64, 48))
-    monkeypatch.setattr(
-        reconstruction,
-        "extract_frames",
-        lambda video_path, images_dir, frame_indices: [
+    extracted_sizes = []
+
+    def fake_extract_frames(
+        video_path, images_dir, frame_indices, *, output_size=None
+    ):
+        extracted_sizes.append(output_size)
+        return [
             reconstruction.ExtractedFrame(frame_index=index, path=images_dir / f"frame_{index:06d}.png")
             for index in frame_indices
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(reconstruction, "extract_frames", fake_extract_frames)
 
     def fake_pipeline(executable, paths, **kwargs):
         calls.append(kwargs)
@@ -355,9 +411,11 @@ def test_colmap_cli_cpu_retry_preserves_all_ba_kwargs(
             min_reg_images=1,
             backend="colmap_cli",
             device="cuda",
+            reconstruction_height=720,
             **ba_kwargs,
         ),
     )
 
+    assert extracted_sizes == [(64, 48)]
     assert [call["use_gpu"] for call in calls] == [True, False]
     assert [{name: call[name] for name in ba_kwargs} for call in calls] == [ba_kwargs, ba_kwargs]

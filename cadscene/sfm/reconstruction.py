@@ -12,6 +12,7 @@ import numpy as np
 
 from cadscene.core.io import ensure_dir, read_json, write_csv_utf8_sig, write_json, write_text
 from cadscene.sfm.backend_detection import detect_sfm_environment, select_sfm_backend
+from cadscene.sfm.resolution import reconstruction_dimensions
 from cadscene.sfm.colmap_cli import (
     ColmapCommandError,
     ColmapCliPaths,
@@ -32,6 +33,7 @@ class ReconstructionConfig:
     start_frame: int = 0
     num_frames: int = 0
     frame_step: int = 5
+    reconstruction_height: int | None = None
     max_image_size: int = 2048
     max_num_features: int = 12000
     camera_model: str = "OPENCV"
@@ -103,6 +105,8 @@ def extract_frames(
     video_path: str | Path,
     images_dir: str | Path,
     frame_indices: Sequence[int],
+    *,
+    output_size: tuple[int, int] | None = None,
 ) -> list[ExtractedFrame]:
     cv2 = importlib.import_module("cv2")
     source = Path(video_path)
@@ -126,7 +130,21 @@ def extract_frames(
                 break
             if frame_index in target_set:
                 path = output / frame_image_name(frame_index)
-                if not cv2.imwrite(str(path), frame):
+                output_frame = frame
+                if output_size is not None:
+                    target_width, target_height = output_size
+                    if target_width <= 0 or target_height <= 0:
+                        raise ValueError("output_size must contain positive dimensions")
+                    if (
+                        frame.shape[1] != target_width
+                        or frame.shape[0] != target_height
+                    ):
+                        output_frame = cv2.resize(
+                            frame,
+                            (target_width, target_height),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                if output_frame.size == 0 or not cv2.imwrite(str(path), output_frame):
                     raise RuntimeError(f"failed to write extracted frame: {path}")
                 pts_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC))
                 pts_time_sec = pts_msec / 1000.0 if np.isfinite(pts_msec) and pts_msec >= 0.0 else None
@@ -344,6 +362,13 @@ def build_sfm_stats(
         "elapsed_sec": runtime_values.get("elapsed_sec"),
         "stage_timings": runtime_values.get("stage_timings", {}),
         "camera_model": config.camera_model,
+        "camera_params": (
+            list(config.camera_params) if config.camera_params is not None else None
+        ),
+        "source_image_size": runtime_values.get("source_image_size"),
+        "reconstruction_image_size": runtime_values.get(
+            "reconstruction_image_size"
+        ),
         "max_image_size": int(config.max_image_size),
         "max_num_features": int(config.max_num_features),
         "warnings": warning_items,
@@ -371,6 +396,9 @@ def build_sfm_report(
         f"- 使用后端：{stats.get('backend')}",
         f"- 请求设备：{stats.get('requested_device')}",
         f"- 实际设备：{stats.get('effective_device') or '未记录'}",
+        f"- 源视频尺寸：{stats.get('source_image_size') or '未记录'}",
+        f"- 姿态解算尺寸：{stats.get('reconstruction_image_size') or '未记录'}",
+        f"- 相机模型/参数：{stats.get('camera_model')} / {stats.get('camera_params') or '自动'}",
         f"- GPU：{stats.get('gpu_name') or '未使用或未验证'}",
         f"- 注册帧数：{stats.get('registered_count')} / {stats.get('extracted_frame_count')}",
         f"- 点云数量：{stats.get('point_count')}",
@@ -615,6 +643,16 @@ def run_reconstruction(
     sparse_dir = ensure_dir(output / "sparse")
     database_path = output / "database.db"
     frame_count, fps, width, height = _video_metadata(video)
+    if config.reconstruction_height not in (None, 720, 1080):
+        raise ValueError("reconstruction_height must be 720, 1080, or omitted")
+    if config.reconstruction_height is None:
+        solve_width, solve_height = width, height
+    else:
+        solve_width, solve_height = reconstruction_dimensions(
+            width,
+            height,
+            f"{int(config.reconstruction_height)}p",
+        )
     frame_indices = frame_indices_for_config(config, frame_count)
     if len(frame_indices) < 3:
         raise RuntimeError("SfM requires at least 3 extracted frames")
@@ -630,8 +668,8 @@ def run_reconstruction(
                 reconstruction,
                 frame_indices=frame_indices,
                 fps=fps,
-                width=width,
-                height=height,
+                width=solve_width,
+                height=solve_height,
                 video_path=video,
             )
         else:
@@ -647,8 +685,8 @@ def run_reconstruction(
                 text_dir,
                 frame_indices=frame_indices,
                 fps=fps,
-                width=width,
-                height=height,
+                width=solve_width,
+                height=solve_height,
                 video_path=video,
             )
             trajectory, intrinsics, points, colors, mean_error = (
@@ -663,6 +701,8 @@ def run_reconstruction(
             **selection.to_dict(),
             "colmap_version": environment.get("colmap_version"),
             "pycolmap_version": environment.get("pycolmap_version"),
+            "source_image_size": [width, height],
+            "reconstruction_image_size": [solve_width, solve_height],
             "elapsed_sec": time.perf_counter() - started_at,
         }
         stats = build_sfm_stats(
@@ -685,8 +725,17 @@ def run_reconstruction(
             warnings=warnings,
             frame_timestamps=[],
         )
-    notify("extract_frames", 0.12, "正在从视频抽帧")
-    frames = extract_frames(video, images_dir, frame_indices)
+    notify(
+        "extract_frames",
+        0.12,
+        f"正在从视频抽帧（{width}×{height} → {solve_width}×{solve_height}）",
+    )
+    frames = extract_frames(
+        video,
+        images_dir,
+        frame_indices,
+        output_size=(solve_width, solve_height),
+    )
     if config.use_mask:
         if seg_dir is None:
             raise FileNotFoundError("--use-mask requires --seg-dir")
@@ -701,6 +750,8 @@ def run_reconstruction(
         "feature_extraction_gpu": False,
         "feature_matching_gpu": False,
         "bundle_adjustment_gpu": False,
+        "source_image_size": [width, height],
+        "reconstruction_image_size": [solve_width, solve_height],
         "stage_timings": {},
     }
     if selection.backend == "colmap_cli":
@@ -780,8 +831,8 @@ def run_reconstruction(
                 reconstruction,
                 frame_indices=[frame.frame_index for frame in frames],
                 fps=fps,
-                width=width,
-                height=height,
+                width=solve_width,
+                height=solve_height,
                 video_path=video,
             )
         else:
@@ -794,8 +845,8 @@ def run_reconstruction(
                 text_dir,
                 frame_indices=[frame.frame_index for frame in frames],
                 fps=fps,
-                width=width,
-                height=height,
+                width=solve_width,
+                height=solve_height,
                 video_path=video,
             )
             trajectory, intrinsics, points, colors, mean_error = (
@@ -867,8 +918,8 @@ def run_reconstruction(
             reconstruction,
             frame_indices=[frame.frame_index for frame in frames],
             fps=fps,
-            width=width,
-            height=height,
+            width=solve_width,
+            height=solve_height,
             video_path=video,
         )
         runtime["feature_extraction_gpu"] = use_gpu
