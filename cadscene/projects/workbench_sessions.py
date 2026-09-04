@@ -29,6 +29,9 @@ from cadscene.workflow.data_import import slugify_dataset_name
 
 
 SCHEMA_VERSION = "1.0"
+TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS = frozenset(
+    {"srt_full_pose", "srt_fixed_track_visual_pose"}
+)
 _LOCKS_GUARD = Lock()
 _RECORD_LOCKS: dict[str, RLock] = {}
 
@@ -411,11 +414,11 @@ class WorkbenchSessionCoordinator:
             and context.trajectory_run_id
         )
         if (
-            context.workflow == "srt_fixed_track_visual_pose"
+            context.workflow in TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS
             and not trajectory_ready
         ):
             raise WorkbenchPermissionDenied(
-                "fixed-track workbench requires a validated trajectory"
+                "SRT workbench requires a validated trajectory"
             )
         if not trajectory_ready and context.save_permissions:
             raise StaleWorkbenchSession("current trajectory output is unavailable")
@@ -913,7 +916,8 @@ class ProjectWorkbenchService:
             and physical_clip is not None
             and cad_design is not None
             and (
-                clip.resolved_workflow != "srt_fixed_track_visual_pose"
+                clip.resolved_workflow
+                not in TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS
                 or current_job is not None
             )
         )

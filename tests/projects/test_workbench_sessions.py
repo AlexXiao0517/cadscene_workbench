@@ -275,6 +275,23 @@ def test_create_requires_server_capability_and_successful_current_output(
         _create(coordinator)
 
 
+def test_full_pose_session_requires_validated_trajectory(session_system) -> None:
+    coordinator, _store, _clock, current, _validated = session_system
+    current[0] = _context(
+        workflow="srt_full_pose",
+        input_fingerprint="",
+        trajectory_job_id="",
+        trajectory_run_id="",
+        trajectory_output_revision="",
+        trajectory_output_fingerprint="",
+        save_permissions=(),
+        can_open_workbench=True,
+    )
+
+    with pytest.raises(WorkbenchPermissionDenied, match="validated trajectory"):
+        _create(coordinator)
+
+
 def test_save_requires_explicit_permission(session_system) -> None:
     coordinator, _store, _clock, current, _validated = session_system
     current[0] = replace(current[0], save_permissions=())
@@ -2998,6 +3015,28 @@ def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
         (tmp_path / "data/project-1-clip-1/dataset_manifest.json").read_text(encoding="utf-8")
     )
     assert bridge["workflow"]["trajectory_mode"] == "sfm_only"
+
+
+def test_full_pose_clip_cannot_open_workbench_before_trajectory_is_solved(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _runs_root, _job = _project_api_with_workbench(
+        tmp_path,
+        workflow="srt_full_pose",
+    )
+    jobs = repositories.jobs.load("project-1")
+    repositories.jobs.update(
+        "project-1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(value, jobs=()),
+    )
+
+    snapshot = api.handle("GET", "/api/projects/project-1/snapshot")
+
+    clip = snapshot.body["clips"][0]
+    assert clip["resolved_workflow"] == "srt_full_pose"
+    assert clip["capabilities"]["can_open_workbench"] is False
+    assert clip["capabilities"]["can_prepare_workbench"] is True
 
 
 def test_workflow_start_session_is_not_allowed_to_save_before_trajectory(
