@@ -100,6 +100,33 @@ def test_full_pose_workbench_preserves_workflow_and_uses_no_sfm_artifacts() -> N
     assert "sfm" not in pipeline["stages"]
 
 
+def test_full_pose_workbench_is_adjustment_then_render_without_quality() -> None:
+    script = _read("workflow.js")
+
+    assert 'const full = mode === "srt_full_pose"' in script
+    assert 'stageTitles.keyframes = "轨迹微调"' in script
+    assert 'stageTitles.render = "渲染导出"' in script
+    assert 'toggleAttribute("hidden", fixed || full)' in script
+    assert 'toggleAttribute("hidden", pure || fixed || full)' in script
+    assert 'keyframeOrdinal.textContent = full ? "1"' in script
+    assert 'renderOrdinal.textContent = "2"' in script
+    assert 'querySelector("#fullPoseAdjustmentPanel")' in script
+    assert 'querySelector("#cameraSettingsDetails")' in script
+    assert "async function finishFullPoseAdjustment()" in script
+    start = script.index("async function finishFullPoseAdjustment()")
+    end = script.index("async function finishKeyframePlan()", start)
+    finish = script[start:end]
+    assert "await saveCurrentCameraTrack()" in finish
+    assert "await finalizeProjectWorkbenchSave" in finish
+    assert 'setWorkflowStage("render")' in finish
+    assert "startAlignmentStage" not in finish
+    assert 'throw new Error("SRT 全姿态工作流不包含质量检测阶段")' in script
+    assert "window.cadsceneApplyFullPoseRouteOffset" in script
+    assert "window.cadsceneResetFullPoseRouteOffset" in script
+    assert 'querySelector("#fullPoseFinishAdjustment")' in script
+    assert 'id="fullPoseFinishAdjustment"' in _read("index.html")
+
+
 def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
@@ -758,8 +785,8 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'viewer_legacy.js?v=20260903-fixed-track-anchor-v1' in index
-    assert 'workflow.js?v=20260903-fixed-track-anchor-v1' in index
+    assert 'viewer_legacy.js?v=20260904-full-pose-offset-v1' in index
+    assert 'workflow.js?v=20260904-full-pose-offset-v1' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:
