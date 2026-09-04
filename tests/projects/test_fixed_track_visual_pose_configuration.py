@@ -115,13 +115,15 @@ def test_settings_store_one_xyz_offset_and_stale_old_references(
         "clip-1",
         expected_revision=current.revision,
         horizontal_fov_deg=72.0,
+        reconstruction_resolution="720p",
         route_offset_xyz_m=(2.0, -1.0, 5.0),
     )
 
     selected = updated.clips[0]
     assert selected.manual_definition["srt_fixed_track_visual_pose"] == {
-        "schema_version": 1,
-        "horizontal_fov_deg": 72.0,
+        "schema_version": 2,
+        "horizontal_fov_deg": 72,
+        "reconstruction_resolution": "720p",
         "route_offset_xyz_m": [2.0, -1.0, 5.0],
     }
     assert selected.references[0].value["status"] == "stale"
@@ -145,6 +147,31 @@ def test_fixed_track_fov_is_rounded_and_stored_as_an_integer(tmp_path: Path) -> 
     ]["horizontal_fov_deg"]
     assert stored == 59
     assert isinstance(stored, int)
+
+
+def test_fixed_track_resolution_defaults_and_rejects_unknown_values(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = _confirmed_service(tmp_path)
+
+    updated = service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=72.0,
+    )
+    assert updated.clips[0].manual_definition[
+        "srt_fixed_track_visual_pose"
+    ]["reconstruction_resolution"] == "1080p"
+
+    with pytest.raises(ValueError, match="reconstruction_resolution"):
+        service.update_srt_fixed_track_visual_pose_settings(
+            "p1",
+            "clip-1",
+            expected_revision=updated.revision,
+            horizontal_fov_deg=72.0,
+            reconstruction_resolution="4k",
+        )
 
 
 @pytest.mark.parametrize(
@@ -186,11 +213,13 @@ def test_fixed_track_settings_api_and_snapshot_are_versioned(tmp_path: Path) -> 
         json_body={
             "expected_revision": repositories.clips.load("p1").revision,
             "horizontal_fov_deg": 72.0,
+            "reconstruction_resolution": "720p",
             "route_offset_xyz_m": [2.0, -1.0, 5.0],
         },
     )
 
     assert response.status == 200
+    assert response.body["settings"]["reconstruction_resolution"] == "720p"
     assert response.body["settings"]["route_offset_xyz_m"] == [2.0, -1.0, 5.0]
     snapshot = api.handle("GET", "/api/projects/p1/snapshot").body
     assert snapshot["clips"][0]["srt_fixed_track_visual_pose_settings"] == (
@@ -222,10 +251,47 @@ def test_adapter_parameters_bind_georeference_media_fov_and_offset(
     assert parameters["cad_scale"] == 1.0
     assert parameters["video_metadata"]["fps"] == 25.0
     assert parameters["srt_fixed_track_visual_pose"] == {
-        "schema_version": 1,
-        "horizontal_fov_deg": 72.0,
+        "schema_version": 2,
+        "horizontal_fov_deg": 72,
+        "reconstruction_resolution": "1080p",
         "route_offset_xyz_m": [2.0, -1.0, 5.0],
     }
+
+
+def test_legacy_fixed_track_settings_default_in_adapter_parameters(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = _confirmed_service(tmp_path)
+    current = repositories.clips.load("p1")
+    repositories.clips.update(
+        "p1",
+        expected_revision=current.revision,
+        mutate=lambda value: replace(
+            value,
+            clips=(
+                replace(
+                    value.clips[0],
+                    manual_definition={
+                        "srt_fixed_track_visual_pose": {
+                            "schema_version": 1,
+                            "horizontal_fov_deg": 72,
+                            "route_offset_xyz_m": [0.0, 0.0, 0.0],
+                        }
+                    },
+                ),
+            ),
+        ),
+    )
+
+    parameters = _fixed_track_visual_pose_adapter_parameters(
+        service.projects_root,
+        repositories.project.load("p1"),
+        repositories.clips.load("p1").clips[0],
+    )
+
+    assert parameters["srt_fixed_track_visual_pose"][
+        "reconstruction_resolution"
+    ] == "1080p"
 
 
 def test_adapter_parameters_derive_display_fps_from_exact_frame_map(

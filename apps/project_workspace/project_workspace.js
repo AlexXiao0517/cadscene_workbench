@@ -727,10 +727,14 @@
       : "大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。";
     $("#cadZOffsetField").hidden = fixedTrack;
     $("#routeOffsetFields").hidden = !fixedTrack;
+    $("#reconstructionResolutionField").hidden = !fixedTrack;
     $("#srtCoverageSummary").textContent = formatSrtCoverage(clip.srt_coverage);
     $("#horizontalFovInput").value = Number.isFinite(Number(settings.horizontal_fov_deg))
       ? Math.round(Number(settings.horizontal_fov_deg))
       : "";
+    $("#reconstructionResolutionInput").value = fixedTrack
+      ? (settings.reconstruction_resolution || "1080p")
+      : "1080p";
     const confirmedGeoreference = state.snapshot?.cad_georeference || {};
     $("#centralMeridianInput").value = confirmedGeoreference.confirmed
       ? formatCentralMeridian(confirmedGeoreference.central_meridian_deg)
@@ -767,6 +771,7 @@
     const horizontalFov = Math.round(Number(fovInput.value));
     const cadZOffset = Number($("#cadZOffsetInput").value || 0);
     const fixedTrack = state.srtConfigWorkflow === "srt_fixed_track_visual_pose";
+    const reconstructionResolution = $("#reconstructionResolutionInput").value;
     const routeOffset = [
       Number($("#routeOffsetXInput").value || 0),
       Number($("#routeOffsetYInput").value || 0),
@@ -800,6 +805,7 @@
             ? {
                 expected_revision: state.snapshot.component_revisions.clips,
                 horizontal_fov_deg: horizontalFov,
+                reconstruction_resolution: reconstructionResolution,
                 route_offset_xyz_m: routeOffset,
               }
             : {

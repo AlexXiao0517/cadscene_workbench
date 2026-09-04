@@ -1666,6 +1666,9 @@ class ProjectApi:
             clip_id,
             expected_revision=_required_revision(payload),
             horizontal_fov_deg=float(payload["horizontal_fov_deg"]),
+            reconstruction_resolution=str(
+                payload.get("reconstruction_resolution", "1080p")
+            ),
             route_offset_xyz_m=offset,
         )
         selected = next(item for item in manifest.clips if item.clip_id == clip_id)

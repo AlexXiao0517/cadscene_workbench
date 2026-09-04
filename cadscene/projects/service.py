@@ -91,6 +91,7 @@ from cadscene.srt.georeference import (
     recommend_cgcs2000_candidates,
 )
 from cadscene.srt.parser import load_srt_records
+from cadscene.sfm.resolution import normalize_reconstruction_resolution
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
@@ -2926,11 +2927,15 @@ class ProjectService:
         *,
         expected_revision: int,
         horizontal_fov_deg: float,
+        reconstruction_resolution: str = "1080p",
         route_offset_xyz_m: Sequence[float] = (0.0, 0.0, 0.0),
     ) -> ClipsManifest:
         """Store FOV and the only allowed whole-route XYZ position adjustment."""
 
         fov = _normalize_horizontal_fov_deg(horizontal_fov_deg)
+        resolution = normalize_reconstruction_resolution(
+            reconstruction_resolution
+        )
         if (
             not isinstance(route_offset_xyz_m, Sequence)
             or isinstance(route_offset_xyz_m, (str, bytes))
@@ -2941,8 +2946,9 @@ class ProjectService:
         if not all(isfinite(value) for value in offset):
             raise ValueError("route_offset_xyz_m must contain finite values")
         settings = {
-            "schema_version": 1,
+            "schema_version": 2,
             "horizontal_fov_deg": fov,
+            "reconstruction_resolution": resolution,
             "route_offset_xyz_m": offset,
         }
         with self._state_guard(project_id):
@@ -8438,12 +8444,18 @@ def _fixed_track_visual_pose_adapter_parameters(
     if media_binding is None:
         raise ValueError("project media specification is unavailable")
     _media_revision, media = media_binding
+    normalized_settings = dict(settings)
+    normalized_settings["reconstruction_resolution"] = (
+        normalize_reconstruction_resolution(
+            normalized_settings.get("reconstruction_resolution")
+        )
+    )
     render = _workbench_render_parameters(
         storage_root, project.project_id, clip, project.source_assets
     )
     return {
         "cad_georeference": dict(georeference),
-        "srt_fixed_track_visual_pose": dict(settings),
+        "srt_fixed_track_visual_pose": normalized_settings,
         "cad_origin_xy": list(render["origin_xy"]),
         "cad_scale": render["cad_scale"],
         "video_metadata": {

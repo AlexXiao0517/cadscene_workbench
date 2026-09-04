@@ -341,6 +341,14 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     assert "/srt-fixed-track-visual-pose`" in script
     assert "route_offset_xyz_m" in script
     assert "state.srtConfigWorkflow" in script
+    assert 'id="reconstructionResolutionField"' in html
+    assert 'id="reconstructionResolutionInput"' in html
+    assert '<option value="1080p">1080p（推荐）</option>' in html
+    assert '<option value="720p">720p（快速）</option>' in html
+    assert '<option value="source">原始分辨率</option>' in html
+    assert '$("#reconstructionResolutionField").hidden = !fixedTrack;' in script
+    assert 'settings.reconstruction_resolution || "1080p"' in script
+    assert "reconstruction_resolution: reconstructionResolution" in script
     assert 'body.state === "preparing_trajectory"' in script
     assert "preparingTrajectory ? clip.progress" in script
     assert "activeProgress?.message" in script
