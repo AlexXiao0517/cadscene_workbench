@@ -1407,7 +1407,10 @@ class ProjectService:
                     clip.clip_id
                 ] = f"physical SRT with {adapter.srt_requirement} coverage is missing"
                 continue
-            if bool(clip.analysis.get("needs_review", False)):
+            if bool(clip.analysis.get("needs_review", False)) and adapter.name not in {
+                "srt_full_pose",
+                "srt_fixed_track_visual_pose",
+            }:
                 confirmation.append(clip.clip_id)
                 reasons[clip.clip_id] = "clip analysis requires confirmation"
             else:
@@ -1495,7 +1498,10 @@ class ProjectService:
                 skipped.append(clip.clip_id)
                 reasons[clip.clip_id] = "immutable workbench output validation failed"
                 continue
-            if bool(clip.analysis.get("needs_review", False)):
+            if bool(clip.analysis.get("needs_review", False)) and workflow not in {
+                "srt_full_pose",
+                "srt_fixed_track_visual_pose",
+            }:
                 confirmation.append(clip.clip_id)
                 reasons[clip.clip_id] = "clip analysis requires confirmation"
             else:

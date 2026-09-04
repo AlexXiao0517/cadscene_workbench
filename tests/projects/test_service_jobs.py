@@ -15,6 +15,7 @@ from cadscene.projects.queue import AttemptRecord, LocalResourceQueue, QueueJob
 from cadscene.projects.repositories import RevisionConflict
 from cadscene.projects.service import ProjectService
 from cadscene.projects.workflow_adapters import default_workflow_adapters
+import cadscene.projects.service as service_module
 
 
 def clip(
@@ -207,6 +208,51 @@ def test_batch_preflight_groups_partial_eligibility_without_enqueueing(
     assert result.skipped == ("unsupported",)
     assert "CAD georeference" in result.reasons["unsupported"]
     assert repositories.jobs.load("p1").jobs == ()
+
+
+def test_fixed_track_srt_does_not_require_legacy_clip_analysis_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    srt_clip = ClipDefinition.from_analysis(
+        {
+            "project_id": "p1",
+            "clip_id": "srt-track",
+            "analysis_revision": "analysis-1",
+            "source_start_pts": 0,
+            "source_end_pts_exclusive": 100,
+            "source_time_base": {"numerator": 1, "denominator": 25},
+            "interval_semantics": "half_open",
+            "recommended_workflow": "srt_fixed_track_visual_pose",
+            "needs_review": True,
+            "srt_coverage": {"trajectory_coverage": 1.0},
+        },
+        manual_definition={
+            "srt_fixed_track_visual_pose": {"horizontal_fov_deg": 72}
+        },
+    )
+    service, repositories, _queue = service_with_clips(tmp_path, (srt_clip,))
+    srt = tmp_path / "source.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:00,040\nGPS\n", encoding="utf-8")
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda current: replace(
+            current,
+            source_assets={**current.source_assets, "srt_path": str(srt)},
+        ),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_confirmed_cad_georeference",
+        lambda _assets: {"confirmed": True},
+    )
+
+    result = service.preflight_trajectory_jobs("p1")
+
+    assert result.eligible == ("srt-track",)
+    assert result.needs_confirmation == ()
+    assert result.reasons["srt-track"] != "clip analysis requires confirmation"
 
 
 def test_project_package_exports_task3_public_interfaces() -> None:
