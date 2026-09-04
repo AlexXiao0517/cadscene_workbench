@@ -78,10 +78,16 @@ def find_colmap_executable(
         if resolved:
             candidates.append(resolved)
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
-    local_root = root / ".local" / "colmap"
-    if local_root.is_dir():
-        for pattern in ("COLMAP.bat", "colmap.exe"):
-            candidates.extend(str(path) for path in sorted(local_root.rglob(pattern)))
+    search_roots = [root]
+    if root.parent.name.casefold() in {".worktrees", "worktrees"}:
+        search_roots.append(root.parent.parent)
+    for search_root in search_roots:
+        local_root = search_root / ".local" / "colmap"
+        if local_root.is_dir():
+            for pattern in ("COLMAP.bat", "colmap.exe"):
+                candidates.extend(
+                    str(path) for path in sorted(local_root.rglob(pattern))
+                )
     for candidate in candidates:
         path = Path(candidate).expanduser()
         if path.is_file():

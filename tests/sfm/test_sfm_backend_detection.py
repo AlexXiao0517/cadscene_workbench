@@ -97,6 +97,25 @@ def test_find_colmap_executable_discovers_project_local_install(tmp_path) -> Non
     assert found == executable.resolve()
 
 
+def test_find_colmap_executable_discovers_owner_install_from_worktree(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    worktree = repository / ".worktrees" / "srt-pose"
+    worktree.mkdir(parents=True)
+    executable = (
+        repository / ".local" / "colmap" / "4.1.0-cuda" / "bin" / "colmap.exe"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"exe")
+    monkeypatch.delenv("COLMAP_EXE", raising=False)
+    monkeypatch.setattr(backend_detection.shutil, "which", lambda _name: None)
+
+    found = find_colmap_executable(project_root=worktree)
+
+    assert found == executable.resolve()
+
+
 def test_environment_probe_hides_windows_console(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
