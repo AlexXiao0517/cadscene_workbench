@@ -23,6 +23,8 @@ def test_run_sfm_help_lists_backend_and_device_controls() -> None:
     assert "--ba-global-points-freq" in result.stdout
     assert "--ba-global-max-num-iterations" in result.stdout
     assert "--ba-global-max-refinements" in result.stdout
+    assert "--camera-params" in result.stdout
+    assert "--no-refine-focal-length" in result.stdout
 
 
 def test_custom_ba_values_are_recorded_in_manifest_inputs(tmp_path) -> None:

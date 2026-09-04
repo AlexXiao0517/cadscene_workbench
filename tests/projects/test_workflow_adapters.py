@@ -554,7 +554,7 @@ def _fixed_track_inputs(tmp_path: Path, *, include_fov: bool = True) -> AdapterI
     )
 
 
-def test_fixed_track_adapter_never_invokes_sfm_or_legacy_fusion(
+def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     tmp_path: Path,
 ) -> None:
     inputs = _fixed_track_inputs(tmp_path)
@@ -564,13 +564,31 @@ def test_fixed_track_adapter_never_invokes_sfm_or_legacy_fusion(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "1"
-    assert len(commands) == 1
-    joined = " ".join(commands[0])
-    assert "cadscene.cli.build_srt_fixed_track_visual_pose" in joined
-    assert "cadscene.cli.run_sfm" not in joined
-    assert "cadscene.cli.fuse_srt_sfm" not in joined
-    config_path = Path(commands[0][commands[0].index("--config") + 1])
+    assert adapter.version == "2"
+    assert len(commands) == 2
+    sfm = commands[0]
+    transfer = commands[1]
+    assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
+    assert sfm[sfm.index("--backend") + 1] == "colmap_cli"
+    assert sfm[sfm.index("--camera-model") + 1] == "PINHOLE"
+    assert sfm[sfm.index("--camera-params") + 1] == (
+        "2642.6532873,2642.6532873,1920,1080"
+    )
+    assert "--no-refine-focal-length" in sfm
+    assert transfer[1:3] == (
+        "-m",
+        "cadscene.cli.build_srt_fixed_track_visual_pose",
+    )
+    assert transfer[transfer.index("--reconstruction-trajectory") + 1].endswith(
+        "02_sfm\\camera_trajectory.json"
+    )
+    assert transfer[transfer.index("--sparse-ply") + 1].endswith(
+        "02_sfm\\sparse_points.ply"
+    )
+    assert "cadscene.cli.fuse_srt_sfm" not in " ".join(
+        item for command in commands for item in command
+    )
+    config_path = Path(transfer[transfer.index("--config") + 1])
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     assert payload["build"]["horizontal_fov_deg"] == 72.0
     assert payload["build"]["route_offset_xyz_m"] == [1.0, -2.0, 5.0]

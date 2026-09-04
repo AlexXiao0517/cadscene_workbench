@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-image-size", type=int, default=2048)
     parser.add_argument("--max-num-features", type=int, default=12000)
     parser.add_argument("--camera-model", default="OPENCV")
+    parser.add_argument("--camera-params")
+    parser.add_argument("--no-refine-focal-length", action="store_true")
     parser.add_argument("--sequential-overlap", type=int, default=15)
     parser.add_argument("--init-min-tri-angle", type=float, default=2.0)
     parser.add_argument("--ba-global-frames-ratio", type=float, default=2.0)
@@ -87,6 +89,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.progress_file is not None:
             _write_progress(args.progress_file, substage, message, progress)
+    camera_params = None
+    if args.camera_params is not None:
+        try:
+            camera_params = tuple(
+                float(value.strip()) for value in args.camera_params.split(",")
+            )
+        except ValueError as exc:
+            raise ValueError("--camera-params must be comma-separated numbers") from exc
+        if not camera_params:
+            raise ValueError("--camera-params must not be empty")
     config = ReconstructionConfig(
         start_frame=args.start_frame,
         num_frames=args.num_frames,
@@ -94,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         max_image_size=args.max_image_size,
         max_num_features=args.max_num_features,
         camera_model=args.camera_model,
+        camera_params=camera_params,
+        refine_focal_length=not args.no_refine_focal_length,
         sequential_overlap=args.sequential_overlap,
         init_min_tri_angle=args.init_min_tri_angle,
         ba_global_frames_ratio=args.ba_global_frames_ratio,
@@ -122,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
         "device": args.device,
         "gpu_index": args.gpu_index,
         "colmap_exe": args.colmap_exe,
+        "camera_params": list(camera_params) if camera_params is not None else None,
+        "refine_focal_length": not args.no_refine_focal_length,
         "ba_global_frames_ratio": args.ba_global_frames_ratio,
         "ba_global_points_ratio": args.ba_global_points_ratio,
         "ba_global_frames_freq": args.ba_global_frames_freq,

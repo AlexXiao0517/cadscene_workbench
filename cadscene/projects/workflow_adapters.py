@@ -5,6 +5,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Mapping
@@ -332,7 +333,37 @@ class ExistingWorkflowAdapter:
             "2",
             "--no-mask",
         ]
-        for key in ("backend", "device", "gpu_index"):
+        if self.name == "srt_fixed_track_visual_pose":
+            settings = inputs.parameters.get("srt_fixed_track_visual_pose")
+            metadata = inputs.parameters.get("video_metadata")
+            if not isinstance(settings, Mapping) or not isinstance(metadata, Mapping):
+                raise ValueError("fixed-track COLMAP requires SRT settings and video metadata")
+            width = int(metadata.get("width", 0))
+            height = int(metadata.get("height", 0))
+            fov = float(settings.get("horizontal_fov_deg", 0.0))
+            if width <= 0 or height <= 0 or not 1.0 < fov < 179.0:
+                raise ValueError("fixed-track COLMAP requires valid video size and FOV")
+            focal = width / (2.0 * math.tan(math.radians(fov) * 0.5))
+            camera_params = ",".join(
+                f"{value:.12g}"
+                for value in (focal, focal, width * 0.5, height * 0.5)
+            )
+            command.extend(
+                [
+                    "--backend",
+                    "colmap_cli",
+                    "--camera-model",
+                    "PINHOLE",
+                    "--camera-params",
+                    camera_params,
+                    "--no-refine-focal-length",
+                ]
+            )
+        for key in (
+            ("device", "gpu_index")
+            if self.name == "srt_fixed_track_visual_pose"
+            else ("backend", "device", "gpu_index")
+        ):
             value = inputs.parameters.get(key)
             if value is not None:
                 command.extend([f"--{key.replace('_', '-')}", str(value)])
@@ -429,6 +460,10 @@ class ExistingWorkflowAdapter:
             str(inputs.frame_map_path),
             "--config",
             str(_fixed_track_config_path(inputs)),
+            "--reconstruction-trajectory",
+            str(self._run_root(inputs) / "02_sfm/camera_trajectory.json"),
+            "--sparse-ply",
+            str(self._run_root(inputs) / "02_sfm/sparse_points.ply"),
             "--progress-file",
             str(inputs.attempt_directory / "adapter_progress.json"),
         )
@@ -537,9 +572,12 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="1",
+                version="2",
                 srt_requirement="fixed_track",
-                modules=("cadscene.cli.build_srt_fixed_track_visual_pose",),
+                modules=(
+                    "cadscene.cli.run_sfm",
+                    "cadscene.cli.build_srt_fixed_track_visual_pose",
+                ),
                 output_relative_path=(
                     "02_srt_visual_pose/camera_trajectory_visual_pose.json"
                 ),

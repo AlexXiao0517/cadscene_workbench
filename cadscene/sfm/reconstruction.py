@@ -35,6 +35,8 @@ class ReconstructionConfig:
     max_image_size: int = 2048
     max_num_features: int = 12000
     camera_model: str = "OPENCV"
+    camera_params: tuple[float, ...] | None = None
+    refine_focal_length: bool = True
     sequential_overlap: int = 15
     quadratic_overlap: bool = True
     init_min_tri_angle: float = 2.0
@@ -713,6 +715,8 @@ def run_reconstruction(
         )
         cli_kwargs = {
             "camera_model": config.camera_model,
+            "camera_params": config.camera_params,
+            "refine_focal_length": config.refine_focal_length,
             "max_image_size": config.max_image_size,
             "max_num_features": config.max_num_features,
             "sequential_overlap": config.sequential_overlap,

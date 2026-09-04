@@ -69,6 +69,8 @@ def build_colmap_cli_commands(
     gpu_index: str,
     feature_help: str,
     matching_help: str,
+    camera_params: Sequence[float] | None = None,
+    refine_focal_length: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     extraction_gpu = _option(
         feature_help,
@@ -121,6 +123,16 @@ def build_colmap_cli_commands(
     ]
     if use_mask:
         feature_args.extend(["--ImageReader.mask_path", str(paths.masks_dir)])
+    if camera_params is not None:
+        values = np.asarray(camera_params, dtype=np.float64).reshape(-1)
+        if not len(values) or not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError("COLMAP camera params must contain positive finite values")
+        feature_args.extend(
+            [
+                "--ImageReader.camera_params",
+                ",".join(f"{float(value):.12g}" for value in values),
+            ]
+        )
     matching_args = [
         "sequential_matcher",
         "--database_path",
@@ -154,6 +166,8 @@ def build_colmap_cli_commands(
         str(ba_global_max_num_iterations),
         "--Mapper.ba_global_max_refinements",
         str(ba_global_max_refinements),
+        "--Mapper.ba_refine_focal_length",
+        "1" if refine_focal_length else "0",
     ]
     return (
         build_colmap_process_command(executable, feature_args),
@@ -286,6 +300,8 @@ def run_colmap_cli_pipeline(
     use_mask: bool,
     use_gpu: bool,
     gpu_index: str,
+    camera_params: Sequence[float] | None = None,
+    refine_focal_length: bool = True,
     progress_callback: Callable[[str, float, str], None] | None = None,
 ) -> dict:
     feature_help = probe_colmap_subcommand_help(executable, "feature_extractor")
@@ -309,6 +325,8 @@ def run_colmap_cli_pipeline(
         gpu_index=gpu_index,
         feature_help=feature_help,
         matching_help=matching_help,
+        camera_params=camera_params,
+        refine_focal_length=refine_focal_length,
     )
     names = ("feature_extraction", "feature_matching", "mapper")
     progress_values = (0.32, 0.52, 0.72)
