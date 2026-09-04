@@ -1,5 +1,11 @@
 """Conservative DJI SRT metadata parsing and trajectory capability detection."""
 
+from .bentley_pose_merge import (
+    BentleyPoseSample,
+    BentleySrtMergeResult,
+    load_bentley_pose_samples,
+    merge_bentley_orientations_into_srt,
+)
 from .capability import detect_trajectory_capability
 from .full_pose import (
     DJI_ABSOLUTE_NED_PROFILE,
@@ -21,6 +27,8 @@ from .fixed_track_visual_pose import (
 from .parser import analyze_srt_stream, load_srt_records
 
 __all__ = [
+    "BentleyPoseSample",
+    "BentleySrtMergeResult",
     "DJI_ABSOLUTE_NED_PROFILE",
     "FullPoseBuildConfig",
     "analyze_srt_stream",
@@ -35,6 +43,8 @@ __all__ = [
     "build_fixed_track_positions",
     "estimate_video_orientations",
     "interpolate_orientations",
+    "load_bentley_pose_samples",
     "load_srt_records",
+    "merge_bentley_orientations_into_srt",
     "solve_fixed_center_rotations",
 ]
