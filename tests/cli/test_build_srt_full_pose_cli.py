@@ -135,6 +135,10 @@ def test_builder_emits_local_cad_metric_centers_and_user_fov(
     assert payload["meta"]["trajectory_mode"] == "srt_full_pose"
     assert payload["meta"]["coordinate_system"] == "cad_local_m"
     assert payload["meta"]["metric_scale_locked"] is True
+    assert payload["meta"]["pose_prior_schema"] == "srt_pose_prior_v1"
+    assert payload["meta"]["edit_policy"] == "six_dof_keyframe_residuals"
+    assert payload["meta"]["position_source"] == "srt_cad"
+    assert payload["meta"]["orientation_source"] == "srt_full_pose"
     assert payload["meta"]["fov_source"] == "user"
     assert payload["intrinsics"][0]["horizontal_fov_deg"] == 82.0
     assert [pose["frame_index"] for pose in payload["poses"]] == [0, 1, 2]

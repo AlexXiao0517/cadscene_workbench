@@ -60,6 +60,8 @@ def test_full_pose_workbench_payload_preserves_positions_attitudes_and_fov() -> 
 
     keyframes = payloads.camera_track["keyframes"]
     assert [row["frame"] for row in keyframes] == [0, 1]
+    assert all(row["source"] == "algorithm_prediction" for row in keyframes)
+    assert all("position_locked" not in row for row in keyframes)
     assert keyframes[0]["time"] == pytest.approx(0.0)
     assert keyframes[0]["camera"] == pytest.approx(
         {
@@ -76,9 +78,11 @@ def test_full_pose_workbench_payload_preserves_positions_attitudes_and_fov() -> 
         "generated_by": "cadscene.build_srt_full_pose",
         "coordinate_system": "web_cad_world",
         "workflow": "srt_full_pose",
-        "position_source": "srt_full_pose",
-        "attitude_source": "srt_full_pose",
-        "position_edit_policy": "uniform_xyz_offset_only",
+        "pose_prior_schema": "srt_pose_prior_v1",
+        "metric_scale_locked": True,
+        "position_source": "srt_cad",
+        "orientation_source": "srt_full_pose",
+        "edit_policy": "six_dof_keyframe_residuals",
         "cad_scale": 1.0,
     }
     assert trajectory == original
@@ -94,6 +98,7 @@ def test_full_pose_workbench_scene_has_route_and_no_point_cloud() -> None:
     route = payloads.viewer_scene["tracks"]["global_sfm_track"]
     assert [entry["frame_index"] for entry in route] == [0, 1]
     assert route[0]["camera"] == payloads.camera_track["keyframes"][0]["camera"]
+    assert all("position_locked" not in entry for entry in route)
 
 
 def test_full_pose_workbench_rejects_wrong_mode_and_empty_registered_route() -> None:

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from cadscene.projects.adapters import AdapterInputs
 from cadscene.projects.workflow_adapters import default_workflow_adapters
 
@@ -129,6 +131,7 @@ def test_srt_full_pose_runs_without_sfm_and_exports_no_pointcloud_scene(
         Path(result.outputs["initial_camera_track"]).read_text(encoding="utf-8")
     )
     for keyframe in saved_track["keyframes"]:
+        keyframe["source"] = "manual_keyframe"
         keyframe["camera"]["x"] += route_offset[0]
         keyframe["camera"]["y"] += route_offset[1]
         keyframe["camera"]["z"] += route_offset[2]
@@ -187,15 +190,18 @@ def test_srt_full_pose_runs_without_sfm_and_exports_no_pointcloud_scene(
         )
     )
     assert alignment["sim3"]["scale"] == 1.0
-    assert alignment["sim3"]["translation"] == route_offset
-    assert alignment["validation"]["alignment_mode"] == "metric_direct"
+    assert alignment["sim3"]["translation"] == [0.0, 0.0, 0.0]
+    assert (
+        alignment["validation"]["alignment_mode"]
+        == "srt_pose_prior_residual"
+    )
     assert scene["meta"]["workflow"] == "srt_full_pose"
     assert scene["points"]["count_exported"] == 0
     assert scene["points"]["data"] == []
     assert len(scene["tracks"]["global_sfm_track"]) == 3
-    assert scene["tracks"]["global_sfm_track"][0]["camera"] == saved_track[
+    assert scene["tracks"]["global_sfm_track"][0]["camera"] != saved_track[
         "keyframes"
     ][0]["camera"]
-    assert scene["tracks"]["anchored_camera_path"][0]["camera"] == saved_track[
-        "keyframes"
-    ][0]["camera"]
+    assert scene["tracks"]["anchored_camera_path"][0]["camera"] == pytest.approx(
+        saved_track["keyframes"][0]["camera"]
+    )

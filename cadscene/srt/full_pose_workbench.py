@@ -72,9 +72,8 @@ def build_full_pose_workbench_payloads(
         keyframe = {
             "frame": frame,
             "time": frame / fps,
-            "source": "srt_full_pose",
-            "position_source": "srt_full_pose",
-            "position_locked": True,
+            "source": "algorithm_prediction",
+            "position_source": "srt_cad",
             "orientation_source": "srt_full_pose",
             "camera": camera,
         }
@@ -83,9 +82,8 @@ def build_full_pose_workbench_payloads(
             {
                 "frame_index": frame,
                 "source_pts": raw_pose.get("source_pts"),
-                "source": "metric_direct_srt_full_pose",
-                "position_source": "srt_full_pose",
-                "position_locked": True,
+                "source": "srt_pose_prior",
+                "position_source": "srt_cad",
                 "orientation_available": True,
                 "camera": dict(camera),
             }
@@ -103,9 +101,11 @@ def build_full_pose_workbench_payloads(
             "generated_by": "cadscene.build_srt_full_pose",
             "coordinate_system": "web_cad_world",
             "workflow": "srt_full_pose",
-            "position_source": "srt_full_pose",
-            "attitude_source": "srt_full_pose",
-            "position_edit_policy": "uniform_xyz_offset_only",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "metric_scale_locked": True,
+            "position_source": "srt_cad",
+            "orientation_source": "srt_full_pose",
+            "edit_policy": "six_dof_keyframe_residuals",
             "cad_scale": cad_scale,
         },
     }
@@ -120,9 +120,11 @@ def build_full_pose_workbench_payloads(
             "anchored_track_transform": "none",
             "pitch_convention": "frontend_pitch_negated_from_python_pitch",
             "workflow": "srt_full_pose",
-            "position_source": "srt_full_pose",
-            "attitude_source": "srt_full_pose",
-            "position_edit_policy": "uniform_xyz_offset_only",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "metric_scale_locked": True,
+            "position_source": "srt_cad",
+            "orientation_source": "srt_full_pose",
+            "edit_policy": "six_dof_keyframe_residuals",
             "point_cloud_generated": False,
         },
         "points": {
