@@ -155,6 +155,24 @@
     return trajectoryWorkflow?.trajectory_mode === "srt_fixed_track_visual_pose";
   }
 
+  function pendingTrajectoryWorkflowStage() {
+    return isFullPoseWorkflow() || isFixedTrackVisualPoseWorkflow()
+      ? "keyframes"
+      : "sfm";
+  }
+
+  function pendingTrajectoryWorkflowMessage() {
+    if (isFullPoseWorkflow()) {
+      return "SRT 全姿态轨迹尚未准备，请返回项目管理页重新生成";
+    }
+    if (isFixedTrackVisualPoseWorkflow()) {
+      return "SRT 固定轨迹与视觉姿态尚未准备，请返回项目管理页重新生成";
+    }
+    return isPureRotationWorkflow()
+      ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
+      : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+  }
+
   function fixedTrackManualAnchors() {
     const track = window.cadsceneGetCameraTrack?.();
     return window.CadsceneKeyframes?.confirmedManualKeyframes?.(
@@ -311,7 +329,7 @@
     }
     const renderStep = document.querySelector('#workflowSteps li[data-stage="render"]');
     if (renderStep) renderStep.lastChild.textContent = stageTitles.render;
-    document.querySelector("#workflowStartSfm")?.toggleAttribute("hidden", pure);
+    document.querySelector("#workflowStartSfm")?.toggleAttribute("hidden", pure || fixed || full);
     document.querySelector("#pureRotationRecoveryActions")?.classList.toggle("is-pure-visible", pure);
     const pureRunButton = document.querySelector("#workflowStartPureRotation");
     if (pure && pureRunButton && !runningStage && !trajectoryWorkflowActionsAreBlocked()) {
@@ -1074,11 +1092,11 @@
     }
     if (isFullPoseWorkflow()) {
       const fullPoseTrajectoryReady = await resourceExists(fullPoseTrajectoryPath());
-      if (fullPoseTrajectoryReady) return "keyframes";
-      const viewerPaths = window.resolveViewerPaths ? window.resolveViewerPaths() : {};
-      const videoReady = await resourceExists(viewerPaths.video);
-      const cadReady = await resourceExists(viewerPaths.cad);
-      return videoReady && cadReady ? "sfm" : "upload";
+      if (!fullPoseTrajectoryReady) {
+        stateLabel.textContent = "轨迹未就绪";
+        message.textContent = pendingTrajectoryWorkflowMessage();
+      }
+      return "keyframes";
     }
     const renderReady = await resourceExists(runPath("08_render/sfm_align_overlay.mp4"));
     if (renderReady) return "render";
@@ -1243,7 +1261,12 @@
     }
     // SfM 重建成功后，自动读取 SfM 的 FOV 作为虚拟相机初值，无需用户手动触发。
     // applySfmCameraInitializationOnce 内部用 sessionStorage 去重，重复调用安全。
-    if (stages.sfm?.status === "success" && !isPureRotationWorkflow()) {
+    if (
+      stages.sfm?.status === "success"
+      && !isPureRotationWorkflow()
+      && !isFullPoseWorkflow()
+      && !isFixedTrackVisualPoseWorkflow()
+    ) {
       const sfmSuitable = await updateSfmSummary();
       if (sfmSuitable !== false) maybeAutoApplySfmCameraInit();
     }
@@ -1344,11 +1367,9 @@
       return;
     }
     if (projectWorkbenchTrajectoryIsPending()) {
-      stateLabel.textContent = "待启动";
-      if (!selectedWorkflowStage) setWorkflowStage("sfm");
-      message.textContent = isPureRotationWorkflow()
-        ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
-        : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+      stateLabel.textContent = isFullPoseWorkflow() ? "轨迹未就绪" : "待启动";
+      if (!selectedWorkflowStage) setWorkflowStage(pendingTrajectoryWorkflowStage());
+      message.textContent = pendingTrajectoryWorkflowMessage();
       return;
     }
     if (
@@ -1676,13 +1697,11 @@
     applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession);
     if (projectWorkbenchTrajectoryIsPending()) {
       document.querySelector('#workflowSteps li[data-stage="upload"]')?.classList.add("is-success");
-      setWorkflowStage("sfm");
+      setWorkflowStage(pendingTrajectoryWorkflowStage());
       const attached = await attachActiveProjectWorkbenchTrajectory();
       if (!attached) {
-        stateLabel.textContent = "待启动";
-        message.textContent = isPureRotationWorkflow()
-          ? "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复"
-          : "片段视频和项目 CAD 已就绪，请点击开始 SfM 重建";
+        stateLabel.textContent = isFullPoseWorkflow() ? "轨迹未就绪" : "待启动";
+        message.textContent = pendingTrajectoryWorkflowMessage();
       }
     } else {
       await heartbeatProjectWorkbenchEditingSession();

@@ -849,6 +849,7 @@
     currentKeyframeStatus.textContent = manualKeyframes().some((keyframe) => keyframe.frame === frame)
       ? "当前：有人工关键帧"
       : "当前：无人工关键帧";
+    updateFullPoseCurrentFrameInfo(frame);
     renderQualityTimeline();
     if (threeScene && sfmScene) {
       threeScene.updateSfmGhost(frame);
@@ -2937,6 +2938,17 @@
     if (a) parts.push(`锚定 xy=(${a.x.toFixed(1)}, ${a.y.toFixed(1)}) z=${a.z.toFixed(1)}`);
     if (nsug) parts.push(`最近建议 ${nsug.frame_index}（${nsug.priority || nsug.risk_level || ""}）`);
     el.textContent = parts.join("　");
+  }
+
+  function updateFullPoseCurrentFrameInfo(frame) {
+    const el = document.querySelector("#fullPoseLivePoseStatus");
+    if (!el || !camera) return;
+    el.textContent = [
+      `帧 ${frame}`,
+      `位置 X ${Number(camera.x).toFixed(3)} / Y ${Number(camera.y).toFixed(3)} / Z ${Number(camera.z).toFixed(3)} 米`,
+      `姿态 yaw ${Number(camera.yaw).toFixed(2)}° / pitch ${Number(camera.pitch).toFixed(2)}° / roll ${Number(camera.roll).toFixed(2)}°`,
+      `FOV ${Math.round(camera.fov)}°`,
+    ].join("　");
   }
 
   function importTrack(file) {

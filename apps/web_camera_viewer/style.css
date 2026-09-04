@@ -57,6 +57,17 @@
   min-width: 0;
 }
 
+.full-pose-live-pose {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--strip);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+
 @media (max-width: 960px) {
   .full-pose-offset-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

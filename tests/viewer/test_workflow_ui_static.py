@@ -133,6 +133,50 @@ def test_full_pose_workbench_is_adjustment_then_render_without_quality() -> None
     assert 'workflow === "srt_full_pose" ? "整轨微调后帧"' in viewer
 
 
+def test_full_pose_workbench_never_presents_an_sfm_fallback() -> None:
+    script = _read("workflow.js")
+
+    layout_start = script.index("function applyPureRotationWorkflowLayout")
+    layout_end = script.index("function pureRotationPoseAtPts", layout_start)
+    layout = script[layout_start:layout_end]
+    assert '#workflowStartSfm")?.toggleAttribute("hidden", pure || fixed || full)' in layout
+
+    detect_start = script.index("async function detectWorkflowStageFromArtifacts")
+    detect_end = script.index("function updateWorkflowStepActive", detect_start)
+    detect = script[detect_start:detect_end]
+    full_pose_start = detect.index("if (isFullPoseWorkflow())")
+    full_pose_end = detect.index("const renderReady", full_pose_start)
+    full_pose = detect[full_pose_start:full_pose_end]
+    assert 'return "keyframes"' in full_pose
+    assert 'return videoReady && cadReady ? "sfm" : "upload"' not in full_pose
+
+    assert "function pendingTrajectoryWorkflowStage()" in script
+    assert "function pendingTrajectoryWorkflowMessage()" in script
+    assert "SRT 全姿态轨迹尚未准备，请返回项目管理页重新生成" in script
+    assert "!isFullPoseWorkflow()" in script
+    assert "!isFixedTrackVisualPoseWorkflow()" in script
+
+
+def test_full_pose_workbench_shows_live_position_attitude_and_integer_fov() -> None:
+    html = _read("index.html")
+    css = _read("style.css")
+    viewer = _read("viewer_legacy.js")
+
+    assert 'id="fullPoseLivePoseStatus"' in html
+    assert 'class="full-pose-live-pose"' in html
+    assert ".full-pose-live-pose" in css
+    assert "function updateFullPoseCurrentFrameInfo(frame)" in viewer
+    assert 'document.querySelector("#fullPoseLivePoseStatus")' in viewer
+    for field in ("camera.x", "camera.y", "camera.z", "camera.yaw", "camera.pitch", "camera.roll"):
+        assert field in viewer
+    assert "Math.round(camera.fov)" in viewer
+    track_status_start = viewer.index("function updateTrackStatus()")
+    track_status_end = viewer.index("function createControls()", track_status_start)
+    assert "updateFullPoseCurrentFrameInfo(frame);" in viewer[
+        track_status_start:track_status_end
+    ]
+
+
 def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")
@@ -387,10 +431,11 @@ def test_project_workbench_applies_session_workflow_before_selecting_pending_sta
     apply_workflow = bootstrap.index(
         "applyProjectWorkbenchSessionWorkflow(projectWorkbenchSession)"
     )
-    select_stage = bootstrap.index("setWorkflowStage(\"sfm\")")
+    select_stage = bootstrap.index(
+        "setWorkflowStage(pendingTrajectoryWorkflowStage())"
+    )
     assert apply_workflow < select_stage
-    assert "isPureRotationWorkflow()" in bootstrap
-    assert "片段视频和项目 CAD 已就绪，请点击开始旋转轨迹恢复" in bootstrap
+    assert "pendingTrajectoryWorkflowMessage()" in bootstrap
 
 
 def test_saved_project_pure_rotation_stage_is_not_overwritten_by_artifact_detection() -> None:
