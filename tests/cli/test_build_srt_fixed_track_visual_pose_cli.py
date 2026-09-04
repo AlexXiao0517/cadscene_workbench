@@ -4,14 +4,14 @@ from fractions import Fraction
 import json
 from pathlib import Path
 
-import numpy as np
-
 import cadscene.cli.build_srt_fixed_track_visual_pose as subject
+import pytest
 from cadscene.srt.fixed_track_visual_pose import (
     FixedTrackVisualPoseConfig,
-    OrientationSolution,
+    build_fixed_track_positions,
 )
 from cadscene.srt.georeference import CadGeoreference, project_wgs84_to_cad_raw
+from cadscene.srt.parser import load_srt_records
 
 
 def _georeference() -> CadGeoreference:
@@ -56,8 +56,8 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "\n".join(
             [
                 f"{index + 1}\n00:00:0{index},000 --> 00:00:0{index},100\n"
-                f"[latitude: {30.0 + index * 0.00001}] "
-                f"[longitude: {120.0 + index * 0.00001}] "
+                f"[latitude: {[30.0, 30.00001, 30.00003][index]}] "
+                f"[longitude: {[120.0, 120.00002, 120.00001][index]}] "
                 f"[rel_alt: {80.0 + index}] [abs_alt: {230.0 + index}]\n"
                 for index in range(3)
             ]
@@ -100,28 +100,62 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return video, srt, frame_map, config
 
 
-def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud(
+def _write_reconstruction_inputs(
     tmp_path: Path,
-    monkeypatch,
+    srt: Path,
+    frame_map: Path,
+) -> tuple[Path, Path]:
+    positions = build_fixed_track_positions(
+        load_srt_records(srt),
+        json.loads(frame_map.read_text(encoding="utf-8")),
+        _config(),
+    )
+    trajectory = tmp_path / "reconstruction.json"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "fps": 1.0,
+                "width": 3840,
+                "height": 2160,
+                "intrinsics": [
+                    {
+                        "model": "PINHOLE",
+                        "width": 3840,
+                        "height": 2160,
+                        "params": [2642.6532873, 2642.6532873, 1920.0, 1080.0],
+                    }
+                ],
+                "poses": [
+                    {
+                        "frame_index": item.frame_index,
+                        "registered": True,
+                        "center": list(item.center),
+                        "cam_from_world_quat_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    }
+                    for item in positions
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sparse = tmp_path / "sparse_points.ply"
+    sparse.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 1\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n0 0 0 10 20 30\n",
+        encoding="ascii",
+    )
+    return trajectory, sparse
+
+
+def test_cli_transfers_colmap_attitude_and_publishes_diagnostic_point_cloud(
+    tmp_path: Path,
 ) -> None:
     video, srt, frame_map, config = _write_inputs(tmp_path)
-
-    def fake_estimate(_video, positions, _intrinsics, _config, **_kwargs):
-        return OrientationSolution(
-            status="orientation_partial",
-            rotations={0: np.eye(3), 1: np.eye(3)},
-            relative_rotations={
-                0: np.eye(3),
-                1: np.eye(3),
-                2: np.eye(3),
-            },
-            component_ids={0: 0, 1: 0, 2: 0},
-            recommended_anchor_frame=1,
-            diagnostics=({"status": "accepted", "first_frame": 0, "second_frame": 1},),
-            warnings=("frame 2 orientation unavailable",),
-        )
-
-    monkeypatch.setattr(subject, "estimate_video_orientations", fake_estimate)
+    reconstruction, sparse = _write_reconstruction_inputs(
+        tmp_path, srt, frame_map
+    )
     output_root = tmp_path / "runs"
     progress = tmp_path / "adapter-progress.json"
 
@@ -141,6 +175,10 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
             str(frame_map),
             "--config",
             str(config),
+            "--reconstruction-trajectory",
+            str(reconstruction),
+            "--sparse-ply",
+            str(sparse),
             "--progress-file",
             str(progress),
         ]
@@ -153,19 +191,18 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert exit_code == 0
     assert trajectory["meta"]["position_source"] == "srt_cad_locked"
-    assert trajectory["meta"]["orientation_status"] == "orientation_partial"
+    assert trajectory["meta"]["orientation_status"] == "ready"
+    assert trajectory["meta"]["orientation_source"] == "colmap_sparse_srt_aligned"
+    assert trajectory["meta"]["pose_prior_schema"] == "srt_pose_prior_v1"
     assert trajectory["poses"][0]["center"] == [1.0, -2.0, 85.0]
     assert trajectory["poses"][2]["position_available"] is True
-    assert trajectory["poses"][2]["orientation_available"] is False
-    assert trajectory["poses"][2]["registered"] is False
-    assert "cam_from_world_quat_wxyz" not in trajectory["poses"][2]
+    assert trajectory["poses"][2]["orientation_available"] is True
+    assert trajectory["poses"][2]["registered"] is True
+    assert "cam_from_world_quat_wxyz" in trajectory["poses"][2]
     assert trajectory["poses"][2]["visual_component_id"] == 0
-    assert trajectory["poses"][2]["cam_from_visual_local_quat_wxyz"] == [
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-    ]
+    assert trajectory["poses"][2]["cam_from_visual_local_quat_wxyz"] == pytest.approx(
+        [1.0, 0.0, 0.0, 0.0], abs=1e-12
+    )
     assert trajectory["meta"]["relative_orientation_count"] == 3
     assert trajectory["meta"]["relative_orientation_coverage"] == 1.0
     assert trajectory["meta"]["recommended_anchor_frame"] == 1
@@ -173,14 +210,13 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     assert trajectory["meta"]["recommended_anchor_time_sec"] == 1.0
     track_path = run_root / "03_alignment" / "camera_track_pred.json"
     track = json.loads(track_path.read_text(encoding="utf-8"))
-    assert len(track["keyframes"]) == 2
+    assert len(track["keyframes"]) == 3
     scene_path = run_root / "05_viewer_scene" / "sfm_viewer_scene.json"
     scene = json.loads(scene_path.read_text(encoding="utf-8"))
-    assert scene["points"]["count_exported"] == 0
+    assert scene["points"]["count_exported"] == 1
     assert len(scene["tracks"]["global_sfm_track"]) == 3
-    assert scene["tracks"]["global_sfm_track"][2]["orientation_available"] is False
+    assert scene["tracks"]["global_sfm_track"][2]["orientation_available"] is True
     assert scene["meta"]["recommended_anchor_frame"] == 1
-    assert not tuple(run_root.rglob("*.ply"))
     diagnostics = json.loads(
         (run_root / "02_srt_visual_pose/orientation_diagnostics.json").read_text(
             encoding="utf-8"
@@ -189,7 +225,7 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     assert set(diagnostics["phase_timings_seconds"]) == {
         "parse_inputs",
         "project_srt_track",
-        "estimate_visual_attitude",
+        "transfer_colmap_attitude",
     }
     assert all(
         value >= 0.0 for value in diagnostics["phase_timings_seconds"].values()
@@ -197,16 +233,17 @@ def test_cli_publishes_fixed_route_and_route_first_workbench_without_point_cloud
     report = (
         run_root / "02_srt_visual_pose/visual_pose_report.md"
     ).read_text(encoding="utf-8")
-    assert "跳过位置注册、三角化、BA 和点云维护" in report
-    assert "仅不写 PLY 并不是主要加速来源" in report
+    assert "COLMAP 稀疏三维重建" in report
+    assert "最终相机中心逐帧强制采用 SRT" in report
     progress_payload = json.loads(progress.read_text(encoding="utf-8"))
     assert progress_payload["stage"] == "completed"
     assert progress_payload["fraction"] == 1.0
-    assert progress_payload["message"] == "SRT 轨迹与视觉姿态已生成"
+    assert progress_payload["message"] == "SRT 轨迹与重建姿态已生成"
 
 
 def test_cli_failure_does_not_publish_partial_route(tmp_path: Path) -> None:
     video, srt, frame_map, config = _write_inputs(tmp_path)
+    reconstruction, _sparse = _write_reconstruction_inputs(tmp_path, srt, frame_map)
     payload = json.loads(config.read_text(encoding="utf-8"))
     payload["build"]["clip_id"] = "wrong-clip"
     config.write_text(json.dumps(payload), encoding="utf-8")
@@ -228,6 +265,8 @@ def test_cli_failure_does_not_publish_partial_route(tmp_path: Path) -> None:
             str(frame_map),
             "--config",
             str(config),
+            "--reconstruction-trajectory",
+            str(reconstruction),
         ]
     )
 

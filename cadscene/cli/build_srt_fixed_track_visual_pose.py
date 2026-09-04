@@ -19,13 +19,18 @@ from cadscene.core.camera import (
     decompose_world_from_camera_rotation,
     rotation_matrix_to_quaternion_wxyz,
 )
-from cadscene.core.coordinates import python_state_to_web_camera
+from cadscene.core.coordinates import cad_meters_to_web_camera, python_state_to_web_camera
+from cadscene.sfm.pointcloud import load_ply, sample_indices
+from cadscene.sfm.trajectory import load_sfm_trajectory
+from cadscene.srt.colmap_pose_transfer import (
+    orientation_solution_from_colmap_transfer,
+    transfer_colmap_pose_to_srt,
+)
 from cadscene.srt.fixed_track_visual_pose import (
     FixedTrackPosition,
     FixedTrackVisualPoseConfig,
     OrientationSolution,
     build_fixed_track_positions,
-    estimate_video_orientations,
 )
 from cadscene.srt.full_pose import horizontal_fov_intrinsics
 from cadscene.srt.parser import load_srt_records
@@ -34,16 +39,16 @@ from cadscene.srt.parser import load_srt_records
 STAGES = (
     ("parse_srt", "正在解析 SRT", 0.08),
     ("project_track", "正在将 SRT 轨迹投影到 CAD", 0.22),
-    ("extract_visual_constraints", "正在提取视觉姿态约束", 0.55),
-    ("solve_orientation", "正在估计固定轨迹上的相机姿态", 0.82),
+    ("load_reconstruction", "正在读取 COLMAP 稀疏重建", 0.42),
+    ("align_orientation", "正在将重建姿态配准到 SRT 轨迹", 0.82),
     ("publish_workbench", "正在准备轨迹工作台", 0.95),
-    ("completed", "SRT 轨迹与视觉姿态已生成", 1.0),
+    ("completed", "SRT 轨迹与重建姿态已生成", 1.0),
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="使用 SRT→CAD 固定轨迹并仅从视频估计相机姿态。"
+        description="使用 SRT→CAD 固定轨迹并从 COLMAP 稀疏重建转移相机姿态。"
     )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--run-id", required=True)
@@ -52,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--srt", required=True, type=Path)
     parser.add_argument("--frame-map", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--reconstruction-trajectory", required=True, type=Path)
+    parser.add_argument("--sparse-ply", type=Path)
     parser.add_argument("--progress-file", type=Path)
     return parser
 
@@ -168,6 +175,7 @@ def _build_payloads(
     intrinsics: Mapping[str, object],
     video_metadata: tuple[int, int, float],
     phase_timings_seconds: Mapping[str, float],
+    diagnostic_points: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     width, height, fps = video_metadata
     poses: list[dict[str, object]] = []
@@ -280,7 +288,6 @@ def _build_payloads(
                     "time": position.pts_time_sec,
                     "source": "algorithm_prediction",
                     "position_source": "srt_cad_locked",
-                    "position_locked": True,
                     "orientation_available": True,
                     "camera": camera,
                 }
@@ -290,7 +297,6 @@ def _build_payloads(
                 "frame_index": position.frame_index,
                 "source": "metric_direct_srt",
                 "position_source": "srt_cad_locked",
-                "position_locked": True,
                 "orientation_available": orientation_available,
                 "relative_orientation_available": relative_rotation is not None,
                 "visual_component_id": component_id,
@@ -312,10 +318,13 @@ def _build_payloads(
             "coordinate_system": "cad_local_m",
             "metric_scale_locked": True,
             "position_source": "srt_cad_locked",
-            "position_edit_policy": "uniform_xyz_offset_only",
-            "orientation_source": "visual_fixed_center",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "edit_policy": "six_dof_keyframe_residuals",
+            "orientation_source": "colmap_sparse_srt_aligned",
             "orientation_status": solution.status,
-            "point_cloud_generated": False,
+            "point_cloud_generated": bool(
+                diagnostic_points and int(diagnostic_points.get("count_exported", 0))
+            ),
             "horizontal_datum": "CGCS2000",
             "georeference": config.georeference.to_dict(),
             "cad_origin_xy": list(config.cad_origin_xy),
@@ -346,8 +355,11 @@ def _build_payloads(
             "generated_by": "cadscene.build_srt_fixed_track_visual_pose",
             "coordinate_system": "web_cad_world",
             "workflow": "srt_fixed_track_visual_pose",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "metric_scale_locked": True,
             "position_source": "srt_cad_locked",
-            "position_edit_policy": "uniform_xyz_offset_only",
+            "orientation_source": "colmap_sparse_srt_aligned",
+            "edit_policy": "six_dof_keyframe_residuals",
             "orientation_status": solution.status,
             **recommendation_meta,
         },
@@ -366,12 +378,18 @@ def _build_payloads(
             "run_id": run_id,
             "rgb_range": "0_255",
             "workflow": "srt_fixed_track_visual_pose",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "metric_scale_locked": True,
             "position_source": "srt_cad_locked",
+            "orientation_source": "colmap_sparse_srt_aligned",
+            "edit_policy": "six_dof_keyframe_residuals",
             "orientation_status": solution.status,
-            "point_cloud_generated": False,
+            "point_cloud_generated": bool(
+                diagnostic_points and int(diagnostic_points.get("count_exported", 0))
+            ),
             **recommendation_meta,
         },
-        "points": {
+        "points": dict(diagnostic_points) if diagnostic_points else {
             "count_original": 0,
             "count_exported": 0,
             "sample_mode": "none",
@@ -402,12 +420,14 @@ def _build_payloads(
         "orientation_count": len(solution.rotations),
         "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
         "orientation_status": solution.status,
-        "point_cloud_generated": False,
+        "point_cloud_generated": bool(
+            diagnostic_points and int(diagnostic_points.get("count_exported", 0))
+        ),
         **recommendation_meta,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
         "height_source": "rel_alt",
         "abs_alt_usage": "diagnostic_only",
-        "visual_pairs": [dict(item) for item in solution.diagnostics],
+        "reconstruction_alignment": [dict(item) for item in solution.diagnostics],
         "warnings": list(solution.warnings),
         "georeference": config.georeference.to_dict(),
         "phase_timings_seconds": {
@@ -419,18 +439,19 @@ def _build_payloads(
         for key, value in phase_timings_seconds.items()
     )
     report = (
-        "# SRT 固定轨迹 + 视觉姿态报告\n\n"
+        "# SRT 固定轨迹 + 稀疏重建姿态报告\n\n"
         f"- 轨迹帧数：{len(positions)}\n"
         f"- 可用姿态帧数：{len(solution.rotations)}\n"
         f"- 姿态状态：{solution.status}\n"
-        f"- 视觉相对姿态：{relative_status}（{relative_count}/{len(positions)}）\n"
+        f"- 重建姿态覆盖：{relative_status}（{relative_count}/{len(positions)}）\n"
         f"- 推荐姿态锚点帧：{solution.recommended_anchor_frame}\n"
         f"- 水平 FOV：{config.horizontal_fov_deg:g}°（用户输入）\n"
         f"- 整条路线统一偏移：{list(config.route_offset_xyz_m)} 米\n"
-        "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD，视觉不得修改。\n"
+        "- 姿态来源：COLMAP 稀疏三维重建配准到 SRT/CAD 坐标。\n"
+        "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD；最终相机中心逐帧强制采用 SRT。\n"
         "- 高度来源：SRT 相对高度；绝对高度只用于诊断。\n"
-        "- 点云：不生成。\n"
-        "- 性能原因：跳过位置注册、三角化、BA 和点云维护；仅不写 PLY 并不是主要加速来源。\n"
+        f"- 诊断点云：{int((diagnostic_points or {}).get('count_exported', 0))} 点，可关闭且不参与渲染门禁。\n"
+        "- 性能说明：缺失姿态路线运行真实稀疏重建，耗时可能接近普通 SfM；跳过稠密重建和独立质量检测。\n"
         "- 阶段耗时：\n"
         f"{timings_report}\n"
     )
@@ -441,6 +462,53 @@ def _build_payloads(
         "report": report,
         "track": track,
         "scene": scene,
+    }
+
+
+def _build_diagnostic_points(
+    sparse_ply: Path | None,
+    sim3,
+    config: FixedTrackVisualPoseConfig,
+    *,
+    max_points: int = 80_000,
+) -> dict[str, object] | None:
+    if sparse_ply is None:
+        return None
+    points, colors = load_ply(sparse_ply)
+    selected = sample_indices(len(points), max_points, mode="uniform")
+    points_cad = sim3.apply(points[selected])
+    selected_colors = colors[selected] if colors is not None else None
+    data: list[list[float | int]] = []
+    for index, point in enumerate(points_cad):
+        web = cad_meters_to_web_camera(point, config.cad_origin_xy, config.cad_scale)
+        row: list[float | int] = [
+            round(float(web["x"]), 6),
+            round(float(web["y"]), 6),
+            round(float(web["z"]), 6),
+        ]
+        if selected_colors is not None:
+            row.extend(int(value) for value in selected_colors[index])
+        data.append(row)
+    coordinates = np.asarray(
+        [row[:3] for row in data], dtype=np.float64
+    ).reshape(-1, 3)
+    bbox = (
+        {
+            "min": coordinates.min(axis=0).round(6).tolist(),
+            "max": coordinates.max(axis=0).round(6).tolist(),
+        }
+        if len(coordinates)
+        else {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+    )
+    return {
+        "count_original": int(len(points)),
+        "count_exported": int(len(data)),
+        "sample_mode": "uniform",
+        "voxel_size": 0.0,
+        "has_rgb": selected_colors is not None,
+        "rgb_range": "0_255",
+        "bbox": bbox,
+        "data": data,
     }
 
 
@@ -478,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
             (args.srt, "SRT"),
             (args.frame_map, "frame map"),
             (args.config, "configuration"),
+            (args.reconstruction_trajectory, "COLMAP trajectory"),
         ):
             if not path.is_file():
                 raise FileNotFoundError(f"physical {label} input is missing: {path}")
@@ -504,25 +573,20 @@ def main(argv: list[str] | None = None) -> int:
         positions = build_fixed_track_positions(records, frame_map, config)
         project_elapsed = perf_counter() - project_started
         _write_progress(args.progress_file, *STAGES[2])
-
-        def visual_progress(value: float, message: str) -> None:
-            fraction = 0.22 + max(0.0, min(1.0, float(value))) * 0.33
-            _write_progress(
-                args.progress_file,
-                "extract_visual_constraints",
-                message,
-                fraction,
-            )
-
-        visual_started = perf_counter()
-        solution = estimate_video_orientations(
-            args.video,
+        transfer_started = perf_counter()
+        reconstruction = load_sfm_trajectory(args.reconstruction_trajectory)
+        transfer = transfer_colmap_pose_to_srt(reconstruction, positions)
+        solution = orientation_solution_from_colmap_transfer(
+            transfer,
             positions,
-            intrinsics,
-            config,
-            progress=visual_progress,
+            max_interpolation_gap_sec=config.max_orientation_interpolation_gap_sec,
         )
-        visual_elapsed = perf_counter() - visual_started
+        diagnostic_points = _build_diagnostic_points(
+            args.sparse_ply,
+            transfer.sim3,
+            config,
+        )
+        transfer_elapsed = perf_counter() - transfer_started
         _write_progress(args.progress_file, *STAGES[3])
         payloads = _build_payloads(
             dataset=args.dataset,
@@ -535,8 +599,9 @@ def main(argv: list[str] | None = None) -> int:
             phase_timings_seconds={
                 "parse_inputs": parse_elapsed,
                 "project_srt_track": project_elapsed,
-                "estimate_visual_attitude": visual_elapsed,
+                "transfer_colmap_attitude": transfer_elapsed,
             },
+            diagnostic_points=diagnostic_points,
         )
         run_root.mkdir(parents=True, exist_ok=True)
         staging_root = Path(

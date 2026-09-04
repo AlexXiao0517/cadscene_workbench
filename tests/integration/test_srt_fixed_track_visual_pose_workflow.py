@@ -7,8 +7,9 @@ import numpy as np
 
 import cadscene.cli.build_srt_fixed_track_visual_pose as builder
 from cadscene.alignment.aligner import AlignmentConfig, run_alignment
-from cadscene.srt.fixed_track_visual_pose import OrientationSolution
+from cadscene.srt.fixed_track_visual_pose import build_fixed_track_positions
 from cadscene.srt.georeference import CadGeoreference, project_wgs84_to_cad_raw
+from cadscene.srt.parser import load_srt_records
 
 
 def test_progress_write_retries_a_transient_windows_sharing_violation(
@@ -34,8 +35,8 @@ def test_progress_write_retries_a_transient_windows_sharing_violation(
     assert json.loads(progress.read_text(encoding="utf-8"))["stage"] == "parse_srt"
 
 
-def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
-    tmp_path: Path, monkeypatch,
+def test_fixed_track_end_to_end_transfers_colmap_pose_and_keeps_srt_route(
+    tmp_path: Path,
 ) -> None:
     pipeline = Path("configs/pipelines/srt_fixed_track_visual_pose_overlay.yaml")
     assert pipeline.is_file()
@@ -59,13 +60,15 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
     )
     origin = project_wgs84_to_cad_raw(120.0, 30.0, georeference)
     video = tmp_path / "clip.mp4"
-    video.write_bytes(b"video is replaced by a deterministic orientation solver")
+    video.write_bytes(b"COLMAP reconstruction is supplied as a deterministic fixture")
     srt = tmp_path / "clip.srt"
     srt.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n"
         "[latitude:30] [longitude:120] [rel_alt:80] [abs_alt:230]\n\n"
         "2\n00:00:01,000 --> 00:00:02,000\n"
-        "[latitude:30.00001] [longitude:120.00001] [rel_alt:81] [abs_alt:231]\n",
+        "[latitude:30.00001] [longitude:120.00002] [rel_alt:81] [abs_alt:231]\n\n"
+        "3\n00:00:02,000 --> 00:00:03,000\n"
+        "[latitude:30.00003] [longitude:120.00001] [rel_alt:82] [abs_alt:232]\n",
         encoding="utf-8",
     )
     frame_map = tmp_path / "frame-map.json"
@@ -77,8 +80,8 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
                     {
                         "clip_id": "clip-1",
                         "source_start_pts": 0,
-                        "source_end_pts_exclusive": 2000,
-                        "frames": [{"pts": 0}, {"pts": 1000}],
+                        "source_end_pts_exclusive": 3000,
+                        "frames": [{"pts": 0}, {"pts": 1000}, {"pts": 2000}],
                     }
                 ],
             }
@@ -94,7 +97,7 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
                     "schema_version": 1,
                     "clip_id": "clip-1",
                     "source_start_pts": 0,
-                    "source_end_pts_exclusive": 2000,
+                    "source_end_pts_exclusive": 3000,
                     "source_time_base": {"numerator": 1, "denominator": 1000},
                     "georeference": georeference.to_dict(),
                     "cad_origin_xy": list(origin),
@@ -106,18 +109,48 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        builder,
-        "estimate_video_orientations",
-        lambda *_args, **_kwargs: OrientationSolution(
-            status="position_only",
-            rotations={},
-            relative_rotations={0: np.eye(3), 1: np.eye(3)},
-            component_ids={0: 0, 1: 0},
-            recommended_anchor_frame=0,
-            diagnostics=(),
-            warnings=("absolute attitude awaits one manual anchor",),
+    build_config = builder.FixedTrackVisualPoseConfig.from_dict(
+        json.loads(config.read_text(encoding="utf-8"))["build"]
+    )
+    positions = build_fixed_track_positions(
+        load_srt_records(srt),
+        json.loads(frame_map.read_text(encoding="utf-8")),
+        build_config,
+    )
+    reconstruction = tmp_path / "camera_trajectory.json"
+    reconstruction.write_text(
+        json.dumps(
+            {
+                "fps": 1.0,
+                "width": 1920,
+                "height": 1080,
+                "intrinsics": [
+                    {
+                        "model": "PINHOLE",
+                        "width": 1920,
+                        "height": 1080,
+                        "params": [1321.32664365, 1321.32664365, 960.0, 540.0],
+                    }
+                ],
+                "poses": [
+                    {
+                        "frame_index": item.frame_index,
+                        "registered": True,
+                        "center": list(item.center),
+                        "cam_from_world_quat_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    }
+                    for item in positions
+                ],
+            }
         ),
+        encoding="utf-8",
+    )
+    sparse = tmp_path / "sparse_points.ply"
+    sparse.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 1\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "end_header\n0 0 0\n",
+        encoding="ascii",
     )
     output_root = tmp_path / "runs"
 
@@ -130,6 +163,8 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
             "--srt", str(srt),
             "--frame-map", str(frame_map),
             "--config", str(config),
+            "--reconstruction-trajectory", str(reconstruction),
+            "--sparse-ply", str(sparse),
         ]
     ) == 0
 
@@ -174,10 +209,11 @@ def test_fixed_track_end_to_end_keeps_route_and_exports_no_point_cloud(
     )
     np.testing.assert_allclose(actual, expected, atol=1e-12)
     assert trajectory["meta"]["position_source"] == "srt_cad_locked"
-    assert trajectory["meta"]["point_cloud_generated"] is False
-    assert trajectory["meta"]["relative_orientation_count"] == 2
+    assert trajectory["meta"]["orientation_source"] == "colmap_sparse_srt_aligned"
+    assert trajectory["meta"]["point_cloud_generated"] is True
+    assert trajectory["meta"]["relative_orientation_count"] == 3
     assert alignment.alignment_json["validation"]["orientation_anchor_count"] == 1
     assert all(row["orientation_available"] for row in alignment.sfm_camera_path_rows)
-    assert scene["points"]["count_exported"] == 0
+    assert scene["points"]["count_exported"] == 1
     assert scene["tracks"]["global_sfm_track"]
     assert not tuple(run_root.rglob("*.ply"))
