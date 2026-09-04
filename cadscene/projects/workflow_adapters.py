@@ -17,6 +17,11 @@ from .adapters import (
     WorkflowAdapterRegistry,
 )
 from cadscene.workflow.job_runner import resolve_sfm_python
+from cadscene.sfm.resolution import (
+    normalize_reconstruction_resolution,
+    reconstruction_dimensions,
+    target_height_for_resolution,
+)
 from cadscene.srt.fixed_track_visual_pose import FixedTrackVisualPoseConfig
 from cadscene.srt.full_pose import FullPoseBuildConfig
 
@@ -338,11 +343,23 @@ class ExistingWorkflowAdapter:
             metadata = inputs.parameters.get("video_metadata")
             if not isinstance(settings, Mapping) or not isinstance(metadata, Mapping):
                 raise ValueError("fixed-track COLMAP requires SRT settings and video metadata")
-            width = int(metadata.get("width", 0))
-            height = int(metadata.get("height", 0))
+            source_width = int(metadata.get("width", 0))
+            source_height = int(metadata.get("height", 0))
             fov = float(settings.get("horizontal_fov_deg", 0.0))
-            if width <= 0 or height <= 0 or not 1.0 < fov < 179.0:
+            if (
+                source_width <= 0
+                or source_height <= 0
+                or not 1.0 < fov < 179.0
+            ):
                 raise ValueError("fixed-track COLMAP requires valid video size and FOV")
+            resolution = normalize_reconstruction_resolution(
+                settings.get("reconstruction_resolution")
+            )
+            width, height = reconstruction_dimensions(
+                source_width,
+                source_height,
+                resolution,
+            )
             focal = width / (2.0 * math.tan(math.radians(fov) * 0.5))
             camera_params = ",".join(
                 f"{value:.12g}"
@@ -352,6 +369,10 @@ class ExistingWorkflowAdapter:
                 [
                     "--backend",
                     "colmap_cli",
+                    "--device",
+                    str(inputs.parameters.get("device", "auto")),
+                    "--max-image-size",
+                    str(max(width, height)),
                     "--camera-model",
                     "PINHOLE",
                     "--camera-params",
@@ -359,8 +380,11 @@ class ExistingWorkflowAdapter:
                     "--no-refine-focal-length",
                 ]
             )
+            target_height = target_height_for_resolution(resolution)
+            if target_height is not None and source_height > target_height:
+                command.extend(["--reconstruction-height", str(target_height)])
         for key in (
-            ("device", "gpu_index")
+            ("gpu_index",)
             if self.name == "srt_fixed_track_visual_pose"
             else ("backend", "device", "gpu_index")
         ):
@@ -572,7 +596,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="2",
+                version="3",
                 srt_requirement="fixed_track",
                 modules=(
                     "cadscene.cli.run_sfm",
@@ -770,6 +794,9 @@ def _fixed_track_config_payload(inputs: AdapterInputs) -> dict[str, object]:
             "cad_origin_xy": list(origin),
             "cad_scale": parameters.get("cad_scale"),
             "horizontal_fov_deg": settings["horizontal_fov_deg"],
+            "reconstruction_resolution": normalize_reconstruction_resolution(
+                settings.get("reconstruction_resolution")
+            ),
             "route_offset_xyz_m": settings.get(
                 "route_offset_xyz_m", (0.0, 0.0, 0.0)
             ),

@@ -529,13 +529,20 @@ def test_full_pose_adapter_rejects_missing_initial_workbench_artifact(
     assert "full-pose artifact output is missing" in result.error
 
 
-def _fixed_track_inputs(tmp_path: Path, *, include_fov: bool = True) -> AdapterInputs:
+def _fixed_track_inputs(
+    tmp_path: Path,
+    *,
+    include_fov: bool = True,
+    reconstruction_resolution: str | None = "1080p",
+) -> AdapterInputs:
     inputs = _full_pose_inputs(tmp_path)
     parameters = _full_pose_parameters()
     settings = {
         "horizontal_fov_deg": 72.0,
         "route_offset_xyz_m": [1.0, -2.0, 5.0],
     }
+    if reconstruction_resolution is not None:
+        settings["reconstruction_resolution"] = reconstruction_resolution
     if not include_fov:
         settings.pop("horizontal_fov_deg")
     parameters.pop("srt_full_pose")
@@ -564,15 +571,18 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "2"
+    assert adapter.version == "3"
     assert len(commands) == 2
     sfm = commands[0]
     transfer = commands[1]
     assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert sfm[sfm.index("--backend") + 1] == "colmap_cli"
+    assert sfm[sfm.index("--device") + 1] == "auto"
+    assert sfm[sfm.index("--reconstruction-height") + 1] == "1080"
+    assert sfm[sfm.index("--max-image-size") + 1] == "1920"
     assert sfm[sfm.index("--camera-model") + 1] == "PINHOLE"
     assert sfm[sfm.index("--camera-params") + 1] == (
-        "2642.6532873,2642.6532873,1920,1080"
+        "1321.32664365,1321.32664365,960,540"
     )
     assert "--no-refine-focal-length" in sfm
     assert transfer[1:3] == (
@@ -591,7 +601,44 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     config_path = Path(transfer[transfer.index("--config") + 1])
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     assert payload["build"]["horizontal_fov_deg"] == 72.0
+    assert payload["build"]["reconstruction_resolution"] == "1080p"
     assert payload["build"]["route_offset_xyz_m"] == [1.0, -2.0, 5.0]
+
+
+def test_fixed_track_720p_command_scales_intrinsics(tmp_path: Path) -> None:
+    inputs = _fixed_track_inputs(
+        tmp_path, reconstruction_resolution="720p"
+    )
+    adapter = default_workflow_adapters().for_workflow(
+        "srt_fixed_track_visual_pose"
+    )
+
+    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[0]
+
+    assert sfm[sfm.index("--reconstruction-height") + 1] == "720"
+    assert sfm[sfm.index("--max-image-size") + 1] == "1280"
+    assert sfm[sfm.index("--camera-params") + 1] == (
+        "880.884429102,880.884429102,640,360"
+    )
+
+
+def test_fixed_track_source_command_keeps_source_intrinsics(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixed_track_inputs(
+        tmp_path, reconstruction_resolution="source"
+    )
+    adapter = default_workflow_adapters().for_workflow(
+        "srt_fixed_track_visual_pose"
+    )
+
+    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[0]
+
+    assert "--reconstruction-height" not in sfm
+    assert sfm[sfm.index("--max-image-size") + 1] == "3840"
+    assert sfm[sfm.index("--camera-params") + 1] == (
+        "2642.6532873,2642.6532873,1920,1080"
+    )
 
 
 def test_fixed_track_prepare_requires_user_fov(tmp_path: Path) -> None:

@@ -115,14 +115,14 @@ def _write_reconstruction_inputs(
         json.dumps(
             {
                 "fps": 1.0,
-                "width": 3840,
-                "height": 2160,
+                "width": 1920,
+                "height": 1080,
                 "intrinsics": [
                     {
                         "model": "PINHOLE",
-                        "width": 3840,
-                        "height": 2160,
-                        "params": [2642.6532873, 2642.6532873, 1920.0, 1080.0],
+                        "width": 1920,
+                        "height": 1080,
+                        "params": [1321.32664365, 1321.32664365, 960.0, 540.0],
                     }
                 ],
                 "poses": [
@@ -217,6 +217,9 @@ def test_cli_transfers_colmap_attitude_and_publishes_diagnostic_point_cloud(
     assert len(scene["tracks"]["global_sfm_track"]) == 3
     assert scene["tracks"]["global_sfm_track"][2]["orientation_available"] is True
     assert scene["meta"]["recommended_anchor_frame"] == 1
+    assert scene["meta"]["source_video_size"] == [3840, 2160]
+    assert scene["meta"]["reconstruction_image_size"] == [1920, 1080]
+    assert scene["meta"]["reconstruction_resolution"] == "1080p"
     diagnostics = json.loads(
         (run_root / "02_srt_visual_pose/orientation_diagnostics.json").read_text(
             encoding="utf-8"

@@ -11,6 +11,7 @@ from typing import Callable, Mapping, Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
+from cadscene.sfm.resolution import normalize_reconstruction_resolution
 from cadscene.srt.full_pose import _frame_timestamps
 from cadscene.srt.georeference import (
     CadGeoreference,
@@ -34,6 +35,7 @@ class FixedTrackVisualPoseConfig:
     cad_origin_xy: tuple[float, float]
     cad_scale: float
     horizontal_fov_deg: float
+    reconstruction_resolution: str = "1080p"
     route_offset_xyz_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
     max_interpolation_gap_sec: float = 1.5
     minimum_position_coverage: float = 0.8
@@ -75,6 +77,7 @@ class FixedTrackVisualPoseConfig:
             raise ValueError("cad_scale must be positive")
         if not 1.0 < self.horizontal_fov_deg < 179.0:
             raise ValueError("horizontal_fov_deg must be inside (1, 179)")
+        normalize_reconstruction_resolution(self.reconstruction_resolution)
         if self.max_interpolation_gap_sec <= 0.0:
             raise ValueError("max_interpolation_gap_sec must be positive")
         if not 0.0 < self.minimum_position_coverage <= 1.0:
@@ -115,6 +118,9 @@ class FixedTrackVisualPoseConfig:
             cad_origin_xy=(float(origin[0]), float(origin[1])),
             cad_scale=float(value["cad_scale"]),
             horizontal_fov_deg=float(value["horizontal_fov_deg"]),
+            reconstruction_resolution=normalize_reconstruction_resolution(
+                value.get("reconstruction_resolution")
+            ),
             route_offset_xyz_m=(
                 float(offset[0]),
                 float(offset[1]),
@@ -150,6 +156,7 @@ class FixedTrackVisualPoseConfig:
             "cad_origin_xy": list(self.cad_origin_xy),
             "cad_scale": self.cad_scale,
             "horizontal_fov_deg": self.horizontal_fov_deg,
+            "reconstruction_resolution": self.reconstruction_resolution,
             "route_offset_xyz_m": list(self.route_offset_xyz_m),
             "max_interpolation_gap_sec": self.max_interpolation_gap_sec,
             "minimum_position_coverage": self.minimum_position_coverage,

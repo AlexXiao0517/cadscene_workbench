@@ -174,6 +174,7 @@ def _build_payloads(
     config: FixedTrackVisualPoseConfig,
     intrinsics: Mapping[str, object],
     video_metadata: tuple[int, int, float],
+    reconstruction_image_size: tuple[int, int],
     phase_timings_seconds: Mapping[str, float],
     diagnostic_points: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -182,6 +183,14 @@ def _build_payloads(
     path_rows: list[dict[str, object]] = []
     keyframes: list[dict[str, object]] = []
     viewer_track: list[dict[str, object]] = []
+    solve_metadata = {
+        "reconstruction_resolution": config.reconstruction_resolution,
+        "source_video_size": [width, height],
+        "reconstruction_image_size": [
+            int(reconstruction_image_size[0]),
+            int(reconstruction_image_size[1]),
+        ],
+    }
     relative_count = len(solution.relative_rotations)
     relative_coverage = relative_count / max(1, len(positions))
     relative_status = (
@@ -344,6 +353,7 @@ def _build_payloads(
             "position_count": len(positions),
             "orientation_count": len(solution.rotations),
             "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
+            **solve_metadata,
             **recommendation_meta,
         },
     }
@@ -361,6 +371,7 @@ def _build_payloads(
             "orientation_source": "colmap_sparse_srt_aligned",
             "edit_policy": "six_dof_keyframe_residuals",
             "orientation_status": solution.status,
+            **solve_metadata,
             **recommendation_meta,
         },
     }
@@ -387,6 +398,7 @@ def _build_payloads(
             "point_cloud_generated": bool(
                 diagnostic_points and int(diagnostic_points.get("count_exported", 0))
             ),
+            **solve_metadata,
             **recommendation_meta,
         },
         "points": dict(diagnostic_points) if diagnostic_points else {
@@ -423,6 +435,7 @@ def _build_payloads(
         "point_cloud_generated": bool(
             diagnostic_points and int(diagnostic_points.get("count_exported", 0))
         ),
+        **solve_metadata,
         **recommendation_meta,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
         "height_source": "rel_alt",
@@ -446,6 +459,9 @@ def _build_payloads(
         f"- 重建姿态覆盖：{relative_status}（{relative_count}/{len(positions)}）\n"
         f"- 推荐姿态锚点帧：{solution.recommended_anchor_frame}\n"
         f"- 水平 FOV：{config.horizontal_fov_deg:g}°（用户输入）\n"
+        f"- 姿态解算档位：{config.reconstruction_resolution}\n"
+        f"- 源视频尺寸：{width}×{height}\n"
+        f"- 实际姿态解算尺寸：{reconstruction_image_size[0]}×{reconstruction_image_size[1]}\n"
         f"- 整条路线统一偏移：{list(config.route_offset_xyz_m)} 米\n"
         "- 姿态来源：COLMAP 稀疏三维重建配准到 SRT/CAD 坐标。\n"
         "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD；最终相机中心逐帧强制采用 SRT。\n"
@@ -596,6 +612,9 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             intrinsics=intrinsics,
             video_metadata=metadata,
+            reconstruction_image_size=(
+                int(reconstruction.width), int(reconstruction.height)
+            ),
             phase_timings_seconds={
                 "parse_inputs": parse_elapsed,
                 "project_srt_track": project_elapsed,
