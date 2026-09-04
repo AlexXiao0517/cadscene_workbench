@@ -731,6 +731,66 @@ def test_srt_pose_prior_without_manual_keys_keeps_original_route(
     )
 
 
+def test_srt_pose_prior_does_not_interpolate_attitude_across_colmap_components(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = tmp_path / "fixed_track_components.json"
+    identity = [1.0, 0.0, 0.0, 0.0]
+    poses = []
+    for frame in range(3):
+        pose = {
+            "frame_index": frame,
+            "center": [float(frame), 0.0, 10.0],
+            "position_available": True,
+            "orientation_available": frame != 1,
+        }
+        if frame != 1:
+            pose.update(
+                {
+                    "cam_from_world_quat_wxyz": identity,
+                    "cam_from_visual_local_quat_wxyz": identity,
+                    "visual_component_id": 0 if frame == 0 else 1,
+                }
+            )
+        poses.append(pose)
+    trajectory_path.write_text(
+        json.dumps(
+            {
+                "fps": 25.0,
+                "width": 1920,
+                "height": 1080,
+                "intrinsics": [{"width": 1920, "params": [960.0]}],
+                "meta": {
+                    "trajectory_mode": "srt_fixed_track_visual_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                    "position_source": "srt_cad_locked",
+                    "pose_prior_schema": "srt_pose_prior_v1",
+                },
+                "poses": poses,
+            }
+        ),
+        encoding="utf-8",
+    )
+    track_path = tmp_path / "camera_track.json"
+    track_path.write_text(json.dumps({"keyframes": []}), encoding="utf-8")
+
+    result = run_alignment(
+        trajectory_path=trajectory_path,
+        web_camera_track_path=track_path,
+        config=AlignmentConfig(
+            cad_scale=1.0,
+            origin_xy=(0.0, 0.0),
+            frame_step=1,
+        ),
+    )
+
+    middle = next(row for row in result.sfm_camera_path_rows if row["frame_index"] == 1)
+    assert middle["status"] == "unregistered"
+    assert middle["position_available"] is True
+    assert middle["orientation_available"] is False
+
+
 def test_metric_full_pose_alignment_preserves_unregistered_frame_gaps() -> None:
     trajectory = SfmTrajectory(
         frames=np.asarray([0, 3], dtype=np.int64),

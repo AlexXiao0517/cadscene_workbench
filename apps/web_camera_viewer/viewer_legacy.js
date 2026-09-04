@@ -91,7 +91,6 @@
   let defaultCamera = null;
   let threeScene = null;
   let cameraTrack = null;
-  let fullPoseRouteOffset = { x: 0, y: 0, z: 0 };
   let loadedAuthoritativeCameraTrack = false;
   let cameraDraftDirty = false;
   let reviewPacket = null;
@@ -107,6 +106,7 @@
   const pureRotationRestrictedFields = new Set();
   const fixedTrackRestrictedFields = new Set();
   let fixedTrackVisualPoseMode = false;
+  let srtPosePriorMode = false;
   let fixedTrackCurrentOrientationAvailable = true;
   let pureRotationPlaybackActive = false;
   let pureRotationAuthoritativeMatrix = null;
@@ -554,10 +554,6 @@
 
   // 统一入口：SfM 跟随模式下用原始 SfM 轨迹，否则用已加载的（人工/预测）关键帧轨迹。
   function poseForFrame(frame) {
-    if (fixedTrackVisualPoseMode) {
-      const pose = fixedTrackPoseAtFrame(frame);
-      if (pose) return pose;
-    }
     if (sfmFollowMode) {
       const p = interpolateSfmPoseAtFrame(frame);
       if (p) return p;
@@ -579,10 +575,6 @@
   }
 
   function currentTrackAsAnchoredPath() {
-    if (fixedTrackVisualPoseMode) {
-      return ((sfmScene && sfmScene.tracks && sfmScene.tracks.global_sfm_track) || [])
-        .map((entry) => ({ ...entry }));
-    }
     // 右侧 3D 的“锚定后轨迹”应跟随当前 URL/导入的 track，而不是 sfm_scene 内嵌旧轨迹。
     const rows = (cameraTrack?.keyframes || [])
       .filter((kf) => kf.camera && Number.isFinite(Number(kf.frame)))
@@ -849,7 +841,7 @@
     currentKeyframeStatus.textContent = manualKeyframes().some((keyframe) => keyframe.frame === frame)
       ? "当前：有人工关键帧"
       : "当前：无人工关键帧";
-    updateFullPoseCurrentFrameInfo(frame);
+    updateSrtPoseCurrentFrameInfo(frame);
     renderQualityTimeline();
     if (threeScene && sfmScene) {
       threeScene.updateSfmGhost(frame);
@@ -2085,31 +2077,6 @@
     return JSON.parse(JSON.stringify(cameraTrack));
   };
 
-  window.cadsceneApplyFullPoseRouteOffset = function (offset) {
-    const result = window.CadsceneFullPoseAdjustment.applyAbsoluteOffset(
-      cameraTrack,
-      fullPoseRouteOffset,
-      offset,
-    );
-    cameraTrack = result.track;
-    fullPoseRouteOffset = result.offset;
-    camera = interpolateCameraAtFrame(currentFrame());
-    syncControls();
-    syncSfmAnchoredTrackFromCurrentTrack();
-    cameraDraftDirty = true;
-    updateTrackStatus();
-    updateViews({ forceOverlay: true, updateThree: true });
-    return { ...fullPoseRouteOffset };
-  };
-
-  window.cadsceneGetFullPoseRouteOffset = function () {
-    return { ...fullPoseRouteOffset };
-  };
-
-  window.cadsceneResetFullPoseRouteOffset = function () {
-    return window.cadsceneApplyFullPoseRouteOffset({ x: 0, y: 0, z: 0 });
-  };
-
   window.cadsceneHasLoadedCameraTrack = function () {
     return loadedAuthoritativeCameraTrack;
   };
@@ -2258,29 +2225,29 @@
   window.cadsceneSetFixedTrackVisualPoseMode = function (enabled) {
     fixedTrackVisualPoseMode = Boolean(enabled);
     fixedTrackRestrictedFields.clear();
-    for (const key of ["x", "y", "z"]) {
-      if (fixedTrackVisualPoseMode) fixedTrackRestrictedFields.add(key);
-      lockedCameraFields[key] = fixedTrackVisualPoseMode;
-      const pair = controlInputs.get(key);
-      if (pair?.lock) {
-        pair.lock.checked = fixedTrackVisualPoseMode;
-        pair.lock.disabled = fixedTrackVisualPoseMode;
-      }
-    }
     const translateButton = document.querySelector("#translateMode");
-    if (translateButton) translateButton.disabled = fixedTrackVisualPoseMode;
+    if (translateButton) translateButton.disabled = false;
     threeScene?.setFixedTrackMode?.(fixedTrackVisualPoseMode);
-    if (fixedTrackVisualPoseMode && threeScene) {
-      threeScene.setMode("rotate");
-      const fixedPose = fixedTrackPoseAtFrame(currentFrame());
-      if (fixedPose) camera = fixedPose;
-    }
     syncControls();
     if (camera) updateViews({ forceOverlay: true, updateThree: true });
     return {
       enabled: fixedTrackVisualPoseMode,
       position_fields: [...fixedTrackRestrictedFields],
     };
+  };
+
+  window.cadsceneSetSrtPosePriorMode = function (enabled) {
+    srtPosePriorMode = Boolean(enabled);
+    lockedCameraFields.fov = srtPosePriorMode;
+    const pair = controlInputs.get("fov");
+    if (pair?.lock) {
+      pair.lock.checked = srtPosePriorMode;
+      pair.lock.disabled = srtPosePriorMode;
+      const lockIcon = pair.lock.parentElement?.querySelector(".lock-icon");
+      if (lockIcon) lockIcon.textContent = srtPosePriorMode ? "🔒" : "🔓";
+    }
+    if (camera) syncControls();
+    return { enabled: srtPosePriorMode, fov_locked: srtPosePriorMode };
   };
 
   window.cadsceneGetFixedTrackMetadata = function () {
@@ -2362,9 +2329,6 @@
       meta: payload.meta && typeof payload.meta === "object" ? { ...payload.meta } : {},
       keyframes: Array.isArray(payload.keyframes) ? payload.keyframes : [],
     };
-    fullPoseRouteOffset = window.CadsceneFullPoseAdjustment.offsetFromTrack(
-      cameraTrack,
-    );
     cameraTrack.keyframes = cameraTrack.keyframes.map((keyframe) => ({
       frame: Number(keyframe.frame),
       time: Number(keyframe.time ?? frameToTime(Number(keyframe.frame))),
@@ -2805,13 +2769,6 @@
       }
     }
     if (threeScene && sfmScene) threeScene.loadSfmScene(sfmScene);
-    if (fixedTrackVisualPoseMode) {
-      const fixedPose = fixedTrackPoseAtFrame(currentFrame());
-      if (fixedPose) {
-        camera = fixedPose;
-        syncControls();
-      }
-    }
     updateSfmInfoPanel();
     if (threeScene && sfmScene) {
       threeScene.updateSfmGhost(currentFrame());
@@ -2904,7 +2861,8 @@
     const a = t.anchored_camera_path || [];
     const sug = sfmScene.suggestions || [];
     const workflow = sfmScene.meta?.workflow || "";
-    if (workflow === "srt_full_pose") {
+    const isSrtPosePriorScene = ["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow);
+    if (isSrtPosePriorScene && workflow === "srt_full_pose") {
       const attitudeCount = g.filter(
         (entry) => entry.orientation_available !== false,
       ).length;
@@ -2915,8 +2873,8 @@
       ].join("\n");
       return;
     }
-    const globalTrackName = workflow === "srt_full_pose" ? "SRT轨迹帧" : "原始SfM轨迹帧";
-    const anchoredTrackName = workflow === "srt_full_pose" ? "整轨微调后帧" : "锚定轨迹帧";
+    const globalTrackName = isSrtPosePriorScene ? "SRT基准轨迹帧" : "原始SfM轨迹帧";
+    const anchoredTrackName = isSrtPosePriorScene ? "六自由度拟合轨迹帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();
     if ((p.count_exported || 0) > 200000) {
       setStatus("点云数量较大，建议用 --max-points 降采样后重新导出。");
@@ -2947,15 +2905,17 @@
     const nsug = nearest(sfmScene.suggestions);
     const parts = [`帧 ${frame}`];
     if (a) {
-      const label = sfmScene.meta?.workflow === "srt_full_pose" ? "轨迹" : "锚定";
+      const label = ["srt_full_pose", "srt_fixed_track_visual_pose"].includes(sfmScene.meta?.workflow)
+        ? "拟合轨迹"
+        : "锚定";
       parts.push(`${label} xy=(${a.x.toFixed(1)}, ${a.y.toFixed(1)}) z=${a.z.toFixed(1)}`);
     }
     if (nsug) parts.push(`最近建议 ${nsug.frame_index}（${nsug.priority || nsug.risk_level || ""}）`);
     el.textContent = parts.join("　");
   }
 
-  function updateFullPoseCurrentFrameInfo(frame) {
-    const el = document.querySelector("#fullPoseLivePoseStatus");
+  function updateSrtPoseCurrentFrameInfo(frame) {
+    const el = document.querySelector("#srtPoseLiveStatus");
     if (!el || !camera) return;
     el.textContent = [
       `帧 ${frame}`,

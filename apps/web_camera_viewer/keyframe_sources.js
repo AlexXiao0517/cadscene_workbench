@@ -42,9 +42,12 @@
     const manual = manualTrack && typeof manualTrack === "object" ? manualTrack : null;
     if (!fitted) return manual;
     if (!manual) return fitted;
+    const usesPosePriorResiduals = fitted?.meta?.pose_prior_schema === "srt_pose_prior_v1"
+      || manual?.meta?.pose_prior_schema === "srt_pose_prior_v1";
     if (
       manual?.meta?.workflow === "srt_full_pose"
       && manual?.meta?.authoritative_workbench_track === true
+      && !usesPosePriorResiduals
     ) return manual;
 
     const fittedFrames = Array.isArray(fitted.keyframes) ? fitted.keyframes : [];

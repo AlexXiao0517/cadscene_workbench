@@ -96,7 +96,7 @@ def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> Non
     assert ".workflow-recommendation" in css
     assert "font-size: var(--font-size-body)" in css
     assert 'sfm_only: "三维重建"' in script
-    assert 'srt_fixed_track_visual_pose: "SRT 轨迹 + 视觉姿态"' in script
+    assert 'srt_fixed_track_visual_pose: "SRT 轨迹 + 稀疏重建姿态"' in script
     assert 'srt_sfm_fused: "SRT 定位 + 三维重建（实验）"' not in script
     assert 'srt_full_pose: "SRT 全姿态（跳过三维重建）"' in script
     assert 'pure_rotation: "旋转估计"' in script
@@ -248,7 +248,7 @@ def test_final_workflow_selector_preserves_all_four_workflows() -> None:
     )[0]
     assert workflow_select.count("<option") == 4
     assert '<option value="sfm_only">三维重建（SfM）</option>' in workflow_select
-    assert '<option value="srt_fixed_track_visual_pose">SRT 轨迹 + 视觉姿态</option>' in workflow_select
+    assert '<option value="srt_fixed_track_visual_pose">SRT 轨迹 + 稀疏重建姿态</option>' in workflow_select
     assert '<option value="srt_sfm_fused">' not in workflow_select
     assert '<option value="srt_full_pose">SRT 全姿态（跳过三维重建）</option>' in workflow_select
     assert '<option value="pure_rotation">旋转估计（OpenGV）</option>' in workflow_select
@@ -326,7 +326,7 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert 'id="srtConfigDescription"' in html
-    assert "SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建" in html
+    assert "COLMAP 稀疏三维重建只反算姿态" in html
     for element_id in (
         "routeOffsetFields",
         "routeOffsetXInput",
@@ -335,6 +335,8 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     ):
         assert f'id="{element_id}"' in html
     assert 'workflow.value === "srt_fixed_track_visual_pose"' in script
+    assert "COLMAP 稀疏三维重建只反算姿态" in script
+    assert "不执行三维重建" not in script[script.index("function openFullPoseDialog"):script.index("function closeFullPoseDialog")]
     assert "srt_fixed_track_visual_pose_settings" in script
     assert "/srt-fixed-track-visual-pose`" in script
     assert "route_offset_xyz_m" in script
@@ -350,27 +352,16 @@ def test_srt_configuration_dialog_conditionally_supports_fixed_track_visual_pose
     assert "await openWorkbench(clip," in script
 
 
-def test_full_pose_workbench_has_only_uniform_route_offset_controls() -> None:
+def test_srt_workbench_uses_shared_six_dof_keyframe_controls() -> None:
     viewer = ROOT / "apps" / "web_camera_viewer"
     html = (viewer / "index.html").read_text(encoding="utf-8")
-    script = (viewer / "viewer_legacy.js").read_text(encoding="utf-8")
-
-    assert "full_pose_adjustment.js" in html
-    assert html.index("full_pose_adjustment.js") < html.index("viewer_legacy.js")
-    assert 'id="fullPoseAdjustmentPanel"' in html
-    for element_id in (
-        "fullPoseOffsetX",
-        "fullPoseOffsetY",
-        "fullPoseOffsetZ",
-        "fullPoseApplyOffset",
-        "fullPoseResetOffset",
-        "fullPoseOffsetStatus",
-    ):
-        assert f'id="{element_id}"' in html
-    assert "window.cadsceneApplyFullPoseRouteOffset" in script
-    assert "window.cadsceneGetFullPoseRouteOffset" in script
-    assert "window.cadsceneResetFullPoseRouteOffset" in script
-    assert "syncSfmAnchoredTrackFromCurrentTrack();" in script
+    assert "full_pose_adjustment.js" not in html
+    assert 'id="fullPoseAdjustmentPanel"' not in html
+    assert 'id="cameraSettingsDetails"' in html
+    assert 'id="cameraControls"' in html
+    assert 'id="addKeyframe"' in html
+    assert 'id="workflowRunAlignment"' in html
+    assert 'id="workflowRender"' in html
 
 
 def test_candidate_dialog_polls_persisted_operation_and_shows_real_progress() -> None:
@@ -574,4 +565,4 @@ def test_full_pose_workbench_preparation_has_workflow_specific_progress_copy() -
 
     assert 'clip?.resolved_workflow === "srt_full_pose"' in script
     assert '"SRT 全姿态轨迹"' in script
-    assert '"SRT 固定轨迹与视觉姿态"' in script
+    assert '"SRT 轨迹与稀疏重建姿态"' in script

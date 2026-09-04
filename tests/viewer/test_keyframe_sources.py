@@ -152,3 +152,27 @@ def test_authoritative_full_pose_workbench_track_replaces_initial_track() -> Non
     merged = _merge_tracks(fitted, manual)
 
     assert merged == manual
+
+
+def test_pose_prior_residual_full_pose_track_merges_only_manual_keys() -> None:
+    fitted = {
+        "meta": {"workflow": "srt_full_pose", "pose_prior_schema": "srt_pose_prior_v1"},
+        "keyframes": [
+            {"frame": 0, "source": "algorithm_prediction", "camera": {"x": 10}},
+            {"frame": 10, "source": "algorithm_prediction", "camera": {"x": 20}},
+        ],
+    }
+    manual = {
+        "meta": {
+            "workflow": "srt_full_pose",
+            "pose_prior_schema": "srt_pose_prior_v1",
+            "authoritative_workbench_track": True,
+        },
+        "keyframes": [
+            {"frame": 10, "source": "manual_keyframe", "camera": {"x": 21}},
+        ],
+    }
+
+    merged = _merge_tracks(fitted, manual)
+
+    assert [item["camera"]["x"] for item in merged["keyframes"]] == [10, 21]

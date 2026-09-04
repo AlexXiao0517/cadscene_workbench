@@ -105,32 +105,28 @@ def test_full_pose_workbench_is_adjustment_then_render_without_quality() -> None
     viewer = _read("viewer_legacy.js")
 
     assert 'const full = mode === "srt_full_pose"' in script
-    assert 'stageTitles.keyframes = "轨迹微调"' in script
+    assert 'stageTitles.keyframes = srt ? "关键帧微调"' in script
     assert 'stageTitles.render = "渲染导出"' in script
     assert 'toggleAttribute("hidden", fixed || full)' in script
     assert 'toggleAttribute("hidden", pure || fixed || full)' in script
     assert 'keyframeOrdinal.textContent = full ? "1"' in script
     assert 'renderOrdinal.textContent = "2"' in script
-    assert 'querySelector("#fullPoseAdjustmentPanel")' in script
     assert 'querySelector("#cameraSettingsDetails")' in script
-    assert "async function finishFullPoseAdjustment()" in script
-    start = script.index("async function finishFullPoseAdjustment()")
-    end = script.index("async function finishKeyframePlan()", start)
-    finish = script[start:end]
-    assert "await saveCurrentCameraTrack()" in finish
-    assert "await finalizeProjectWorkbenchSave" in finish
-    assert 'setWorkflowStage("render")' in finish
-    assert "startAlignmentStage" not in finish
-    assert 'throw new Error("SRT 全姿态工作流不包含质量检测阶段")' in script
-    assert "window.cadsceneApplyFullPoseRouteOffset" in script
-    assert "window.cadsceneResetFullPoseRouteOffset" in script
-    assert 'querySelector("#fullPoseFinishAdjustment")' in script
-    assert 'id="fullPoseFinishAdjustment"' in _read("index.html")
+    assert 'querySelector("#fullPoseAdjustmentPanel")' not in script
+    assert 'id="fullPoseAdjustmentPanel"' not in _read("index.html")
+    assert "async function finishFullPoseAdjustment()" not in script
+    assert 'throw new Error("SRT 姿态先验工作流不包含质量检测阶段")' in script
+    assert "window.cadsceneApplyFullPoseRouteOffset" not in script
+    assert "window.cadsceneResetFullPoseRouteOffset" not in script
+    assert "CadsceneFullPoseAdjustment" not in viewer
+    assert "window.cadsceneSetSrtPosePriorMode" in viewer
+    assert "window.cadsceneSetSrtPosePriorMode?.(" in script
+    assert 'lockedCameraFields.fov = srtPosePriorMode' in viewer
     assert 'full ? "SRT 全姿态轨迹（无点云）"' in script
-    assert 'full ? "SRT 原始轨迹"' in script
-    assert 'full ? "整轨微调后轨迹"' in script
-    assert 'workflow === "srt_full_pose" ? "SRT轨迹帧"' in viewer
-    assert 'workflow === "srt_full_pose" ? "整轨微调后帧"' in viewer
+    assert 'srt ? "SRT 基准轨迹"' in script
+    assert 'srt ? "六自由度拟合轨迹"' in script
+    assert 'isSrtPosePriorScene ? "SRT基准轨迹帧"' in viewer
+    assert 'isSrtPosePriorScene ? "六自由度拟合轨迹帧"' in viewer
 
 
 def test_full_pose_workbench_never_presents_an_sfm_fallback() -> None:
@@ -162,17 +158,17 @@ def test_full_pose_workbench_shows_live_position_attitude_and_integer_fov() -> N
     css = _read("style.css")
     viewer = _read("viewer_legacy.js")
 
-    assert 'id="fullPoseLivePoseStatus"' in html
-    assert 'class="full-pose-live-pose"' in html
-    assert ".full-pose-live-pose" in css
-    assert "function updateFullPoseCurrentFrameInfo(frame)" in viewer
-    assert 'document.querySelector("#fullPoseLivePoseStatus")' in viewer
+    assert 'id="srtPoseLiveStatus"' in html
+    assert 'class="srt-pose-live"' in html
+    assert ".srt-pose-live" in css
+    assert "function updateSrtPoseCurrentFrameInfo(frame)" in viewer
+    assert 'document.querySelector("#srtPoseLiveStatus")' in viewer
     for field in ("camera.x", "camera.y", "camera.z", "camera.yaw", "camera.pitch", "camera.roll"):
         assert field in viewer
     assert "Math.round(camera.fov)" in viewer
     track_status_start = viewer.index("function updateTrackStatus()")
     track_status_end = viewer.index("function createControls()", track_status_start)
-    assert "updateFullPoseCurrentFrameInfo(frame);" in viewer[
+    assert "updateSrtPoseCurrentFrameInfo(frame);" in viewer[
         track_status_start:track_status_end
     ]
 
@@ -193,7 +189,7 @@ def test_full_pose_hides_legacy_sfm_controls_and_quality_timeline() -> None:
         'querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed || full)'
         in workflow
     )
-    assert 'if (workflow === "srt_full_pose")' in viewer
+    assert 'const isSrtPosePriorScene = ["srt_full_pose", "srt_fixed_track_visual_pose"]' in viewer
     assert "SRT 姿态帧" in viewer
     assert "当前微调轨迹" in viewer
 
@@ -208,8 +204,8 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert '02_srt_visual_pose/camera_trajectory_visual_pose.json' in workflow
     assert 'keyframes: "render"' in workflow
     assert 'stage === "quality" ? "render"' in workflow
-    assert 'stageTitles.keyframes = fixed ? "视觉姿态"' in workflow
-    assert 'stageTitles.render = fixed ? "微调与渲染"' in workflow
+    assert 'stageTitles.keyframes = srt ? "关键帧微调"' in workflow
+    assert 'stageTitles.render = "渲染导出"' in workflow
     assert 'li[data-stage="upload"]' in workflow
     assert 'li[data-stage="sfm"]' in workflow
     assert 'li[data-stage="quality"]' in workflow
@@ -217,23 +213,21 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
         "isFullPoseWorkflow() || isFixedTrackVisualPoseWorkflow()" in workflow
     )
     assert 'stateLabel.textContent = "轨迹已就绪"' in workflow
-    assert 'message.textContent = "SRT→CAD 固定轨迹已载入；位置锁定，仅姿态可微调。"' in workflow
+    assert 'message.textContent = "SRT 基准轨迹和 COLMAP 姿态已载入；可添加六自由度关键帧并拟合路线。"' in workflow
 
     assert "window.cadsceneSetFixedTrackVisualPoseMode" in viewer
-    assert 'for (const key of ["x", "y", "z"])' in viewer
+    fixed_mode_start = viewer.index("window.cadsceneSetFixedTrackVisualPoseMode")
+    fixed_mode_end = viewer.index("window.cadsceneGetFixedTrackMetadata", fixed_mode_start)
+    assert 'for (const key of ["x", "y", "z"])' not in viewer[fixed_mode_start:fixed_mode_end]
     assert "fixedTrackPoseAtFrame" in viewer
     assert "orientation_available !== false" in viewer
     assert "setFrustumOrientationAvailable" in viewer
-    assert 'id="fixedTrackAnchorPanel"' in html
-    assert 'id="fixedTrackAnchorStatus"' in html
-    assert 'id="fixedTrackGoStart"' in html
-    assert 'id="fixedTrackGoRecommendedAnchor"' in html
-    assert 'id="fixedTrackConfirmAnchor"' in html
-    assert "function refreshFixedTrackAnchorPanel()" in workflow
-    assert "requiredAnchorCount = isFixedTrackVisualPoseWorkflow() ? 1 : 2" in workflow
+    assert 'id="fixedTrackAnchorPanel"' not in html
+    assert "function refreshFixedTrackAnchorPanel()" not in workflow
+    assert "requiredAnchorCount = isSrtPosePriorWorkflow() ? 1 : 2" in workflow
     assert "cadsceneGetFixedTrackMetadata" in viewer
     assert "cadsceneFixedTrackVisualComponentAtFrame" in viewer
-    assert "cadsceneConfirmCurrentCameraKeyframe" in viewer
+    assert "cadsceneConfirmCurrentCameraKeyframe" not in workflow
     assert "pickFixedTrackRoute" in viewer
     assert "goToFrame(hit.frame)" in viewer
     assert "fixedTrackRelativeLine" in viewer
@@ -857,8 +851,8 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'viewer_legacy.js?v=20260904-full-pose-offset-v1' in index
-    assert 'workflow.js?v=20260904-full-pose-offset-v1' in index
+    assert 'viewer_legacy.js?v=20260904-srt-pose-prior-v2' in index
+    assert 'workflow.js?v=20260904-srt-pose-prior-v2' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:

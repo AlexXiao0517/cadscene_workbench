@@ -461,6 +461,19 @@ def test_full_pose_alignment_resolves_semantic_trajectory_without_sparse_ply(
     )
     assert "--sparse-ply" not in command
 
+    fitted_path = run / "03_alignment/sfm_camera_path.csv"
+    fitted_path.parent.mkdir(parents=True)
+    fitted_path.write_text("frame_index,camera_x\n0,0\n", encoding="utf-8")
+    render_command = build_stage_command(
+        tmp_path,
+        "demo",
+        "full-pose",
+        "render",
+        {},
+        application_root=Path.cwd(),
+    )
+    assert render_command[render_command.index("--stages") + 1] == "render"
+
     with pytest.raises(
         ValueError, match="full-pose workflow has no quality stage"
     ):
@@ -521,6 +534,19 @@ def test_fixed_track_alignment_uses_visual_pose_pipeline_without_sparse_ply(
         "configs\\pipelines\\srt_fixed_track_visual_pose_overlay.yaml"
     )
     assert "--sparse-ply" not in command
+
+    fitted_path = run / "03_alignment/sfm_camera_path.csv"
+    fitted_path.parent.mkdir(parents=True)
+    fitted_path.write_text("frame_index,camera_x\n0,0\n", encoding="utf-8")
+    render_command = build_stage_command(
+        tmp_path,
+        "demo",
+        "fixed-track",
+        "render",
+        {},
+        application_root=Path.cwd(),
+    )
+    assert render_command[render_command.index("--stages") + 1] == "render"
 
 
 def test_alignment_command_allows_rotation_only_manual_anchor_positions(tmp_path: Path) -> None:

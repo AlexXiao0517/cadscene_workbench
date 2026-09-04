@@ -42,7 +42,7 @@
   };
   const WORKFLOW_LABELS = {
     sfm_only: "三维重建",
-    srt_fixed_track_visual_pose: "SRT 轨迹 + 视觉姿态",
+    srt_fixed_track_visual_pose: "SRT 轨迹 + 稀疏重建姿态",
     srt_full_pose: "SRT 全姿态（跳过三维重建）",
     pure_rotation: "旋转估计",
   };
@@ -718,12 +718,12 @@
     const settings = fixedTrack
       ? (clip.srt_fixed_track_visual_pose_settings || {})
       : (clip.srt_full_pose_settings || {});
-    $("#srtConfigEyebrow").textContent = fixedTrack ? "SRT 固定轨迹" : "SRT 直接轨迹";
+    $("#srtConfigEyebrow").textContent = fixedTrack ? "SRT 轨迹 + 稀疏重建姿态" : "SRT 直接轨迹";
     $("#srtConfigTitle").textContent = fixedTrack
-      ? "配置固定轨迹与视觉姿态"
+      ? "配置轨迹与稀疏重建姿态"
       : "配置无人机与 CAD 坐标";
     $("#srtConfigDescription").textContent = fixedTrack
-      ? "SRT 提供严格位置和相对高度，视觉算法只估计姿态，不执行三维重建。"
+      ? "SRT 提供严格位置和相对高度；COLMAP 稀疏三维重建只反算姿态，最终相机中心仍采用 SRT→CAD 轨迹。"
       : "大疆 SRT 已提供位置和云台姿态，不再执行三维重建。镜头按水平视场角建模，姿态使用大疆绝对 NED 约定。";
     $("#cadZOffsetField").hidden = fixedTrack;
     $("#routeOffsetFields").hidden = !fixedTrack;
@@ -818,7 +818,7 @@
       }
       state.etag = null;
       closeFullPoseDialog();
-      setMessage(fixedTrack ? "SRT 固定轨迹配置已保存" : "SRT 全姿态配置已保存");
+      setMessage(fixedTrack ? "SRT 轨迹与稀疏重建姿态配置已保存" : "SRT 全姿态配置已保存");
       await pollSnapshot();
     } catch (error) {
       setMessage(`SRT 配置保存失败：${error.message}`, true);
@@ -1337,7 +1337,7 @@
   function trajectoryPreparationLabel(clip) {
     return clip?.resolved_workflow === "srt_full_pose"
       ? "SRT 全姿态轨迹"
-      : "SRT 固定轨迹与视觉姿态";
+      : "SRT 轨迹与稀疏重建姿态";
   }
 
   async function waitForWorkbenchPreparation(clipId, initialState = "preparing_clip") {

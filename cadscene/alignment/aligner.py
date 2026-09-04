@@ -396,6 +396,15 @@ def _srt_pose_prior_alignment(
         [fit.pose_at(int(frame))[1] for frame in orientation_frames],
         dtype=np.float64,
     ).reshape(-1, 3, 3)
+    orientation_components = np.asarray(
+        [
+            0
+            if traj.relative_component_at(int(frame)) is None
+            else int(traj.relative_component_at(int(frame)))
+            for frame in orientation_frames
+        ],
+        dtype=np.int64,
+    )
     residual_angles = np.asarray(
         [
             _decompose_world_from_cam(rotation)
@@ -413,7 +422,7 @@ def _srt_pose_prior_alignment(
         anchor_positions=None,
         orientation_frames=orientation_frames,
         orientation_world_from_camera=orientation_values,
-        orientation_component_ids=np.zeros(len(orientation_frames), dtype=np.int64),
+        orientation_component_ids=orientation_components,
         orientation_anchor_count=len(manual),
     )
 

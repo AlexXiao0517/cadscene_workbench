@@ -1,5 +1,5 @@
 pipeline_name: srt_fixed_track_visual_pose_overlay
-version: v1-srt-position-locked
+version: v2-srt-pose-prior-residuals
 
 stages:
   alignment:

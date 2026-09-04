@@ -658,12 +658,16 @@ def build_stage_command(
             )
         return command
     required = ["trajectory", "manual_track"]
-    if not no_sparse_geometry:
+    if no_sparse_geometry:
+        required.append("sfm_camera_path")
+    else:
         required.append("sparse_ply")
     for label in required:
         if not resolved[label].exists():
             if label in {"trajectory", "sparse_ply"}:
                 raise FileNotFoundError("请先完成 SfM 重建，或选择已有 SfM 结果。")
+            if label == "sfm_camera_path":
+                raise FileNotFoundError("请先完成最终路线拟合，再启动渲染。")
             raise FileNotFoundError(f"manual camera track not found: {resolved[label]}")
     if not no_sparse_geometry:
         _require_suitable_sfm(resolved["run_dir"])
@@ -678,7 +682,7 @@ def build_stage_command(
         "--config",
         str(config_root / "configs" / "pipelines" / pipeline_config),
         "--stages",
-        "alignment,render",
+        "render" if no_sparse_geometry else "alignment,render",
         "--trajectory",
         str(resolved["trajectory"]),
         "--web-camera-track",

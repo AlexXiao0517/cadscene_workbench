@@ -104,10 +104,7 @@ def test_render_stage_uses_full_label_editor_and_collapses_camera_settings() -> 
     assert 'document.querySelector("#annotationPanel")' in workflow
     assert 'document.querySelector("#cameraSettingsDetails")' in workflow
     assert 'annotationPanel.hidden = selectedWorkflowStage !== "render"' in workflow
-    assert (
-        'cameraSettings.open = !isFullPoseWorkflow() && selectedWorkflowStage !== "render"'
-        in workflow
-    )
+    assert 'cameraSettings.open = selectedWorkflowStage !== "render"' in workflow
 
 
 def test_new_label_is_selected_for_immediate_text_editing() -> None:
