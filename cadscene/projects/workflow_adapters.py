@@ -187,10 +187,15 @@ class ExistingWorkflowAdapter:
             }
         elif self.name == "srt_full_pose":
             root = output.parent
+            run_root = root.parent
             artifacts = {
                 "diagnostics": root / "georeference_diagnostics.json",
                 "camera_path": root / "camera_path_full_pose.csv",
                 "report": root / "full_pose_report.md",
+                "initial_camera_track": run_root
+                / "03_alignment/camera_track_pred.json",
+                "viewer_scene": run_root
+                / "05_viewer_scene/sfm_viewer_scene.json",
             }
             missing = [key for key, path in artifacts.items() if not path.is_file()]
             if missing:
@@ -214,6 +219,12 @@ class ExistingWorkflowAdapter:
                     artifacts["camera_path"].read_bytes()
                 ).hexdigest(),
                 "report_sha256": sha256(artifacts["report"].read_bytes()).hexdigest(),
+                "initial_camera_track_sha256": sha256(
+                    artifacts["initial_camera_track"].read_bytes()
+                ).hexdigest(),
+                "viewer_scene_sha256": sha256(
+                    artifacts["viewer_scene"].read_bytes()
+                ).hexdigest(),
                 "frame_map_sha256": sha256(
                     inputs.frame_map_path.read_bytes()
                 ).hexdigest(),

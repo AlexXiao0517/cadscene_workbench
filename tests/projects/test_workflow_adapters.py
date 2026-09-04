@@ -450,6 +450,18 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     camera_path.write_text("frame_index,camera_x\n0,0\n", encoding="utf-8")
     report = output.with_name("full_pose_report.md")
     report.write_text("# report\n", encoding="utf-8")
+    initial_track = output.parent.parent / "03_alignment/camera_track_pred.json"
+    initial_track.parent.mkdir(parents=True, exist_ok=True)
+    initial_track.write_text(
+        json.dumps({"fps": 25.0, "keyframes": [{"frame": 0}]}),
+        encoding="utf-8",
+    )
+    viewer_scene = output.parent.parent / "05_viewer_scene/sfm_viewer_scene.json"
+    viewer_scene.parent.mkdir(parents=True, exist_ok=True)
+    viewer_scene.write_text(
+        json.dumps({"meta": {"workflow": "srt_full_pose"}}),
+        encoding="utf-8",
+    )
 
     result = adapter.validate_outputs(prepared)
 
@@ -458,8 +470,63 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     assert result.outputs["diagnostics"] == str(diagnostics)
     assert result.outputs["camera_path"] == str(camera_path)
     assert result.outputs["report"] == str(report)
+    assert result.outputs["initial_camera_track"] == str(initial_track)
+    assert result.outputs["viewer_scene"] == str(viewer_scene)
     assert result.validation_proof is not None
     assert result.validation_proof["metric_scale_locked"] is True
+    assert result.validation_proof["initial_camera_track_sha256"]
+    assert result.validation_proof["viewer_scene_sha256"]
+
+
+@pytest.mark.parametrize(
+    "missing_relative",
+    (
+        "03_alignment/camera_track_pred.json",
+        "05_viewer_scene/sfm_viewer_scene.json",
+    ),
+)
+def test_full_pose_adapter_rejects_missing_initial_workbench_artifact(
+    tmp_path: Path,
+    missing_relative: str,
+) -> None:
+    inputs = _full_pose_inputs(tmp_path)
+    adapter = default_workflow_adapters().for_workflow("srt_full_pose")
+    prepared = adapter.prepare_inputs(inputs)
+    output = (
+        inputs.attempt_directory
+        / "02_srt_full_pose"
+        / "camera_trajectory_full_pose.json"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "poses": [{"registered": True}],
+                "meta": {
+                    "trajectory_mode": "srt_full_pose",
+                    "coordinate_system": "cad_local_m",
+                    "metric_scale_locked": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name, content in {
+        "02_srt_full_pose/georeference_diagnostics.json": "{}",
+        "02_srt_full_pose/camera_path_full_pose.csv": "frame_index\n0\n",
+        "02_srt_full_pose/full_pose_report.md": "# report\n",
+        "03_alignment/camera_track_pred.json": "{}",
+        "05_viewer_scene/sfm_viewer_scene.json": "{}",
+    }.items():
+        path = inputs.attempt_directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    (inputs.attempt_directory / missing_relative).unlink()
+
+    result = adapter.validate_outputs(prepared)
+
+    assert result.status == "failed"
+    assert "full-pose artifact output is missing" in result.error
 
 
 def _fixed_track_inputs(tmp_path: Path, *, include_fov: bool = True) -> AdapterInputs:

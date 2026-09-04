@@ -14,6 +14,10 @@ from cadscene.srt.full_pose import (
     build_full_pose_trajectory,
 )
 from cadscene.srt.parser import load_srt_records
+from cadscene.srt.full_pose_workbench import (
+    build_full_pose_workbench_payloads,
+    publish_full_pose_workbench_payloads,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,12 +99,22 @@ def main(argv: list[str] | None = None) -> int:
             config,
             staged_output,
         )
-        _write_progress(args.progress_file, "publishing_full_pose", 0.95)
-        if final_output.exists():
-            raise FileExistsError(
-                f"full-pose output already exists: {final_output}"
+        trajectory = json.loads(
+            (staged_output / "camera_trajectory_full_pose.json").read_text(
+                encoding="utf-8-sig"
             )
-        os.replace(staged_output, final_output)
+        )
+        workbench_payloads = build_full_pose_workbench_payloads(trajectory)
+        publish_full_pose_workbench_payloads(staging_root, workbench_payloads)
+        _write_progress(args.progress_file, "publishing_full_pose", 0.95)
+        target_names = ("02_srt_full_pose", "03_alignment", "05_viewer_scene")
+        occupied = [name for name in target_names if (run_root / name).exists()]
+        if occupied:
+            raise FileExistsError(
+                "full-pose output already exists: " + ", ".join(occupied)
+            )
+        for name in target_names:
+            os.replace(staging_root / name, run_root / name)
         _write_progress(args.progress_file, "ready_for_validation", 0.98)
         print(f"输出路径: {final_output}")
         return 0

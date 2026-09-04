@@ -269,6 +269,14 @@ def test_cli_publishes_complete_artifact_directory(tmp_path: Path) -> None:
     assert (output / "camera_path_full_pose.csv").is_file()
     assert (output / "georeference_diagnostics.json").is_file()
     assert (output / "full_pose_report.md").is_file()
+    track = output.parent / "03_alignment" / "camera_track_pred.json"
+    scene = output.parent / "05_viewer_scene" / "sfm_viewer_scene.json"
+    assert track.is_file()
+    assert scene.is_file()
+    assert len(json.loads(track.read_text(encoding="utf-8"))["keyframes"]) == 3
+    assert json.loads(scene.read_text(encoding="utf-8"))["meta"][
+        "point_cloud_generated"
+    ] is False
 
 
 def test_cli_failure_does_not_publish_partial_output(tmp_path: Path) -> None:
@@ -308,6 +316,9 @@ def test_cli_failure_does_not_publish_partial_output(tmp_path: Path) -> None:
         ]
     )
 
-    output = output_root / "p1" / "clip-1" / "02_srt_full_pose"
+    run_root = output_root / "p1" / "clip-1"
+    output = run_root / "02_srt_full_pose"
     assert exit_code == 1
     assert not output.exists()
+    assert not (run_root / "03_alignment").exists()
+    assert not (run_root / "05_viewer_scene").exists()
