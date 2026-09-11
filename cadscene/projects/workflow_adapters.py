@@ -476,6 +476,8 @@ class ExistingWorkflowAdapter:
             str(width),
             "--reconstruct-height",
             str(height),
+            "--progress-file",
+            str(inputs.attempt_directory / "adapter_progress.json"),
         )
 
     def _srt_fusion_command(self, inputs: AdapterInputs) -> tuple[str, ...]:

@@ -582,6 +582,9 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     )
     assert planner[planner.index("--reconstruct-width") + 1] == "1920"
     assert planner[planner.index("--reconstruct-height") + 1] == "1080"
+    assert planner[planner.index("--progress-file") + 1].endswith(
+        "adapter_progress.json"
+    )
     assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert sfm[sfm.index("--backend") + 1] == "colmap_cli"
     assert sfm[sfm.index("--device") + 1] == "auto"

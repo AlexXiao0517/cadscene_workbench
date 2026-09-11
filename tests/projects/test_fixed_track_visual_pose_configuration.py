@@ -442,7 +442,7 @@ def test_validated_fixed_track_reconstruction_can_be_reused_after_terrain_change
         job_type="trajectory",
         resource_class="heavy_compute",
         adapter_name="srt_fixed_track_visual_pose",
-        adapter_version="5",
+        adapter_version=trajectory.adapter_version,
         exclusive_key="trajectory:p1:clip-1",
         dependency_ids=trajectory.depends_on_job_ids,
         project_assets=project.source_assets,

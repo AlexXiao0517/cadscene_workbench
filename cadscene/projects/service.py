@@ -86,7 +86,13 @@ from .queue import (
     QueueJob,
     RestoreCleanupReservation,
 )
-from cadscene.video_analysis.pts import DecodedFrameIndex, DecodedFrameTimestamp
+from cadscene.video_analysis.clip_export import ExportClip, build_clip_frame_map
+from cadscene.video_analysis.pts import (
+    DecodedFrameIndex,
+    DecodedFrameTimestamp,
+    probe_decoded_frame_index,
+    probe_fast_frame_index,
+)
 from cadscene.workflow.job_runner import read_workflow_log_text
 from cadscene.application_resources import application_root
 from cadscene.srt.georeference import (
@@ -3280,10 +3286,13 @@ class ProjectService:
             clip = by_id[clip_id]
             adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
             physical_clip = _clip_output_path(clip)
+            use_source_asset = _uses_whole_source_srt_media(
+                clip, clips_manifest.clips
+            )
             dependency_ids = (
                 *(
                     export_dependencies[clip.clip_id]
-                    if clip.clip_id in export_dependencies
+                    if clip.clip_id in export_dependencies and not use_source_asset
                     else ()
                 ),
                 *solve_export_dependencies.get(clip.clip_id, ()),
@@ -5093,8 +5102,15 @@ class ProjectService:
             item for item in clips_manifest.clips if item.clip_id == job.clip_id
         )
         adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
-        video_path = _clip_output_path(clip)
-        frame_map_path = _clip_frame_map_path(clip)
+        if _uses_whole_source_srt_media(clip, clips_manifest.clips):
+            video_path, frame_map_path = _prepare_whole_source_srt_media(
+                clip,
+                project.source_assets,
+                Path(job.attempts[-1].directory),
+            )
+        else:
+            video_path = _clip_output_path(clip)
+            frame_map_path = _clip_frame_map_path(clip)
         core_frame_map_path = frame_map_path
         for dependency_id in job.depends_on_job_ids:
             dependency = self.queue.get(dependency_id)
@@ -7638,6 +7654,77 @@ def _clip_frame_map_path(clip: ClipDefinition) -> Path | None:
     return None if value in (None, "") else Path(str(value))
 
 
+def _uses_whole_source_srt_media(
+    clip: ClipDefinition, clips: Sequence[ClipDefinition]
+) -> bool:
+    if clip.resolved_workflow not in {
+        "srt_full_pose",
+        "srt_fixed_track_visual_pose",
+    }:
+        return False
+    if len(clips) != 1 or clips[0].clip_id != clip.clip_id:
+        return False
+    start = clip.analysis.get("start_boundary")
+    end = clip.analysis.get("end_boundary")
+    start_reasons = start.get("reasons") if isinstance(start, Mapping) else None
+    end_reasons = end.get("reasons") if isinstance(end, Mapping) else None
+    return (
+        clip.analysis.get("interval_semantics") == "half_open"
+        and isinstance(start_reasons, list)
+        and "source_start" in start_reasons
+        and isinstance(end_reasons, list)
+        and "source_end" in end_reasons
+    )
+
+
+def _prepare_whole_source_srt_media(
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object],
+    attempt_directory: Path,
+) -> tuple[Path, Path]:
+    source = _clip_asset_path(clip, project_assets, "video")
+    if source is None or not source.is_file():
+        raise FileNotFoundError("whole-source SRT video asset is unavailable")
+    frame_index = probe_fast_frame_index(source)
+    if frame_index is None:
+        frame_index = probe_decoded_frame_index(source)
+    time_base = _fraction_time_base(clip)
+    start_pts = int(clip.analysis["source_start_pts"])
+    end_pts = int(clip.analysis["source_end_pts_exclusive"])
+    if (
+        frame_index.time_base != time_base
+        or frame_index.source_start_pts != start_pts
+        or frame_index.source_end_pts_exclusive != end_pts
+    ):
+        raise ValueError(
+            "whole-source SRT clip does not exactly match the source video frame interval"
+        )
+    frame_map = build_clip_frame_map(
+        frame_index,
+        [
+            ExportClip(
+                clip_id=clip.clip_id,
+                source_start_pts=start_pts,
+                source_end_pts_exclusive=end_pts,
+                source_time_base=time_base,
+            )
+        ],
+        require_full_source_partition=True,
+    )
+    attempt_directory.mkdir(parents=True, exist_ok=True)
+    path = attempt_directory / "source_asset_frame_map.json"
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(frame_map, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return source, path
+
+
 def _render_physical_inputs(
     clip: ClipDefinition, jobs: Sequence[QueueJob]
 ) -> tuple[Path, Path]:
@@ -8056,7 +8143,6 @@ def _fixed_track_reconstruction_reuse(
             candidate.job_type != "trajectory"
             or candidate.clip_id != clip_id
             or candidate.adapter_name != "srt_fixed_track_visual_pose"
-            or candidate.adapter_version != "5"
             or not _has_exact_success_proof(candidate)
             or candidate.request_parameters.get("reconstruction_identity")
             != reconstruction_identity
