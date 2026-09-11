@@ -45,6 +45,21 @@ class CalibratedCameraModel:
             self.cx_px * scale_x, self.cy_px * scale_y, self.k1, self.k2,
         )
 
+    def with_horizontal_fov(self, fov_deg: float) -> "CalibratedCameraModel":
+        value = float(fov_deg)
+        if not math.isfinite(value) or not 1.0 < value < 179.0:
+            raise ValueError("horizontal FOV must be inside (1, 179)")
+        focal = self.width / (2.0 * math.tan(math.radians(value) / 2.0))
+        return CalibratedCameraModel(
+            self.width,
+            self.height,
+            focal,
+            self.cx_px,
+            self.cy_px,
+            self.k1,
+            self.k2,
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "model": "RADIAL", "width": self.width, "height": self.height,

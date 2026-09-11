@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from fractions import Fraction
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -571,7 +573,7 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "4"
+    assert adapter.version == "5"
     assert len(commands) == 3
     planner, sfm, transfer = commands
     assert planner[1:3] == ("-m", "cadscene.cli.plan_srt_adaptive_frames")
@@ -609,6 +611,44 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     assert payload["build"]["horizontal_fov_deg"] == 72.0
     assert payload["build"]["reconstruction_resolution"] == "1080p"
     assert payload["build"]["route_offset_xyz_m"] == [1.0, -2.0, 5.0]
+
+
+def test_fixed_track_adapter_reuses_validated_colmap_outputs_for_terrain_refresh(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixed_track_inputs(tmp_path)
+    reconstruction = tmp_path / "cached-camera-trajectory.json"
+    sparse = tmp_path / "cached-sparse-points.ply"
+    reconstruction.write_text('{"poses": []}', encoding="utf-8")
+    sparse.write_text("ply\n", encoding="utf-8")
+    inputs = replace(
+        inputs,
+        parameters={
+            **inputs.parameters,
+            "reconstruction_reuse": {
+                "trajectory_path": str(reconstruction),
+                "trajectory_sha256": sha256(reconstruction.read_bytes()).hexdigest(),
+                "sparse_points_path": str(sparse),
+                "sparse_points_sha256": sha256(sparse.read_bytes()).hexdigest(),
+            },
+        },
+    )
+    adapter = default_workflow_adapters().for_workflow(
+        "srt_fixed_track_visual_pose"
+    )
+
+    commands = adapter.build_commands(adapter.prepare_inputs(inputs))
+
+    assert len(commands) == 1
+    transfer = commands[0]
+    assert transfer[1:3] == (
+        "-m",
+        "cadscene.cli.build_srt_fixed_track_visual_pose",
+    )
+    assert transfer[transfer.index("--reconstruction-trajectory") + 1] == str(
+        reconstruction
+    )
+    assert transfer[transfer.index("--sparse-ply") + 1] == str(sparse)
 
 
 def test_fixed_track_720p_command_scales_intrinsics(tmp_path: Path) -> None:

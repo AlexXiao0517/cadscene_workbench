@@ -217,6 +217,7 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert "姿态解算：${solveResolution}" in viewer
     assert "${solveSize[0]}×${solveSize[1]}" in viewer
     assert "源视频/渲染：${sourceSize[0]}×${sourceSize[1]}" in viewer
+    assert "垂直基准：${heightDatum}" in viewer
 
     assert "window.cadsceneSetFixedTrackVisualPoseMode" in viewer
     fixed_mode_start = viewer.index("window.cadsceneSetFixedTrackVisualPoseMode")

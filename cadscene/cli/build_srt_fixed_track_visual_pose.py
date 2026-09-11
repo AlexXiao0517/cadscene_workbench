@@ -15,7 +15,6 @@ from time import perf_counter, sleep
 from typing import Mapping, Sequence
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from cadscene.core.camera import (
     CameraState,
@@ -266,33 +265,20 @@ def _align_relative_height_datum(
     samples, _source_ids = sampled_control_points(controls, step_m=2.0)
     if not len(samples):
         return tuple(positions), terrain_context
-    first_xy = np.asarray(positions[0].center[:2], dtype=np.float64)
-    distance, index = cKDTree(samples[:, :2]).query(first_xy, k=1)
-    if not np.isfinite(distance) or float(distance) > terrain_context.max_control_distance_m:
-        warning = (
-            "terrain does not cover the first SRT position; downgraded to relative-height mode"
-        )
-        return tuple(positions), replace(
-            terrain_context,
-            mode="relative",
-            reference_ground_m=None,
-            warnings=(*terrain_context.warnings, warning),
-        )
-    ground = float(samples[int(index), 2])
-    aligned = tuple(
-        replace(
-            item,
-            canonical_center=(
-                item.canonical_center[0],
-                item.canonical_center[1],
-                item.canonical_center[2] + ground,
-            ),
-            center=(item.center[0], item.center[1], item.center[2] + ground),
-            height_source="terrain_reference_plus_rel_alt",
-        )
-        for item in positions
+    fallback_ground = float(np.median(samples[:, 2]))
+    warning = (
+        "当前平台输入没有可验证的 home/takeoff 坐标；高程仅用于 CAD 贴地，"
+        "必须通过至少 2 个关键帧校准垂直基准"
     )
-    return aligned, replace(terrain_context, reference_ground_m=ground)
+    return tuple(positions), replace(
+        terrain_context,
+        mode="partial",
+        reference_ground_m=None,
+        cad_fallback_ground_m=fallback_ground,
+        camera_height_datum_valid=False,
+        camera_height_datum_source="unresolved",
+        warnings=(*terrain_context.warnings, warning),
+    )
 
 
 def _require_complete_render_path(

@@ -17,7 +17,7 @@
 - Preserve all existing dirty worktree edits and stage only files belonging to each task.
 - Use integer user FOV as the RADIAL self-calibration initial value.
 - Effective terrain requires at least 95% SRT route coverage within 160 metres of a control.
-- Effective terrain permits zero manual keyframes or at least two; partial/no terrain requires at least two.
+- The current platform has no trusted home/takeoff coordinate input, so every new terrain-backed task is published as partial-height and requires at least two manual keyframes; never infer takeoff from an arbitrary near-zero `rel_alt` sample.
 - Render choices are 720p, 1080p, source, and conditional 4K; output is H.264 at 30 FPS.
 - Changing only render resolution must not rerun pose, terrain, or route fitting.
 
@@ -290,7 +290,7 @@ git commit -m "feat: add multi-file terrain project assets"
 
 - [ ] **Step 1: Write failing context tests**
 
-Assert `terrain` at coverage `>= 0.95`, `partial` below 0.95, `relative` with no valid controls, and binding to CAD/georeference/source fingerprints.
+Assert `partial` whenever valid controls exist but no trusted takeoff datum is available (including coverage `>= 0.95`), `relative` with no valid controls, and binding to CAD/georeference/source fingerprints.
 
 - [ ] **Step 2: Run context tests and verify failure**
 
@@ -465,7 +465,7 @@ Show “解析高程数据” only when terrain sources exist. Display valid fil
 
 - [ ] **Step 5: Implement workbench controls and keyframe gate copy**
 
-Keep all six-degree-of-freedom controls enabled. For effective terrain, allow zero keyframes or require at least two after editing; for partial/relative modes require at least two. Never accept exactly one manual keyframe.
+Keep all six-degree-of-freedom controls enabled. Current new tasks require at least two keyframes in all partial/relative terrain modes. Never accept exactly one manual keyframe; preserve historical validated absolute-datum behavior when reading old artifacts.
 
 - [ ] **Step 6: Run static UI tests**
 

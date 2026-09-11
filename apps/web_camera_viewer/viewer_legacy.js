@@ -2908,8 +2908,11 @@
     const radial = Array.isArray(sfmScene.meta?.camera_radial_distortion)
       ? sfmScene.meta.camera_radial_distortion.map((value) => Number(value).toFixed(6)).join(",")
       : "-";
+    const heightDatum = sfmScene.meta?.camera_height_datum_valid === true
+      ? "已由起飞/归零样本绑定高程"
+      : "待至少 2 个关键帧校准";
     const calibratedCameraInfo = workflow === "srt_fixed_track_visual_pose"
-      ? `相机：${sfmScene.meta?.camera_model || "RADIAL"} f=${Number(sfmScene.meta?.camera_focal_px || 0).toFixed(2)}px c=(${principalPoint}) k=(${radial})；高程：${terrainMode} / ${terrainSources} 文件 / 覆盖 ${terrainCoverage}% / Z ${terrainHeightRange}`
+      ? `相机：${sfmScene.meta?.camera_model || "RADIAL"} f=${Number(sfmScene.meta?.camera_focal_px || 0).toFixed(2)}px c=(${principalPoint}) k=(${radial})；高程：${terrainMode} / ${terrainSources} 文件 / 覆盖 ${terrainCoverage}% / Z ${terrainHeightRange}；垂直基准：${heightDatum}`
       : "";
     const globalTrackName = isSrtPosePriorScene ? "SRT基准轨迹帧" : "原始SfM轨迹帧";
     const anchoredTrackName = isSrtPosePriorScene ? "六自由度拟合轨迹帧" : "锚定轨迹帧";

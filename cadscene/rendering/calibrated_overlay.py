@@ -138,6 +138,19 @@ def _load_exact_cameras(path: Path) -> dict[int, CameraState]:
     return cameras
 
 
+def effective_camera_from_track(
+    source_camera: CalibratedCameraModel,
+    cameras: Mapping[int, CameraState],
+) -> tuple[CalibratedCameraModel, float]:
+    fovs = np.asarray([float(state.fov_deg) for state in cameras.values()])
+    if not len(fovs) or not np.isfinite(fovs).all():
+        raise ValueError("camera track requires a finite global horizontal FOV")
+    if float(np.max(fovs) - np.min(fovs)) > 0.1:
+        raise ValueError("camera track must use one global horizontal FOV")
+    effective_fov = float(np.mean(fovs))
+    return source_camera.with_horizontal_fov(effective_fov), effective_fov
+
+
 def _hex_bgr(value: object) -> tuple[int, int, int]:
     text = str(value or "").strip().lstrip("#")
     if len(text) == 6:
@@ -323,12 +336,19 @@ def render_calibrated_overlay_video(
     started = perf_counter()
     source_camera = CalibratedCameraModel.from_json(config.camera_calibration)
     width, height = output_dimensions(source_camera.width, source_camera.height, config.output_resolution)
-    camera = source_camera.scaled_to(width, height)
+    cameras = _load_exact_cameras(Path(config.camera_path))
+    effective_source_camera, effective_fov = effective_camera_from_track(
+        source_camera, cameras
+    )
+    camera = effective_source_camera.scaled_to(width, height)
     context = json.loads(Path(config.terrain_context).read_text(encoding="utf-8-sig"))
     mode = str(context.get("terrain_mode", "relative"))
-    fallback_z = float(context.get("terrain_reference_ground_m") or 0.0)
+    fallback_z = float(
+        context.get("cad_fallback_ground_m")
+        or context.get("terrain_reference_ground_m")
+        or 0.0
+    )
     warnings = [str(item) for item in context.get("terrain_warnings", ())]
-    cameras = _load_exact_cameras(Path(config.camera_path))
     cad_dir = Path(config.cad_dir)
     cad = load_cad_bundle(cad_dir, origin_xy=config.origin_xy, cad_scale=config.cad_scale)
     starts, ends, colors = _flatten_cad(
@@ -427,6 +447,7 @@ def render_calibrated_overlay_video(
         "video_codec": "h264", "camera_interpolation": "exact_frame",
         "camera_path_frame_count": len(cameras),
         "camera_calibration": camera.to_dict(), "terrain_mode": mode,
+        "effective_horizontal_fov_deg": effective_fov,
         "terrain_coverage": float(context.get("terrain_coverage") or 0.0),
         "terrain_source_fingerprints": list(
             context.get("terrain_source_fingerprints", ())

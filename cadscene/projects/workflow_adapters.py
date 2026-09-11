@@ -70,6 +70,7 @@ class ExistingWorkflowAdapter:
             _write_full_pose_config(inputs)
         if self.name == "srt_fixed_track_visual_pose":
             _write_fixed_track_config(inputs)
+            _fixed_track_reconstruction_paths(inputs)
         return inputs
 
     def build_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
@@ -87,6 +88,16 @@ class ExistingWorkflowAdapter:
             raise NotImplementedError(self.unavailable_reason or "adapter is unavailable")
         commands: list[tuple[str, ...]] = []
         for module in self.modules:
+            if (
+                self.name == "srt_fixed_track_visual_pose"
+                and _has_reconstruction_reuse(inputs)
+                and module
+                in {
+                    "cadscene.cli.plan_srt_adaptive_frames",
+                    "cadscene.cli.run_sfm",
+                }
+            ):
+                continue
             if module == "cadscene.cli.run_sfm":
                 commands.append(self._sfm_command(inputs))
             elif module == "cadscene.cli.partition_sfm_trajectory":
@@ -300,6 +311,19 @@ class ExistingWorkflowAdapter:
                 "metric_scale_locked": True,
                 "position_source": "srt_cad_locked",
             }
+            reconstruction, sparse_points = _fixed_track_reconstruction_paths(inputs)
+            if reconstruction.is_file():
+                outputs["reconstruction_trajectory"] = str(reconstruction)
+                reconstruction_sha = sha256(reconstruction.read_bytes()).hexdigest()
+                validation_proof["reconstruction_trajectory_sha256"] = (
+                    reconstruction_sha
+                )
+                digest.update(reconstruction.read_bytes())
+            if sparse_points is not None and sparse_points.is_file():
+                outputs["reconstruction_sparse_points"] = str(sparse_points)
+                sparse_sha = sha256(sparse_points.read_bytes()).hexdigest()
+                validation_proof["reconstruction_sparse_points_sha256"] = sparse_sha
+                digest.update(sparse_points.read_bytes())
         fingerprint = digest.hexdigest()
         return AdapterResult.success(
             output_revision=f"{self.name}:{fingerprint[:16]}",
@@ -510,7 +534,8 @@ class ExistingWorkflowAdapter:
     def _fixed_track_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         if inputs.srt_path is None or inputs.frame_map_path is None:
             raise FileNotFoundError("fixed-track SRT and frame map are required")
-        return (
+        reconstruction, sparse_points = _fixed_track_reconstruction_paths(inputs)
+        command = [
             sys.executable,
             "-m",
             "cadscene.cli.build_srt_fixed_track_visual_pose",
@@ -529,12 +554,13 @@ class ExistingWorkflowAdapter:
             "--config",
             str(_fixed_track_config_path(inputs)),
             "--reconstruction-trajectory",
-            str(self._run_root(inputs) / "02_sfm/camera_trajectory.json"),
-            "--sparse-ply",
-            str(self._run_root(inputs) / "02_sfm/sparse_points.ply"),
+            str(reconstruction),
             "--progress-file",
             str(inputs.attempt_directory / "adapter_progress.json"),
-        )
+        ]
+        if sparse_points is not None:
+            command.extend(["--sparse-ply", str(sparse_points)])
+        return tuple(command)
 
     def _pure_rotation_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         command = [
@@ -640,7 +666,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="4",
+                version="5",
                 srt_requirement="fixed_track",
                 modules=(
                     "cadscene.cli.plan_srt_adaptive_frames",
@@ -662,6 +688,56 @@ def default_workflow_adapters(
                 pure_rotation_calibration_root=pure_rotation_calibration_root,
             ),
         )
+    )
+
+
+def _has_reconstruction_reuse(inputs: AdapterInputs) -> bool:
+    return isinstance(inputs.parameters.get("reconstruction_reuse"), Mapping)
+
+
+def _fixed_track_reconstruction_paths(
+    inputs: AdapterInputs,
+) -> tuple[Path, Path | None]:
+    reuse = inputs.parameters.get("reconstruction_reuse")
+    if isinstance(reuse, Mapping):
+        trajectory_value = reuse.get("trajectory_path")
+        trajectory_sha256 = reuse.get("trajectory_sha256")
+        sparse_value = reuse.get("sparse_points_path")
+        sparse_sha256 = reuse.get("sparse_points_sha256")
+        if (
+            not isinstance(trajectory_value, str)
+            or not trajectory_value
+            or not isinstance(trajectory_sha256, str)
+        ):
+            raise ValueError(
+                "reconstruction reuse requires trajectory_path and trajectory_sha256"
+            )
+        trajectory = Path(trajectory_value)
+        if not trajectory.is_file():
+            raise FileNotFoundError(
+                f"reused COLMAP trajectory is missing: {trajectory}"
+            )
+        if sha256(trajectory.read_bytes()).hexdigest() != trajectory_sha256:
+            raise ValueError("reused COLMAP trajectory fingerprint changed")
+        sparse = (
+            Path(sparse_value)
+            if isinstance(sparse_value, str) and sparse_value
+            else None
+        )
+        if sparse is not None:
+            if not isinstance(sparse_sha256, str):
+                raise ValueError("reused COLMAP sparse points require sparse_points_sha256")
+            if not sparse.is_file():
+                raise FileNotFoundError(
+                    f"reused COLMAP sparse points are missing: {sparse}"
+                )
+            if sha256(sparse.read_bytes()).hexdigest() != sparse_sha256:
+                raise ValueError("reused COLMAP sparse points fingerprint changed")
+        return trajectory, sparse
+    run_root = inputs.attempt_directory / inputs.project_id / inputs.clip_id
+    return (
+        run_root / "02_sfm/camera_trajectory.json",
+        run_root / "02_sfm/sparse_points.ply",
     )
 
 

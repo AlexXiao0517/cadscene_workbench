@@ -24,6 +24,9 @@ class TerrainContext:
     cad_fingerprint: str
     georeference_fingerprint: str
     reference_ground_m: float | None = None
+    cad_fallback_ground_m: float | None = None
+    camera_height_datum_valid: bool = False
+    camera_height_datum_source: str = "unresolved"
     uncovered_intervals: tuple[Mapping[str, object], ...] = ()
     conflicts: tuple[Mapping[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
@@ -42,6 +45,9 @@ class TerrainContext:
             "cad_fingerprint": self.cad_fingerprint,
             "georeference_fingerprint": self.georeference_fingerprint,
             "terrain_reference_ground_m": self.reference_ground_m,
+            "cad_fallback_ground_m": self.cad_fallback_ground_m,
+            "camera_height_datum_valid": self.camera_height_datum_valid,
+            "camera_height_datum_source": self.camera_height_datum_source,
             "terrain_uncovered_intervals": [
                 dict(item) for item in self.uncovered_intervals
             ],

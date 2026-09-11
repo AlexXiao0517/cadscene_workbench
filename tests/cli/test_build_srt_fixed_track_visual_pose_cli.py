@@ -55,17 +55,17 @@ def _config() -> FixedTrackVisualPoseConfig:
     )
 
 
-def _position(frame: int, x: float) -> FixedTrackPosition:
+def _position(frame: int, x: float, *, rel_alt: float = 80.0) -> FixedTrackPosition:
     return FixedTrackPosition(
         frame_index=frame,
         source_pts=frame * 1000,
         pts_time_sec=float(frame),
-        canonical_center=(x, 0.0, 80.0),
-        center=(x, 0.0, 80.0),
+        canonical_center=(x, 0.0, rel_alt),
+        center=(x, 0.0, rel_alt),
         latitude=30.0,
         longitude=120.0,
-        rel_alt=80.0,
-        abs_alt=230.0,
+        rel_alt=rel_alt,
+        abs_alt=150.0 + rel_alt,
         projected_easting=x,
         projected_northing=0.0,
         cad_raw_x=x,
@@ -76,7 +76,7 @@ def _position(frame: int, x: float) -> FixedTrackPosition:
     )
 
 
-def test_first_uncovered_route_point_downgrades_terrain_datum_to_relative() -> None:
+def test_first_uncovered_route_point_downgrades_terrain_datum_to_partial() -> None:
     summary = TerrainSourceSummary(
         source_id="a" * 64,
         path="terrain.tpkg",
@@ -117,9 +117,106 @@ def test_first_uncovered_route_point_downgrades_terrain_datum_to_relative() -> N
         (_position(0, 0.0), _position(1, 500.0)), controls, context
     )
 
-    assert downgraded.mode == "relative"
+    assert downgraded.mode == "partial"
     assert downgraded.reference_ground_m is None
+    assert downgraded.camera_height_datum_valid is False
     assert positions[0].center[2] == 80.0
+
+
+def test_in_flight_recording_does_not_treat_first_terrain_height_as_home_datum() -> None:
+    summary = TerrainSourceSummary(
+        source_id="a" * 64,
+        path="terrain.tpkg",
+        feature_count=1,
+        vertex_count=1,
+        geometry_types={"PointZ": 1},
+        layers={"terrain": 1},
+        bbox_lon_lat=(0.0, 0.0, 0.0, 0.0),
+        z_range_m=(130.0, 130.0),
+    )
+    controls = TerrainControlSet(
+        points_xyz=np.asarray([[0.0, 0.0, 130.0], [10.0, 0.0, 131.0]]),
+        point_source_ids=(summary.source_id, summary.source_id),
+        point_labels=("", ""),
+        point_colors_bgr=np.zeros((2, 3), dtype="uint8"),
+        segment_starts_xyz=np.empty((0, 3)),
+        segment_ends_xyz=np.empty((0, 3)),
+        segment_source_ids=(),
+        segment_colors_bgr=np.empty((0, 3), dtype="uint8"),
+        segment_widths=np.empty(0, dtype="int32"),
+        sources=(summary,),
+        fingerprint="b" * 64,
+    )
+    context = TerrainContext(
+        mode="terrain",
+        coverage_fraction=1.0,
+        covered_route_points=2,
+        total_route_points=2,
+        max_control_distance_m=160.0,
+        height_range_m=(130.0, 131.0),
+        source_fingerprints=(summary.source_id,),
+        controls_fingerprint=controls.fingerprint,
+        cad_fingerprint="cad",
+        georeference_fingerprint="geo",
+    )
+
+    positions, downgraded = subject._align_relative_height_datum(
+        (_position(0, 0.0), _position(1, 10.0, rel_alt=81.0)), controls, context
+    )
+
+    assert downgraded.mode == "partial"
+    assert downgraded.camera_height_datum_valid is False
+    assert downgraded.cad_fallback_ground_m == pytest.approx(130.5)
+    assert [item.center[2] for item in positions] == [80.0, 81.0]
+
+
+def test_near_zero_sample_without_verified_home_still_requires_vertical_calibration() -> None:
+    summary = TerrainSourceSummary(
+        source_id="a" * 64,
+        path="terrain.tpkg",
+        feature_count=1,
+        vertex_count=1,
+        geometry_types={"PointZ": 1},
+        layers={"terrain": 1},
+        bbox_lon_lat=(0.0, 0.0, 0.0, 0.0),
+        z_range_m=(130.0, 130.0),
+    )
+    controls = TerrainControlSet(
+        points_xyz=np.asarray([[0.0, 0.0, 130.0], [10.0, 0.0, 131.0]]),
+        point_source_ids=(summary.source_id, summary.source_id),
+        point_labels=("", ""),
+        point_colors_bgr=np.zeros((2, 3), dtype="uint8"),
+        segment_starts_xyz=np.empty((0, 3)),
+        segment_ends_xyz=np.empty((0, 3)),
+        segment_source_ids=(),
+        segment_colors_bgr=np.empty((0, 3), dtype="uint8"),
+        segment_widths=np.empty(0, dtype="int32"),
+        sources=(summary,),
+        fingerprint="b" * 64,
+    )
+    context = TerrainContext(
+        mode="terrain",
+        coverage_fraction=1.0,
+        covered_route_points=2,
+        total_route_points=2,
+        max_control_distance_m=160.0,
+        height_range_m=(130.0, 131.0),
+        source_fingerprints=(summary.source_id,),
+        controls_fingerprint=controls.fingerprint,
+        cad_fingerprint="cad",
+        georeference_fingerprint="geo",
+    )
+
+    positions, aligned = subject._align_relative_height_datum(
+        (_position(0, 0.0, rel_alt=0.5), _position(1, 10.0, rel_alt=80.0)),
+        controls,
+        context,
+    )
+
+    assert aligned.mode == "partial"
+    assert aligned.camera_height_datum_valid is False
+    assert aligned.reference_ground_m is None
+    assert [item.center[2] for item in positions] == pytest.approx([0.5, 80.0])
 
 
 def test_render_path_requires_a_pose_for_every_authoritative_frame() -> None:

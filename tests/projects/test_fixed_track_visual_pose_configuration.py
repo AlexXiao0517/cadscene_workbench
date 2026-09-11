@@ -9,7 +9,12 @@ import pytest
 
 from cadscene.projects.http_api import ProjectApi
 from cadscene.projects.models import StateReference
-from cadscene.projects.service import _fixed_track_visual_pose_adapter_parameters
+from cadscene.projects.service import (
+    _fingerprint,
+    _fixed_track_visual_pose_adapter_parameters,
+    _fixed_track_reconstruction_reuse,
+    _job_identity_payload,
+)
 from cadscene.projects.uploads import ValidatedUploadStore
 
 from .test_full_pose_configuration import _configure_project_inputs
@@ -332,6 +337,149 @@ def test_trajectory_job_snapshots_terrain_and_becomes_stale_after_change(
     )
 
     assert service._current_input_fingerprint(trajectory) != trajectory.input_fingerprint
+
+
+def test_historical_fixed_track_v3_job_keeps_its_original_adapter_identity(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _confirmed_service(tmp_path)
+    service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=72.0,
+    )
+    enqueued = service.enqueue_trajectory_jobs("p1")
+    trajectory = next(queue.get(job_id) for job_id in enqueued.job_ids)
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    selected = clips.clips[0]
+    legacy_identity = _job_identity_payload(
+        job_type="trajectory",
+        clip=selected,
+        project_assets=project.source_assets,
+        project_revision=project.revision,
+        clips_revision=clips.revision,
+        adapter_name="srt_fixed_track_visual_pose",
+        adapter_version="3",
+        include_fixed_track_terrain=False,
+    )
+    legacy = replace(
+        trajectory,
+        adapter_version="3",
+        input_fingerprint=_fingerprint(legacy_identity),
+        request_parameters={},
+        validation_proof=None,
+    )
+
+    assert service._current_input_fingerprint(legacy) == legacy.input_fingerprint
+
+
+def test_validated_fixed_track_reconstruction_can_be_reused_after_terrain_change(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _confirmed_service(tmp_path)
+    service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=72.0,
+    )
+    enqueued = service.enqueue_trajectory_jobs("p1")
+    trajectory = next(queue.get(job_id) for job_id in enqueued.job_ids)
+    reconstruction = tmp_path / "camera_trajectory.json"
+    sparse = tmp_path / "sparse_points.ply"
+    reconstruction.write_text('{"poses": []}', encoding="utf-8")
+    sparse.write_text("ply\n", encoding="utf-8")
+    completed = replace(
+        trajectory,
+        status="success",
+        stage="success",
+        output_validated=True,
+        validated_input_fingerprint=trajectory.input_fingerprint,
+        published_outputs={
+            "reconstruction_trajectory": str(reconstruction),
+            "reconstruction_sparse_points": str(sparse),
+        },
+        validation_proof={
+            "reconstruction_trajectory_sha256": _file_sha256(reconstruction),
+            "reconstruction_sparse_points_sha256": _file_sha256(sparse),
+        },
+    )
+
+    reuse = _fixed_track_reconstruction_reuse(
+        (completed,),
+        clip_id="clip-1",
+        reconstruction_identity=str(
+            trajectory.request_parameters["reconstruction_identity"]
+        ),
+    )
+
+    assert reuse == {
+        "source_job_id": trajectory.job_id,
+        "trajectory_path": str(reconstruction),
+        "trajectory_sha256": _file_sha256(reconstruction),
+        "sparse_points_path": str(sparse),
+        "sparse_points_sha256": _file_sha256(sparse),
+    }
+    jobs = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=tuple(
+                completed.to_dict() if item["job_id"] == completed.job_id else item
+                for item in value.jobs
+            ),
+        ),
+    )
+    project = repositories.project.load("p1")
+    clips = repositories.clips.load("p1")
+    refreshed = service._new_job(
+        "p1",
+        clips.clips[0],
+        job_type="trajectory",
+        resource_class="heavy_compute",
+        adapter_name="srt_fixed_track_visual_pose",
+        adapter_version="5",
+        exclusive_key="trajectory:p1:clip-1",
+        dependency_ids=trajectory.depends_on_job_ids,
+        project_assets=project.source_assets,
+        project_revision=project.revision,
+        clips_revision=clips.revision,
+        reconstruction_identity=str(
+            trajectory.request_parameters["reconstruction_identity"]
+        ),
+        reconstruction_reuse=reuse,
+    )
+
+    assert refreshed.input_fingerprint == trajectory.input_fingerprint
+    assert refreshed.idempotency_key == trajectory.idempotency_key
+    assert service._current_input_fingerprint(refreshed) == refreshed.input_fingerprint
+    tampered_identity = replace(
+        refreshed,
+        request_parameters={
+            **refreshed.request_parameters,
+            "reconstruction_identity": "f" * 64,
+        },
+    )
+    invalid_reuse_shape = replace(
+        refreshed,
+        request_parameters={
+            **refreshed.request_parameters,
+            "reconstruction_reuse": "not-a-mapping",
+        },
+    )
+
+    assert service._current_input_fingerprint(tampered_identity) is None
+    assert service._current_input_fingerprint(invalid_reuse_shape) is None
+
+
+def _file_sha256(path: Path) -> str:
+    from hashlib import sha256
+
+    return sha256(path.read_bytes()).hexdigest()
 
 
 def test_legacy_fixed_track_settings_default_in_adapter_parameters(

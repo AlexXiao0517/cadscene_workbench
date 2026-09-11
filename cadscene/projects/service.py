@@ -3288,6 +3288,19 @@ class ProjectService:
                 ),
                 *solve_export_dependencies.get(clip.clip_id, ()),
             )
+            reconstruction_identity = None
+            reconstruction_reuse = None
+            if adapter.name == "srt_fixed_track_visual_pose":
+                reconstruction_identity = _fixed_track_reconstruction_identity(
+                    clip=clip,
+                    project_assets=project.source_assets,
+                    adapter_version=adapter.version,
+                )
+                reconstruction_reuse = _fixed_track_reconstruction_reuse(
+                    stored_jobs,
+                    clip_id=clip.clip_id,
+                    reconstruction_identity=reconstruction_identity,
+                )
             solve = self._new_job(
                 project_id,
                 clip,
@@ -3300,6 +3313,8 @@ class ProjectService:
                 project_assets=project.source_assets,
                 project_revision=project.revision,
                 clips_revision=clips_manifest.revision,
+                reconstruction_identity=reconstruction_identity,
+                reconstruction_reuse=reconstruction_reuse,
             )
             submitted_solve = self.queue.submit(solve)
             if submitted_solve.job_id == solve.job_id:
@@ -5109,34 +5124,46 @@ class ProjectService:
         if video_path is None:
             raise FileNotFoundError("physical clip MP4 is unavailable")
         time_base = _fraction_time_base(clip)
+        adapter_parameters = (
+            _srt_full_pose_adapter_parameters(
+                self.projects_root,
+                project,
+                clip,
+                frame_map_path=frame_map_path,
+            )
+            if adapter.name == "srt_full_pose"
+            else (
+                _fixed_track_visual_pose_adapter_parameters(
+                    self.projects_root,
+                    project,
+                    clip,
+                    frame_map_path=frame_map_path,
+                    terrain_sources=job.request_parameters.get(
+                        "terrain_sources"
+                    ),
+                )
+                if adapter.name == "srt_fixed_track_visual_pose"
+                else dict(clip.manual_definition)
+            )
+        )
+        reconstruction_reuse = job.request_parameters.get(
+            "reconstruction_reuse"
+        )
+        if (
+            adapter.name == "srt_fixed_track_visual_pose"
+            and isinstance(reconstruction_reuse, Mapping)
+        ):
+            adapter_parameters = {
+                **adapter_parameters,
+                "reconstruction_reuse": dict(reconstruction_reuse),
+            }
         inputs = AdapterInputs(
             project_id=project_id,
             clip_id=clip.clip_id,
             video_path=video_path,
             srt_path=_clip_asset_path(clip, project.source_assets, "srt"),
             attempt_directory=Path(job.attempts[-1].directory),
-            parameters=(
-                _srt_full_pose_adapter_parameters(
-                    self.projects_root,
-                    project,
-                    clip,
-                    frame_map_path=frame_map_path,
-                )
-                if adapter.name == "srt_full_pose"
-                else (
-                    _fixed_track_visual_pose_adapter_parameters(
-                        self.projects_root,
-                        project,
-                        clip,
-                        frame_map_path=frame_map_path,
-                        terrain_sources=job.request_parameters.get(
-                            "terrain_sources"
-                        ),
-                    )
-                    if adapter.name == "srt_fixed_track_visual_pose"
-                    else dict(clip.manual_definition)
-                )
-            ),
+            parameters=adapter_parameters,
             source_start_pts=int(clip.analysis["source_start_pts"]),
             source_end_pts_exclusive=int(clip.analysis["source_end_pts_exclusive"]),
             source_time_base=time_base,
@@ -6498,6 +6525,8 @@ class ProjectService:
         project_assets: Mapping[str, object],
         project_revision: int,
         clips_revision: int,
+        reconstruction_identity: str | None = None,
+        reconstruction_reuse: Mapping[str, str] | None = None,
     ) -> QueueJob:
         identity_payload = _job_identity_payload(
             job_type=job_type,
@@ -6518,6 +6547,18 @@ class ProjectService:
             request_parameters["terrain_sources"] = list(
                 _terrain_source_snapshot(project_assets)
             )
+            request_parameters["reconstruction_identity"] = (
+                reconstruction_identity
+                or _fixed_track_reconstruction_identity(
+                    clip=clip,
+                    project_assets=project_assets,
+                    adapter_version=adapter_version,
+                )
+            )
+            if reconstruction_reuse is not None:
+                request_parameters["reconstruction_reuse"] = dict(
+                    reconstruction_reuse
+                )
         return QueueJob(
             job_id=job_id,
             project_id=project_id,
@@ -7110,7 +7151,48 @@ class ProjectService:
             except KeyError:
                 return None
             adapter_name = adapter.name
-            adapter_version = adapter.version
+            is_historical_fixed_track = (
+                adapter_name == "srt_fixed_track_visual_pose"
+                and job.adapter_name == adapter_name
+                and job.adapter_version == "3"
+                and "terrain_sources" not in job.request_parameters
+                and "terrain_context_sha256" not in (job.validation_proof or {})
+            )
+            adapter_version = (
+                job.adapter_version if is_historical_fixed_track else adapter.version
+            )
+            reconstruction_reuse = job.request_parameters.get(
+                "reconstruction_reuse"
+            )
+            if (
+                adapter_name == "srt_fixed_track_visual_pose"
+                and not is_historical_fixed_track
+            ):
+                expected_reconstruction_identity = (
+                    _fixed_track_reconstruction_identity(
+                        clip=clip,
+                        project_assets=project.source_assets,
+                        adapter_version=adapter.version,
+                    )
+                )
+                if (
+                    job.request_parameters.get("reconstruction_identity")
+                    != expected_reconstruction_identity
+                ):
+                    return None
+                if "reconstruction_reuse" in job.request_parameters:
+                    if not isinstance(reconstruction_reuse, Mapping):
+                        return None
+                    if not _fixed_track_reconstruction_reuse_request_is_valid(
+                        tuple(
+                            QueueJob.from_dict(item)
+                            for item in self.repositories.jobs.load(job.project_id).jobs
+                        ),
+                        clip_id=clip.clip_id,
+                        reconstruction_identity=expected_reconstruction_identity,
+                        request=reconstruction_reuse,
+                    ):
+                        return None
         else:
             return None
         return _fingerprint(
@@ -7938,6 +8020,110 @@ def _terrain_source_identity(
         {**item, "available": Path(item["path"]).is_file()}
         for item in _terrain_source_snapshot(project_assets)
     )
+
+
+def _fixed_track_reconstruction_identity(
+    *,
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object],
+    adapter_version: str,
+) -> str:
+    payload = dict(
+        _job_identity_payload(
+            job_type="trajectory",
+            clip=clip,
+            project_assets=project_assets,
+            project_revision=0,
+            clips_revision=0,
+            adapter_name="srt_fixed_track_visual_pose",
+            adapter_version=adapter_version,
+            include_fixed_track_terrain=False,
+        )
+    )
+    payload.pop("project_manifest_revision", None)
+    payload.pop("clips_manifest_revision", None)
+    return _fingerprint({"purpose": "fixed_track_colmap", **payload})
+
+
+def _fixed_track_reconstruction_reuse(
+    jobs: Sequence[QueueJob],
+    *,
+    clip_id: str,
+    reconstruction_identity: str,
+) -> Mapping[str, str] | None:
+    for candidate in reversed(tuple(jobs)):
+        if (
+            candidate.job_type != "trajectory"
+            or candidate.clip_id != clip_id
+            or candidate.adapter_name != "srt_fixed_track_visual_pose"
+            or candidate.adapter_version != "5"
+            or not _has_exact_success_proof(candidate)
+            or candidate.request_parameters.get("reconstruction_identity")
+            != reconstruction_identity
+        ):
+            continue
+        trajectory_value = candidate.published_outputs.get(
+            "reconstruction_trajectory"
+        )
+        proof = candidate.validation_proof or {}
+        expected_trajectory = proof.get("reconstruction_trajectory_sha256")
+        if not isinstance(trajectory_value, str) or not isinstance(
+            expected_trajectory, str
+        ):
+            continue
+        trajectory = Path(trajectory_value)
+        try:
+            if (
+                not trajectory.is_file()
+                or sha256(trajectory.read_bytes()).hexdigest()
+                != expected_trajectory
+            ):
+                continue
+        except OSError:
+            continue
+        reuse: dict[str, str] = {
+            "source_job_id": candidate.job_id,
+            "trajectory_path": str(trajectory),
+            "trajectory_sha256": expected_trajectory,
+        }
+        sparse_value = candidate.published_outputs.get(
+            "reconstruction_sparse_points"
+        )
+        expected_sparse = proof.get("reconstruction_sparse_points_sha256")
+        if isinstance(sparse_value, str) and isinstance(expected_sparse, str):
+            sparse = Path(sparse_value)
+            try:
+                if (
+                    sparse.is_file()
+                    and sha256(sparse.read_bytes()).hexdigest() == expected_sparse
+                ):
+                    reuse["sparse_points_path"] = str(sparse)
+                    reuse["sparse_points_sha256"] = expected_sparse
+            except OSError:
+                pass
+        return reuse
+    return None
+
+
+def _fixed_track_reconstruction_reuse_request_is_valid(
+    jobs: Sequence[QueueJob],
+    *,
+    clip_id: str,
+    reconstruction_identity: str,
+    request: Mapping[str, object],
+) -> bool:
+    source_job_id = request.get("source_job_id")
+    if not isinstance(source_job_id, str) or not source_job_id:
+        return False
+    source = next((item for item in jobs if item.job_id == source_job_id), None)
+    if source is None:
+        return False
+    expected = _fixed_track_reconstruction_reuse(
+        (source,),
+        clip_id=clip_id,
+        reconstruction_identity=reconstruction_identity,
+    )
+    return expected is not None and dict(request) == dict(expected)
 
 
 def _project_media_binding(
