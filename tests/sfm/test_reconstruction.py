@@ -252,6 +252,51 @@ def test_extract_frames_resizes_before_writing_without_changing_frame_indices(
     assert cv2.imread(str(extracted[0].path)).shape[:2] == (24, 32)
 
 
+def test_prepared_images_bypass_video_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reconstruction = importlib.import_module("cadscene.sfm.reconstruction")
+    images = tmp_path / "images"
+    images.mkdir()
+    identity = {"planner_version": "2"}
+    rows = [
+        {
+            "source_frame_index": frame,
+            "image_name": f"frame_{frame:06d}.png",
+            "pts_time_sec": frame / 25.0,
+        }
+        for frame in (0, 2, 4)
+    ]
+    monkeypatch.setattr(
+        reconstruction,
+        "validate_prepared_images",
+        lambda *args, **kwargs: rows,
+    )
+    monkeypatch.setattr(
+        reconstruction,
+        "extract_frames",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("video extraction must be skipped")
+        ),
+    )
+
+    frames = reconstruction.resolve_reconstruction_frames(
+        video_path=tmp_path / "video.mp4",
+        images_dir=images,
+        frame_indices=[0, 2, 4],
+        output_size=(64, 48),
+        prepared_images_dir=images,
+        prepared_images_identity=identity,
+    )
+
+    assert [frame.frame_index for frame in frames] == [0, 2, 4]
+    assert [frame.timestamp_source for frame in frames] == [
+        "prepared_manifest",
+        "prepared_manifest",
+        "prepared_manifest",
+    ]
+
+
 def test_stats_record_source_and_actual_reconstruction_dimensions() -> None:
     config = ReconstructionConfig(
         reconstruction_height=1080,

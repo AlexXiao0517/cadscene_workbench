@@ -12,6 +12,7 @@ import numpy as np
 
 from cadscene.core.io import ensure_dir, read_json, write_csv_utf8_sig, write_json, write_text
 from cadscene.sfm.backend_detection import detect_sfm_environment, select_sfm_backend
+from cadscene.sfm.adaptive_frame_preparation import validate_prepared_images
 from cadscene.sfm.resolution import reconstruction_dimensions
 from cadscene.sfm.colmap_cli import (
     ColmapCommandError,
@@ -167,6 +168,51 @@ def extract_frames(
     finally:
         capture.release()
     return extracted
+
+
+def resolve_reconstruction_frames(
+    *,
+    video_path: str | Path,
+    images_dir: str | Path,
+    frame_indices: Sequence[int],
+    output_size: tuple[int, int],
+    prepared_images_dir: str | Path | None = None,
+    prepared_images_identity: Mapping[str, object] | None = None,
+) -> list[ExtractedFrame]:
+    if prepared_images_dir is None:
+        return extract_frames(
+            video_path,
+            images_dir,
+            frame_indices,
+            output_size=output_size,
+        )
+    prepared = Path(prepared_images_dir).resolve()
+    expected = Path(images_dir).resolve()
+    if prepared != expected:
+        raise ValueError(
+            "prepared images must be published in the current SfM images directory"
+        )
+    if prepared_images_identity is None:
+        raise ValueError("prepared image identity is required")
+    rows = validate_prepared_images(
+        prepared,
+        source_frames=frame_indices,
+        expected_identity=prepared_images_identity,
+        expected_size=output_size,
+    )
+    return [
+        ExtractedFrame(
+            frame_index=int(row["source_frame_index"]),
+            path=prepared / str(row["image_name"]),
+            pts_time_sec=(
+                None
+                if row.get("pts_time_sec") is None
+                else float(row["pts_time_sec"])
+            ),
+            timestamp_source="prepared_manifest",
+        )
+        for row in rows
+    ]
 
 
 def frame_timestamp_rows(frames: Sequence[ExtractedFrame]) -> list[dict[str, object]]:
@@ -616,6 +662,8 @@ def run_reconstruction(
     config: ReconstructionConfig,
     seg_dir: str | Path | None = None,
     progress_callback: Callable[[str, float, str], None] | None = None,
+    prepared_images_dir: str | Path | None = None,
+    prepared_images_identity: Mapping[str, object] | None = None,
 ) -> ReconstructionResult:
     started_at = time.perf_counter()
     runtime_label = ""
@@ -732,16 +780,18 @@ def run_reconstruction(
             warnings=warnings,
             frame_timestamps=[],
         )
-    notify(
-        "extract_frames",
-        0.12,
-        f"正在从视频抽帧（{width}×{height} → {solve_width}×{solve_height}）",
-    )
-    frames = extract_frames(
-        video,
-        images_dir,
-        frame_indices,
+    if prepared_images_dir is None:
+        frame_message = f"正在从视频抽帧（{width}×{height} → {solve_width}×{solve_height}）"
+    else:
+        frame_message = f"正在校验预生成求解帧（{solve_width}×{solve_height}）"
+    notify("extract_frames", 0.12, frame_message)
+    frames = resolve_reconstruction_frames(
+        video_path=video,
+        images_dir=images_dir,
+        frame_indices=frame_indices,
         output_size=(solve_width, solve_height),
+        prepared_images_dir=prepared_images_dir,
+        prepared_images_identity=prepared_images_identity,
     )
     if config.use_mask:
         if seg_dir is None:

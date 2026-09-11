@@ -427,6 +427,8 @@ class ExistingWorkflowAdapter:
                     camera_params,
                     "--source-frames-file",
                     str(inputs.attempt_directory / "adaptive_frame_plan.json"),
+                    "--prepared-images-dir",
+                    str(self._run_root(inputs) / "02_sfm" / "images"),
                 ]
             )
             target_height = target_height_for_resolution(resolution)
@@ -445,6 +447,15 @@ class ExistingWorkflowAdapter:
     def _fixed_track_plan_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         if inputs.srt_path is None or inputs.frame_map_path is None:
             raise FileNotFoundError("fixed-track SRT and frame map are required")
+        settings = inputs.parameters.get("srt_fixed_track_visual_pose")
+        metadata = inputs.parameters.get("video_metadata")
+        if not isinstance(settings, Mapping) or not isinstance(metadata, Mapping):
+            raise ValueError("fixed-track planner requires SRT settings and video metadata")
+        width, height = reconstruction_dimensions(
+            int(metadata.get("width", 0)),
+            int(metadata.get("height", 0)),
+            normalize_reconstruction_resolution(settings.get("reconstruction_resolution")),
+        )
         return (
             sys.executable,
             "-m",
@@ -459,6 +470,12 @@ class ExistingWorkflowAdapter:
             str(_fixed_track_config_path(inputs)),
             "--output",
             str(inputs.attempt_directory / "adaptive_frame_plan.json"),
+            "--images-output",
+            str(self._run_root(inputs) / "02_sfm" / "images"),
+            "--reconstruct-width",
+            str(width),
+            "--reconstruct-height",
+            str(height),
         )
 
     def _srt_fusion_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
@@ -666,7 +683,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="5",
+                version="6",
                 srt_requirement="fixed_track",
                 modules=(
                     "cadscene.cli.plan_srt_adaptive_frames",

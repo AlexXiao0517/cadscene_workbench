@@ -46,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON list (or object with source_frames) of exact source-frame ordinals",
     )
     parser.add_argument(
+        "--prepared-images-dir",
+        type=Path,
+        help="Validated solve-resolution images prepared by the adaptive planner",
+    )
+    parser.add_argument(
         "--reconstruction-height",
         type=int,
         choices=(720, 1080),
@@ -98,9 +103,25 @@ def _load_source_frames(path: Path | None) -> tuple[int, ...] | None:
         raise ValueError("source_frames values must be integers") from exc
 
 
+def _load_preparation_identity(path: Path | None) -> dict[str, object] | None:
+    if path is None:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("preparation_identity")
+    return dict(value) if isinstance(value, dict) else None
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_utf8_stdio()
     args = build_parser().parse_args(argv)
+    source_frames = _load_source_frames(args.source_frames_file)
+    preparation_identity = _load_preparation_identity(args.source_frames_file)
+    if args.prepared_images_dir is not None and preparation_identity is None:
+        raise ValueError(
+            "--prepared-images-dir requires preparation_identity in --source-frames-file"
+        )
     manager = ArtifactManager(output_root=args.output_root, dataset=args.dataset, run_id=args.run_id)
     stage_dir = manager.stage_dir("sfm", "02_sfm")
     status_store = JobStatusStore(
@@ -156,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         gpu_index=args.gpu_index,
         no_cpu_fallback=args.no_cpu_fallback,
-        explicit_source_frames=_load_source_frames(args.source_frames_file),
+        explicit_source_frames=source_frames,
     )
     command = [sys.executable, "-m", "cadscene.cli.run_sfm", *(argv or sys.argv[1:])]
     inputs = {
@@ -178,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "ba_global_max_num_iterations": args.ba_global_max_num_iterations,
         "ba_global_max_refinements": args.ba_global_max_refinements,
         "source_frames_file": str(args.source_frames_file) if args.source_frames_file else None,
+        "prepared_images_dir": str(args.prepared_images_dir) if args.prepared_images_dir else None,
     }
     try:
         if args.mock_reconstruction:
@@ -193,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
                 config=config,
                 seg_dir=args.seg_dir,
                 progress_callback=update_progress,
+                prepared_images_dir=args.prepared_images_dir,
+                prepared_images_identity=preparation_identity,
             )
         outputs = write_reconstruction_outputs(stage_dir, result, video_path=args.video)
         manager.record_stage(

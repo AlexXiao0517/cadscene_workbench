@@ -201,3 +201,41 @@ def test_sfm_cli_publishes_authoritative_stage_progress(
         "message": "正在进行顺序匹配",
         "fraction": 0.52,
     }
+
+
+def test_sfm_cli_passes_prepared_images_and_plan_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    plan = tmp_path / "adaptive_frame_plan.json"
+    identity = {"planner_version": "2", "output_size": [64, 48]}
+    plan.write_text(
+        json.dumps({"source_frames": [0, 2, 4], "preparation_identity": identity}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_reconstruction(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(stats={})
+
+    monkeypatch.setattr(run_sfm_module, "run_reconstruction", fake_reconstruction)
+    monkeypatch.setattr(
+        run_sfm_module, "write_reconstruction_outputs", lambda *_args, **_kwargs: {}
+    )
+
+    result = run_sfm_module.main(
+        [
+            "--dataset", "demo",
+            "--run-id", "prepared",
+            "--output-root", str(tmp_path / "runs"),
+            "--video", str(video),
+            "--source-frames-file", str(plan),
+            "--prepared-images-dir", str(tmp_path / "images"),
+        ]
+    )
+
+    assert result == 0
+    assert captured["prepared_images_dir"] == tmp_path / "images"
+    assert captured["prepared_images_identity"] == identity

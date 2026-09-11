@@ -573,10 +573,15 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "5"
+    assert adapter.version == "6"
     assert len(commands) == 3
     planner, sfm, transfer = commands
     assert planner[1:3] == ("-m", "cadscene.cli.plan_srt_adaptive_frames")
+    assert planner[planner.index("--images-output") + 1].endswith(
+        "p1\\c1\\02_sfm\\images"
+    )
+    assert planner[planner.index("--reconstruct-width") + 1] == "1920"
+    assert planner[planner.index("--reconstruct-height") + 1] == "1080"
     assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert sfm[sfm.index("--backend") + 1] == "colmap_cli"
     assert sfm[sfm.index("--device") + 1] == "auto"
@@ -592,6 +597,9 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     assert sfm[sfm.index("--ba-global-max-num-iterations") + 1] == "15"
     assert sfm[sfm.index("--source-frames-file") + 1].endswith(
         "adaptive_frame_plan.json"
+    )
+    assert sfm[sfm.index("--prepared-images-dir") + 1].endswith(
+        "p1\\c1\\02_sfm\\images"
     )
     assert transfer[1:3] == (
         "-m",
