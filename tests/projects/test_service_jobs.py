@@ -451,6 +451,96 @@ def test_whole_source_srt_decoupling_requires_matching_asset_digest_and_interval
     ) is False
 
 
+def test_whole_source_media_mode_is_part_of_trajectory_job_identity(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("whole", workflow="srt_full_pose"),)
+    )
+    project = repositories.project.load("p1")
+    selected = repositories.clips.load("p1").clips[0]
+    common = {
+        "job_type": "trajectory",
+        "resource_class": "heavy_compute",
+        "adapter_name": "srt_full_pose",
+        "adapter_version": "2",
+        "exclusive_key": "trajectory:p1:whole",
+        "dependency_ids": (),
+        "project_assets": project.source_assets,
+        "project_revision": project.revision,
+        "clips_revision": repositories.clips.load("p1").revision,
+    }
+
+    exported = service._new_job("p1", selected, **common, whole_source_media=False)
+    direct = service._new_job("p1", selected, **common, whole_source_media=True)
+
+    assert exported.idempotency_key != direct.idempotency_key
+    assert exported.input_fingerprint != direct.input_fingerprint
+    assert exported.request_parameters["whole_source_media"] is False
+    assert direct.request_parameters["whole_source_media"] is True
+
+
+def test_current_fingerprint_accepts_only_exact_pre_mode_identity(
+    tmp_path: Path,
+) -> None:
+    service, repositories, _queue = service_with_clips(
+        tmp_path, (clip("whole", workflow="srt_full_pose"),)
+    )
+    project = repositories.project.load("p1")
+    clips_manifest = repositories.clips.load("p1")
+    selected = clips_manifest.clips[0]
+    current = service._new_job(
+        "p1",
+        selected,
+        job_type="trajectory",
+        resource_class="heavy_compute",
+        adapter_name="srt_full_pose",
+        adapter_version="2",
+        exclusive_key="trajectory:p1:whole",
+        dependency_ids=(),
+        project_assets=project.source_assets,
+        project_revision=project.revision,
+        clips_revision=clips_manifest.revision,
+        whole_source_media=True,
+    )
+    legacy_identity = service_module._job_identity_payload(
+        job_type="trajectory",
+        clip=selected,
+        project_assets=project.source_assets,
+        project_revision=project.revision,
+        clips_revision=clips_manifest.revision,
+        adapter_name="srt_full_pose",
+        adapter_version="2",
+    )
+    legacy = replace(
+        current,
+        input_fingerprint=service_module._fingerprint(legacy_identity),
+        idempotency_key=service_module._fingerprint(
+            {**legacy_identity, "purpose": "idempotency"}
+        ),
+    )
+
+    assert service._current_input_fingerprint(legacy) == legacy.input_fingerprint
+    assert (
+        service._current_input_fingerprint(
+            replace(legacy, idempotency_key="tampered-legacy-idempotency")
+        )
+        != legacy.input_fingerprint
+    )
+    assert (
+        service._current_input_fingerprint(
+            replace(current, request_parameters={"whole_source_media": "true"})
+        )
+        is None
+    )
+    assert (
+        service._current_input_fingerprint(
+            replace(legacy, request_parameters={"whole_source_media": 1})
+        )
+        is None
+    )
+
+
 def test_project_package_exports_task3_public_interfaces() -> None:
     import cadscene.projects as projects
 

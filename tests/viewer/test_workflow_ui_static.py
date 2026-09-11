@@ -261,10 +261,34 @@ def test_srt_timeline_uses_one_bidirectional_source_frame_authority() -> None:
 def test_viewer_uses_authoritative_pts_for_frame_time_sync() -> None:
     viewer = _read("viewer_legacy.js")
 
-    assert "window.CadsceneAnnotationPts?.sourceFrameAtTime" in viewer
-    assert "window.CadsceneAnnotationPts?.clipTimeAtSourceFrame" in viewer
+    assert "window.CadsceneAnnotationPts?.clipFrameAtTime" in viewer
+    assert "window.CadsceneAnnotationPts?.clipTimeAtClipFrame" in viewer
+    assert "window.CadsceneAnnotationPts?.clipFrameRange" in viewer
     assert "videoFrameAtCurrentTime()" in viewer
     assert '"video_playback"' in viewer
+
+
+def test_viewer_waits_for_pts_authority_before_manual_frame_actions() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "function hasSelectableFrameTiming()" in viewer
+    assert "window.CadsceneAnnotationPts?.hasFrameMap?.() === true" in viewer
+    assert "fallback !== null && fallback !== undefined" in viewer
+    assert "if (!hasSelectableFrameTiming())" in viewer
+    assert 'window.addEventListener("cadscenePtsAuthorityReady"' in viewer
+    assert "retryInitialFrameNavigation" in viewer
+    timing_controls = viewer[
+        viewer.index("function updateFrameTimingControls") :
+        viewer.index("function videoFrameAtTime")
+    ]
+    assert '"#deleteKeyframe"' in timing_controls
+    assert '"#previousKeyframe"' in timing_controls
+    assert '"#nextKeyframe"' in timing_controls
+    delete_keyframe = viewer[
+        viewer.index("function deleteCurrentKeyframe") :
+        viewer.index("function goToKeyframe")
+    ]
+    assert "if (!hasSelectableFrameTiming())" in delete_keyframe
 
 
 def test_pure_rotation_keeps_frame_coordinator_current_without_applying_track_pose() -> None:
@@ -273,6 +297,13 @@ def test_pure_rotation_keeps_frame_coordinator_current_without_applying_track_po
     assert "if (!pureRotationPlaybackActive && cameraTrack && camera" in viewer
     assert 'selectSourceFrame(videoFrameAtCurrentTime(), "video_seek"' in viewer
     assert "window.cadsceneRefreshPureRotationPose?.();" in viewer
+
+
+def test_viewer_never_assumes_cfr_before_media_timing_is_confirmed() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "meta: { cfr_confirmed: false }" in viewer
+    assert "if (hasExplicitCfrTiming())" in viewer
 
 
 def test_route_picker_considers_all_visible_srt_routes() -> None:
@@ -1270,7 +1301,9 @@ def test_viewer_honors_authoritative_initial_frame_from_workbench_url() -> None:
     assert 'video.addEventListener("error", onError, { once: true })' in viewer
     assert "初始定位失败：视频元数据无法加载" in viewer
     assert "await waitForVideoMetadata()" in viewer
-    assert "await goToFrame(initialFrame)" in viewer
+    assert "pendingInitialFrame" in viewer
+    assert "await goToFrame(targetFrame)" in viewer
+    assert "await retryInitialFrameNavigation()" in viewer
 
 
 def test_sfm_workflow_reenables_finish_quality_after_manifest_mode_is_confirmed() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -92,6 +93,22 @@ def reuse_prepared_plan(
         return None
 
 
+def planning_input_fingerprint(candidate_frames: list[int], centers: object) -> str:
+    center_rows = np.asarray(centers, dtype=np.float64)
+    if center_rows.shape != (len(candidate_frames), 3):
+        raise ValueError("candidate centers must be an Nx3 array")
+    if not np.all(np.isfinite(center_rows)):
+        raise ValueError("candidate centers must be finite")
+    payload = {
+        "candidate_frames": [int(frame) for frame in candidate_frames],
+        "candidate_centers": center_rows.tolist(),
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _write_progress(args.progress_file, "preparing_frames", "正在建立 SRT 求解帧计划", 0.01)
@@ -108,14 +125,20 @@ def main(argv: list[str] | None = None) -> int:
     if candidate_frames[-1] != last_frame:
         candidate_frames.append(last_frame)
     candidate_frames = [frame for frame in candidate_frames if frame in by_frame]
-    centers = np.asarray([by_frame[frame].center for frame in candidate_frames], dtype=np.float64)
+    centers = np.asarray([by_frame[frame].canonical_center for frame in candidate_frames], dtype=np.float64)
     output_size = (args.reconstruct_width, args.reconstruct_height)
     identity = preparation_identity(
         video=args.video,
         srt=args.srt,
         frame_map=args.frame_map,
         output_size=output_size,
-        planner_settings={"candidate_spacing_sec": 0.5, "base_spacing_sec": 1.0},
+        planner_settings={
+            "candidate_spacing_sec": 0.5,
+            "base_spacing_sec": 1.0,
+            "planning_input_fingerprint": planning_input_fingerprint(
+                candidate_frames, centers
+            ),
+        },
     )
     if reuse_prepared_plan(
         args.output,

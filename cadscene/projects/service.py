@@ -525,11 +525,12 @@ class ProjectService:
             },
             "frames": [
                 {
+                    "clip_frame_index": clip_frame_index,
                     "source_frame_index": frame.ordinal,
                     "source_pts": frame.pts,
                     "clip_time_sec": float((frame.pts - first_pts) * time_base),
                 }
-                for frame in frames
+                for clip_frame_index, frame in enumerate(frames)
             ],
         }
 
@@ -6566,14 +6567,19 @@ class ProjectService:
             adapter_name=adapter_name,
             adapter_version=adapter_version,
         )
+        if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
+            identity_payload = {
+                **identity_payload,
+                "whole_source_media": bool(whole_source_media),
+            }
         input_fingerprint = _fingerprint(identity_payload)
         idempotency_key = _fingerprint({**identity_payload, "purpose": "idempotency"})
         job_id = self._identity()
         operation_id = self._identity()
         attempt_dir = self._attempt_directory(project_id, job_id, 1)
         request_parameters: dict[str, object] = {}
-        if whole_source_media:
-            request_parameters["whole_source_media"] = True
+        if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
+            request_parameters["whole_source_media"] = bool(whole_source_media)
         if adapter_name == "srt_fixed_track_visual_pose":
             request_parameters["terrain_sources"] = list(
                 _terrain_source_snapshot(project_assets)
@@ -7226,7 +7232,7 @@ class ProjectService:
                         return None
         else:
             return None
-        return _fingerprint(
+        current_identity = dict(
             _job_identity_payload(
                 job_type=job.job_type,
                 clip=clip,
@@ -7243,6 +7249,25 @@ class ProjectService:
                 ),
             )
         )
+        if (
+            adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}
+            and "whole_source_media" in job.request_parameters
+        ):
+            whole_source_media = job.request_parameters["whole_source_media"]
+            if not isinstance(whole_source_media, bool):
+                return None
+            legacy_fingerprint = _fingerprint(current_identity)
+            legacy_idempotency = _fingerprint(
+                {**current_identity, "purpose": "idempotency"}
+            )
+            if (
+                whole_source_media is True
+                and job.input_fingerprint == legacy_fingerprint
+                and job.idempotency_key == legacy_idempotency
+            ):
+                return legacy_fingerprint
+            current_identity["whole_source_media"] = whole_source_media
+        return _fingerprint(current_identity)
 
     def _load_scene_bridge_request(self, job: QueueJob) -> Mapping[str, object]:
         requests_root = (

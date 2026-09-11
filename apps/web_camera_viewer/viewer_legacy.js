@@ -99,6 +99,7 @@
   let lastMediaSeekPromise = Promise.resolve();
   let requestedMediaFrame = null;
   let mediaSeekGeneration = 0;
+  let pendingInitialFrame = Number.parseInt(INITIAL_FRAME_VALUE || "", 10);
   let timelinePointerId = null;
   let lastOverlayDrawAt = 0;
   let videoRangeSupported = null;
@@ -388,8 +389,28 @@
     return cameraTrack?.meta?.cfr_confirmed === true;
   }
 
+  function hasSelectableFrameTiming() {
+    return window.CadsceneAnnotationPts?.hasFrameMap?.() === true || hasExplicitCfrTiming();
+  }
+
+  function updateFrameTimingControls() {
+    const disabled = !hasSelectableFrameTiming();
+    for (const selector of [
+      "#addKeyframe",
+      "#deleteKeyframe",
+      "#previousKeyframe",
+      "#nextKeyframe",
+      "#goToFrame",
+      "#saveAdjustedKeyframe",
+      "#frameInput",
+    ]) {
+      const control = document.querySelector(selector);
+      if (control) control.disabled = disabled;
+    }
+  }
+
   function videoFrameAtTime(timeSec) {
-    const exact = window.CadsceneAnnotationPts?.sourceFrameAtTime?.(Number(timeSec));
+    const exact = window.CadsceneAnnotationPts?.clipFrameAtTime?.(Number(timeSec));
     if (Number.isInteger(exact)) return exact;
     if (hasExplicitCfrTiming()) return Math.round(Number(timeSec || 0) * cameraTrack.fps);
     return frameCoordinator?.currentFrame?.() ?? manualFrameOverride ?? 0;
@@ -400,7 +421,7 @@
   }
 
   function frameToTime(frame) {
-    const exact = window.CadsceneAnnotationPts?.clipTimeAtSourceFrame?.(Number(frame));
+    const exact = window.CadsceneAnnotationPts?.clipTimeAtClipFrame?.(Number(frame));
     if (Number.isFinite(exact)) return exact;
     if (hasExplicitCfrTiming()) return Number(frame) / cameraTrack.fps;
     return null;
@@ -409,13 +430,27 @@
   function resolvedFrameTime(frame, fallback = null) {
     const exact = frameToTime(frame);
     if (Number.isFinite(exact)) return exact;
-    const candidate = Number(fallback);
+    const candidate = fallback !== null && fallback !== undefined
+      ? Number(fallback)
+      : Number.NaN;
     return Number.isFinite(candidate) ? candidate : Number(video.currentTime || 0);
   }
 
   function clampSelectableFrame(frame) {
+    const range = window.CadsceneAnnotationPts?.clipFrameRange?.();
+    if (Array.isArray(range) && range.length === 2) {
+      return Math.min(
+        Number(range[1]),
+        Math.max(Number(range[0]), Math.round(Number(frame) || 0)),
+      );
+    }
     const lower = Math.max(0, Math.round(Number(frame) || 0));
-    if (!cameraTrack || !Number.isFinite(video.duration) || video.duration <= 0) return lower;
+    if (
+      !hasExplicitCfrTiming()
+      || !cameraTrack
+      || !Number.isFinite(video.duration)
+      || video.duration <= 0
+    ) return lower;
     return Math.min(lower, Math.max(0, Math.round(video.duration * cameraTrack.fps)));
   }
 
@@ -458,6 +493,14 @@
   }
 
   function selectSourceFrame(frame, origin, options = {}) {
+    if (
+      !hasSelectableFrameTiming()
+      && origin !== "video_playback"
+      && origin !== "video_seek"
+    ) {
+      setStatus("正在加载精确帧时间映射，请稍候再选择帧");
+      return Promise.resolve(false);
+    }
     return ensureFrameCoordinator().selectFrame(frame, origin, options);
   }
 
@@ -693,7 +736,7 @@
       version: 1,
       video: VIDEO_PATH,
       fps: DEFAULT_FPS,
-      meta: { cfr_confirmed: true },
+      meta: { cfr_confirmed: false },
       keyframes: [{ frame: 0, time: 0, camera: cloneCameraPose(initialPose) }],
     };
   }
@@ -2053,20 +2096,30 @@
   }
 
   function addOrUpdateKeyframe() {
+    if (!hasSelectableFrameTiming()) {
+      setStatus("正在加载精确帧时间映射，暂不能保存关键帧");
+      return false;
+    }
     const frame = currentFrame();
     const source = reviewPacket && Number(reviewPacket.review_frame) === frame ? "manual_corrected" : "manual_anchor";
     upsertKeyframe(makeKeyframe(frame, camera, source));
     syncSfmAnchoredTrackFromCurrentTrack();
     updateTrackStatus();
     notifyManualCameraChanged("keyframe");
+    return true;
   }
 
   function deleteCurrentKeyframe() {
+    if (!hasSelectableFrameTiming()) {
+      setStatus("正在加载精确帧时间映射，暂不能删除关键帧");
+      return false;
+    }
     const frame = currentFrame();
     cameraTrack.keyframes = cameraTrack.keyframes.filter((keyframe) => keyframe.frame !== frame);
     syncSfmAnchoredTrackFromCurrentTrack();
     updateTrackStatus();
     notifyManualCameraChanged("keyframe_delete");
+    return true;
   }
 
   function goToKeyframe(direction) {
@@ -2181,6 +2234,10 @@
   }
 
   function goToFrame(frame) {
+    if (!hasSelectableFrameTiming()) {
+      setStatus("正在加载精确帧时间映射，暂不能跳转帧");
+      return Promise.resolve(false);
+    }
     const targetFrame = clampSelectableFrame(frame);
     if (!Number.isFinite(targetFrame)) return;
     selectSourceFrame(targetFrame, "frame_navigation", { media: "immediate" });
@@ -2424,7 +2481,9 @@
     if (fixedTrackVisualPoseMode && fixedTrackVisualComponentAtFrame(frame) === null) {
       throw new Error("当前帧没有可传播的视觉相对姿态，请选择推荐帧或其他绿色姿态区段");
     }
-    addOrUpdateKeyframe();
+    if (!addOrUpdateKeyframe()) {
+      throw new Error("精确帧时间映射尚未就绪，请稍候再保存关键帧");
+    }
     return frame;
   };
 
@@ -2489,6 +2548,7 @@
       // 质量评估附加字段（evaluate_sfm_alignment_quality 产出，可选；向后兼容，仅展示不影响对齐）
       quality: keyframe.quality || null,
     }));
+    updateFrameTimingControls();
     // 单个 frame=0 且无 source 的轨迹只是默认占位，可安全用 SfM 内参修复 FOV。
     loadedAuthoritativeCameraTrack = cameraTrack.keyframes.length > 1
       || cameraTrack.keyframes.some(
@@ -3253,14 +3313,19 @@
   }
 
   function saveAdjustedReviewKeyframe() {
+    if (!hasSelectableFrameTiming()) {
+      setReviewStatus("正在加载精确帧时间映射，暂不能保存微调关键帧");
+      return false;
+    }
     const frame = currentFrame();
-    if (!Number.isFinite(frame)) return;
+    if (!Number.isFinite(frame)) return false;
     const keyframe = makeKeyframe(frame, camera, "manual_corrected");
     upsertKeyframe(keyframe);
     syncSfmAnchoredTrackFromCurrentTrack();
     updateViews({ forceOverlay: true });
     setReviewStatus(`已保存微调关键帧 ${frame}，正在导出轨迹`);
     exportTrack();
+    return true;
   }
 
   function rejectReviewPrediction() {
@@ -3475,6 +3540,21 @@
     });
   }
 
+  async function retryInitialFrameNavigation() {
+    if (!Number.isInteger(pendingInitialFrame) || pendingInitialFrame < 0) return false;
+    if (!hasSelectableFrameTiming()) return false;
+    const targetFrame = pendingInitialFrame;
+    pendingInitialFrame = null;
+    try {
+      await waitForVideoMetadata();
+      await goToFrame(targetFrame);
+      return true;
+    } catch (error) {
+      pendingInitialFrame = targetFrame;
+      throw error;
+    }
+  }
+
   async function boot() {
     cameraTrack = createInitialTrack({ x: 0, y: 0, z: 120, yaw: 0, pitch: -45, roll: 0, fov: 70 });
     ensureFrameCoordinator();
@@ -3492,6 +3572,13 @@
     cameraTrack = createInitialTrack(camera);
     createControls();
     bindButtons();
+    updateFrameTimingControls();
+    window.addEventListener("cadscenePtsAuthorityReady", () => {
+      updateFrameTimingControls();
+      retryInitialFrameNavigation().catch((error) => {
+        setStatus(`初始定位失败：${error.message}`);
+      });
+    });
 
     threeScene = createThreeScene(cadData);
     threeScene.updateVirtualCamera(camera);
@@ -3515,11 +3602,7 @@
     if (trackLoaded) threeScene.focusInspectOnCamera(camera);
     else threeScene.focusInspectOnCad();
     updateViews({ forceOverlay: true });
-    const initialFrame = Number.parseInt(INITIAL_FRAME_VALUE || "", 10);
-    if (Number.isInteger(initialFrame) && initialFrame >= 0) {
-      await waitForVideoMetadata();
-      await goToFrame(initialFrame);
-    }
+    await retryInitialFrameNavigation();
   }
 
   function tick() {

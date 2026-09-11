@@ -79,6 +79,33 @@
     return Number.isFinite(clipTime) ? clipTime : null;
   }
 
+  function clipFrameAtTime(frames, clipTimeSec) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const sourceFrame = sourceFrameAtTime(frames, clipTimeSec);
+    const selected = frames.find((item) => item.source_frame_index === sourceFrame);
+    return Number.isInteger(selected?.clip_frame_index)
+      ? selected.clip_frame_index : null;
+  }
+
+  function clipTimeAtClipFrame(frames, clipFrameIndex) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const target = Number(clipFrameIndex);
+    if (!Number.isFinite(target)) return null;
+    let low = 0;
+    let high = frames.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(frames[middle].clip_frame_index) < target) low = middle + 1;
+      else high = middle;
+    }
+    const after = frames[low];
+    const before = low > 0 ? frames[low - 1] : after;
+    const selected = Math.abs(Number(before.clip_frame_index) - target)
+      <= Math.abs(Number(after.clip_frame_index) - target) ? before : after;
+    const clipTime = Number(selected.clip_time_sec);
+    return Number.isFinite(clipTime) ? clipTime : null;
+  }
+
   function hidden(reason, extra = {}) {
     return { visible: false, reason, ...extra };
   }
@@ -263,6 +290,22 @@
         return clipTimeAtSourceFrame(frames, sourceFrameIndex);
       },
 
+      clipFrameAtTime(clipTimeSec) {
+        return clipFrameAtTime(frames, clipTimeSec);
+      },
+
+      clipTimeAtClipFrame(clipFrameIndex) {
+        return clipTimeAtClipFrame(frames, clipFrameIndex);
+      },
+
+      clipFrameRange() {
+        if (frames.length === 0) return null;
+        return [
+          Number(frames[0].clip_frame_index),
+          Number(frames[frames.length - 1].clip_frame_index),
+        ];
+      },
+
       hasFrameMap() {
         return frames.length > 0;
       },
@@ -350,6 +393,8 @@
     clipTimeAtSourcePts,
     sourceFrameAtTime,
     clipTimeAtSourceFrame,
+    clipFrameAtTime,
+    clipTimeAtClipFrame,
     videoTrackVisual,
     cadAnchorVisual,
     cadAnchorCreationDecision,

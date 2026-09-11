@@ -14,7 +14,7 @@ import numpy as np
 
 
 PREPARATION_SCHEMA = "adaptive_sfm_prepared_images_v1"
-PLANNER_VERSION = "2"
+PLANNER_VERSION = "3"
 MANIFEST_NAME = "prepared_images_manifest.json"
 
 
@@ -219,7 +219,7 @@ def validate_prepared_images(
     cv2 = importlib.import_module("cv2")
     output = Path(images_dir)
     manifest = output / MANIFEST_NAME
-    if not manifest.exists():
+    if not manifest.exists() or manifest.is_symlink():
         raise ValueError(f"prepared image manifest is missing: {manifest}")
     payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
     if payload.get("schema_version") != PREPARATION_SCHEMA or payload.get("complete") is not True:
@@ -235,9 +235,15 @@ def validate_prepared_images(
     for expected_frame, row in zip(expected_frames, rows):
         if not isinstance(row, dict) or int(row.get("source_frame_index", -1)) != expected_frame:
             raise ValueError("prepared image rows are out of order")
-        path = output / str(row.get("image_name", ""))
-        if path.name != frame_image_name(expected_frame) or not path.exists():
+        expected_name = frame_image_name(expected_frame)
+        image_name = row.get("image_name")
+        if image_name != expected_name:
+            raise ValueError(f"prepared image name is unsafe for frame {expected_frame}")
+        path = output / expected_name
+        if path.is_symlink() or not path.exists():
             raise ValueError(f"prepared image is missing for frame {expected_frame}")
+        if path.resolve(strict=True).parent != output.resolve(strict=True):
+            raise ValueError(f"prepared image escapes its directory for frame {expected_frame}")
         if _sha256(path) != row.get("sha256"):
             raise ValueError(f"prepared image hash mismatch for frame {expected_frame}")
         if expected_size is not None:

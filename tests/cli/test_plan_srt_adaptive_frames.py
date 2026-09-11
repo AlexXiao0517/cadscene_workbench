@@ -63,3 +63,14 @@ def test_matching_complete_plan_reuses_prepared_images(
     assert reused is not None
     assert reused["source_frames"] == [0, 3]
     assert calls[0][1]["expected_identity"] == identity
+
+
+def test_planning_input_fingerprint_changes_with_candidate_centers() -> None:
+    first = planner.planning_input_fingerprint(
+        [0, 10], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    )
+    shifted = planner.planning_input_fingerprint(
+        [0, 10], [[1.0, 2.0, 3.0], [4.1, 5.0, 6.0]]
+    )
+
+    assert first != shifted

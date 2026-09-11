@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -207,6 +208,19 @@ def test_published_manifest_removes_unselected_candidates_and_fails_closed(
     )
     assert [row["source_frame_index"] for row in validated] == [0, 3]
 
+    escaped = tmp_path / "frame_000000.png"
+    shutil.copy2(tmp_path / "images" / "frame_000000.png", escaped)
+    payload["images"][0]["image_name"] = "../frame_000000.png"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="image name"):
+        validate_prepared_images(
+            tmp_path / "images",
+            source_frames=[0, 3],
+            expected_identity=identity,
+            expected_size=(8, 6),
+        )
+
+    payload["images"][0]["image_name"] = "frame_000000.png"
     payload["identity"]["output_size"] = [10, 6]
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="identity"):
