@@ -39,6 +39,7 @@ class ReconstructionConfig:
     camera_model: str = "OPENCV"
     camera_params: tuple[float, ...] | None = None
     refine_focal_length: bool = True
+    refine_extra_params: bool = True
     sequential_overlap: int = 15
     quadratic_overlap: bool = True
     init_min_tri_angle: float = 2.0
@@ -63,6 +64,7 @@ class ReconstructionConfig:
     device: str = "cpu"
     gpu_index: str = "0"
     no_cpu_fallback: bool = False
+    explicit_source_frames: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,11 @@ class ReconstructionResult:
 
 
 def frame_indices_for_config(config: ReconstructionConfig, frame_count: int) -> list[int]:
+    if config.explicit_source_frames is not None:
+        values = sorted({int(value) for value in config.explicit_source_frames})
+        if any(value < 0 or (frame_count > 0 and value >= frame_count) for value in values):
+            raise ValueError("explicit source frame is outside video frame range")
+        return values
     start = max(0, int(config.start_frame))
     step = max(1, int(config.frame_step))
     end = frame_count
@@ -768,6 +775,7 @@ def run_reconstruction(
             "camera_model": config.camera_model,
             "camera_params": config.camera_params,
             "refine_focal_length": config.refine_focal_length,
+            "refine_extra_params": config.refine_extra_params,
             "max_image_size": config.max_image_size,
             "max_num_features": config.max_num_features,
             "sequential_overlap": config.sequential_overlap,

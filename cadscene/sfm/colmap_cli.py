@@ -71,6 +71,7 @@ def build_colmap_cli_commands(
     matching_help: str,
     camera_params: Sequence[float] | None = None,
     refine_focal_length: bool = True,
+    refine_extra_params: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     extraction_gpu = _option(
         feature_help,
@@ -168,6 +169,8 @@ def build_colmap_cli_commands(
         str(ba_global_max_refinements),
         "--Mapper.ba_refine_focal_length",
         "1" if refine_focal_length else "0",
+        "--Mapper.ba_refine_extra_params",
+        "1" if refine_extra_params else "0",
     ]
     return (
         build_colmap_process_command(executable, feature_args),
@@ -302,6 +305,7 @@ def run_colmap_cli_pipeline(
     gpu_index: str,
     camera_params: Sequence[float] | None = None,
     refine_focal_length: bool = True,
+    refine_extra_params: bool = True,
     progress_callback: Callable[[str, float, str], None] | None = None,
 ) -> dict:
     feature_help = probe_colmap_subcommand_help(executable, "feature_extractor")
@@ -327,6 +331,7 @@ def run_colmap_cli_pipeline(
         matching_help=matching_help,
         camera_params=camera_params,
         refine_focal_length=refine_focal_length,
+        refine_extra_params=refine_extra_params,
     )
     names = ("feature_extraction", "feature_matching", "mapper")
     progress_values = (0.32, 0.52, 0.72)

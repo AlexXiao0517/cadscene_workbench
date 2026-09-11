@@ -27,6 +27,24 @@ def test_frame_indices_respect_start_count_and_step() -> None:
     assert frame_indices_for_config(config, frame_count=20) == [3, 6, 9]
 
 
+def test_explicit_source_frames_override_regular_sampling() -> None:
+    config = ReconstructionConfig(
+        start_frame=9,
+        num_frames=2,
+        frame_step=9,
+        explicit_source_frames=(120, 0, 60, 60),
+    )
+
+    assert frame_indices_for_config(config, frame_count=181) == [0, 60, 120]
+
+
+def test_explicit_source_frames_must_fit_video() -> None:
+    config = ReconstructionConfig(explicit_source_frames=(0, 99))
+
+    with pytest.raises(ValueError, match="outside video"):
+        frame_indices_for_config(config, frame_count=20)
+
+
 def test_mask_path_matches_colmap_image_name(tmp_path: Path) -> None:
     assert mask_path_for_frame(tmp_path, 12).name == "frame_000012.png"
 

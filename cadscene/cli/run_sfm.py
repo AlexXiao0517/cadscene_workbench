@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-frames", type=int, default=0)
     parser.add_argument("--frame-step", type=int, default=5)
     parser.add_argument(
+        "--source-frames-file",
+        type=Path,
+        help="JSON list (or object with source_frames) of exact source-frame ordinals",
+    )
+    parser.add_argument(
         "--reconstruction-height",
         type=int,
         choices=(720, 1080),
@@ -55,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-model", default="OPENCV")
     parser.add_argument("--camera-params")
     parser.add_argument("--no-refine-focal-length", action="store_true")
+    parser.add_argument("--no-refine-extra-params", action="store_true")
     parser.add_argument("--sequential-overlap", type=int, default=15)
     parser.add_argument("--init-min-tri-angle", type=float, default=2.0)
     parser.add_argument("--ba-global-frames-ratio", type=float, default=2.0)
@@ -77,6 +83,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(use_mask=False)
     parser.add_argument("--mock-reconstruction", help=argparse.SUPPRESS)
     return parser
+
+
+def _load_source_frames(path: Path | None) -> tuple[int, ...] | None:
+    if path is None:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    values = payload.get("source_frames") if isinstance(payload, dict) else payload
+    if not isinstance(values, list) or not values:
+        raise ValueError("--source-frames-file must contain a non-empty source_frames list")
+    try:
+        return tuple(int(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source_frames values must be integers") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         camera_model=args.camera_model,
         camera_params=camera_params,
         refine_focal_length=not args.no_refine_focal_length,
+        refine_extra_params=not args.no_refine_extra_params,
         sequential_overlap=args.sequential_overlap,
         init_min_tri_angle=args.init_min_tri_angle,
         ba_global_frames_ratio=args.ba_global_frames_ratio,
@@ -136,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         gpu_index=args.gpu_index,
         no_cpu_fallback=args.no_cpu_fallback,
+        explicit_source_frames=_load_source_frames(args.source_frames_file),
     )
     command = [sys.executable, "-m", "cadscene.cli.run_sfm", *(argv or sys.argv[1:])]
     inputs = {
@@ -156,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         "ba_global_points_freq": args.ba_global_points_freq,
         "ba_global_max_num_iterations": args.ba_global_max_num_iterations,
         "ba_global_max_refinements": args.ba_global_max_refinements,
+        "source_frames_file": str(args.source_frames_file) if args.source_frames_file else None,
     }
     try:
         if args.mock_reconstruction:

@@ -75,6 +75,7 @@ def test_cli_commands_use_current_help_options_and_gpu_index(tmp_path: Path) -> 
     assert mapper[mapper.index("--Mapper.ba_global_points_freq") + 1] == "1000000"
     assert mapper[mapper.index("--Mapper.ba_global_max_num_iterations") + 1] == "25"
     assert mapper[mapper.index("--Mapper.ba_global_max_refinements") + 1] == "2"
+    assert mapper[mapper.index("--Mapper.ba_refine_extra_params") + 1] == "1"
 
 
 def test_cli_commands_accept_authoritative_camera_params_and_disable_focal_ba(
