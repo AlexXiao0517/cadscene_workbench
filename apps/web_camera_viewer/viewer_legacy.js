@@ -95,6 +95,10 @@
   let cameraDraftDirty = false;
   let reviewPacket = null;
   let manualFrameOverride = null;
+  let frameCoordinator = null;
+  let lastMediaSeekPromise = Promise.resolve();
+  let requestedMediaFrame = null;
+  let timelinePointerId = null;
   let lastOverlayDrawAt = 0;
   let videoRangeSupported = null;
   let showCadText = true;
@@ -374,12 +378,60 @@
   }
 
   function currentFrame() {
+    if (frameCoordinator) return frameCoordinator.currentFrame();
     if (manualFrameOverride !== null) return manualFrameOverride;
     return Math.round((video.currentTime || 0) * cameraTrack.fps);
   }
 
   function frameToTime(frame) {
     return frame / cameraTrack.fps;
+  }
+
+  function clampSelectableFrame(frame) {
+    const lower = Math.max(0, Math.round(Number(frame) || 0));
+    if (!cameraTrack || !Number.isFinite(video.duration) || video.duration <= 0) return lower;
+    return Math.min(lower, Math.max(0, Math.round(video.duration * cameraTrack.fps)));
+  }
+
+  function applyLogicalSourceFrame(frame, origin) {
+    if (origin === "video_playback" || (origin === "video_seek" && requestedMediaFrame === null)) {
+      manualFrameOverride = null;
+    } else {
+      manualFrameOverride = frame;
+    }
+    if (cameraTrack && camera && (fixedTrackVisualPoseMode || srtPosePriorMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
+      camera = poseForFrame(frame);
+      syncControls();
+    }
+    if (cameraTrack && camera) {
+      updateViews({
+        forceOverlay: origin !== "video_playback",
+        updateThree: true,
+        followCamera: origin === "video_playback" && followOnPlay,
+      });
+    }
+  }
+
+  function ensureFrameCoordinator() {
+    if (frameCoordinator) return frameCoordinator;
+    if (!window.CadsceneFrameSync?.createCoordinator) {
+      throw new Error("frame_sync.js 未加载");
+    }
+    frameCoordinator = window.CadsceneFrameSync.createCoordinator({
+      initialFrame: manualFrameOverride ?? Math.round((video.currentTime || 0) * (cameraTrack?.fps || DEFAULT_FPS)),
+      clampFrame: clampSelectableFrame,
+      onLogicalFrame: applyLogicalSourceFrame,
+      seekVideo: (frame) => {
+        lastMediaSeekPromise = seekVideoToFrame(frame);
+        return lastMediaSeekPromise;
+      },
+      throttleMs: 100,
+    });
+    return frameCoordinator;
+  }
+
+  function selectSourceFrame(frame, origin, options = {}) {
+    return ensureFrameCoordinator().selectFrame(frame, origin, options);
   }
 
   function sortKeyframes() {
@@ -841,6 +893,9 @@
     currentKeyframeStatus.textContent = manualKeyframes().some((keyframe) => keyframe.frame === frame)
       ? "当前：有人工关键帧"
       : "当前：无人工关键帧";
+    if (qualitySummary && isSrtTimelineMode()) {
+      qualitySummary.textContent = `${frameToTime(frame).toFixed(3)} 秒 · 源帧 ${frame} · 人工关键帧 ${manualKeyframes().length}`;
+    }
     updateSrtPoseCurrentFrameInfo(frame);
     renderQualityTimeline();
     if (threeScene && sfmScene) {
@@ -1506,6 +1561,8 @@
     const sfmRaycaster = new THREE.Raycaster();
     const sfmPointer = new THREE.Vector2();
     sfmRaycaster.params.Line.threshold = Math.max(0.5, maxSize * 0.0015);
+    let scenePointerDown = null;
+    let suppressNextSceneClick = false;
 
     function disposeObject(obj) {
       if (!obj) return;
@@ -1759,19 +1816,35 @@
       return suggestionMarkers.find((m) => m.mesh === hits[0].object) || null;
     }
 
-    function pickFixedTrackRoute(event) {
-      if (!fixedTrackVisualPoseMode || !globalTrackLine || sfmGlobalTrack.length === 0) return null;
+    function pickSrtTrackRoute(event) {
+      if (!(srtPosePriorMode || fixedTrackVisualPoseMode)) return null;
+      const useAnchored = Boolean(
+        anchoredTrackLine?.visible && sfmAnchoredTrack.length > 1,
+      );
+      const line = useAnchored ? anchoredTrackLine : globalTrackLine;
+      const track = useAnchored ? sfmAnchoredTrack : sfmGlobalTrack;
+      if (!line || !line.visible || track.length < 2) return null;
       const rect = renderer.domElement.getBoundingClientRect();
       sfmPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       sfmPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       sfmRaycaster.setFromCamera(sfmPointer, inspectCamera);
-      const hit = sfmRaycaster.intersectObject(globalTrackLine, false)[0];
+      const hit = sfmRaycaster.intersectObject(line, false)[0];
       if (!hit) return null;
       const index = Math.max(
         0,
-        Math.min(sfmGlobalTrack.length - 1, Number.isInteger(hit.index) ? hit.index : 0),
+        Math.min(track.length - 2, Number.isInteger(hit.index) ? hit.index : 0),
       );
-      return { frame: Number(sfmGlobalTrack[index].frame_index), data: sfmGlobalTrack[index] };
+      const start = worldToScene([track[index].x, track[index].y, track[index].z], origin);
+      const end = worldToScene([track[index + 1].x, track[index + 1].y, track[index + 1].z], origin);
+      const segment = end.clone().sub(start);
+      const lengthSquared = segment.lengthSq();
+      const fraction = lengthSquared > 0
+        ? clamp(hit.point.clone().sub(start).dot(segment) / lengthSquared, 0, 1)
+        : 0;
+      const startFrame = Number(track[index].frame_index);
+      const endFrame = Number(track[index + 1].frame_index);
+      const frame = Math.round(startFrame + (endFrame - startFrame) * fraction);
+      return { frame, data: fraction < 0.5 ? track[index] : track[index + 1] };
     }
 
     const cadPickRaycaster = new THREE.Raycaster();
@@ -1820,7 +1893,28 @@
       return { visible: true, reason: "visible", xy: [x, y] };
     }
 
+    function selectSceneTrackHit(hit) {
+      selectSourceFrame(hit.frame, "scene_track_pick", { media: "immediate" });
+    }
+
+    renderer.domElement.addEventListener("pointerdown", (event) => {
+      scenePointerDown = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      suppressNextSceneClick = false;
+    });
+    renderer.domElement.addEventListener("pointermove", (event) => {
+      if (!scenePointerDown || event.pointerId !== scenePointerDown.pointerId) return;
+      if (Math.hypot(event.clientX - scenePointerDown.x, event.clientY - scenePointerDown.y) > 4) {
+        suppressNextSceneClick = true;
+      }
+    });
+    renderer.domElement.addEventListener("pointerup", () => { scenePointerDown = null; });
+    renderer.domElement.addEventListener("pointercancel", () => { scenePointerDown = null; });
+
     renderer.domElement.addEventListener("click", (event) => {
+      if (suppressNextSceneClick) {
+        suppressNextSceneClick = false;
+        return;
+      }
       const hit = pickSuggestion(event);
       if (hit) {
         const s = hit.data;
@@ -1828,10 +1922,10 @@
         goToFrame(hit.frame);
         return;
       }
-      const routeHit = pickFixedTrackRoute(event);
+      const routeHit = pickSrtTrackRoute(event);
       if (!routeHit) return;
       setStatus(`已按 SRT 轨迹定位到帧 ${routeHit.frame}`);
-      goToFrame(routeHit.frame);
+      selectSceneTrackHit(routeHit);
     });
 
     renderer.domElement.addEventListener("mousemove", (event) => {
@@ -1916,8 +2010,10 @@
       window.cadsceneRefreshPureRotationPose();
       return;
     }
-    if (!video.paused && (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
-      camera = poseForFrame(currentFrame());
+    if (!video.paused) {
+      const frame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      selectSourceFrame(frame, "video_playback", { media: "none" });
+      return;
     }
     updateViews({ forceOverlay: false, updateThree: true, followCamera: followOnPlay });
   }
@@ -1990,6 +2086,7 @@
     const targetTime = frameToTime(targetFrame);
     const duration = Number.isFinite(video.duration) ? video.duration : targetTime;
     const clampedTime = clamp(targetTime, 0, Math.max(duration, 0));
+    requestedMediaFrame = targetFrame;
     video.pause();
     applyFramePreview(targetFrame);
 
@@ -2038,12 +2135,14 @@
     }
     updateViews({ forceOverlay: true });
     if (threeScene) threeScene.focusInspectOnCamera(camera);
+    if (requestedMediaFrame === targetFrame) requestedMediaFrame = null;
   }
 
   function goToFrame(frame) {
-    const targetFrame = Math.max(0, Math.round(Number(frame)));
+    const targetFrame = clampSelectableFrame(frame);
     if (!Number.isFinite(targetFrame)) return;
-    return seekVideoToFrame(targetFrame);
+    selectSourceFrame(targetFrame, "frame_navigation", { media: "immediate" });
+    return lastMediaSeekPromise;
   }
 
   async function detectVideoRangeSupport() {
@@ -2544,6 +2643,19 @@
     return maxFrame;
   }
 
+  function isSrtTimelineMode() {
+    return srtPosePriorMode || fixedTrackVisualPoseMode;
+  }
+
+  function srtTimelineTrack() {
+    const fixedTrack = (sfmScene?.tracks?.global_sfm_track || []);
+    if (fixedTrackVisualPoseMode && fixedTrack.length > 0) return fixedTrack;
+    return (cameraTrack?.keyframes || []).map((entry) => ({
+      frame_index: Number(entry.frame),
+      orientation_available: entry.orientation_available !== false,
+    }));
+  }
+
   function renderQualityTimeline() {
     if (!qualityCanvas || !qualityContext) return;
     const dpr = window.devicePixelRatio || 1;
@@ -2570,8 +2682,23 @@
     const bandBottom = cssH - 14;
     const bandH = Math.max(4, bandBottom - bandTop);
 
-    // 1) 风险着色带：优先用 quality_timeline.csv；否则退回 track 内嵌 quality。
-    if (qualityTimelineRows.length > 0) {
+    // 1) SRT 工作流显示姿态覆盖；普通 SfM 显示质量风险。
+    if (isSrtTimelineMode()) {
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = "#596273";
+      ctx.fillRect(0, bandTop, cssW, bandH);
+      const route = srtTimelineTrack();
+      for (let index = 0; index < route.length - 1; index += 1) {
+        const start = route[index];
+        const end = route[index + 1];
+        if (start.orientation_available === false || end.orientation_available === false) continue;
+        const x0 = xForFrame(Number(start.frame_index));
+        const x1 = xForFrame(Number(end.frame_index));
+        ctx.fillStyle = "#38d996";
+        ctx.fillRect(x0, bandTop, Math.max(1, x1 - x0), bandH);
+      }
+      ctx.globalAlpha = 1;
+    } else if (qualityTimelineRows.length > 0) {
       let start = qualityTimelineRows[0];
       for (let i = 1; i <= qualityTimelineRows.length; i += 1) {
         const row = qualityTimelineRows[i];
@@ -2670,17 +2797,38 @@
     return best;
   }
 
-  function handleTimelineClick(event) {
+  function timelineFrameFromEvent(event) {
     if (!cameraTrack) return;
     const rect = qualityCanvas.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const hit = suggestionAtX(px);
     const total = timelineTotalFrames();
-    const targetFrame = hit ? hit.frame : Math.round(clamp(px / rect.width, 0, 1) * total);
+    return hit ? hit.frame : Math.round(clamp(px / rect.width, 0, 1) * total);
+  }
+
+  function handleTimelineClick(event) {
+    const targetFrame = timelineFrameFromEvent(event);
+    if (!Number.isFinite(targetFrame)) return;
+    const rect = qualityCanvas.getBoundingClientRect();
+    const hit = suggestionAtX(event.clientX - rect.left);
     if (hit && hit.suggestion.reason) {
       setStatus(`跳转到建议帧 ${targetFrame}（${hit.suggestion.priority}）：${hit.suggestion.reason}`);
     }
-    goToFrame(targetFrame);
+    selectSourceFrame(targetFrame, "timeline_click", { media: "immediate" });
+  }
+
+  function handleTimelinePointer(event) {
+    const frame = timelineFrameFromEvent(event);
+    if (!Number.isFinite(frame)) return;
+    selectSourceFrame(frame, "timeline_drag", { media: "throttled" });
+  }
+
+  function finishTimelinePointer(event) {
+    if (timelinePointerId === null || event.pointerId !== timelinePointerId) return;
+    handleTimelinePointer(event);
+    frameCoordinator?.flushVideoSeek("timeline_release");
+    qualityCanvas.releasePointerCapture?.(timelinePointerId);
+    timelinePointerId = null;
   }
 
   function handleTimelineHover(event) {
@@ -3146,7 +3294,16 @@
       }
     });
     if (qualityCanvas) {
-      qualityCanvas.addEventListener("click", handleTimelineClick);
+      qualityCanvas.addEventListener("pointerdown", (event) => {
+        timelinePointerId = event.pointerId;
+        qualityCanvas.setPointerCapture?.(event.pointerId);
+        handleTimelinePointer(event);
+      });
+      qualityCanvas.addEventListener("pointermove", (event) => {
+        if (timelinePointerId === event.pointerId) handleTimelinePointer(event);
+      });
+      qualityCanvas.addEventListener("pointerup", finishTimelinePointer);
+      qualityCanvas.addEventListener("pointercancel", finishTimelinePointer);
       qualityCanvas.addEventListener("mousemove", handleTimelineHover);
       qualityCanvas.addEventListener("mouseleave", hideTimelineTip);
       window.addEventListener("resize", renderQualityTimeline);
@@ -3221,9 +3378,29 @@
     });
     video.addEventListener("play", () => {
       manualFrameOverride = null;
+      requestedMediaFrame = null;
+      selectSourceFrame(
+        Math.round((video.currentTime || 0) * cameraTrack.fps),
+        "video_playback",
+        { media: "none" },
+      );
       requestAnimationFrame(tick);
     });
     video.addEventListener("pause", () => updateViews({ forceOverlay: true }));
+    video.addEventListener("timeupdate", () => {
+      if (video.paused || pureRotationPlaybackActive) return;
+      selectSourceFrame(
+        Math.round((video.currentTime || 0) * cameraTrack.fps),
+        "video_playback",
+        { media: "none" },
+      );
+    }, { passive: true });
+    video.addEventListener("seeking", () => {
+      if (pureRotationPlaybackActive) return;
+      const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      const frame = requestedMediaFrame ?? actualFrame;
+      selectSourceFrame(frame, "video_seek", { media: "none" });
+    });
     video.addEventListener("seeked", () => {
       if (pureRotationPlaybackActive) {
         window.cadsceneRefreshPureRotationPose?.();
@@ -3231,11 +3408,7 @@
       }
       const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       const targetFrame = manualFrameOverride ?? actualFrame;
-      if (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0) {
-        camera = poseForFrame(targetFrame);
-        syncControls();
-      }
-      updateViews({ forceOverlay: true });
+      selectSourceFrame(targetFrame, "video_seek", { media: "none" });
     });
   }
 
@@ -3257,6 +3430,7 @@
 
   async function boot() {
     cameraTrack = createInitialTrack({ x: 0, y: 0, z: 120, yaw: 0, pitch: -45, roll: 0, fov: 70 });
+    ensureFrameCoordinator();
     bindVideo();
 
     setStatus("正在加载 CAD…");

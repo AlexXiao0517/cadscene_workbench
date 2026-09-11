@@ -292,7 +292,7 @@
     document.querySelector("#standardSfmAdvanced")?.toggleAttribute("hidden", pure);
     document.querySelector("#standardKeyframeActions")?.toggleAttribute("hidden", pure);
     document.querySelector("#pureRotationKeyframeActions")?.classList.toggle("is-pure-visible", pure);
-    document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed || full);
+    document.querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure);
     const sfmHeading = document.querySelector("#sfmPanel .sfm-panel-head span");
     if (sfmHeading) sfmHeading.textContent = full ? "SRT 全姿态轨迹（无点云）" : (fixed
       ? "SRT 轨迹 + COLMAP 稀疏重建（点云诊断）"

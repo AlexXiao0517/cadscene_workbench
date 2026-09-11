@@ -186,7 +186,7 @@ def test_full_pose_hides_legacy_sfm_controls_and_quality_timeline() -> None:
     ):
         assert f"#{element_id}[hidden]" in css
     assert (
-        'querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure || fixed || full)'
+        'querySelector("#qualityTimelineWrap")?.toggleAttribute("hidden", pure)'
         in workflow
     )
     assert 'const isSrtPosePriorScene = ["srt_full_pose", "srt_fixed_track_visual_pose"]' in viewer
@@ -234,11 +234,28 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert "cadsceneGetFixedTrackMetadata" in viewer
     assert "cadsceneFixedTrackVisualComponentAtFrame" in viewer
     assert "cadsceneConfirmCurrentCameraKeyframe" not in workflow
-    assert "pickFixedTrackRoute" in viewer
+    assert "pickSrtTrackRoute" in viewer
     assert "goToFrame(hit.frame)" in viewer
     assert "fixedTrackRelativeLine" in viewer
     assert "buildFixedTrackRelativeLine" in viewer
     assert "relative_orientation_available === true" in viewer
+
+
+def test_srt_timeline_uses_one_bidirectional_source_frame_authority() -> None:
+    html = _read("index.html")
+    viewer = _read("viewer_legacy.js")
+
+    assert "轨迹与关键帧时间轴" in html
+    assert html.index("frame_sync.js") < html.index("viewer_legacy.js")
+    assert "CadsceneFrameSync.createCoordinator" in viewer
+    assert "function selectSourceFrame(" in viewer
+    assert 'selectSourceFrame(frame, "timeline_drag"' in viewer
+    assert 'selectSourceFrame(frame, "video_seek"' in viewer
+    assert 'selectSourceFrame(hit.frame, "scene_track_pick"' in viewer
+    assert 'qualityCanvas.addEventListener("pointerdown"' in viewer
+    assert 'qualityCanvas.addEventListener("pointermove"' in viewer
+    assert 'video.addEventListener("seeking"' in viewer
+    assert "srtPosePriorMode || fixedTrackVisualPoseMode" in viewer
 
 
 def test_fixed_track_workbench_shows_terrain_calibration_and_render_resolution() -> None:
