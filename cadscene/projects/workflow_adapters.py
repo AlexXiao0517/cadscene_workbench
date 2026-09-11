@@ -101,6 +101,8 @@ class ExistingWorkflowAdapter:
                 commands.append(self._full_pose_command(inputs))
             elif module == "cadscene.cli.build_srt_fixed_track_visual_pose":
                 commands.append(self._fixed_track_command(inputs))
+            elif module == "cadscene.cli.plan_srt_adaptive_frames":
+                commands.append(self._fixed_track_plan_command(inputs))
             else:  # pragma: no cover - constructor constants are closed
                 raise ValueError(f"unsupported existing workflow module: {module}")
         return tuple(commands)
@@ -244,6 +246,8 @@ class ExistingWorkflowAdapter:
                 "diagnostics": root / "orientation_diagnostics.json",
                 "camera_path": root / "camera_path_srt_locked.csv",
                 "report": root / "visual_pose_report.md",
+                "calibration": root / "camera_calibration.json",
+                "joint_alignment": root / "joint_alignment.json",
                 "initial_camera_track": run_root
                 / "03_alignment/camera_track_pred.json",
                 "viewer_scene": run_root
@@ -274,6 +278,12 @@ class ExistingWorkflowAdapter:
                 ).hexdigest(),
                 "viewer_scene_sha256": sha256(
                     artifacts["viewer_scene"].read_bytes()
+                ).hexdigest(),
+                "calibration_sha256": sha256(
+                    artifacts["calibration"].read_bytes()
+                ).hexdigest(),
+                "joint_alignment_sha256": sha256(
+                    artifacts["joint_alignment"].read_bytes()
                 ).hexdigest(),
                 "frame_map_sha256": sha256(
                     inputs.frame_map_path.read_bytes()
@@ -363,7 +373,7 @@ class ExistingWorkflowAdapter:
             focal = width / (2.0 * math.tan(math.radians(fov) * 0.5))
             camera_params = ",".join(
                 f"{value:.12g}"
-                for value in (focal, focal, width * 0.5, height * 0.5)
+                for value in (focal, width * 0.5, height * 0.5, 0.0, 0.0)
             )
             command.extend(
                 [
@@ -373,11 +383,18 @@ class ExistingWorkflowAdapter:
                     str(inputs.parameters.get("device", "auto")),
                     "--max-image-size",
                     str(max(width, height)),
+                    "--max-num-features",
+                    "8000",
+                    "--sequential-overlap",
+                    "10",
+                    "--ba-global-max-num-iterations",
+                    "15",
                     "--camera-model",
-                    "PINHOLE",
+                    "RADIAL",
                     "--camera-params",
                     camera_params,
-                    "--no-refine-focal-length",
+                    "--source-frames-file",
+                    str(inputs.attempt_directory / "adaptive_frame_plan.json"),
                 ]
             )
             target_height = target_height_for_resolution(resolution)
@@ -392,6 +409,25 @@ class ExistingWorkflowAdapter:
             if value is not None:
                 command.extend([f"--{key.replace('_', '-')}", str(value)])
         return tuple(command)
+
+    def _fixed_track_plan_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
+        if inputs.srt_path is None or inputs.frame_map_path is None:
+            raise FileNotFoundError("fixed-track SRT and frame map are required")
+        return (
+            sys.executable,
+            "-m",
+            "cadscene.cli.plan_srt_adaptive_frames",
+            "--video",
+            str(inputs.video_path),
+            "--srt",
+            str(inputs.srt_path),
+            "--frame-map",
+            str(inputs.frame_map_path),
+            "--config",
+            str(_fixed_track_config_path(inputs)),
+            "--output",
+            str(inputs.attempt_directory / "adaptive_frame_plan.json"),
+        )
 
     def _srt_fusion_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         if inputs.srt_path is None:  # guarded by prepare_inputs
@@ -596,9 +632,10 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="3",
+                version="4",
                 srt_requirement="fixed_track",
                 modules=(
+                    "cadscene.cli.plan_srt_adaptive_frames",
                     "cadscene.cli.run_sfm",
                     "cadscene.cli.build_srt_fixed_track_visual_pose",
                 ),

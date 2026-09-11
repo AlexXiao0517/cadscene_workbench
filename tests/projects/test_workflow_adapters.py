@@ -571,20 +571,26 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "3"
-    assert len(commands) == 2
-    sfm = commands[0]
-    transfer = commands[1]
+    assert adapter.version == "4"
+    assert len(commands) == 3
+    planner, sfm, transfer = commands
+    assert planner[1:3] == ("-m", "cadscene.cli.plan_srt_adaptive_frames")
     assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert sfm[sfm.index("--backend") + 1] == "colmap_cli"
     assert sfm[sfm.index("--device") + 1] == "auto"
     assert sfm[sfm.index("--reconstruction-height") + 1] == "1080"
     assert sfm[sfm.index("--max-image-size") + 1] == "1920"
-    assert sfm[sfm.index("--camera-model") + 1] == "PINHOLE"
+    assert sfm[sfm.index("--camera-model") + 1] == "RADIAL"
     assert sfm[sfm.index("--camera-params") + 1] == (
-        "1321.32664365,1321.32664365,960,540"
+        "1321.32664365,960,540,0,0"
     )
-    assert "--no-refine-focal-length" in sfm
+    assert "--no-refine-focal-length" not in sfm
+    assert sfm[sfm.index("--max-num-features") + 1] == "8000"
+    assert sfm[sfm.index("--sequential-overlap") + 1] == "10"
+    assert sfm[sfm.index("--ba-global-max-num-iterations") + 1] == "15"
+    assert sfm[sfm.index("--source-frames-file") + 1].endswith(
+        "adaptive_frame_plan.json"
+    )
     assert transfer[1:3] == (
         "-m",
         "cadscene.cli.build_srt_fixed_track_visual_pose",
@@ -613,12 +619,12 @@ def test_fixed_track_720p_command_scales_intrinsics(tmp_path: Path) -> None:
         "srt_fixed_track_visual_pose"
     )
 
-    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[0]
+    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[1]
 
     assert sfm[sfm.index("--reconstruction-height") + 1] == "720"
     assert sfm[sfm.index("--max-image-size") + 1] == "1280"
     assert sfm[sfm.index("--camera-params") + 1] == (
-        "880.884429102,880.884429102,640,360"
+        "880.884429102,640,360,0,0"
     )
 
 
@@ -632,12 +638,12 @@ def test_fixed_track_source_command_keeps_source_intrinsics(
         "srt_fixed_track_visual_pose"
     )
 
-    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[0]
+    sfm = adapter.build_commands(adapter.prepare_inputs(inputs))[1]
 
     assert "--reconstruction-height" not in sfm
     assert sfm[sfm.index("--max-image-size") + 1] == "3840"
     assert sfm[sfm.index("--camera-params") + 1] == (
-        "2642.6532873,2642.6532873,1920,1080"
+        "2642.6532873,1920,1080,0,0"
     )
 
 
@@ -694,6 +700,8 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
         "viewer_scene": (
             inputs.attempt_directory / "05_viewer_scene" / "sfm_viewer_scene.json"
         ),
+        "calibration": output.with_name("camera_calibration.json"),
+        "joint_alignment": output.with_name("joint_alignment.json"),
     }
     artifacts["camera_path"].write_text(
         "frame_index,camera_x,camera_y,camera_z\n0,0,0,80\n",
@@ -701,6 +709,12 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
     )
     artifacts["diagnostics"].write_text("{}", encoding="utf-8")
     artifacts["report"].write_text("# report\n", encoding="utf-8")
+    artifacts["calibration"].write_text(
+        json.dumps({"model": "RADIAL", "focal_px": 1000.0}), encoding="utf-8"
+    )
+    artifacts["joint_alignment"].write_text(
+        json.dumps({"status": "success"}), encoding="utf-8"
+    )
     artifacts["initial_camera_track"].parent.mkdir(parents=True, exist_ok=True)
     artifacts["initial_camera_track"].write_text("{}", encoding="utf-8")
     artifacts["viewer_scene"].parent.mkdir(parents=True, exist_ok=True)
@@ -714,6 +728,8 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
         artifacts["initial_camera_track"]
     )
     assert result.outputs["viewer_scene"] == str(artifacts["viewer_scene"])
+    assert result.outputs["calibration"] == str(artifacts["calibration"])
+    assert result.outputs["joint_alignment"] == str(artifacts["joint_alignment"])
     assert "sparse_points" not in result.outputs
     assert result.validation_proof["position_source"] == "srt_cad_locked"
 

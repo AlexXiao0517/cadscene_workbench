@@ -126,8 +126,10 @@ def build_colmap_cli_commands(
         feature_args.extend(["--ImageReader.mask_path", str(paths.masks_dir)])
     if camera_params is not None:
         values = np.asarray(camera_params, dtype=np.float64).reshape(-1)
-        if not len(values) or not np.all(np.isfinite(values)) or np.any(values <= 0.0):
-            raise ValueError("COLMAP camera params must contain positive finite values")
+        if not len(values) or not np.all(np.isfinite(values)) or values[0] <= 0.0:
+            raise ValueError(
+                "COLMAP camera params must be finite and start with a positive focal length"
+            )
         feature_args.extend(
             [
                 "--ImageReader.camera_params",

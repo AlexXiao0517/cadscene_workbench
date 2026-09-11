@@ -119,10 +119,10 @@ def _write_reconstruction_inputs(
                 "height": 1080,
                 "intrinsics": [
                     {
-                        "model": "PINHOLE",
+                        "model": "RADIAL",
                         "width": 1920,
                         "height": 1080,
-                        "params": [1321.32664365, 1321.32664365, 960.0, 540.0],
+                        "params": [1321.32664365, 960.0, 540.0, -0.01, 0.04],
                     }
                 ],
                 "poses": [
@@ -233,6 +233,25 @@ def test_cli_transfers_colmap_attitude_and_publishes_diagnostic_point_cloud(
     assert all(
         value >= 0.0 for value in diagnostics["phase_timings_seconds"].values()
     )
+    calibration = json.loads(
+        (run_root / "02_srt_visual_pose/camera_calibration.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert calibration["model"] == "RADIAL"
+    assert calibration["source_size"] == [3840, 2160]
+    assert calibration["focal_px"] == pytest.approx(2642.6532873)
+    assert calibration["cx_px"] == pytest.approx(1920.0)
+    assert calibration["cy_px"] == pytest.approx(1080.0)
+    assert calibration["k1"] == pytest.approx(-0.01)
+    assert calibration["k2"] == pytest.approx(0.04)
+    joint = json.loads(
+        (run_root / "02_srt_visual_pose/joint_alignment.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert joint["position_constraint"] == "SRT projected CAD-local"
+    assert joint["dji_prior_available"] is False
     report = (
         run_root / "02_srt_visual_pose/visual_pose_report.md"
     ).read_text(encoding="utf-8")

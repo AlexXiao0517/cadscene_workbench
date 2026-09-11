@@ -117,6 +117,39 @@ def test_cli_commands_accept_authoritative_camera_params_and_disable_focal_ba(
     assert mapper[mapper.index("--Mapper.ba_refine_focal_length") + 1] == "0"
 
 
+def test_cli_commands_accept_radial_zero_distortion_initial_values(tmp_path: Path) -> None:
+    paths = ColmapCliPaths(
+        images_dir=tmp_path / "images",
+        masks_dir=tmp_path / "masks",
+        database_path=tmp_path / "database.db",
+        sparse_dir=tmp_path / "sparse",
+    )
+
+    feature, _matching, _mapper = build_colmap_cli_commands(
+        "colmap.exe",
+        paths,
+        camera_model="RADIAL",
+        camera_params=(1000.0, 960.0, 540.0, 0.0, 0.0),
+        max_image_size=2048,
+        max_num_features=8000,
+        sequential_overlap=10,
+        init_min_tri_angle=2.0,
+        ba_global_frames_ratio=2.0,
+        ba_global_points_ratio=2.0,
+        ba_global_frames_freq=1000,
+        ba_global_points_freq=1_000_000,
+        ba_global_max_num_iterations=15,
+        ba_global_max_refinements=2,
+        use_mask=False,
+        use_gpu=False,
+        gpu_index="0",
+        feature_help=FEATURE_HELP,
+        matching_help=MATCH_HELP,
+    )
+
+    assert feature[feature.index("--ImageReader.camera_params") + 1] == "1000,960,540,0,0"
+
+
 def test_gpu_execution_requires_positive_log_evidence() -> None:
     assert parse_gpu_execution("Feature extraction completed", requested=True) is False
     assert parse_gpu_execution("Creating SIFT GPU feature extractor using CUDA device 0", requested=True) is True

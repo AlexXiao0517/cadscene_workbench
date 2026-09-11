@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from dataclasses import replace
 from time import perf_counter, sleep
 from typing import Mapping, Sequence
 
@@ -34,6 +35,8 @@ from cadscene.srt.fixed_track_visual_pose import (
 )
 from cadscene.srt.full_pose import horizontal_fov_intrinsics
 from cadscene.srt.parser import load_srt_records
+from cadscene.dji.metadata import load_dji_pose_priors
+from cadscene.srt.joint_pose_alignment import solve_joint_alignment
 
 
 STAGES = (
@@ -142,6 +145,59 @@ def _video_metadata(value: object) -> tuple[int, int, float]:
     if width <= 0 or height <= 0 or not np.isfinite(fps) or fps <= 0.0:
         raise ValueError("video_metadata width, height and fps must be positive")
     return width, height, fps
+
+
+def _source_calibration(reconstruction, source_size: tuple[int, int]) -> dict[str, object]:
+    intrinsics = dict(reconstruction.intrinsics)
+    model = str(intrinsics.get("model", "")).upper()
+    params = [float(value) for value in intrinsics.get("params", [])]
+    solve_width = int(intrinsics.get("width", reconstruction.width))
+    solve_height = int(intrinsics.get("height", reconstruction.height))
+    source_width, source_height = source_size
+    if solve_width <= 0 or solve_height <= 0:
+        raise ValueError("COLMAP calibration has invalid solve dimensions")
+    scale_x = source_width / solve_width
+    scale_y = source_height / solve_height
+    if model == "RADIAL" and len(params) >= 5:
+        focal, cx, cy, k1, k2 = params[:5]
+    elif model == "PINHOLE" and len(params) >= 4:
+        fx, fy, cx, cy = params[:4]
+        focal = 0.5 * (fx * scale_x / scale_y + fy)
+        k1 = k2 = 0.0
+    else:
+        raise ValueError(f"unsupported COLMAP calibration for fixed-track rendering: {model}")
+    calibration = {
+        "schema_version": "cadscene_camera_calibration_v1",
+        "model": "RADIAL",
+        "source_size": [source_width, source_height],
+        "solve_size": [solve_width, solve_height],
+        "focal_px": focal * scale_x,
+        "cx_px": cx * scale_x,
+        "cy_px": cy * scale_y,
+        "k1": k1,
+        "k2": k2,
+        "calibration_source": "COLMAP_RADIAL_self_calibration" if model == "RADIAL" else "legacy_PINHOLE_promoted",
+    }
+    values = [calibration[key] for key in ("focal_px", "cx_px", "cy_px", "k1", "k2")]
+    if not np.all(np.isfinite(np.asarray(values, dtype=np.float64))) or float(calibration["focal_px"]) <= 0:
+        raise ValueError("COLMAP calibration contains invalid values")
+    return calibration
+
+
+def _intrinsics_from_calibration(calibration: Mapping[str, object]) -> dict[str, object]:
+    width, height = calibration["source_size"]  # type: ignore[misc]
+    return {
+        "model": "RADIAL",
+        "width": int(width),
+        "height": int(height),
+        "params": [
+            float(calibration["focal_px"]),
+            float(calibration["cx_px"]),
+            float(calibration["cy_px"]),
+            float(calibration["k1"]),
+            float(calibration["k2"]),
+        ],
+    }
 
 
 def _camera_values(
@@ -544,6 +600,14 @@ def _publish_payloads(staging_root: Path, payloads: Mapping[str, object]) -> Non
         trajectory_dir / "orientation_diagnostics.json",
         payloads["diagnostics"],
     )
+    _atomic_write_json(
+        trajectory_dir / "camera_calibration.json",
+        payloads["calibration"],
+    )
+    _atomic_write_json(
+        trajectory_dir / "joint_alignment.json",
+        payloads["joint_alignment"],
+    )
     _atomic_write_text(
         trajectory_dir / "visual_pose_report.md",
         str(payloads["report"]),
@@ -577,9 +641,6 @@ def main(argv: list[str] | None = None) -> int:
         if config.clip_id != args.run_id:
             raise ValueError("configuration clip_id must match --run-id")
         metadata = _video_metadata(payload.get("video_metadata"))
-        intrinsics = horizontal_fov_intrinsics(
-            metadata[0], metadata[1], config.horizontal_fov_deg
-        )
         _write_progress(args.progress_file, *STAGES[0])
         records = load_srt_records(args.srt)
         frame_map = json.loads(args.frame_map.read_text(encoding="utf-8-sig"))
@@ -592,6 +653,58 @@ def main(argv: list[str] | None = None) -> int:
         transfer_started = perf_counter()
         reconstruction = load_sfm_trajectory(args.reconstruction_trajectory)
         transfer = transfer_colmap_pose_to_srt(reconstruction, positions)
+        calibration = _source_calibration(reconstruction, (metadata[0], metadata[1]))
+        paired_frames = np.asarray(transfer.registered_frames, dtype=np.int64)
+        by_frame = {item.frame_index: item for item in positions}
+        dji = load_dji_pose_priors(args.video, paired_frames)
+        joint_payload: dict[str, object] = {
+            "schema_version": "cadscene_joint_alignment_v1",
+            "position_constraint": "SRT projected CAD-local",
+            "dji_prior_available": dji.available,
+            "dji_prior_reason": dji.reason,
+            "dji_packet_count": dji.packet_count,
+            "status": "fallback_colmap_srt",
+        }
+        if len(paired_frames) >= 3:
+            try:
+                joint = solve_joint_alignment(
+                    frames=paired_frames,
+                    colmap_centers=np.asarray(
+                        [reconstruction.center_at(int(frame)) for frame in paired_frames]
+                    ),
+                    colmap_world_from_camera=np.asarray(
+                        [reconstruction.orientation_at(int(frame)).T for frame in paired_frames]
+                    ),
+                    srt_centers=np.asarray(
+                        [by_frame[int(frame)].center for frame in paired_frames]
+                    ),
+                    dji_world_from_camera=(dji.world_from_camera if dji.available else None),
+                    frame_rate=metadata[2],
+                )
+                if joint.success:
+                    transfer = replace(
+                        transfer,
+                        world_from_camera={
+                            int(frame): joint.world_from_camera[index]
+                            for index, frame in enumerate(paired_frames)
+                        },
+                    )
+                joint_payload.update(
+                    {
+                        "status": "success" if joint.success else "failed",
+                        "message": joint.message,
+                        "scale": joint.scale,
+                        "world_rotation": joint.world_rotation.tolist(),
+                        "translation": joint.translation.tolist(),
+                        "knot_times_sec": joint.knot_times_sec.tolist(),
+                        "knot_offsets_m": joint.knot_offsets_m.tolist(),
+                        "initial_cost": joint.initial_cost,
+                        "final_cost": joint.final_cost,
+                        "nfev": joint.nfev,
+                    }
+                )
+            except (ValueError, RuntimeError) as exc:
+                joint_payload["message"] = str(exc)
         solution = orientation_solution_from_colmap_transfer(
             transfer,
             positions,
@@ -610,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
             positions=positions,
             solution=solution,
             config=config,
-            intrinsics=intrinsics,
+            intrinsics=_intrinsics_from_calibration(calibration),
             video_metadata=metadata,
             reconstruction_image_size=(
                 int(reconstruction.width), int(reconstruction.height)
@@ -622,6 +735,8 @@ def main(argv: list[str] | None = None) -> int:
             },
             diagnostic_points=diagnostic_points,
         )
+        payloads["calibration"] = calibration
+        payloads["joint_alignment"] = joint_payload
         run_root.mkdir(parents=True, exist_ok=True)
         staging_root = Path(
             tempfile.mkdtemp(prefix=".srt-fixed-track-", dir=run_root)
