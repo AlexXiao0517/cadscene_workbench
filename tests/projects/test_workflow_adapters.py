@@ -702,6 +702,8 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
         ),
         "calibration": output.with_name("camera_calibration.json"),
         "joint_alignment": output.with_name("joint_alignment.json"),
+        "terrain_context": output.with_name("terrain_context.json"),
+        "terrain_controls": output.with_name("terrain_controls.npz"),
     }
     artifacts["camera_path"].write_text(
         "frame_index,camera_x,camera_y,camera_z\n0,0,0,80\n",
@@ -715,6 +717,10 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
     artifacts["joint_alignment"].write_text(
         json.dumps({"status": "success"}), encoding="utf-8"
     )
+    artifacts["terrain_context"].write_text(
+        json.dumps({"terrain_mode": "relative"}), encoding="utf-8"
+    )
+    artifacts["terrain_controls"].write_bytes(b"npz")
     artifacts["initial_camera_track"].parent.mkdir(parents=True, exist_ok=True)
     artifacts["initial_camera_track"].write_text("{}", encoding="utf-8")
     artifacts["viewer_scene"].parent.mkdir(parents=True, exist_ok=True)
@@ -730,6 +736,7 @@ def test_fixed_track_adapter_validates_route_without_sparse_points(
     assert result.outputs["viewer_scene"] == str(artifacts["viewer_scene"])
     assert result.outputs["calibration"] == str(artifacts["calibration"])
     assert result.outputs["joint_alignment"] == str(artifacts["joint_alignment"])
+    assert result.outputs["terrain_context"] == str(artifacts["terrain_context"])
     assert "sparse_points" not in result.outputs
     assert result.validation_proof["position_source"] == "srt_cad_locked"
 

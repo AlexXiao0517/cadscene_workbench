@@ -191,6 +191,38 @@ def test_snapshot_etag_returns_304_with_an_empty_body(tmp_path: Path) -> None:
     assert lowercase.encoded_body == b""
 
 
+def test_terrain_upload_and_delete_routes_expose_project_collection(tmp_path: Path) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
+    api.uploads._validators["terrain"] = lambda *_args: {
+        "feature_count": 10,
+        "z_range_m": [120.0, 150.0],
+    }
+    revision = repositories.project.load("p1").revision
+
+    created = api.handle(
+        "POST",
+        "/api/projects/p1/uploads/terrain",
+        json_body={"expected_revision": revision},
+        upload=UploadRequest("zhix.tpkg", BytesIO(b"terrain"), 7),
+    )
+    snapshot = api.handle("GET", "/api/projects/p1/snapshot")
+
+    assert created.status == 201
+    assert created.body["asset_type"] == "terrain"
+    sources = snapshot.body["assets"]["terrain_sources"]
+    assert len(sources) == 1
+    assert sources[0]["original_filename"] == "zhix.tpkg"
+
+    deleted = api.handle(
+        "DELETE",
+        f"/api/projects/p1/terrain-sources/{created.body['fingerprint']}",
+        json_body={"expected_revision": created.body["project_revision"]},
+    )
+
+    assert deleted.status == 200
+    assert deleted.body["terrain_source_count"] == 0
+
+
 def test_project_catalog_api_lists_safe_project_summaries(tmp_path: Path) -> None:
     api, _repositories, _queue = _api(tmp_path, (_clip("clip-1"),))
 
@@ -771,8 +803,9 @@ def test_render_preflight_and_enqueue_routes_delegate_to_project_service(
     monkeypatch.setattr(
         api.service,
         "preflight_render_jobs",
-        lambda project_id, *, clip_ids=None: (
-            calls.append(("preflight", project_id, clip_ids)) or preflight
+        lambda project_id, *, clip_ids=None, output_resolution="1080p": (
+            calls.append(("preflight", project_id, clip_ids, output_resolution))
+            or preflight
         ),
     )
     monkeypatch.setattr(
@@ -799,6 +832,8 @@ def test_render_preflight_and_enqueue_routes_delegate_to_project_service(
     assert checked.body["confirmation_required"] == []
     assert enqueued.status == 202
     assert enqueued.body["job_ids"] == ["render-job-1"]
+    assert calls[0] == ("preflight", "p1", ("ready",), "1080p")
+    assert calls[-1][2]["output_resolution"] == "1080p"
     assert calls[-1][0] == "enqueue"
 
 

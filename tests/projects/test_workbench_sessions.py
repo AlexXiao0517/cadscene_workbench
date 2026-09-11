@@ -21,6 +21,7 @@ from cadscene.projects.workbench_sessions import (
     WorkbenchPermissionDenied,
     ProjectWorkbenchService,
     WorkbenchSessionCoordinator,
+    _validate_manual_camera_track,
 )
 from cadscene.projects.http_api import ProjectApi
 from cadscene.projects.json_repositories import project_repositories
@@ -4179,6 +4180,49 @@ def test_manual_track_authoritative_validation_rejects_malformed_values(
     )
     assert rejected.status == 400
     assert "camera track" in rejected.body["error"]
+
+
+def test_fixed_track_manual_anchor_gate_is_enforced_server_side() -> None:
+    predicted = {
+        "fps": 25,
+        "keyframes": [
+            {
+                "frame": 0,
+                "source": "algorithm_prediction",
+                "camera": {
+                    "x": 0, "y": 0, "z": 80,
+                    "yaw": 0, "pitch": -45, "roll": 0, "fov": 72,
+                },
+            }
+        ],
+    }
+    manual = {
+        **predicted,
+        "keyframes": [
+            {
+                **predicted["keyframes"][0],
+                "source": "manual_keyframe",
+            }
+        ],
+    }
+
+    _validate_manual_camera_track(
+        predicted,
+        workflow="srt_fixed_track_visual_pose",
+        terrain_mode="terrain",
+    )
+    with pytest.raises(InvalidWorkbenchOutput, match="at least 2"):
+        _validate_manual_camera_track(
+            predicted,
+            workflow="srt_fixed_track_visual_pose",
+            terrain_mode="relative",
+        )
+    with pytest.raises(InvalidWorkbenchOutput, match="exactly one"):
+        _validate_manual_camera_track(
+            manual,
+            workflow="srt_fixed_track_visual_pose",
+            terrain_mode="terrain",
+        )
 
 
 def test_manual_track_publication_uses_the_exact_validated_byte_snapshot(

@@ -39,6 +39,7 @@ _IMMUTABLE_JOB_CONTRACT_FIELDS = (
     "adapter_name",
     "adapter_version",
     "attempts",
+    "request_parameters",
     "submission_operation_id",
     "cleanup_reason",
     "target_terminal_status",
@@ -140,6 +141,7 @@ class QueueJob:
     published_outputs: Mapping[str, str] = field(default_factory=dict)
     validation_proof: Mapping[str, object] | None = None
     progress: Mapping[str, object] | None = None
+    request_parameters: Mapping[str, object] = field(default_factory=dict)
     error: str | None = None
     cleanup_reason: str | None = None
     target_terminal_status: str | None = None
@@ -212,6 +214,7 @@ class QueueJob:
                 None if self.validation_proof is None else dict(self.validation_proof)
             ),
             "progress": None if self.progress is None else dict(self.progress),
+            "request_parameters": dict(self.request_parameters),
             "error": self.error,
             "cleanup_reason": self.cleanup_reason,
             "target_terminal_status": self.target_terminal_status,
@@ -268,6 +271,7 @@ class QueueJob:
                 if value.get("progress") is None
                 else dict(value["progress"])  # type: ignore[arg-type]
             ),
+            request_parameters=dict(value.get("request_parameters", {})),  # type: ignore[arg-type]
             error=_optional_string(value.get("error")),
             cleanup_reason=_optional_string(value.get("cleanup_reason")),
             target_terminal_status=_optional_string(
@@ -1345,7 +1349,13 @@ class LocalResourceQueue:
             self._schedule_locked()
             return self._jobs[reservation.job_id]
 
-    def retry(self, job_id: str, attempt: AttemptRecord) -> QueueJob:
+    def retry(
+        self,
+        job_id: str,
+        attempt: AttemptRecord,
+        *,
+        depends_on_job_ids: tuple[str, ...] | None = None,
+    ) -> QueueJob:
         with self._lock:
             current = self._jobs[job_id]
             if job_id in self._execution_claims:
@@ -1365,8 +1375,13 @@ class LocalResourceQueue:
                 and _process_may_be_alive(self._process_alive, previous.pid)
             ):
                 raise ValueError("old process is not proven gone; retry is blocked")
+            retry_base = current.with_attempt(attempt)
+            if depends_on_job_ids is not None:
+                retry_base = replace(
+                    retry_base, depends_on_job_ids=depends_on_job_ids
+                )
             retried = replace(
-                current.with_attempt(attempt),
+                retry_base,
                 status="queued",
                 stage="queued",
                 output_revision=None,
@@ -1380,6 +1395,18 @@ class LocalResourceQueue:
                 target_terminal_status=None,
             )
             self._jobs[job_id] = retried
+            self._schedule_locked()
+            return self._jobs[job_id]
+
+    def rebind_queued_dependencies(
+        self, job_id: str, depends_on_job_ids: tuple[str, ...]
+    ) -> QueueJob:
+        with self._lock:
+            current = self._jobs[job_id]
+            if current.status != "queued" or job_id in self._execution_claims:
+                raise ValueError("only an unclaimed queued job can rebind dependencies")
+            rebound = replace(current, depends_on_job_ids=depends_on_job_ids)
+            self._jobs[job_id] = rebound
             self._schedule_locked()
             return self._jobs[job_id]
 

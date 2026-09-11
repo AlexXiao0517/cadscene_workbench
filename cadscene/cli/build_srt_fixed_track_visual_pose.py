@@ -10,10 +10,12 @@ from pathlib import Path
 import shutil
 import tempfile
 from dataclasses import replace
+from hashlib import sha256
 from time import perf_counter, sleep
 from typing import Mapping, Sequence
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from cadscene.core.camera import (
     CameraState,
@@ -37,6 +39,13 @@ from cadscene.srt.full_pose import horizontal_fov_intrinsics
 from cadscene.srt.parser import load_srt_records
 from cadscene.dji.metadata import load_dji_pose_priors
 from cadscene.srt.joint_pose_alignment import solve_joint_alignment
+from cadscene.srt.georeference import cad_raw_to_local_m, project_wgs84_to_cad_raw
+from cadscene.terrain.context import build_terrain_context, write_terrain_context
+from cadscene.terrain.tpkg import (
+    load_tpkg,
+    merge_terrain_controls,
+    sampled_control_points,
+)
 
 
 STAGES = (
@@ -200,6 +209,126 @@ def _intrinsics_from_calibration(calibration: Mapping[str, object]) -> dict[str,
     }
 
 
+def _compile_terrain(
+    payload: Mapping[str, object],
+    config: FixedTrackVisualPoseConfig,
+    positions: Sequence[FixedTrackPosition],
+):
+    paths = payload.get("terrain_source_paths", ())
+    fingerprints = payload.get("terrain_source_fingerprints", ())
+    if not isinstance(paths, list) or not isinstance(fingerprints, list):
+        paths, fingerprints = [], []
+    expected = {
+        str(path): str(fingerprint)
+        for path, fingerprint in zip(paths, fingerprints)
+    }
+    warnings: list[str] = []
+    items = []
+
+    def project(longitude: float, latitude: float) -> tuple[float, float]:
+        raw = project_wgs84_to_cad_raw(longitude, latitude, config.georeference)
+        return cad_raw_to_local_m(raw, config.cad_origin_xy, config.cad_scale)
+
+    for value in paths:
+        path = Path(str(value))
+        try:
+            controls = load_tpkg(path, project_lon_lat=project)
+            wanted = expected.get(str(value))
+            actual = controls.sources[0].source_id if controls.sources else ""
+            if wanted and wanted != actual:
+                warnings.append(f"高程文件指纹已变化，已排除：{path.name}")
+                continue
+            items.append(controls)
+        except (OSError, ValueError) as exc:
+            warnings.append(f"高程文件无效，已排除 {path.name}: {exc}")
+    controls = merge_terrain_controls(items) if items else None
+    georef_json = json.dumps(
+        config.georeference.to_dict(), sort_keys=True, separators=(",", ":")
+    )
+    context = build_terrain_context(
+        controls,
+        np.asarray([item.center[:2] for item in positions], dtype=np.float64),
+        route_time_sec=tuple(item.pts_time_sec for item in positions),
+        cad_fingerprint=str(payload.get("cad_asset_fingerprint") or "unbound"),
+        georeference_fingerprint=sha256(georef_json.encode("utf-8")).hexdigest(),
+        warnings=warnings,
+    )
+    return context, controls
+
+
+def _align_relative_height_datum(
+    positions: Sequence[FixedTrackPosition],
+    controls,
+    terrain_context,
+) -> tuple[tuple[FixedTrackPosition, ...], object]:
+    if not positions or controls is None or terrain_context.mode == "relative":
+        return tuple(positions), terrain_context
+    samples, _source_ids = sampled_control_points(controls, step_m=2.0)
+    if not len(samples):
+        return tuple(positions), terrain_context
+    first_xy = np.asarray(positions[0].center[:2], dtype=np.float64)
+    distance, index = cKDTree(samples[:, :2]).query(first_xy, k=1)
+    if not np.isfinite(distance) or float(distance) > terrain_context.max_control_distance_m:
+        warning = (
+            "terrain does not cover the first SRT position; downgraded to relative-height mode"
+        )
+        return tuple(positions), replace(
+            terrain_context,
+            mode="relative",
+            reference_ground_m=None,
+            warnings=(*terrain_context.warnings, warning),
+        )
+    ground = float(samples[int(index), 2])
+    aligned = tuple(
+        replace(
+            item,
+            canonical_center=(
+                item.canonical_center[0],
+                item.canonical_center[1],
+                item.canonical_center[2] + ground,
+            ),
+            center=(item.center[0], item.center[1], item.center[2] + ground),
+            height_source="terrain_reference_plus_rel_alt",
+        )
+        for item in positions
+    )
+    return aligned, replace(terrain_context, reference_ground_m=ground)
+
+
+def _require_complete_render_path(
+    positions: Sequence[FixedTrackPosition],
+    solution: OrientationSolution,
+    frame_map: Mapping[str, object],
+    clip_id: str,
+) -> None:
+    clips = frame_map.get("clips")
+    if not isinstance(clips, list):
+        raise ValueError("exact frame map requires a clips list")
+    selected = next(
+        (
+            item
+            for item in clips
+            if isinstance(item, Mapping) and str(item.get("clip_id")) == clip_id
+        ),
+        clips[0] if len(clips) == 1 and isinstance(clips[0], Mapping) else None,
+    )
+    frames = selected.get("frames") if isinstance(selected, Mapping) else None
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("exact frame map contains no authoritative frames")
+    expected = set(range(len(frames)))
+    position_frames = {int(item.frame_index) for item in positions}
+    orientation_frames = {int(frame) for frame in solution.rotations}
+    missing_positions = sorted(expected - position_frames)
+    missing_orientations = sorted(expected - orientation_frames)
+    if missing_positions or missing_orientations:
+        raise ValueError(
+            "complete per-frame SRT position and COLMAP pose are required before "
+            "entering the workbench: "
+            f"missing_positions={len(missing_positions)}, "
+            f"missing_orientations={len(missing_orientations)}"
+        )
+
+
 def _camera_values(
     position: FixedTrackPosition,
     solution: OrientationSolution,
@@ -233,14 +362,21 @@ def _build_payloads(
     reconstruction_image_size: tuple[int, int],
     phase_timings_seconds: Mapping[str, float],
     diagnostic_points: Mapping[str, object] | None = None,
+    terrain_context: Mapping[str, object],
 ) -> dict[str, object]:
     width, height, fps = video_metadata
+    height_source = positions[0].height_source if positions else "rel_alt"
     poses: list[dict[str, object]] = []
     path_rows: list[dict[str, object]] = []
     keyframes: list[dict[str, object]] = []
     viewer_track: list[dict[str, object]] = []
+    camera_params = [float(value) for value in intrinsics.get("params", ())]
     solve_metadata = {
         "reconstruction_resolution": config.reconstruction_resolution,
+        "camera_model": str(intrinsics.get("model", "RADIAL")),
+        "camera_focal_px": camera_params[0],
+        "camera_principal_point_px": camera_params[1:3],
+        "camera_radial_distortion": camera_params[3:5],
         "source_video_size": [width, height],
         "reconstruction_image_size": [
             int(reconstruction_image_size[0]),
@@ -395,7 +531,7 @@ def _build_payloads(
             "cad_origin_xy": list(config.cad_origin_xy),
             "cad_scale": config.cad_scale,
             "route_offset_xyz_m": list(config.route_offset_xyz_m),
-            "height_source": "rel_alt",
+            "height_source": height_source,
             "absolute_height_usage": "diagnostic_only",
             "horizontal_fov_deg": config.horizontal_fov_deg,
             "fov_source": "user",
@@ -411,6 +547,7 @@ def _build_payloads(
             "orientation_coverage": len(solution.rotations) / max(1, len(positions)),
             **solve_metadata,
             **recommendation_meta,
+            **terrain_context,
         },
     }
     track = {
@@ -429,6 +566,7 @@ def _build_payloads(
             "orientation_status": solution.status,
             **solve_metadata,
             **recommendation_meta,
+            **terrain_context,
         },
     }
     empty_bbox = {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
@@ -456,6 +594,7 @@ def _build_payloads(
             ),
             **solve_metadata,
             **recommendation_meta,
+            **terrain_context,
         },
         "points": dict(diagnostic_points) if diagnostic_points else {
             "count_original": 0,
@@ -477,7 +616,13 @@ def _build_payloads(
             "quality_timeline_ref": "",
             "suggestions_ref": "",
         },
-        "warnings": list(solution.warnings),
+        "warnings": [
+            *solution.warnings,
+            *(
+                str(item)
+                for item in terrain_context.get("terrain_warnings", ())
+            ),
+        ],
     }
     diagnostics = {
         "schema_version": 1,
@@ -493,8 +638,9 @@ def _build_payloads(
         ),
         **solve_metadata,
         **recommendation_meta,
+        **terrain_context,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
-        "height_source": "rel_alt",
+        "height_source": height_source,
         "abs_alt_usage": "diagnostic_only",
         "reconstruction_alignment": [dict(item) for item in solution.diagnostics],
         "warnings": list(solution.warnings),
@@ -521,7 +667,7 @@ def _build_payloads(
         f"- 整条路线统一偏移：{list(config.route_offset_xyz_m)} 米\n"
         "- 姿态来源：COLMAP 稀疏三维重建配准到 SRT/CAD 坐标。\n"
         "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD；最终相机中心逐帧强制采用 SRT。\n"
-        "- 高度来源：SRT 相对高度；绝对高度只用于诊断。\n"
+        f"- 高度来源：{height_source}；SRT 绝对高度只用于诊断。\n"
         f"- 诊断点云：{int((diagnostic_points or {}).get('count_exported', 0))} 点，可关闭且不参与渲染门禁。\n"
         "- 性能说明：缺失姿态路线运行真实稀疏重建，耗时可能接近普通 SfM；跳过稠密重建和独立质量检测。\n"
         "- 阶段耗时：\n"
@@ -648,6 +794,12 @@ def main(argv: list[str] | None = None) -> int:
         _write_progress(args.progress_file, *STAGES[1])
         project_started = perf_counter()
         positions = build_fixed_track_positions(records, frame_map, config)
+        terrain_context, terrain_controls = _compile_terrain(
+            payload, config, positions
+        )
+        positions, terrain_context = _align_relative_height_datum(
+            positions, terrain_controls, terrain_context
+        )
         project_elapsed = perf_counter() - project_started
         _write_progress(args.progress_file, *STAGES[2])
         transfer_started = perf_counter()
@@ -710,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
             positions,
             max_interpolation_gap_sec=config.max_orientation_interpolation_gap_sec,
         )
+        _require_complete_render_path(positions, solution, frame_map, config.clip_id)
         diagnostic_points = _build_diagnostic_points(
             args.sparse_ply,
             transfer.sim3,
@@ -734,6 +887,7 @@ def main(argv: list[str] | None = None) -> int:
                 "transfer_colmap_attitude": transfer_elapsed,
             },
             diagnostic_points=diagnostic_points,
+            terrain_context=terrain_context.to_dict(),
         )
         payloads["calibration"] = calibration
         payloads["joint_alignment"] = joint_payload
@@ -742,6 +896,11 @@ def main(argv: list[str] | None = None) -> int:
             tempfile.mkdtemp(prefix=".srt-fixed-track-", dir=run_root)
         )
         _publish_payloads(staging_root, payloads)
+        write_terrain_context(
+            staging_root / "02_srt_visual_pose",
+            terrain_context,
+            terrain_controls,
+        )
         _write_progress(args.progress_file, *STAGES[4])
         target_names = ("02_srt_visual_pose", "03_alignment", "05_viewer_scene")
         occupied = [name for name in target_names if (run_root / name).exists()]

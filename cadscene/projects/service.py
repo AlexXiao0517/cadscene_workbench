@@ -9,6 +9,7 @@ import json
 from math import floor, isfinite
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -63,8 +64,12 @@ from .media import (
     validate_rendered_media,
 )
 from .identifiers import is_safe_stable_id
-from .render_adapters import RenderAdapterRegistry
-from .render_adapters import RenderInputs
+from .render_adapters import (
+    RenderAdapterRegistry,
+    RenderInputs,
+    normalize_render_resolution,
+    render_output_media_spec,
+)
 from .source_fallback import SourceIntervalRenderAdapter, SourceIntervalRenderInputs
 from .scene_bridge_runner import (
     BRIDGE_ALGORITHM_VERSION,
@@ -92,11 +97,13 @@ from cadscene.srt.georeference import (
 )
 from cadscene.srt.parser import load_srt_records
 from cadscene.sfm.resolution import normalize_reconstruction_resolution
+from cadscene.alignment.keyframes import confirmed_keyframes
 
 
 ANALYSIS_IDENTITY_SCHEMA = 2
 CAD_GEOREFERENCE_CANDIDATE_ADAPTER_NAME = "cad_georeference_candidates"
 CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION = "2"
+CLIP_EXPORT_ADAPTER_VERSION = "2"
 
 
 def _has_exact_success_proof(job: QueueJob) -> bool:
@@ -592,6 +599,11 @@ class ProjectService:
     ) -> RegisterUploadResult:
         """Atomically register immutable upload state without starting analysis."""
 
+        if upload.asset_type == "terrain":
+            return self.register_uploaded_terrain_source(
+                project_id, upload, expected_revision=expected_revision
+            )
+
         if upload.project_id != project_id:
             raise ValueError("published upload belongs to another project")
         if not upload.path.is_file() or not upload.validation_report_path.is_file():
@@ -667,6 +679,107 @@ class ProjectService:
                 project_revision=updated_project.revision,
                 request_key=request_key,
                 analysis_job_ids=(),
+            )
+
+    def register_uploaded_terrain_source(
+        self,
+        project_id: str,
+        upload: PublishedUpload,
+        *,
+        expected_revision: int | None,
+    ) -> RegisterUploadResult:
+        """Add one immutable TPKG descriptor without invalidating pose results."""
+
+        if upload.project_id != project_id or upload.asset_type != "terrain":
+            raise ValueError("published terrain upload belongs to another asset collection")
+        if not upload.path.is_file() or not upload.validation_report_path.is_file():
+            raise FileNotFoundError("immutable terrain media/report is unavailable")
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            if expected_revision is not None and project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            existing = [
+                dict(item)
+                for item in project.source_assets.get("terrain_sources", ())
+                if isinstance(item, Mapping)
+            ]
+            if any(str(item.get("sha256")) == upload.sha256 for item in existing):
+                return RegisterUploadResult(
+                    project_revision=project.revision,
+                    request_key=None,
+                    analysis_job_ids=(),
+                )
+            existing.append(
+                {
+                    "path": str(upload.path),
+                    "original_filename": upload.original_filename,
+                    "size_bytes": upload.size_bytes,
+                    "sha256": upload.sha256,
+                    "validation": dict(upload.validation),
+                    "validation_report": str(upload.validation_report_path),
+                }
+            )
+            existing.sort(key=lambda item: str(item["sha256"]))
+            assets = dict(project.source_assets)
+            assets["terrain_sources"] = existing
+            for key in ("_terrain_analysis", "_terrain_cad", "_render_freshness"):
+                assets.pop(key, None)
+            updated = self.repositories.project.update(
+                project_id,
+                expected_revision=project.revision,
+                mutate=lambda value: replace(
+                    value,
+                    source_assets=assets,
+                    updated_at=self.now(),
+                ),
+            )
+            return RegisterUploadResult(
+                project_revision=updated.revision,
+                request_key=None,
+                analysis_job_ids=(),
+            )
+
+    def delete_terrain_source(
+        self,
+        project_id: str,
+        fingerprint: str,
+        *,
+        expected_revision: int,
+    ) -> ProjectManifest:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(fingerprint)):
+            raise ValueError("terrain fingerprint must be a lowercase SHA-256 digest")
+        with self._state_guard(project_id):
+            project = self.repositories.project.load(project_id)
+            if project.revision != expected_revision:
+                raise RevisionConflict(
+                    project_id=project_id,
+                    expected_revision=expected_revision,
+                    current_revision=project.revision,
+                )
+            current = [
+                dict(item)
+                for item in project.source_assets.get("terrain_sources", ())
+                if isinstance(item, Mapping)
+            ]
+            remaining = [item for item in current if str(item.get("sha256")) != fingerprint]
+            if len(remaining) == len(current):
+                raise FileNotFoundError(f"terrain source is unavailable: {fingerprint}")
+            assets = dict(project.source_assets)
+            assets["terrain_sources"] = remaining
+            for key in ("_terrain_analysis", "_terrain_cad", "_render_freshness"):
+                assets.pop(key, None)
+            return self.repositories.project.update(
+                project_id,
+                expected_revision=project.revision,
+                mutate=lambda value: replace(
+                    value,
+                    source_assets=assets,
+                    updated_at=self.now(),
+                ),
             )
 
     def cad_replacement_eligibility(self, project_id: str) -> dict[str, object]:
@@ -1444,6 +1557,7 @@ class ProjectService:
         project_id: str,
         *,
         clip_ids: Sequence[str] | None = None,
+        output_resolution: str = "1080p",
     ) -> RenderPreflight:
         project = self.repositories.project.load(project_id)
         clips_manifest = self.repositories.clips.load(project_id)
@@ -1466,6 +1580,20 @@ class ProjectService:
                     for clip_id in clip_ids_without_spec
                 },
             )
+        try:
+            normalized_resolution = normalize_render_resolution(
+                output_resolution, media_spec=media_binding[1]
+            )
+        except ValueError as exc:
+            if str(output_resolution).strip().lower() != "4k":
+                raise
+            rejected = tuple(clip.clip_id for clip in selected)
+            return RenderPreflight(
+                eligible=(),
+                confirmation_required=(),
+                skipped=rejected,
+                reasons={clip_id: str(exc) for clip_id in rejected},
+            )
         for clip in selected:
             workflow = clip.resolved_workflow
             if workflow is None:
@@ -1485,7 +1613,10 @@ class ProjectService:
                     clip, stored_jobs
                 )
                 _render_input_asset_identity(
-                    clip, video_path=physical_video, frame_map_path=physical_map
+                    clip,
+                    video_path=physical_video,
+                    frame_map_path=physical_map,
+                    include_content_hashes=False,
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 skipped.append(clip.clip_id)
@@ -1514,6 +1645,17 @@ class ProjectService:
             ):
                 skipped.append(clip.clip_id)
                 reasons[clip.clip_id] = "immutable workbench output validation failed"
+                continue
+            fixed_track_gate = _fixed_track_workbench_gate_reason(
+                self.projects_root,
+                project_id,
+                clip,
+                trajectory,
+                workbench,
+            )
+            if fixed_track_gate is not None:
+                skipped.append(clip.clip_id)
+                reasons[clip.clip_id] = fixed_track_gate
                 continue
             if bool(clip.analysis.get("needs_review", False)) and workflow not in {
                 "srt_full_pose",
@@ -1882,10 +2024,15 @@ class ProjectService:
         clip_ids: Sequence[str] | None = None,
         confirmed_clip_ids: Sequence[str] = (),
         expected_jobs_revision: int | None = None,
+        output_resolution: str = "1080p",
     ) -> EnqueueRenderResult:
         with self._state_guard(project_id):
             self._require_jobs_revision_locked(project_id, expected_jobs_revision)
-            preflight = self.preflight_render_jobs(project_id, clip_ids=clip_ids)
+            preflight = self.preflight_render_jobs(
+                project_id,
+                clip_ids=clip_ids,
+                output_resolution=output_resolution,
+            )
             confirmed = set(confirmed_clip_ids)
             invalid_confirmations = confirmed - set(preflight.confirmation_required)
             if invalid_confirmations:
@@ -1907,6 +2054,9 @@ class ProjectService:
             if media_binding is None:
                 raise RuntimeError("project media specification changed after preflight")
             media_spec_revision, media_spec = media_binding
+            normalized_resolution = normalize_render_resolution(
+                output_resolution, media_spec=media_spec
+            )
             by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
             stored_jobs = tuple(
                 QueueJob.from_dict(item) for item in jobs_manifest.jobs
@@ -1946,6 +2096,7 @@ class ProjectService:
                     media_spec_revision=media_spec_revision,
                     physical_video_path=physical_video,
                     physical_frame_map_path=physical_map,
+                    output_resolution=normalized_resolution,
                 )
                 submitted = self.queue.submit(render)
                 if submitted.job_id == render.job_id:
@@ -3033,6 +3184,36 @@ class ProjectService:
         project = self.repositories.project.load(project_id)
         by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
         trajectory_ids: list[str] = []
+
+        def submit_dependency(candidate: QueueJob) -> QueueJob:
+            submitted = self.queue.submit(candidate)
+            if submitted.job_id == candidate.job_id:
+                Path(submitted.attempts[-1].directory).mkdir(
+                    parents=True, exist_ok=False
+                )
+                return submitted
+            if submitted.status not in {
+                "failed",
+                "interrupted",
+                "cancelled",
+                "stale_input",
+                "superseded",
+            }:
+                return submitted
+            number = len(submitted.attempts) + 1
+            directory = self._attempt_directory(
+                project_id, submitted.job_id, number
+            )
+            directory.mkdir(parents=True, exist_ok=False)
+            try:
+                return self.queue.retry(
+                    submitted.job_id,
+                    AttemptRecord(number=number, directory=str(directory)),
+                )
+            except Exception:
+                directory.rmdir()
+                raise
+
         needs_export = [
             by_id[clip_id]
             for clip_id in accepted_ids
@@ -3062,11 +3243,7 @@ class ProjectService:
                 project_revision=project.revision,
                 clips_revision=clips_manifest.revision,
             )
-            submitted_export = self.queue.submit(export)
-            if submitted_export.job_id == export.job_id:
-                Path(submitted_export.attempts[-1].directory).mkdir(
-                    parents=True, exist_ok=False
-                )
+            submitted_export = submit_dependency(export)
             export_dependencies[export_clip.clip_id] = (submitted_export.job_id,)
         stored_jobs = tuple(
             QueueJob.from_dict(item)
@@ -3095,11 +3272,7 @@ class ProjectService:
                 project_revision=project.revision,
                 clips_revision=clips_manifest.revision,
             )
-            submitted_export = self.queue.submit(export)
-            if submitted_export.job_id == export.job_id:
-                Path(submitted_export.attempts[-1].directory).mkdir(
-                    parents=True, exist_ok=False
-                )
+            submitted_export = submit_dependency(export)
             solve_export_dependencies[solve_clip.clip_id] = (
                 submitted_export.job_id,
             )
@@ -3133,7 +3306,20 @@ class ProjectService:
                 Path(submitted_solve.attempts[-1].directory).mkdir(
                     parents=True, exist_ok=False
                 )
-            elif submitted_solve.status == "cancelled":
+            elif (
+                submitted_solve.status == "queued"
+                and submitted_solve.depends_on_job_ids != dependency_ids
+            ):
+                submitted_solve = self.queue.rebind_queued_dependencies(
+                    submitted_solve.job_id, dependency_ids
+                )
+            elif submitted_solve.status in {
+                "failed",
+                "interrupted",
+                "cancelled",
+                "stale_input",
+                "superseded",
+            }:
                 number = len(submitted_solve.attempts) + 1
                 directory = self._attempt_directory(
                     project_id, submitted_solve.job_id, number
@@ -3143,6 +3329,7 @@ class ProjectService:
                     submitted_solve = self.queue.retry(
                         submitted_solve.job_id,
                         AttemptRecord(number=number, directory=str(directory)),
+                        depends_on_job_ids=dependency_ids,
                     )
                 except Exception:
                     directory.rmdir()
@@ -4165,7 +4352,11 @@ class ProjectService:
         media_binding = _project_media_binding(project)
         if media_binding is None:
             raise ValueError("project media specification is missing")
-        _, media_spec = media_binding
+        _, source_media_spec = media_binding
+        media_spec = render_output_media_spec(
+            source_media_spec,
+            job.request_parameters.get("output_resolution", "1080p"),
+        )
         frame_map_payload = json.loads(frame_map_path.read_text(encoding="utf-8"))
         if not isinstance(frame_map_payload, Mapping):
             raise ValueError("render frame map must be an object")
@@ -4938,6 +5129,9 @@ class ProjectService:
                         project,
                         clip,
                         frame_map_path=frame_map_path,
+                        terrain_sources=job.request_parameters.get(
+                            "terrain_sources"
+                        ),
                     )
                     if adapter.name == "srt_fixed_track_visual_pose"
                     else dict(clip.manual_definition)
@@ -5007,7 +5201,11 @@ class ProjectService:
         ).resolve(strict=True)
         if attempt != expected_attempt or not attempt.is_dir():
             raise RuntimeError("clip render attempt directory identity is invalid")
-        _, media_spec = media_binding
+        _, source_media_spec = media_binding
+        media_spec = render_output_media_spec(
+            source_media_spec,
+            job.request_parameters.get("output_resolution", "1080p"),
+        )
         authoritative_frames = _load_authoritative_source_frames(clip, frame_map)
         source_time_base = _fraction_time_base(clip)
         annotation_bundle = self._write_annotation_render_bundle(
@@ -5027,7 +5225,30 @@ class ProjectService:
                 self.repositories.project.load(job.project_id).source_assets,
             ),
             "trajectory_path": dependency.published_outputs["trajectory"],
+            "output_resolution": normalize_render_resolution(
+                job.request_parameters.get("output_resolution", "1080p"),
+                media_spec=media_spec,
+            ),
         }
+        if clip.resolved_workflow == "srt_fixed_track_visual_pose":
+            required_fixed_artifacts = {
+                "camera_calibration_path": "calibration",
+                "terrain_context_path": "terrain_context",
+                "terrain_controls_path": "terrain_controls",
+            }
+            available_fixed_artifacts = {
+                parameter_key: value
+                for parameter_key, output_key in required_fixed_artifacts.items()
+                if isinstance(
+                    value := dependency.published_outputs.get(output_key), str
+                )
+                and Path(value).is_file()
+            }
+            if available_fixed_artifacts and len(available_fixed_artifacts) != len(
+                required_fixed_artifacts
+            ):
+                raise RuntimeError("calibrated fixed-track render artifacts are incomplete")
+            render_parameters.update(available_fixed_artifacts)
         if annotation_bundle is not None:
             render_parameters["annotation_render_bundle_path"] = str(
                 annotation_bundle
@@ -6292,6 +6513,11 @@ class ProjectService:
         job_id = self._identity()
         operation_id = self._identity()
         attempt_dir = self._attempt_directory(project_id, job_id, 1)
+        request_parameters: dict[str, object] = {}
+        if adapter_name == "srt_fixed_track_visual_pose":
+            request_parameters["terrain_sources"] = list(
+                _terrain_source_snapshot(project_assets)
+            )
         return QueueJob(
             job_id=job_id,
             project_id=project_id,
@@ -6311,6 +6537,7 @@ class ProjectService:
             output_revision=None,
             operation_id=operation_id,
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            request_parameters=request_parameters,
         )
 
     def _new_export_job(
@@ -6348,7 +6575,7 @@ class ProjectService:
             input_revision=clip.analysis_revision,
             input_fingerprint=input_fingerprint,
             adapter_name="clip_export",
-            adapter_version="1",
+            adapter_version=CLIP_EXPORT_ADAPTER_VERSION,
             output_revision=None,
             operation_id=self._identity(),
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
@@ -6412,7 +6639,11 @@ class ProjectService:
         media_spec_revision: str,
         physical_video_path: Path | None = None,
         physical_frame_map_path: Path | None = None,
+        output_resolution: str = "1080p",
     ) -> QueueJob:
+        normalized_resolution = normalize_render_resolution(
+            output_resolution, media_spec=media_spec
+        )
         annotation_identity = self._annotation_render_identity(project_id, clip)
         active_cad_identity = _active_cad_render_identity(
             self.repositories.project.load(project_id).source_assets, clip
@@ -6431,6 +6662,7 @@ class ProjectService:
             physical_frame_map_path=physical_frame_map_path,
             annotation_identity=annotation_identity,
             active_cad_identity=active_cad_identity,
+            output_resolution=normalized_resolution,
         )
         input_fingerprint = _fingerprint(identity_payload)
         revision_fingerprint = _fingerprint(
@@ -6467,6 +6699,7 @@ class ProjectService:
             output_revision=None,
             operation_id=self._identity(),
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
+            request_parameters={"output_resolution": normalized_resolution},
         )
 
     def _annotation_render_identity(
@@ -6861,6 +7094,12 @@ class ProjectService:
                         active_cad_identity=_active_cad_render_identity(
                             project.source_assets, clip
                         ),
+                        output_resolution=normalize_render_resolution(
+                            job.request_parameters.get(
+                                "output_resolution", "1080p"
+                            ),
+                            media_spec=media_spec,
+                        ),
                     )
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -6883,6 +7122,12 @@ class ProjectService:
                 clips_revision=clips_manifest.revision,
                 adapter_name=adapter_name,
                 adapter_version=adapter_version,
+                include_fixed_track_terrain=not (
+                    adapter_name == "srt_fixed_track_visual_pose"
+                    and "terrain_sources" not in job.request_parameters
+                    and "terrain_context_sha256"
+                    not in (job.validation_proof or {})
+                ),
             )
         )
 
@@ -7084,6 +7329,15 @@ class ProjectService:
             "veryfast",
             "--allow-subset",
         )
+        if clip.resolved_workflow in {
+            "srt_full_pose",
+            "srt_fixed_track_visual_pose",
+        }:
+            command = (
+                *command,
+                "--no-duration-limit",
+                "--reuse-source-full-span",
+            )
         return JobExecutionPlan(
             commands=(command,),
             validate=lambda: _validate_clip_export_outputs((clip,), output_dir),
@@ -7494,6 +7748,38 @@ def _workbench_artifact_path(
     return artifact
 
 
+def _fixed_track_workbench_gate_reason(
+    projects_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    trajectory: QueueJob,
+    workbench: StateReference,
+) -> str | None:
+    if clip.resolved_workflow != "srt_fixed_track_visual_pose":
+        return None
+    context_value = trajectory.published_outputs.get("terrain_context")
+    if not isinstance(context_value, str):
+        return None  # Historical trajectory: keep its legacy render contract.
+    try:
+        context = json.loads(Path(context_value).read_text(encoding="utf-8-sig"))
+        track = json.loads(
+            _workbench_artifact_path(projects_root, project_id, workbench).read_text(
+                encoding="utf-8-sig"
+            )
+        )
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        return f"fixed-track keyframe gate cannot validate immutable inputs: {exc}"
+    if not isinstance(context, Mapping) or not isinstance(track, Mapping):
+        return "fixed-track keyframe gate inputs are invalid"
+    mode = str(context.get("terrain_mode", "relative"))
+    manual_count = len(confirmed_keyframes(dict(track)))
+    if manual_count == 1:
+        return "fixed-track route cannot use exactly one manual keyframe"
+    if mode != "terrain" and manual_count < 2:
+        return "partial or relative-height fixed-track route requires at least 2 manual keyframes"
+    return None
+
+
 def _validate_existing_render_publication(
     target: Path,
     *,
@@ -7631,6 +7917,29 @@ def _clip_input_identity(
     return identity
 
 
+def _terrain_source_snapshot(
+    project_assets: Mapping[str, object],
+) -> tuple[Mapping[str, str], ...]:
+    items: list[Mapping[str, str]] = []
+    for item in project_assets.get("terrain_sources", ()):
+        if not isinstance(item, Mapping):
+            continue
+        path = item.get("path")
+        fingerprint = item.get("sha256")
+        if isinstance(path, str) and isinstance(fingerprint, str):
+            items.append({"path": path, "sha256": fingerprint})
+    return tuple(sorted(items, key=lambda item: (item["sha256"], item["path"])))
+
+
+def _terrain_source_identity(
+    project_assets: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    return tuple(
+        {**item, "available": Path(item["path"]).is_file()}
+        for item in _terrain_source_snapshot(project_assets)
+    )
+
+
 def _project_media_binding(
     project: ProjectManifest,
 ) -> tuple[str, ProjectMediaSpec] | None:
@@ -7715,8 +8024,19 @@ def _trajectory_artifact_matches_proof(job: QueueJob) -> bool:
             "solve_trajectory": "solve_trajectory_sha256",
             "solve_frame_map": "solve_frame_map_sha256",
             "core_frame_map": "core_frame_map_sha256",
+            "diagnostics": "diagnostics_sha256",
+            "camera_path": "camera_path_sha256",
+            "report": "report_sha256",
+            "initial_camera_track": "initial_camera_track_sha256",
+            "viewer_scene": "viewer_scene_sha256",
+            "calibration": "calibration_sha256",
+            "joint_alignment": "joint_alignment_sha256",
+            "terrain_context": "terrain_context_sha256",
+            "terrain_controls": "terrain_controls_sha256",
         }
         for output_key, proof_key in bindings.items():
+            if proof_key not in proof:
+                continue
             raw = job.published_outputs.get(output_key)
             expected = proof.get(proof_key)
             if not isinstance(raw, str) or not isinstance(expected, str):
@@ -7998,6 +8318,7 @@ def _render_identity_payload(
     physical_frame_map_path: Path | None = None,
     annotation_identity: Mapping[str, object] | None = None,
     active_cad_identity: Mapping[str, object] | None = None,
+    output_resolution: str = "1080p",
 ) -> Mapping[str, object]:
     return {
         "job_type": "clip_render",
@@ -8034,6 +8355,7 @@ def _render_identity_payload(
         "adapter_version": adapter_version,
         "annotation_dependencies": dict(annotation_identity or {}),
         "active_cad": dict(active_cad_identity or {}),
+        "output_resolution": output_resolution,
     }
 
 
@@ -8042,6 +8364,7 @@ def _render_input_asset_identity(
     *,
     video_path: Path | None = None,
     frame_map_path: Path | None = None,
+    include_content_hashes: bool = True,
 ) -> Mapping[str, object]:
     video_path = video_path or _clip_output_path(clip)
     frame_map_path = frame_map_path or _clip_frame_map_path(clip)
@@ -8085,12 +8408,15 @@ def _render_input_asset_identity(
         raise ValueError("clip render physical input cannot be validated") from exc
 
     def identity(path: Path) -> Mapping[str, object]:
-        content = path.read_bytes()
-        return {
+        result: dict[str, object] = {
             "path": str(path),
-            "size_bytes": len(content),
-            "sha256": sha256(content).hexdigest(),
+            "size_bytes": path.stat().st_size,
         }
+        if include_content_hashes:
+            digest = sha256()
+            _update_digest_from_file(digest, path)
+            result["sha256"] = digest.hexdigest()
+        return result
 
     return {"video": identity(video), "frame_map": identity(frame_map)}
 
@@ -8433,6 +8759,7 @@ def _fixed_track_visual_pose_adapter_parameters(
     clip: ClipDefinition,
     *,
     frame_map_path: Path | None = None,
+    terrain_sources: object = None,
 ) -> dict[str, object]:
     georeference = _confirmed_cad_georeference(project.source_assets)
     settings = clip.manual_definition.get("srt_fixed_track_visual_pose")
@@ -8453,6 +8780,19 @@ def _fixed_track_visual_pose_adapter_parameters(
     render = _workbench_render_parameters(
         storage_root, project.project_id, clip, project.source_assets
     )
+    source_candidates = (
+        terrain_sources
+        if isinstance(terrain_sources, (list, tuple))
+        else project.source_assets.get("terrain_sources", ())
+    )
+    terrain_sources = [
+        item
+        for item in source_candidates
+        if isinstance(item, Mapping)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("sha256"), str)
+        and Path(str(item["path"])).is_file()
+    ]
     return {
         "cad_georeference": dict(georeference),
         "srt_fixed_track_visual_pose": normalized_settings,
@@ -8463,6 +8803,9 @@ def _fixed_track_visual_pose_adapter_parameters(
             "height": media.height,
             "fps": _srt_display_frame_rate(media, clip, frame_map_path),
         },
+        "terrain_source_paths": [str(item["path"]) for item in terrain_sources],
+        "terrain_source_fingerprints": [str(item["sha256"]) for item in terrain_sources],
+        "cad_asset_fingerprint": _active_cad_asset_fingerprint(project.source_assets),
     }
 
 
@@ -8499,6 +8842,7 @@ def _job_identity_payload(
     clips_revision: int,
     adapter_name: str,
     adapter_version: str,
+    include_fixed_track_terrain: bool = True,
 ) -> Mapping[str, object]:
     payload: dict[str, object] = {
         "job_type": job_type,
@@ -8513,6 +8857,8 @@ def _job_identity_payload(
     }
     if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
         payload["cad_georeference"] = _cad_georeference_snapshot(project_assets)
+    if adapter_name == "srt_fixed_track_visual_pose" and include_fixed_track_terrain:
+        payload["terrain_sources"] = list(_terrain_source_identity(project_assets))
     if _clip_input_snapshot(clip) is None:
         payload.update(
             {
@@ -8787,7 +9133,7 @@ def _export_identity_payload(
         "clip_interval": _authoritative_interval(clip),
         "source_assets": _clip_input_identity(clip, project_assets),
         "adapter_name": "clip_export",
-        "adapter_version": "1",
+        "adapter_version": CLIP_EXPORT_ADAPTER_VERSION,
         "parameters": dict(clip.manual_definition),
     }
     if _clip_input_snapshot(clip) is None:
@@ -8861,7 +9207,8 @@ def _validate_clip_export_outputs(
         return AdapterResult.failed(f"invalid clip export frame map: {exc}")
     mapped = {str(item.get("clip_id")): item for item in payload.get("clips", ())}
     outputs: dict[str, str] = {}
-    digest = sha256(frame_map_path.read_bytes())
+    digest = sha256()
+    _update_digest_from_file(digest, frame_map_path)
     for clip in clips:
         item = mapped.get(clip.clip_id)
         interval = _authoritative_interval(clip)
@@ -8875,7 +9222,7 @@ def _validate_clip_export_outputs(
         video_path = output_dir / f"{clip.clip_id}.mp4"
         if not video_path.is_file() or video_path.stat().st_size == 0:
             return AdapterResult.failed(f"physical clip is missing: {clip.clip_id}")
-        digest.update(video_path.read_bytes())
+        _update_digest_from_file(digest, video_path)
         outputs[f"video:{clip.clip_id}"] = str(video_path)
         outputs[f"frame_map:{clip.clip_id}"] = str(frame_map_path)
     fingerprint = digest.hexdigest()
@@ -8884,6 +9231,12 @@ def _validate_clip_export_outputs(
         output_fingerprint=fingerprint,
         outputs=outputs,
     )
+
+
+def _update_digest_from_file(digest, path: Path) -> None:
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
 
 
 def _validate_solve_export_outputs(

@@ -6,6 +6,10 @@ from pathlib import Path
 
 from cadscene.cli._progress import write_progress_sidecar
 from cadscene.core.artifacts import ArtifactManager
+from cadscene.rendering.calibrated_overlay import (
+    CalibratedRenderConfig,
+    render_calibrated_overlay_video,
+)
 from cadscene.rendering.overlay import RenderOverlayConfig, render_overlay_video, write_render_outputs
 
 
@@ -20,6 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cad-scale", type=float)
     parser.add_argument("--origin-xy", type=float, nargs=2)
     parser.add_argument("--sfm-camera-path", required=True)
+    parser.add_argument("--camera-calibration")
+    parser.add_argument("--terrain-context")
+    parser.add_argument("--terrain-controls")
+    parser.add_argument(
+        "--output-resolution",
+        choices=("720p", "1080p", "source", "4k"),
+        default="1080p",
+    )
+    parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--debug-scale", type=float, default=1.0)
     parser.add_argument("--overlay-linewidth", type=int, default=3)
     parser.add_argument("--overlay-alpha", type=float, default=0.88)
@@ -43,6 +56,19 @@ def _validate_inputs(args: argparse.Namespace) -> None:
     for name, path in checks.items():
         if not path.exists():
             raise FileNotFoundError(f"{name} not found: {path}")
+    calibrated = (
+        args.camera_calibration,
+        args.terrain_context,
+        args.terrain_controls,
+    )
+    if any(calibrated) and not all(calibrated):
+        raise ValueError(
+            "camera_calibration, terrain_context and terrain_controls must be provided together"
+        )
+    for name in ("camera_calibration", "terrain_context", "terrain_controls"):
+        value = getattr(args, name)
+        if value and not Path(value).is_file():
+            raise FileNotFoundError(f"{name} not found: {value}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,25 +79,6 @@ def main(argv: list[str] | None = None) -> int:
         artifacts = ArtifactManager(output_root=args.output_root, dataset=args.dataset, run_id=args.run_id)
         stage_dir = artifacts.stage_dir("render", "08_render")
         output_video = stage_dir / "sfm_align_overlay.mp4"
-        config = RenderOverlayConfig(
-            video_path=args.video,
-            cad_dir=args.cad_dir,
-            sfm_camera_path=args.sfm_camera_path,
-            output_video=output_video,
-            cad_scale=args.cad_scale,
-            origin_xy=tuple(args.origin_xy) if args.origin_xy else None,
-            debug_scale=args.debug_scale,
-            overlay_linewidth=args.overlay_linewidth,
-            overlay_alpha=args.overlay_alpha,
-            faded_overlay=args.faded_overlay,
-            max_distance_m=args.max_distance_m,
-            fade_start_m=args.fade_start_m,
-            start_frame=args.start_frame,
-            end_frame=args.end_frame,
-            sample_every=args.sample_every,
-            write_sample_frames=args.write_sample_frames,
-            sample_frames_dir=stage_dir / "sample_frames",
-        )
         progress_callback = None
         if args.progress_file is not None:
             write_progress_sidecar(
@@ -82,7 +89,49 @@ def main(argv: list[str] | None = None) -> int:
                     args.progress_file, stage, message, float(fraction) * 0.95
                 )
             )
-        result = render_overlay_video(config, progress_callback=progress_callback)
+        if args.camera_calibration:
+            config = CalibratedRenderConfig(
+                video_path=args.video,
+                cad_dir=args.cad_dir,
+                camera_path=args.sfm_camera_path,
+                camera_calibration=args.camera_calibration,
+                terrain_context=args.terrain_context,
+                terrain_controls=args.terrain_controls,
+                output_video=output_video,
+                cad_scale=float(args.cad_scale or 1.0),
+                origin_xy=tuple(args.origin_xy or (0.0, 0.0)),
+                output_resolution=args.output_resolution,
+                overlay_linewidth=args.overlay_linewidth,
+                overlay_alpha=args.overlay_alpha,
+                max_distance_m=args.max_distance_m,
+                fade_start_m=args.fade_start_m,
+                output_fps=30.0,
+                ffmpeg_executable=args.ffmpeg,
+            )
+            result = render_calibrated_overlay_video(
+                config, progress_callback=progress_callback
+            )
+        else:
+            config = RenderOverlayConfig(
+                video_path=args.video,
+                cad_dir=args.cad_dir,
+                sfm_camera_path=args.sfm_camera_path,
+                output_video=output_video,
+                cad_scale=args.cad_scale,
+                origin_xy=tuple(args.origin_xy) if args.origin_xy else None,
+                debug_scale=args.debug_scale,
+                overlay_linewidth=args.overlay_linewidth,
+                overlay_alpha=args.overlay_alpha,
+                faded_overlay=args.faded_overlay,
+                max_distance_m=args.max_distance_m,
+                fade_start_m=args.fade_start_m,
+                start_frame=args.start_frame,
+                end_frame=args.end_frame,
+                sample_every=args.sample_every,
+                write_sample_frames=args.write_sample_frames,
+                sample_frames_dir=stage_dir / "sample_frames",
+            )
+            result = render_overlay_video(config, progress_callback=progress_callback)
         inputs = {
             "config": args.config,
             "video": args.video,
@@ -90,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
             "cad_scale": args.cad_scale,
             "origin_xy": args.origin_xy,
             "sfm_camera_path": args.sfm_camera_path,
+            "camera_calibration": args.camera_calibration,
+            "terrain_context": args.terrain_context,
+            "terrain_controls": args.terrain_controls,
+            "output_resolution": args.output_resolution,
         }
         write_render_outputs(stage_dir, result, inputs=inputs)
         artifacts.record_stage(

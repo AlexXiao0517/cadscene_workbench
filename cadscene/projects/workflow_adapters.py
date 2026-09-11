@@ -248,6 +248,8 @@ class ExistingWorkflowAdapter:
                 "report": root / "visual_pose_report.md",
                 "calibration": root / "camera_calibration.json",
                 "joint_alignment": root / "joint_alignment.json",
+                "terrain_context": root / "terrain_context.json",
+                "terrain_controls": root / "terrain_controls.npz",
                 "initial_camera_track": run_root
                 / "03_alignment/camera_track_pred.json",
                 "viewer_scene": run_root
@@ -284,6 +286,12 @@ class ExistingWorkflowAdapter:
                 ).hexdigest(),
                 "joint_alignment_sha256": sha256(
                     artifacts["joint_alignment"].read_bytes()
+                ).hexdigest(),
+                "terrain_context_sha256": sha256(
+                    artifacts["terrain_context"].read_bytes()
+                ).hexdigest(),
+                "terrain_controls_sha256": sha256(
+                    artifacts["terrain_controls"].read_bytes()
                 ).hexdigest(),
                 "frame_map_sha256": sha256(
                     inputs.frame_map_path.read_bytes()
@@ -854,7 +862,15 @@ def _fixed_track_config_payload(inputs: AdapterInputs) -> dict[str, object]:
             ),
         }
     )
-    return {"video_metadata": dict(video_metadata), "build": build.to_dict()}
+    return {
+        "video_metadata": dict(video_metadata),
+        "build": build.to_dict(),
+        "terrain_source_paths": list(parameters.get("terrain_source_paths", ())),
+        "terrain_source_fingerprints": list(
+            parameters.get("terrain_source_fingerprints", ())
+        ),
+        "cad_asset_fingerprint": parameters.get("cad_asset_fingerprint"),
+    }
 
 
 def _write_fixed_track_config(inputs: AdapterInputs) -> Path:

@@ -15,11 +15,94 @@ from cadscene.projects.uploads import (
     _validate_cad,
     _validate_video,
 )
+from cadscene.projects.json_repositories import project_repositories
+from cadscene.projects.queue import LocalResourceQueue
+from cadscene.projects.service import ProjectService
+from cadscene.projects.workflow_adapters import default_workflow_adapters
 
 
 def _accept(path: Path, asset_type: str) -> dict[str, object]:
     assert path.is_file()
     return {"asset_type": asset_type, "decoded": True}
+
+
+def _terrain_service(tmp_path: Path) -> ProjectService:
+    root = tmp_path / "projects"
+    repositories = project_repositories(root)
+    repositories.create_project("p1", updated_at="now")
+    return ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=root,
+        now=lambda: "later",
+    )
+
+
+def test_multiple_terrain_uploads_coexist_and_duplicate_content_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"terrain": _accept}
+    )
+    service = _terrain_service(tmp_path)
+
+    def publish(name: str, payload: bytes):
+        pending = store.begin("p1", "terrain", name, expected_size=len(payload))
+        pending.write(payload)
+        return pending.complete_staged()
+
+    first = publish("zhix.tpkg", b"terrain-one")
+    registered = service.register_uploaded_terrain_source(
+        "p1", first, expected_revision=0
+    )
+    second = publish("station.tpkg", b"terrain-two")
+    registered = service.register_uploaded_terrain_source(
+        "p1", second, expected_revision=registered.project_revision
+    )
+    duplicate = service.register_uploaded_terrain_source(
+        "p1", first, expected_revision=registered.project_revision
+    )
+
+    manifest = service.repositories.project.load("p1")
+    assert duplicate.project_revision == registered.project_revision
+    assert [item["sha256"] for item in manifest.source_assets["terrain_sources"]] == sorted(
+        [first.sha256, second.sha256]
+    )
+    assert first.path.is_file() and second.path.is_file()
+
+
+def test_delete_one_terrain_source_preserves_the_other(tmp_path: Path) -> None:
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"terrain": _accept}
+    )
+    service = _terrain_service(tmp_path)
+    uploads = []
+    revision = 0
+    for name, payload in (("a.tpkg", b"first"), ("b.tpkg", b"second")):
+        pending = store.begin("p1", "terrain", name, expected_size=len(payload))
+        pending.write(payload)
+        upload = pending.complete_staged()
+        uploads.append(upload)
+        revision = service.register_uploaded_terrain_source(
+            "p1", upload, expected_revision=revision
+        ).project_revision
+
+    updated = service.delete_terrain_source(
+        "p1", uploads[0].sha256, expected_revision=revision
+    )
+
+    sources = updated.source_assets["terrain_sources"]
+    assert [item["sha256"] for item in sources] == [uploads[1].sha256]
+
+
+def test_terrain_upload_rejects_non_tpkg_extension(tmp_path: Path) -> None:
+    store = ValidatedUploadStore(
+        tmp_path / "projects", validators={"terrain": _accept}
+    )
+
+    with pytest.raises(ValueError, match="TPKG"):
+        store.begin("p1", "terrain", "height.zip", expected_size=0)
 
 
 def test_interrupted_upload_never_becomes_analyzable(tmp_path: Path) -> None:

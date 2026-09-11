@@ -1,4 +1,4 @@
-import { activateCandidateAnalysis, createProject, getSnapshot, retryAnalysis, startAnalysis, uploadAsset } from "./portal_api.js?v=20260807-upload-v4";
+import { activateCandidateAnalysis, createProject, deleteTerrainSource, getSnapshot, retryAnalysis, startAnalysis, uploadAsset } from "./portal_api.js?v=20260911-terrain-v1";
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1"; // debug=1
 const THEME_STORAGE_KEY = "mediaflow-theme";
@@ -12,6 +12,7 @@ const state = {
   projectId: "", dataset: "", projectRevision: 0, manifest: null,
   projectPromise: null, files: {}, uploads: {},
   completed: { video: false, cad: false, srt: false }, etag: "", snapshot: null,
+  terrainUploads: [], terrainSources: new Map(),
   overlayDismissed: false, analysisComplete: false,
 };
 const $ = (selector) => document.querySelector(selector);
@@ -58,6 +59,61 @@ function validateFile(kind, file) {
   if (kind === "video" && extension !== "mp4") throw new Error("视频仅支持 MP4 格式");
   if (kind === "cad" && extension !== "dxf") throw new Error("CAD 图纸仅支持 DXF 格式");
   if (kind === "srt" && extension !== "srt") throw new Error("遥测文件仅支持 SRT 格式");
+  if (kind === "terrain" && extension !== "tpkg") throw new Error("地形高程仅支持 TPKG 格式");
+}
+
+function renderTerrainUploadList() {
+  const list = $("#terrainUploadList");
+  list.replaceChildren(...[...state.terrainSources.values()].map((item) => {
+    const row = document.createElement("li");
+    const copy = document.createElement("span");
+    copy.textContent = `${item.name} · ${item.status}`;
+    row.append(copy);
+    if (item.fingerprint) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "移除";
+      remove.addEventListener("click", async () => {
+        const latest = await getSnapshot(state.projectId, "");
+        await deleteTerrainSource(
+          state.projectId,
+          item.fingerprint,
+          latest.snapshot.component_revisions.project,
+        );
+        state.terrainSources.delete(item.key);
+        renderTerrainUploadList();
+      });
+      row.append(remove);
+    }
+    return row;
+  }));
+}
+
+function startTerrainUpload(file) {
+  validateFile("terrain", file);
+  const key = `${file.name}:${file.size}:${file.lastModified}`;
+  state.terrainSources.set(key, { key, name: file.name, status: "等待上传" });
+  renderTerrainUploadList();
+  const task = (async () => {
+    await ensureProject(file);
+    try {
+      const result = await uploadAsset(state.projectId, "terrain", file, ({ loaded, total, acknowledged }) => {
+        const percent = acknowledged ? 100 : Math.min(99, Math.floor((loaded / Math.max(1, total)) * 100));
+        state.terrainSources.set(key, { key, name: file.name, status: `上传 ${percent}%` });
+        renderTerrainUploadList();
+      });
+      state.terrainSources.set(key, {
+        key, name: file.name, status: "验证完成", fingerprint: result.fingerprint,
+      });
+      renderTerrainUploadList();
+      return Object.assign({}, result);
+    } catch (error) {
+      state.terrainSources.set(key, { key, name: file.name, status: `失败：${error.message}` });
+      renderTerrainUploadList();
+      return null;
+    }
+  })();
+  state.terrainUploads.push(task);
 }
 function setUploadVisual(kind, loaded, total, acknowledged) {
   const exactPercent = total > 0 ? Math.floor((loaded / total) * 100) : 0;
@@ -201,7 +257,12 @@ function renderAnalysis(snapshot) {
   const videoJob = jobs.video_analysis;
   const cad = progressOf(cadJob);
   const hasSrt = Boolean(snapshot.assets?.srt);
+  const terrainSources = Array.isArray(snapshot.assets?.terrain_sources)
+    ? snapshot.assets.terrain_sources
+    : [];
+  const hasTerrain = terrainSources.length > 0;
   $("#taskStageSrt").hidden = !hasSrt;
+  $("#taskStageTerrain").hidden = !hasTerrain;
   renumberVisibleTaskStages();
   const stage = videoJob?.progress?.stage || videoJob?.stage || "";
   const currentVideoStageIndex = videoStageIndex(videoJob);
@@ -224,6 +285,14 @@ function renderAnalysis(snapshot) {
       srt === 100 ? "SRT 姿态解析与片段覆盖率评估完成" : stageMessage(videoJob, "等待视频时间轴与片段建立"),
       srtActive,
       srtActive,
+    );
+  }
+  if (hasTerrain) {
+    renderTaskStage(
+      "Terrain",
+      100,
+      `${terrainSources.length} 个 TPKG 已验证；将在姿态解算时合并并计算覆盖率`,
+      false,
     );
   }
   renderTaskStage("Workspace", workspace, workspace ? "项目片段已生成" : "等待生成逻辑片段", video >= 100);
@@ -288,7 +357,8 @@ async function submit(event) {
   $("#analysisError").hidden = true;
   $("#analysisRetry").hidden = true;
   try {
-    await Promise.all([state.uploads.video, state.uploads.cad]);
+    await Promise.all([state.uploads.video, state.uploads.cad, state.uploads.srt].filter(Boolean));
+    await Promise.allSettled(state.terrainUploads);
     const current = await getSnapshot(state.projectId, "");
     state.snapshot = current.snapshot;
     state.etag = current.etag;
@@ -320,6 +390,10 @@ async function submit(event) {
 }
 
 bindUpload("video"); bindUpload("cad"); bindUpload("srt");
+$("#portalTerrain").addEventListener("change", (event) => {
+  [...(event.target.files || [])].forEach(startTerrainUpload);
+  event.target.value = "";
+});
 initializeTheme();
 $("#themeToggle").addEventListener("click", () => {
   const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";

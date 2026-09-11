@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 import math
 from pathlib import Path
@@ -13,6 +13,41 @@ from cadscene.video_analysis.pts import DecodedFrameTimestamp
 from .adapters import AdapterResult
 from .identifiers import is_safe_stable_id, validate_project_id
 from .media import ProjectMediaSpec
+
+
+RENDER_RESOLUTIONS = frozenset({"720p", "1080p", "source", "4k"})
+
+
+def normalize_render_resolution(
+    value: object,
+    *,
+    media_spec: ProjectMediaSpec | None = None,
+) -> str:
+    normalized = str(value or "1080p").strip().lower()
+    if normalized not in RENDER_RESOLUTIONS:
+        raise ValueError(f"unsupported output_resolution: {value}")
+    if (
+        normalized == "4k"
+        and media_spec is not None
+        and (media_spec.width < 3840 or media_spec.height < 2160)
+    ):
+        raise ValueError("4k output requires a 4K source")
+    return normalized
+
+
+def render_output_media_spec(
+    media_spec: ProjectMediaSpec,
+    output_resolution: object,
+) -> ProjectMediaSpec:
+    preset = normalize_render_resolution(output_resolution, media_spec=media_spec)
+    if preset == "source":
+        return media_spec
+    target_height = 2160 if preset == "4k" else 1080 if preset == "1080p" else 720
+    target_height = min(target_height, media_spec.height)
+    target_width = max(2, int(round(media_spec.width * target_height / media_spec.height)))
+    target_width -= target_width % 2
+    target_height -= target_height % 2
+    return replace(media_spec, width=target_width, height=target_height)
 
 
 @dataclass(frozen=True)

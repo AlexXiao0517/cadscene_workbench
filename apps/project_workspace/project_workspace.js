@@ -228,6 +228,13 @@
       $(`#${nameId}`).textContent = asset.original_filename || kind;
       $(`#${metaId}`).textContent = asset.size_bytes ? `${(asset.size_bytes / 1048576).toFixed(1)} MB` : "已验证";
     }
+    const terrainSources = Array.isArray(assets.terrain_sources)
+      ? assets.terrain_sources
+      : [];
+    $("#terrainSourceCount").textContent = `${terrainSources.length} 个 TPKG`;
+    $("#terrainSourceSummary").textContent = terrainSources.length
+      ? terrainSources.map((item) => item.original_filename || "terrain.tpkg").join("、")
+      : "未上传高程文件，姿态解算后仍可通过关键帧微调与路线拟合";
     const sourceThumb = $("#sourceVideoThumbnail");
     sourceThumb.src = assets.video?.thumbnail_url || "";
     sourceThumb.hidden = !assets.video?.thumbnail_url;
@@ -1364,6 +1371,12 @@
         $("#workbenchPreparationTitle").textContent = `正在生成 ${trajectoryLabel}`;
       }
       const preparation = clip.workbench?.preparation;
+      const preparationFailed = ["failed", "interrupted", "cancelled", "stale_input", "superseded"]
+        .includes(preparation?.status);
+      if (preparingTrajectory && preparationFailed) {
+        dialog.close();
+        throw new Error(preparation?.error || "片段视频准备失败，请重试");
+      }
       const activeProgress = preparingTrajectory ? clip.progress : preparation?.progress;
       const activeStatus = preparingTrajectory ? clip.status : preparation?.status;
       const activeError = preparingTrajectory ? clip.error : preparation?.error;

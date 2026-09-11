@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 import math
 
 import numpy as np
@@ -86,29 +87,52 @@ def detect_terrain_conflicts(
     horizontal_threshold_m: float = 2.0,
     vertical_threshold_m: float = 3.0,
     sample_step_m: float = 2.0,
+    max_conflicts: int = 1000,
 ) -> tuple[TerrainConflict, ...]:
-    if horizontal_threshold_m <= 0.0 or vertical_threshold_m <= 0.0:
+    if (
+        horizontal_threshold_m <= 0.0
+        or vertical_threshold_m <= 0.0
+        or max_conflicts <= 0
+    ):
         raise ValueError("terrain conflict thresholds must be positive")
     samples, source_ids = sampled_control_points(controls, step_m=sample_step_m)
     if len(samples) < 2:
         return ()
-    pairs = cKDTree(samples[:, :2]).query_pairs(float(horizontal_threshold_m))
-    conflicts = []
-    for first, second in sorted(pairs):
-        source_pair = tuple(sorted((source_ids[first], source_ids[second])))
-        if source_pair[0] == source_pair[1]:
-            continue
-        vertical = abs(float(samples[first, 2] - samples[second, 2]))
-        if vertical <= vertical_threshold_m:
-            continue
-        horizontal = float(np.linalg.norm(samples[first, :2] - samples[second, :2]))
-        midpoint = tuple(float(value) for value in (samples[first, :2] + samples[second, :2]) * 0.5)
-        conflicts.append(
-            TerrainConflict(
-                source_ids=source_pair,
-                horizontal_distance_m=horizontal,
-                vertical_difference_m=vertical,
-                midpoint_xy=midpoint,
-            )
+    by_source = {
+        source_id: np.flatnonzero(
+            np.asarray(source_ids, dtype=object) == source_id
         )
+        for source_id in sorted(set(source_ids))
+    }
+    conflicts: list[TerrainConflict] = []
+    for first_source, second_source in combinations(by_source, 2):
+        first_indices = by_source[first_source]
+        second_indices = by_source[second_source]
+        if not len(first_indices) or not len(second_indices):
+            continue
+        distances, nearest = cKDTree(samples[second_indices, :2]).query(
+            samples[first_indices, :2],
+            k=1,
+            distance_upper_bound=float(horizontal_threshold_m),
+        )
+        for local_index in np.flatnonzero(np.isfinite(distances)):
+            first = int(first_indices[local_index])
+            second = int(second_indices[int(nearest[local_index])])
+            vertical = abs(float(samples[first, 2] - samples[second, 2]))
+            if vertical <= vertical_threshold_m:
+                continue
+            midpoint = tuple(
+                float(value)
+                for value in (samples[first, :2] + samples[second, :2]) * 0.5
+            )
+            conflicts.append(
+                TerrainConflict(
+                    source_ids=(first_source, second_source),
+                    horizontal_distance_m=float(distances[local_index]),
+                    vertical_difference_m=vertical,
+                    midpoint_xy=midpoint,
+                )
+            )
+            if len(conflicts) >= max_conflicts:
+                return tuple(conflicts)
     return tuple(conflicts)

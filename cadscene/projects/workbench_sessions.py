@@ -2638,7 +2638,11 @@ class ProjectWorkbenchService:
             raise InvalidWorkbenchOutput(f"invalid bound workbench output: {exc}") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("keyframes"), list):
             raise InvalidWorkbenchOutput("bound workbench output contract is invalid")
-        _validate_manual_camera_track(payload)
+        _validate_manual_camera_track(
+            payload,
+            workflow=session.workflow,
+            terrain_mode=self._fixed_track_terrain_mode(session),
+        )
         fingerprint = sha256(source_bytes).hexdigest()
         return {
             "source_output_revision": f"manual-track:{fingerprint[:16]}",
@@ -2647,6 +2651,22 @@ class ProjectWorkbenchService:
             "source_bytes": source_bytes,
             "source_artifact_name": actual.name,
         }
+
+    def _fixed_track_terrain_mode(self, session: WorkbenchSession) -> str | None:
+        if session.workflow != "srt_fixed_track_visual_pose":
+            return None
+        if not session.trajectory_job_id:
+            return "relative"
+        try:
+            job = self.project_service.queue.get(session.trajectory_job_id)
+            value = job.published_outputs.get("terrain_context")
+            if not isinstance(value, str):
+                return "relative"
+            payload = json.loads(Path(value).read_text(encoding="utf-8-sig"))
+            mode = str(payload.get("terrain_mode", "relative"))
+            return mode if mode in {"terrain", "partial", "relative"} else "relative"
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            return "relative"
 
     def _validate_pure_rotation_save(
         self, session: WorkbenchSession, receipt: Mapping[str, object]
@@ -2864,7 +2884,12 @@ def _valid_rotation_matrix(value: object) -> bool:
     )
 
 
-def _validate_manual_camera_track(payload: Mapping[str, object]) -> None:
+def _validate_manual_camera_track(
+    payload: Mapping[str, object],
+    *,
+    workflow: str | None = None,
+    terrain_mode: str | None = None,
+) -> None:
     fps = payload.get("fps")
     keyframes = payload.get("keyframes")
     if not _valid_number(fps) or float(fps) <= 0:
@@ -2898,6 +2923,16 @@ def _validate_manual_camera_track(payload: Mapping[str, object]) -> None:
             )
         if not 1.0 < float(camera["fov"]) < 179.0:
             raise InvalidWorkbenchOutput("camera track camera fov is invalid")
+    if workflow == "srt_fixed_track_visual_pose":
+        manual_count = len(confirmed_keyframes(dict(payload)))
+        if manual_count == 1:
+            raise InvalidWorkbenchOutput(
+                "fixed-track route cannot use exactly one manual keyframe"
+            )
+        if terrain_mode != "terrain" and manual_count < 2:
+            raise InvalidWorkbenchOutput(
+                "partial or relative-height fixed-track route requires at least 2 manual keyframes"
+            )
 
 
 def _fsync_directory(path: Path) -> None:

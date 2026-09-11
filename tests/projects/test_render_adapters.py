@@ -262,7 +262,7 @@ def test_default_workbench_render_adapters_cover_every_project_workflow(
 
     adapter = registry.for_workflow(workflow)
     assert adapter.workflow == workflow
-    assert adapter.version == "5"
+    assert adapter.version == "6"
 
 
 def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
@@ -286,7 +286,7 @@ def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
         application_root=tmp_path
     ).for_workflow("pure_rotation")
 
-    assert adapter.version == "5"
+    assert adapter.version == "6"
     plan = adapter.prepare(inputs)
     render_command, package_command = plan.commands
 
@@ -387,6 +387,16 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
     ).resolve()
     trajectory.parent.mkdir(parents=True)
     trajectory.write_text('{"poses":[]}', encoding="utf-8")
+    calibration = trajectory.parent / "camera_calibration.json"
+    calibration.write_text(
+        '{"model":"RADIAL","width":1920,"height":1080,'
+        '"params":[1000,960,540,0,0]}',
+        encoding="utf-8",
+    )
+    terrain_context = trajectory.parent / "terrain_context.json"
+    terrain_context.write_text('{"terrain_mode":"relative"}', encoding="utf-8")
+    terrain_controls = trajectory.parent / "terrain_controls.npz"
+    terrain_controls.write_bytes(b"npz")
     inputs = RenderInputs(
         **{
             **inputs.__dict__,
@@ -396,6 +406,10 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
                 "cad_scale": 1.0,
                 "origin_xy": [499000.0, 3319000.0],
                 "trajectory_path": str(trajectory),
+                "camera_calibration_path": str(calibration),
+                "terrain_context_path": str(terrain_context),
+                "terrain_controls_path": str(terrain_controls),
+                "output_resolution": "720p",
             },
         }
     )
@@ -403,18 +417,57 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
     plan = default_workbench_render_adapters(
         application_root=tmp_path
     ).for_workflow("srt_fixed_track_visual_pose").prepare(inputs)
-    command = plan.commands[0]
-    joined = " ".join(command)
+    alignment_command, command, _package_command = plan.commands
+    joined = " ".join((*alignment_command, *command))
 
-    assert "cadscene.cli.run_pipeline" in command
-    assert command[command.index("--config") + 1].endswith(
+    assert "cadscene.cli.run_pipeline" in alignment_command
+    assert alignment_command[alignment_command.index("--config") + 1].endswith(
         "configs\\pipelines\\srt_fixed_track_visual_pose_overlay.yaml"
     )
-    assert command[command.index("--stages") + 1] == "alignment,render"
+    assert alignment_command[alignment_command.index("--stages") + 1] == "alignment"
+    assert "cadscene.cli.render_overlay" in command
+    assert command[command.index("--camera-calibration") + 1] == str(calibration.resolve())
+    assert command[command.index("--terrain-context") + 1] == str(terrain_context.resolve())
+    assert command[command.index("--terrain-controls") + 1] == str(terrain_controls.resolve())
+    assert command[command.index("--output-resolution") + 1] == "720p"
     assert "--sparse-ply" not in command
     assert "quality" not in joined
     assert "road_surface" not in joined
     assert "02_sfm" not in joined
+
+
+def test_historical_fixed_track_without_calibrated_artifacts_uses_legacy_renderer(
+    tmp_path: Path,
+) -> None:
+    inputs = _render_inputs(tmp_path)
+    cad = (tmp_path / "cad").resolve()
+    cad.mkdir()
+    trajectory = (
+        tmp_path / "run" / "02_srt_visual_pose" / "camera_trajectory_visual_pose.json"
+    ).resolve()
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text('{"poses":[]}', encoding="utf-8")
+    inputs = RenderInputs(
+        **{
+            **inputs.__dict__,
+            "workflow": "srt_fixed_track_visual_pose",
+            "parameters": {
+                "cad_dataset_path": str(cad),
+                "cad_scale": 1.0,
+                "origin_xy": [499000.0, 3319000.0],
+                "trajectory_path": str(trajectory),
+                "output_resolution": "1080p",
+            },
+        }
+    )
+
+    plan = default_workbench_render_adapters(
+        application_root=tmp_path
+    ).for_workflow("srt_fixed_track_visual_pose").prepare(inputs)
+
+    render_command, _package_command = plan.commands
+    assert render_command[render_command.index("--stages") + 1] == "alignment,render"
+    assert "cadscene.cli.render_overlay" not in render_command
 
 
 def test_workbench_render_draws_annotation_overlay_before_packaging(

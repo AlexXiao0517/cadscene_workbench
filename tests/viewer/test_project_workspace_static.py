@@ -270,6 +270,16 @@ def test_workspace_explains_srt_route_with_server_coverage() -> None:
     assert "完整姿态覆盖" in script
 
 
+def test_workspace_lists_optional_terrain_sources_and_explains_fallback() -> None:
+    html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+
+    assert 'id="terrainSourceCount"' in html
+    assert 'id="terrainSourceSummary"' in html
+    assert "terrain_sources" in script
+    assert "未上传高程文件，姿态解算后仍可通过关键帧微调与路线拟合" in html
+
+
 def test_full_pose_dialog_uses_one_horizontal_fov_and_explicit_crs_confirmation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")

@@ -121,6 +121,13 @@ form { padding: 0; border: 0; background: transparent; }
 .reselect { margin-top: 13px; padding: 0; border: 0; color: #9dc7ff; background: transparent; font-size: 15px; cursor: pointer; }
 .srt-row { margin-top: 23px; min-height: 66px; border-top: 1px solid #2b4058; border-bottom: 1px solid #2b4058; display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; cursor: pointer; }
 .srt-row input { display: none; }
+.terrain-row { margin-top: 12px; border-bottom: 1px solid #2b4058; padding: 0 0 14px; }
+.terrain-row > label { min-height: 58px; display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; align-items: center; cursor: pointer; }
+.terrain-row > label input { display: none; }
+.terrain-row > label > span:last-child { color: #849ab1; font-size: 12px; }
+.terrain-upload-list { margin: 6px 0 0; padding: 0; display: grid; gap: 6px; list-style: none; }
+.terrain-upload-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #b8cae0; font-size: 12px; }
+.terrain-upload-list button { border: 1px solid #40566e; background: transparent; color: #b8cae0; border-radius: 6px; padding: 3px 7px; cursor: pointer; }
 .srt-title { display: flex; gap: 8px; align-items: center; font-size: 17px; font-weight: 650; }
 .srt-title i { color: #c7dcf3; background: #29435e; }
 #srtStatus { color: var(--muted); text-align: right; }
@@ -179,6 +186,7 @@ form { padding: 0; border: 0; background: transparent; }
   .upload-grid { grid-template-columns: 1fr; }
   form { padding: 18px; }
   .srt-row { grid-template-columns: 1fr; gap: 6px; padding: 14px 0; }
+  .terrain-row > label { grid-template-columns: 1fr; }
   #srtStatus { text-align: left; }
   .analysis-summary { grid-template-columns: 1fr; justify-items: center; text-align: center; }
 }

@@ -452,6 +452,36 @@ def test_service_builds_existing_clip_export_cli_plan_inside_attempt(
     assert payload["clips"][0]["interval_semantics"] == "half_open"
 
 
+@pytest.mark.parametrize(
+    "workflow", ("srt_full_pose", "srt_fixed_track_visual_pose")
+)
+def test_service_clip_export_reuses_unsegmented_srt_source_video(
+    tmp_path: Path, workflow: str
+) -> None:
+    definition = clip("one", workflow=workflow)
+    service, repositories, queue = service_with_clips(tmp_path, (definition,))
+    export = service.enqueue_workbench_clip_export(
+        "p1",
+        "one",
+        expected_jobs_revision=repositories.jobs.load("p1").revision,
+    )
+    assert export.adapter_version == "2"
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+
+    plan = service.prepare_job_execution(
+        "p1",
+        claimed.job_id,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    command = plan.commands[0]
+    assert "--no-duration-limit" in command
+    assert "--reuse-source-full-span" in command
+
+
 def test_process_worker_refuses_tampered_plan_before_starting_child(
     tmp_path: Path, monkeypatch
 ) -> None:

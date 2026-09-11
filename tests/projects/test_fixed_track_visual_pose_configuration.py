@@ -240,6 +240,21 @@ def test_adapter_parameters_bind_georeference_media_fov_and_offset(
         route_offset_xyz_m=(2.0, -1.0, 5.0),
     )
     project = repositories.project.load("p1")
+    terrain = tmp_path / "terrain.tpkg"
+    terrain.write_bytes(b"tpkg")
+    project = repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "terrain_sources": [
+                    {"path": str(terrain), "sha256": "c" * 64}
+                ],
+            },
+        ),
+    )
     selected = repositories.clips.load("p1").clips[0]
 
     parameters = _fixed_track_visual_pose_adapter_parameters(
@@ -256,6 +271,67 @@ def test_adapter_parameters_bind_georeference_media_fov_and_offset(
         "reconstruction_resolution": "1080p",
         "route_offset_xyz_m": [2.0, -1.0, 5.0],
     }
+    assert parameters["terrain_source_paths"] == [str(terrain)]
+    assert parameters["terrain_source_fingerprints"] == ["c" * 64]
+
+
+def test_trajectory_job_snapshots_terrain_and_becomes_stale_after_change(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = _confirmed_service(tmp_path)
+    service.update_srt_fixed_track_visual_pose_settings(
+        "p1",
+        "clip-1",
+        expected_revision=repositories.clips.load("p1").revision,
+        horizontal_fov_deg=72.0,
+    )
+    first = tmp_path / "first.tpkg"
+    first.write_bytes(b"first")
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "terrain_sources": [
+                    {"path": str(first), "sha256": "a" * 64}
+                ],
+            },
+        ),
+    )
+
+    enqueued = service.enqueue_trajectory_jobs("p1")
+    trajectory = next(
+        queue.get(job_id)
+        for job_id in enqueued.job_ids
+        if queue.get(job_id).job_type == "trajectory"
+    )
+    assert trajectory.request_parameters["terrain_sources"] == [
+        {"path": str(first), "sha256": "a" * 64}
+    ]
+    assert service._current_input_fingerprint(trajectory) == trajectory.input_fingerprint
+
+    second = tmp_path / "second.tpkg"
+    second.write_bytes(b"second")
+    project = repositories.project.load("p1")
+    repositories.project.update(
+        "p1",
+        expected_revision=project.revision,
+        mutate=lambda value: replace(
+            value,
+            source_assets={
+                **value.source_assets,
+                "terrain_sources": [
+                    {"path": str(first), "sha256": "a" * 64},
+                    {"path": str(second), "sha256": "b" * 64},
+                ],
+            },
+        ),
+    )
+
+    assert service._current_input_fingerprint(trajectory) != trajectory.input_fingerprint
 
 
 def test_legacy_fixed_track_settings_default_in_adapter_parameters(

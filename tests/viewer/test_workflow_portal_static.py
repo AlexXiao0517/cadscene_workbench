@@ -259,6 +259,20 @@ def test_successful_upload_hides_progress_instead_of_leaving_one_hundred_percent
     assert 'progressWrap.hidden = true' in success_block
 
 
+def test_optional_multiple_terrain_sources_upload_independently() -> None:
+    html = _read("index.html")
+    script = _read("workflow_portal.js")
+    api = _read("portal_api.js")
+
+    assert 'id="portalTerrain" type="file" accept=".tpkg" multiple' in html
+    assert 'id="terrainUploadList"' in html
+    assert 'id="taskStageTerrain"' in html
+    assert 'uploadAsset(state.projectId, "terrain", file' in script
+    assert "Promise.allSettled(state.terrainUploads" in script
+    assert "terrain_sources" in script
+    assert "deleteTerrainSource" in api
+
+
 def test_flat_navigation_has_no_rule_and_uses_hover_color_only() -> None:
     css = _read("style.css")
 

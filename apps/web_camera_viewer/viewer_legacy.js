@@ -895,6 +895,16 @@
         if (lockedCameraFields[def.key] || pureRotationRestrictedFields.has(def.key) || fixedTrackRestrictedFields.has(def.key)) return;
         clearPureRotationAuthoritativeMatrix();
         camera[def.key] = Number(value);
+        if (def.key === "fov" && fixedTrackVisualPoseMode) {
+          for (const keyframe of cameraTrack.keyframes || []) {
+            if (
+              window.CadsceneKeyframes?.isConfirmedManualKeyframe(keyframe)
+              && keyframe.camera
+            ) {
+              keyframe.camera.fov = camera.fov;
+            }
+          }
+        }
         syncControls();
         updateViews();
         notifyManualCameraChanged("parameter");
@@ -2884,6 +2894,23 @@
       && solveSize && sourceSize
       ? `姿态解算：${solveResolution} / ${solveSize[0]}×${solveSize[1]}；源视频/渲染：${sourceSize[0]}×${sourceSize[1]}`
       : "";
+    const terrainMode = String(sfmScene.meta?.terrain_mode || "relative");
+    const terrainCoverage = Math.round(Number(sfmScene.meta?.terrain_coverage || 0) * 100);
+    const terrainSources = Array.isArray(sfmScene.meta?.terrain_source_fingerprints)
+      ? sfmScene.meta.terrain_source_fingerprints.length
+      : 0;
+    const terrainHeightRange = Array.isArray(sfmScene.meta?.terrain_height_range_m)
+      ? `${Number(sfmScene.meta.terrain_height_range_m[0]).toFixed(2)}–${Number(sfmScene.meta.terrain_height_range_m[1]).toFixed(2)}m`
+      : "无";
+    const principalPoint = Array.isArray(sfmScene.meta?.camera_principal_point_px)
+      ? sfmScene.meta.camera_principal_point_px.map((value) => Number(value).toFixed(2)).join(",")
+      : "-";
+    const radial = Array.isArray(sfmScene.meta?.camera_radial_distortion)
+      ? sfmScene.meta.camera_radial_distortion.map((value) => Number(value).toFixed(6)).join(",")
+      : "-";
+    const calibratedCameraInfo = workflow === "srt_fixed_track_visual_pose"
+      ? `相机：${sfmScene.meta?.camera_model || "RADIAL"} f=${Number(sfmScene.meta?.camera_focal_px || 0).toFixed(2)}px c=(${principalPoint}) k=(${radial})；高程：${terrainMode} / ${terrainSources} 文件 / 覆盖 ${terrainCoverage}% / Z ${terrainHeightRange}`
+      : "";
     const globalTrackName = isSrtPosePriorScene ? "SRT基准轨迹帧" : "原始SfM轨迹帧";
     const anchoredTrackName = isSrtPosePriorScene ? "六自由度拟合轨迹帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();
@@ -2895,6 +2922,7 @@
       `点云：${p.count_exported || 0} / 原始 ${p.count_original || 0}（${p.sample_mode || "-"}，RGB ${p.has_rgb ? "有" : "无"}）`,
       `${globalTrackName}：${g.length}　${anchoredTrackName}：${a.length}　建议：${sug.length}`,
       fixedTrackSolveInfo,
+      calibratedCameraInfo,
       ...sceneWarnings.map((item) => `警告：${item}`),
       warn,
     ].filter(Boolean).join("\n");

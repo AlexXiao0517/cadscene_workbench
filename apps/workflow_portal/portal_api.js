@@ -32,6 +32,20 @@ export function uploadAsset(projectId, kind, file, onProgress) {
   });
 }
 
+export async function deleteTerrainSource(projectId, fingerprint, expectedRevision) {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/terrain-sources/${encodeURIComponent(fingerprint)}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+    },
+  );
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `删除失败（HTTP ${response.status}）`);
+  return result;
+}
+
 export async function getSnapshot(projectId, etag = "") {
   const headers = etag ? { "If-None-Match": etag } : {};
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/snapshot`, { cache: "no-store", headers });

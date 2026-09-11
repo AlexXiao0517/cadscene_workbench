@@ -16,6 +16,7 @@ from .tpkg import (
     merge_terrain_controls,
     route_coverage,
 )
+from .context import TerrainContext, build_terrain_context, write_terrain_context
 
 __all__ = [
     "DrapedCadSegments",
@@ -30,4 +31,7 @@ __all__ = [
     "load_tpkg",
     "merge_terrain_controls",
     "route_coverage",
+    "TerrainContext",
+    "build_terrain_context",
+    "write_terrain_context",
 ]

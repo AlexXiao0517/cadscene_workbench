@@ -39,8 +39,11 @@ def test_official_upload_formats_match_the_current_portal() -> None:
 
     assert 'accept=".mp4,video/mp4"' in portal_html
     assert 'accept=".dxf,application/dxf"' in portal_html
+    assert 'accept=".tpkg" multiple' in portal_html
     assert "视频仅支持 MP4 格式" in portal_script
     assert "CAD 图纸仅支持 DXF 格式" in portal_script
+    assert "地形高程仅支持 TPKG 格式" in portal_script
+    assert "可选 SRT，以及固定轨迹路线可选的 TPKG 高程文件" in routing
 
     assert "正式上传界面目前仅支持 MP4 视频和 DXF 图纸" in readme
     assert "The official upload UI currently supports only MP4 video and DXF drawings" in readme_en

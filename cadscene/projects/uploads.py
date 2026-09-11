@@ -13,7 +13,7 @@ from uuid import uuid4
 import zipfile
 
 
-ASSET_TYPES = frozenset({"video", "cad", "srt"})
+ASSET_TYPES = frozenset({"video", "cad", "srt", "terrain"})
 from .identifiers import validate_project_id
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v"})
 _CAD_EXTENSIONS = frozenset({".dwg", ".dxf", ".json", ".zip"})
@@ -378,6 +378,8 @@ class ValidatedUploadStore:
             raise ValueError("unsupported SRT extension")
         if asset_type == "cad" and extension not in _CAD_EXTENSIONS:
             raise ValueError("unsupported CAD extension")
+        if asset_type == "terrain" and extension != ".tpkg":
+            raise ValueError("unsupported TPKG terrain extension")
         if asset_type == "cad" and extension == ".json" and filename.lower() != "design.json":
             raise ValueError("CAD JSON upload must be named design.json")
 
@@ -475,6 +477,12 @@ def _validate_cad(path: Path, _asset_type: str) -> Mapping[str, object]:
     return {"format": extension.lstrip(".")}
 
 
+def _validate_terrain(path: Path, _asset_type: str) -> Mapping[str, object]:
+    from cadscene.terrain.tpkg import inspect_tpkg
+
+    return inspect_tpkg(path).to_dict()
+
+
 def _validate_dxf_structure_bounded(path: Path, *, window_bytes: int = 64 * 1024) -> None:
     size = path.stat().st_size
     if size <= 0:
@@ -504,4 +512,5 @@ _DEFAULT_VALIDATORS: Mapping[str, Validator] = {
     "video": _validate_video,
     "cad": _validate_cad,
     "srt": _validate_srt,
+    "terrain": _validate_terrain,
 }

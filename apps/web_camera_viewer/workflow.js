@@ -78,6 +78,29 @@
   let focusPureRotationCameraOnce = true;
   let pureRotationHandledCompletion = null;
 
+  function selectedOutputResolution() {
+    return document.querySelector("#workflowOutputResolution")?.value || "1080p";
+  }
+
+  function updateRenderResolutionAvailability() {
+    const video = document.querySelector("#sourceVideo");
+    const selector = document.querySelector("#workflowOutputResolution");
+    const option = selector?.querySelector('option[value="4k"]');
+    if (!option) return;
+    const available = Number(video?.videoWidth || 0) >= 3840
+      && Number(video?.videoHeight || 0) >= 2160;
+    option.hidden = !available;
+    option.disabled = !available;
+    if (!available && selectedOutputResolution() === "4k") selector.value = "1080p";
+  }
+
+  function fixedTrackTerrainMode() {
+    if (!isFixedTrackVisualPoseWorkflow()) return "relative";
+    return String(
+      window.cadsceneGetFixedTrackMetadata?.()?.terrain_mode || "relative",
+    );
+  }
+
   function applyWorkbenchTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     const toggle = document.querySelector("#workbenchThemeToggle");
@@ -111,9 +134,7 @@
     window.cadsceneSetFixedTrackVisualPoseMode?.(
       mode === "srt_fixed_track_visual_pose",
     );
-    window.cadsceneSetSrtPosePriorMode?.(
-      mode === "srt_full_pose" || mode === "srt_fixed_track_visual_pose",
-    );
+    window.cadsceneSetSrtPosePriorMode?.(mode === "srt_full_pose");
     if (mode === "pure_rotation") {
       window.setTimeout(async () => {
         await initializePureRotationViewer();
@@ -2280,12 +2301,27 @@
     const manualAnchorCount = window.CadsceneKeyframes.confirmedManualKeyframes(
       cameraTrack.keyframes || [],
     ).length;
-    const requiredAnchorCount = isSrtPosePriorWorkflow() ? 1 : 2;
-    if (manualAnchorCount < requiredAnchorCount) {
-      if (isSrtPosePriorWorkflow()) {
-        throw new Error("路线拟合至少需要 1 个已确认的六自由度关键帧；请调整 XYZ/yaw/pitch/roll 后点击“添加/更新关键帧”。");
+    if (isFixedTrackVisualPoseWorkflow()) {
+      if (manualAnchorCount === 1) {
+        throw new Error("不能只使用 1 个关键帧拟合整条路线；请删除该关键帧，或至少再添加 1 个六自由度关键帧。");
       }
-      throw new Error(`路线拟合至少需要 ${requiredAnchorCount} 个人工关键帧；当前为 ${manualAnchorCount} 个。请在另一帧完成“添加/更新关键帧”后再运行。`);
+      if (manualAnchorCount === 0 && fixedTrackTerrainMode() === "terrain") {
+        await saveCurrentCameraTrack(cameraTrack);
+        setWorkflowStage("render");
+        message.textContent = "有效高程已覆盖路线，可直接渲染；如需人工修正，请添加至少 2 个关键帧后再拟合。";
+        return null;
+      }
+      if (manualAnchorCount < 2) {
+        throw new Error("当前为部分/无高程模式，路线拟合至少需要 2 个已确认的六自由度关键帧。");
+      }
+    } else {
+      const requiredAnchorCount = isFullPoseWorkflow() ? 1 : 2;
+      if (manualAnchorCount < requiredAnchorCount) {
+        if (isFullPoseWorkflow()) {
+          throw new Error("路线拟合至少需要 1 个已确认的六自由度关键帧；请调整 XYZ/yaw/pitch/roll 后点击“添加/更新关键帧”。");
+        }
+        throw new Error(`路线拟合至少需要 ${requiredAnchorCount} 个人工关键帧；当前为 ${manualAnchorCount} 个。请在另一帧完成“添加/更新关键帧”后再运行。`);
+      }
     }
     await saveCurrentCameraTrack(cameraTrack);
     return runStage("alignment");
@@ -2445,6 +2481,9 @@
       const currentClip = (snapshot.clips || []).find((item) => item.clip_id === clipId);
       const activeStatuses = new Set(["queued", "preparing", "running", "validating", "cancel_requested"]);
       if (currentClip?.render?.job_id && activeStatuses.has(currentClip.render.status)) {
+        if (currentClip.render.output_resolution) {
+          document.querySelector("#workflowOutputResolution").value = currentClip.render.output_resolution;
+        }
         renderProgressState = null;
         projectRenderVisibleProgress = 0;
         projectWorkbenchRenderJobId = currentClip.render.job_id;
@@ -2456,6 +2495,7 @@
       const preflight = await projectWorkbenchRequest("/render-jobs", {
         expected_revision: projectWorkbenchSession.jobs_revision,
         clip_ids: [clipId],
+        output_resolution: selectedOutputResolution(),
         enqueue: false,
       });
       const confirmationRequired = preflight.needs_confirmation || preflight.confirmation_required || [];
@@ -2470,6 +2510,7 @@
         expected_revision: projectWorkbenchSession.jobs_revision,
         clip_ids: [clipId],
         confirmed_clip_ids: confirmedClipIds,
+        output_resolution: selectedOutputResolution(),
         enqueue: true,
       });
       const jobId = queued.job_ids?.[0];
@@ -2919,6 +2960,11 @@
     maybeAutoApplySfmCameraInit();
   });
   pollJobStatus();
+  document.querySelector("#sourceVideo")?.addEventListener(
+    "loadedmetadata",
+    updateRenderResolutionAvailability,
+  );
+  updateRenderResolutionAvailability();
   setInterval(pollJobStatus, 1000);
   setInterval(pollJobLog, 2000);
 })();

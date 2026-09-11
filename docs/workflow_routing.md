@@ -17,6 +17,7 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
 - **CAD**：必传；正式项目上传界面仅支持 `.dxf`。只有图纸解析为可用 assets 后，
   项目分析才能发布。
 - **SRT 遥测**：选传。完整 DJI 云台姿态走全姿态路线；GPS 与相对高度完整但云台姿态不足时走固定轨迹 + 视觉姿态路线。两者都要求坐标/FOV 确认。
+- **地形高程**：选传；固定轨迹 + 视觉姿态路线可一次上传多个 `.tpkg`。平台独立校验后按当前 CAD 地理参考合并，不改变工作流名称。
 
 门户先创建 Project API 项目并并行上传视频、CAD 和可选 SRT，再启动 CAD/video 分析，
 等待候选 analysis revision 完成并激活，最后进入项目片段管理。新建项目进度在 source
@@ -26,7 +27,7 @@ assets 含 SRT 时条件显示“解析 SRT”，并复用 `video_analysis` 的 
 
 Project API 的底层上传校验器和兼容 Workflow API 仍能接收一些额外扩展名，用于迁移、
 历史数据或维护调用；这些入口未被正式上传界面开放，也没有形成当前用户流程的格式
-承诺。日常项目准备应只使用 MP4、DXF 和可选 SRT。
+承诺。日常项目准备应只使用 MP4、DXF、可选 SRT，以及固定轨迹路线可选的 TPKG 高程文件。
 
 ## 当前路由状态
 
@@ -35,7 +36,7 @@ Project API 的底层上传校验器和兼容 Workflow API 仍能接收一些额
 | `sfm_only` | 未上传/无法解析 SRT 或 SRT 覆盖不足，且不是已验证纯旋转；或人工覆盖为 SfM | **Stable** | 当前唯一稳定的 JobRunner 端到端路径：SfM、人工关键帧、路线拟合、质量和渲染。 |
 | `pure_rotation` | 无 SRT 路由优先级，且自动分析验证完整短视频具有持续、无矛盾的强旋转证据；也可在项目页人工覆盖 | **Supported** | 运行固定版本外部 OpenGV 旋转恢复，再人工全局放置、局部姿态校正并渲染；固定相机中心，不恢复平移或尺度。自动推荐精度仍需人工复核。 |
 | partial-SRT core | 独立命令行使用 | **Experimental CLI** | 可做 PTS 时间同步、局部 ENU、稳健 Sim3 和融合辅助；尚未接入正式 JobRunner。 |
-| `srt_fixed_track_visual_pose` | SRT 有足够 GPS 与 `rel_alt`，未满足完整相机姿态，并已确认当前 CAD 投影与水平 FOV | **Supported with guard** | SRT→CGCS2000→CAD 严格提供逐帧 XYZ，视频只估计旋转；跳过位置注册、三角化、BA、点云和质量检测。 |
+| `srt_fixed_track_visual_pose` | SRT 有足够 GPS 与 `rel_alt`，未满足完整相机姿态，并已确认当前 CAD 投影与水平 FOV | **Supported with guard** | 自适应抽帧运行 COLMAP 稀疏重建恢复旋转与 RADIAL 内参，SRT→CGCS2000→CAD 提供逐帧位置约束；保留诊断点云，跳过质量检测。 |
 | `srt_sfm_fused` | 旧项目 manifest/产物 | **Legacy read-only** | 新项目不再推荐或创建；保留读取兼容。 |
 | `srt_full_pose` | SRT 有足够 GPS、高度与完整云台相机姿态，并已确认当前 CAD 投影与水平 FOV | **Supported with guard** | 按精确 source PTS 把 WGS84 位置投影到已确认的 CGCS2000/CAD 本地米制坐标，直接生成相机轨迹；跳过 SfM 和稀疏点云。 |
 
@@ -78,15 +79,22 @@ SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹�
 ## 固定轨迹 + 视觉姿态约束
 
 - 位置始终来自 `SRT WGS84 → 已确认 CGCS2000 投影 → CAD local metres`；Z 使用
-  `rel_alt`，`abs_alt` 只进入诊断。
-- 配置阶段只允许整条路线统一 XYZ 偏移；工作台锁定 X/Y/Z，任何逐帧不一致的位置
-  编辑都会被对齐器拒绝。
-- 视频根据用户水平 FOV 只估计相机旋转。姿态锚点之间使用四元数 SLERP，边界外不
-  伪造姿态；缺姿态帧仍显示真实位置轨迹，但不显示视锥。
-- 工作台只有“视觉姿态 → 微调与渲染”。最终命令只跑 `alignment,render`，没有
-  sparse PLY、quality、road-surface 或点云输入。
-- 通常比纯 SfM 快，因为跳过位置注册、三角化、bundle adjustment 和点云维护；仅
-  不序列化 PLY 不是主要加速来源。实际耗时以每次诊断中的阶段计时为准。
+  `rel_alt` 建立垂直轨迹，`abs_alt` 只进入诊断；有效高程会把相对高度放入与 CAD
+  地形一致的 Z 基准，但不会把未经验证的 `abs_alt` 当作高程真值。
+- 视频按 0.5 秒候选、1 秒基础间隔并结合运动、转弯和模糊度自适应抽帧，运行 COLMAP
+  稀疏重建与 RADIAL 自标定。用户整数水平 FOV 仅作为内参初值；最终保存焦距、主点、
+  `k1/k2` 和逐帧完整旋转。XML 只可用于离线对照，不是生产输入。
+- 工作台始终开放 X/Y/Z、yaw/pitch/roll 与 FOV 控件，并显示 SRT 基准轨迹、拟合轨迹、
+  稀疏点云和视锥。人工修改作为整条路线上的平滑六自由度残差，不把单点生硬扩散。
+- TPKG 按轨迹点在 160 米内的覆盖率分为 `terrain`（至少 95%）、`partial` 和
+  `relative`。`terrain` 可零关键帧直接确认；一旦修改必须至少两个关键帧。
+  `partial` 与 `relative` 必须至少两个关键帧，任何模式都拒绝仅一个关键帧。
+- 渲染是拟合之后的独立阶段。固定轨迹路线使用新版标定渲染器：CAD 逐点 Z、原始颜色
+  与中文标注、精确逐帧相机、RADIAL 畸变和 H.264 输出；可选 720p、默认 1080p、
+  原始分辨率，源视频达到 4K 时额外允许 4K。只修改输出分辨率不会重算姿态或路线。
+- 有 SRT 时视频分析默认整段为一个统一场景，不再因为超过一分钟而分段。COLMAP 仍需
+  稀疏三角化和局部 BA 来恢复稳定姿态，因此速度提升主要来自自适应抽帧与跳过稠密重建，
+  不是完全省略三维几何。
 
 ## 稳定路径中的关键帧
 

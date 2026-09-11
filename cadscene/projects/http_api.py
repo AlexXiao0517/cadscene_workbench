@@ -36,7 +36,10 @@ from cadscene.srt.georeference import parse_central_meridian
 _SAFE_ID = r"[A-Za-z0-9_.-]+"
 _PROJECT = re.compile(rf"^/api/projects/(?P<project>{_SAFE_ID})$")
 _UPLOAD = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt)$"
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/(?P<asset>video|cad|srt|terrain)$"
+)
+_TERRAIN_SOURCE = re.compile(
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/terrain-sources/(?P<fingerprint>[0-9a-f]{{64}})$"
 )
 _CAD_REPLACEMENT_UPLOAD = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/uploads/cad-replacement$"
@@ -188,6 +191,11 @@ class ProjectApi:
                     raise ValueError("project upload body is required")
                 return self._publish_upload(
                     match["project"], match["asset"], payload, upload
+                )
+            match = _TERRAIN_SOURCE.fullmatch(path)
+            if method == "DELETE" and match:
+                return self._delete_terrain_source(
+                    match["project"], match["fingerprint"], payload
                 )
             match = _ANALYSIS.fullmatch(path)
             if method == "POST" and match:
@@ -516,6 +524,28 @@ class ProjectApi:
                 "project_revision": result.project_revision,
                 "request_key": result.request_key,
                 "job_ids": list(result.analysis_job_ids),
+            },
+        )
+
+    def _delete_terrain_source(
+        self,
+        project_id: str,
+        fingerprint: str,
+        payload: Mapping[str, object],
+    ) -> ApiResponse:
+        updated = self.service.delete_terrain_source(
+            project_id,
+            fingerprint,
+            expected_revision=_required_revision(payload),
+        )
+        sources = updated.source_assets.get("terrain_sources", ())
+        return ApiResponse(
+            200,
+            {
+                "project_id": project_id,
+                "project_revision": updated.revision,
+                "deleted_fingerprint": fingerprint,
+                "terrain_source_count": len(sources) if isinstance(sources, (list, tuple)) else 0,
             },
         )
 
@@ -990,6 +1020,17 @@ class ProjectApi:
                         ),
                         "preview_is_current": _render_preview_is_current(
                             clip.clip_id, render_job, render.clip_renders
+                        ),
+                        "output_resolution": (
+                            "1080p"
+                            if render_job is None
+                            else (
+                                render_job.get("request_parameters", {})
+                                if isinstance(
+                                    render_job.get("request_parameters"), Mapping
+                                )
+                                else {}
+                            ).get("output_resolution", "1080p")
                         ),
                     },
                     "scene_bridge": {
@@ -1759,8 +1800,11 @@ class ProjectApi:
                 current_revision=current.revision,
             )
         clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
+        output_resolution = str(payload.get("output_resolution") or "1080p")
         preflight = self.service.preflight_render_jobs(
-            project_id, clip_ids=clip_ids or None
+            project_id,
+            clip_ids=clip_ids or None,
+            output_resolution=output_resolution,
         )
         if not bool(payload.get("enqueue", False)):
             return ApiResponse(200, _render_preflight_payload(preflight))
@@ -1772,6 +1816,7 @@ class ProjectApi:
             clip_ids=clip_ids or None,
             confirmed_clip_ids=confirmed,
             expected_jobs_revision=expected_revision,
+            output_resolution=output_resolution,
         )
         return ApiResponse(
             202,

@@ -77,6 +77,15 @@
           </span>
         </label>
 
+        <section class="terrain-row" aria-labelledby="terrainUploadTitle">
+          <label for="portalTerrain">
+            <input id="portalTerrain" type="file" accept=".tpkg" multiple />
+            <span class="srt-title" id="terrainUploadTitle">地形高程 TPKG <i>可选，可多选</i></span>
+            <span>用于自动恢复 CAD 逐点高程；不上传仍可在工作台用关键帧微调与路线拟合。</span>
+          </label>
+          <ul id="terrainUploadList" class="terrain-upload-list" aria-live="polite"></ul>
+        </section>
+
         <p id="portalMessage" class="message" role="status">文件已上传，可以新建项目。解析进度将在弹窗中显示。</p>
         <button id="portalSubmit" class="primary-action" type="submit" disabled>
           <span>新建项目</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"/></svg>
@@ -120,6 +129,9 @@
           </li>
           <li id="taskStageSrt" hidden>
             <span class="stage-icon">4</span><div><strong>解析 SRT</strong><small>等待视频时间轴与片段建立</small></div><b>0%</b>
+          </li>
+          <li id="taskStageTerrain" hidden>
+            <span class="stage-icon">5</span><div><strong>解析高程数据</strong><small>等待 TPKG 文件验证</small></div><b>0%</b>
           </li>
           <li id="taskStageWorkspace">
             <span class="stage-icon">5</span><div><strong>初始化工作台</strong><small>等待生成逻辑片段</small></div><b>0%</b>

@@ -49,6 +49,7 @@ class ExistingWorkbenchRenderAdapter:
             / "sfm_align_overlay.mp4"
         )
         progress_path = inputs.attempt_directory / "adapter_progress.json"
+        render_commands: tuple[tuple[str, ...], ...]
         if self.workflow == "pure_rotation":
             render_command = (
                 sys.executable,
@@ -75,6 +76,7 @@ class ExistingWorkbenchRenderAdapter:
                 "--progress-file",
                 str(progress_path),
             )
+            render_commands = (render_command,)
         else:
             trajectory = _required_path(inputs.parameters, "trajectory_path")
             pipeline_name = (
@@ -134,7 +136,77 @@ class ExistingWorkbenchRenderAdapter:
                     "--sparse-ply",
                     str(sparse_ply),
                 ]
-            render_command = tuple(command)
+            if self.workflow == "srt_fixed_track_visual_pose":
+                calibrated_keys = (
+                    "camera_calibration_path",
+                    "terrain_context_path",
+                    "terrain_controls_path",
+                )
+                supplied = [inputs.parameters.get(key) for key in calibrated_keys]
+                if any(value is not None for value in supplied) and not all(
+                    isinstance(value, str) and value for value in supplied
+                ):
+                    raise ValueError("calibrated fixed-track artifacts are incomplete")
+                if all(isinstance(value, str) and value for value in supplied):
+                    command[command.index("--stages") + 1] = "alignment"
+                    calibration, terrain_context, terrain_controls = (
+                        _required_path(inputs.parameters, key)
+                        for key in calibrated_keys
+                    )
+                    output_resolution = str(
+                        inputs.parameters.get("output_resolution", "1080p")
+                    ).lower()
+                    if output_resolution not in {"720p", "1080p", "source", "4k"}:
+                        raise ValueError("unsupported output_resolution")
+                    aligned_camera_path = (
+                        output_root
+                        / inputs.project_id
+                        / inputs.clip_id
+                        / "03_alignment"
+                        / "sfm_camera_path.csv"
+                    )
+                    calibrated_render_command = (
+                        sys.executable,
+                        "-m",
+                        "cadscene.cli.render_overlay",
+                        "--dataset",
+                        inputs.project_id,
+                        "--run-id",
+                        inputs.clip_id,
+                        "--output-root",
+                        str(output_root),
+                        "--video",
+                        str(inputs.physical_video_path),
+                        "--cad-dir",
+                        str(cad_path),
+                        "--cad-scale",
+                        str(cad_scale),
+                        "--origin-xy",
+                        str(origin_xy[0]),
+                        str(origin_xy[1]),
+                        "--sfm-camera-path",
+                        str(aligned_camera_path),
+                        "--camera-calibration",
+                        str(calibration),
+                        "--terrain-context",
+                        str(terrain_context),
+                        "--terrain-controls",
+                        str(terrain_controls),
+                        "--output-resolution",
+                        output_resolution,
+                        "--faded-overlay",
+                        "--max-distance-m",
+                        "900",
+                        "--fade-start-m",
+                        "250",
+                        "--progress-file",
+                        str(progress_path),
+                    )
+                    render_commands = (tuple(command), calibrated_render_command)
+                else:
+                    render_commands = (tuple(command),)
+            else:
+                render_commands = (tuple(command),)
         annotation_bundle_value = inputs.parameters.get(
             "annotation_render_bundle_path"
         )
@@ -184,9 +256,9 @@ class ExistingWorkbenchRenderAdapter:
         )
         return RenderExecutionPlan(
             commands=(
-                (render_command, package_command)
+                (*render_commands, package_command)
                 if annotation_command is None
-                else (render_command, annotation_command, package_command)
+                else (*render_commands, annotation_command, package_command)
             ),
             validate=lambda: _validate_packaged_render(inputs),
         )
@@ -201,7 +273,7 @@ def default_workbench_render_adapters(
             ExistingWorkbenchRenderAdapter(
                 workflow=workflow,
                 application_root=root,
-                version="5",
+                version="6",
             )
             for workflow in (
                 "sfm_only",

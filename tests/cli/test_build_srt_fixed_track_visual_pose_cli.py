@@ -5,11 +5,16 @@ import json
 from pathlib import Path
 
 import cadscene.cli.build_srt_fixed_track_visual_pose as subject
+import numpy as np
 import pytest
 from cadscene.srt.fixed_track_visual_pose import (
+    FixedTrackPosition,
     FixedTrackVisualPoseConfig,
+    OrientationSolution,
     build_fixed_track_positions,
 )
+from cadscene.terrain.context import TerrainContext
+from cadscene.terrain.tpkg import TerrainControlSet, TerrainSourceSummary
 from cadscene.srt.georeference import CadGeoreference, project_wgs84_to_cad_raw
 from cadscene.srt.parser import load_srt_records
 
@@ -48,6 +53,100 @@ def _config() -> FixedTrackVisualPoseConfig:
         horizontal_fov_deg=72.0,
         route_offset_xyz_m=(1.0, -2.0, 5.0),
     )
+
+
+def _position(frame: int, x: float) -> FixedTrackPosition:
+    return FixedTrackPosition(
+        frame_index=frame,
+        source_pts=frame * 1000,
+        pts_time_sec=float(frame),
+        canonical_center=(x, 0.0, 80.0),
+        center=(x, 0.0, 80.0),
+        latitude=30.0,
+        longitude=120.0,
+        rel_alt=80.0,
+        abs_alt=230.0,
+        projected_easting=x,
+        projected_northing=0.0,
+        cad_raw_x=x,
+        cad_raw_y=0.0,
+        interpolated=False,
+        source_entry_before=0,
+        source_entry_after=0,
+    )
+
+
+def test_first_uncovered_route_point_downgrades_terrain_datum_to_relative() -> None:
+    summary = TerrainSourceSummary(
+        source_id="a" * 64,
+        path="terrain.tpkg",
+        feature_count=1,
+        vertex_count=1,
+        geometry_types={"PointZ": 1},
+        layers={"terrain": 1},
+        bbox_lon_lat=(0.0, 0.0, 0.0, 0.0),
+        z_range_m=(130.0, 130.0),
+    )
+    controls = TerrainControlSet(
+        points_xyz=np.asarray([[500.0, 0.0, 130.0]]),
+        point_source_ids=(summary.source_id,),
+        point_labels=("",),
+        point_colors_bgr=np.asarray([[0, 0, 0]], dtype="uint8"),
+        segment_starts_xyz=np.empty((0, 3)),
+        segment_ends_xyz=np.empty((0, 3)),
+        segment_source_ids=(),
+        segment_colors_bgr=np.empty((0, 3), dtype="uint8"),
+        segment_widths=np.empty(0, dtype="int32"),
+        sources=(summary,),
+        fingerprint="b" * 64,
+    )
+    context = TerrainContext(
+        mode="terrain",
+        coverage_fraction=0.95,
+        covered_route_points=19,
+        total_route_points=20,
+        max_control_distance_m=160.0,
+        height_range_m=(130.0, 130.0),
+        source_fingerprints=(summary.source_id,),
+        controls_fingerprint=controls.fingerprint,
+        cad_fingerprint="cad",
+        georeference_fingerprint="geo",
+    )
+
+    positions, downgraded = subject._align_relative_height_datum(
+        (_position(0, 0.0), _position(1, 500.0)), controls, context
+    )
+
+    assert downgraded.mode == "relative"
+    assert downgraded.reference_ground_m is None
+    assert positions[0].center[2] == 80.0
+
+
+def test_render_path_requires_a_pose_for_every_authoritative_frame() -> None:
+    positions = (_position(0, 0.0), _position(2, 2.0))
+    solution = OrientationSolution(
+        status="orientation_partial",
+        rotations={0: np.eye(3)},
+    )
+
+    with pytest.raises(ValueError, match="complete per-frame"):
+        subject._require_complete_render_path(
+            positions,
+            solution,
+            {
+                "clips": [
+                    {
+                        "clip_id": "clip-1",
+                        "frames": [
+                            {"ordinal": 0, "pts": 0},
+                            {"ordinal": 1, "pts": 1000},
+                            {"ordinal": 2, "pts": 2000},
+                        ],
+                    }
+                ]
+            },
+            "clip-1",
+        )
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -252,6 +351,14 @@ def test_cli_transfers_colmap_attitude_and_publishes_diagnostic_point_cloud(
     )
     assert joint["position_constraint"] == "SRT projected CAD-local"
     assert joint["dji_prior_available"] is False
+    terrain = json.loads(
+        (run_root / "02_srt_visual_pose/terrain_context.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert terrain["terrain_mode"] == "relative"
+    assert (run_root / "02_srt_visual_pose/terrain_controls.npz").is_file()
+    assert scene["meta"]["terrain_mode"] == "relative"
     report = (
         run_root / "02_srt_visual_pose/visual_pose_report.md"
     ).read_text(encoding="utf-8")

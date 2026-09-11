@@ -227,7 +227,9 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert "setFrustumOrientationAvailable" in viewer
     assert 'id="fixedTrackAnchorPanel"' not in html
     assert "function refreshFixedTrackAnchorPanel()" not in workflow
-    assert "requiredAnchorCount = isSrtPosePriorWorkflow() ? 1 : 2" in workflow
+    assert "fixedTrackTerrainMode" in workflow
+    assert "manualAnchorCount === 1" in workflow
+    assert 'fixedTrackTerrainMode() === "terrain"' in workflow
     assert "cadsceneGetFixedTrackMetadata" in viewer
     assert "cadsceneFixedTrackVisualComponentAtFrame" in viewer
     assert "cadsceneConfirmCurrentCameraKeyframe" not in workflow
@@ -236,6 +238,20 @@ def test_fixed_track_workbench_shows_route_and_skips_sfm_and_quality() -> None:
     assert "fixedTrackRelativeLine" in viewer
     assert "buildFixedTrackRelativeLine" in viewer
     assert "relative_orientation_available === true" in viewer
+
+
+def test_fixed_track_workbench_shows_terrain_calibration_and_render_resolution() -> None:
+    html = _read("index.html")
+    workflow = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert 'id="workflowOutputResolution"' in html
+    for value in ("720p", "1080p", "source", "4k"):
+        assert f'<option value="{value}"' in html
+    assert "output_resolution: selectedOutputResolution()" in workflow
+    assert "terrain_mode" in viewer
+    assert "terrain_coverage" in viewer
+    assert "camera_model" in viewer
 
 
 def test_quality_success_refreshes_quality_artifacts_without_page_reload() -> None:
@@ -829,6 +845,15 @@ def test_sfm_completion_auto_initializes_fov_without_enter_keyframes_button() ->
     assert "进入/继续关键帧标定" not in _read("index.html")
 
 
+def test_fixed_track_visual_pose_keeps_fov_editable() -> None:
+    script = _read("workflow.js")
+    viewer = _read("viewer_legacy.js")
+
+    assert 'window.cadsceneSetSrtPosePriorMode?.(mode === "srt_full_pose")' in script
+    assert 'def.key === "fov" && fixedTrackVisualPoseMode' in viewer
+    assert "keyframe.camera.fov = camera.fov" in viewer
+
+
 def test_sfm_fov_is_applied_after_the_legacy_viewer_has_loaded_the_saved_track() -> None:
     workflow = _read("workflow.js")
     viewer = _read("viewer_legacy.js")
@@ -854,8 +879,8 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'viewer_legacy.js?v=20260904-srt-resolution-v1' in index
-    assert 'workflow.js?v=20260904-srt-pose-prior-v2' in index
+    assert 'viewer_legacy.js?v=20260911-terrain-render-v1' in index
+    assert 'workflow.js?v=20260911-terrain-render-v1' in index
 
 
 def test_sfm_fov_initialization_is_page_local_so_refresh_reapplies_intrinsics() -> None:

@@ -410,6 +410,30 @@ def test_render_preflight_requires_current_trajectory_and_saved_workbench_proof(
     assert repositories.render.load("p1") == render_before
 
 
+def test_render_preflight_does_not_hash_whole_video(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+    ready = next(
+        item for item in repositories.clips.load("p1").clips if item.clip_id == "ready"
+    )
+    video_path = Path(str(ready.analysis["physical_mp4_path"])).resolve()
+    original_update = service_module._update_digest_from_file
+
+    def guarded_update(digest, path: Path) -> None:
+        if path.resolve() == video_path:
+            pytest.fail("render preflight must not load the whole MP4 into memory")
+        original_update(digest, path)
+
+    monkeypatch.setattr(service_module, "_update_digest_from_file", guarded_update)
+
+    first = service.preflight_render_jobs("p1", clip_ids=("ready",))
+    second = service.preflight_render_jobs("p1", clip_ids=("ready",))
+
+    assert first.eligible == ("ready",)
+    assert second.eligible == ("ready",)
+
+
 def test_render_reuses_validated_export_job_when_clip_has_no_embedded_paths(
     tmp_path: Path,
 ) -> None:
@@ -2125,3 +2149,44 @@ def test_enqueue_render_jobs_builds_media_dag_identity_and_is_idempotent(
     assert changed_job.input_fingerprint != jobs[0].input_fingerprint
     assert changed_job.idempotency_key != jobs[0].idempotency_key
     assert changed_job.status == "queued"
+
+
+def test_render_resolution_is_validated_and_part_of_the_job_identity(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue, _adapter, _trajectories = _system(tmp_path)
+
+    default = service.enqueue_render_jobs(
+        "p1", clip_ids=("ready",), output_resolution="1080p"
+    )
+    repeated = service.enqueue_render_jobs(
+        "p1", clip_ids=("ready",), output_resolution="1080p"
+    )
+    smaller = service.enqueue_render_jobs(
+        "p1", clip_ids=("ready",), output_resolution="720p"
+    )
+
+    assert repeated.job_ids == default.job_ids
+    assert smaller.job_ids != default.job_ids
+    assert queue.get(default.job_ids[0]).request_parameters == {
+        "output_resolution": "1080p"
+    }
+    assert queue.get(smaller.job_ids[0]).request_parameters == {
+        "output_resolution": "720p"
+    }
+    assert (
+        queue.get(default.job_ids[0]).depends_on_job_ids
+        == queue.get(smaller.job_ids[0]).depends_on_job_ids
+    )
+
+
+def test_render_preflight_rejects_4k_for_non_4k_source(tmp_path: Path) -> None:
+    service, _repositories, _queue, _adapter, _trajectories = _system(tmp_path)
+
+    result = service.preflight_render_jobs(
+        "p1", clip_ids=("ready",), output_resolution="4k"
+    )
+
+    assert result.eligible == ()
+    assert result.skipped == ("ready",)
+    assert "4K source" in result.reasons["ready"]
