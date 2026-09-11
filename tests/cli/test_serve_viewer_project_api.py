@@ -524,9 +524,9 @@ def test_annotation_preview_timing_uses_authoritative_clip_frame_map(
     assert response.body["timestamp_authority"] == "source_decoded_frame_integer_pts"
     assert response.body["time_base"] == {"numerator": 1, "denominator": 25}
     assert response.body["frames"] == [
-        {"source_pts": 2250, "clip_time_sec": 0.0},
-        {"source_pts": 2251, "clip_time_sec": 0.04},
-        {"source_pts": 2254, "clip_time_sec": 0.16},
+        {"source_frame_index": 20, "source_pts": 2250, "clip_time_sec": 0.0},
+        {"source_frame_index": 21, "source_pts": 2251, "clip_time_sec": 0.04},
+        {"source_frame_index": 22, "source_pts": 2254, "clip_time_sec": 0.16},
     ]
 
 

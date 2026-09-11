@@ -258,6 +258,30 @@ def test_srt_timeline_uses_one_bidirectional_source_frame_authority() -> None:
     assert "srtPosePriorMode || fixedTrackVisualPoseMode" in viewer
 
 
+def test_viewer_uses_authoritative_pts_for_frame_time_sync() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "window.CadsceneAnnotationPts?.sourceFrameAtTime" in viewer
+    assert "window.CadsceneAnnotationPts?.clipTimeAtSourceFrame" in viewer
+    assert "videoFrameAtCurrentTime()" in viewer
+    assert '"video_playback"' in viewer
+
+
+def test_pure_rotation_keeps_frame_coordinator_current_without_applying_track_pose() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "if (!pureRotationPlaybackActive && cameraTrack && camera" in viewer
+    assert 'selectSourceFrame(videoFrameAtCurrentTime(), "video_seek"' in viewer
+    assert "window.cadsceneRefreshPureRotationPose?.();" in viewer
+
+
+def test_route_picker_considers_all_visible_srt_routes() -> None:
+    viewer = _read("viewer_legacy.js")
+
+    assert "sfmRaycaster.intersectObjects(candidates.map((candidate) => candidate.line), false)" in viewer
+    assert "candidate.line === hit.object" in viewer
+
+
 def test_timeline_seek_drops_stale_async_fallbacks() -> None:
     viewer = _read("viewer_legacy.js")
     seek = viewer[
@@ -348,7 +372,8 @@ def test_sfm_initialization_retimes_the_loaded_track_with_authoritative_fps() ->
 
     assert "const fps = Number(params.fps);" in viewer
     assert "cameraTrack.fps = fps;" in viewer
-    assert "keyframe.time = frameToTime(Number(keyframe.frame));" in viewer
+    assert "const exactTime = frameToTime(Number(keyframe.frame));" in viewer
+    assert "if (Number.isFinite(exactTime)) keyframe.time = exactTime;" in viewer
 
 
 def test_bottom_keyframe_edits_are_persisted_to_the_active_run() -> None:

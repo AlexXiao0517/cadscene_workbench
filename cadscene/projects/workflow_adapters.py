@@ -456,7 +456,7 @@ class ExistingWorkflowAdapter:
             int(metadata.get("height", 0)),
             normalize_reconstruction_resolution(settings.get("reconstruction_resolution")),
         )
-        return (
+        command = [
             sys.executable,
             "-m",
             "cadscene.cli.plan_srt_adaptive_frames",
@@ -478,7 +478,11 @@ class ExistingWorkflowAdapter:
             str(height),
             "--progress-file",
             str(inputs.attempt_directory / "adapter_progress.json"),
-        )
+        ]
+        cache_root = inputs.parameters.get("prepared_frame_cache_root")
+        if cache_root not in (None, ""):
+            command.extend(["--cache-root", str(cache_root)])
+        return tuple(command)
 
     def _srt_fusion_command(self, inputs: AdapterInputs) -> tuple[str, ...]:
         if inputs.srt_path is None:  # guarded by prepare_inputs
@@ -685,7 +689,7 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="6",
+                version="7",
                 srt_requirement="fixed_track",
                 modules=(
                     "cadscene.cli.plan_srt_adaptive_frames",

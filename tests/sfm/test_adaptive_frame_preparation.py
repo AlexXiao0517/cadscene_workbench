@@ -7,11 +7,93 @@ import numpy as np
 import pytest
 
 from cadscene.sfm.adaptive_frame_preparation import (
+    hydrate_prepared_cache,
     preparation_identity,
     prepare_adaptive_candidates,
+    publish_prepared_cache,
     publish_selected_candidates,
     validate_prepared_images,
 )
+
+
+def test_content_addressed_cache_hydrates_a_new_attempt(
+    tmp_path: Path,
+) -> None:
+    cv2 = pytest.importorskip("cv2")
+    candidate_dir = tmp_path / "candidates"
+    candidate_dir.mkdir()
+    paths = []
+    for frame, value in ((0, 20), (3, 80)):
+        path = candidate_dir / f"frame_{frame:06d}.png"
+        assert cv2.imwrite(
+            str(path), np.full((6, 8, 3), value, dtype=np.uint8)
+        )
+        paths.append(path)
+    from cadscene.sfm.adaptive_frame_preparation import PreparedCandidates
+
+    prepared = PreparedCandidates(
+        frames=(0, 3),
+        sharpness=np.asarray([1.0, 2.0]),
+        paths=tuple(paths),
+        pts_time_sec=(0.0, 0.12),
+        output_size=(8, 6),
+    )
+    identity = {"planner_version": "2", "output_size": [8, 6]}
+    first_images = tmp_path / "attempt-1" / "images"
+    manifest = publish_selected_candidates(
+        prepared,
+        selected_frames=[0, 3],
+        images_dir=first_images,
+        identity=identity,
+    )
+    first_plan = tmp_path / "attempt-1" / "plan.json"
+    first_plan.write_text(
+        json.dumps(
+            {
+                "schema_version": "adaptive_sfm_frame_plan_v1",
+                "source_frames": [0, 3],
+                "prepared_images_dir": str(first_images),
+                "prepared_images_manifest": str(manifest),
+                "preparation_identity": identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cache_entry = publish_prepared_cache(
+        first_plan,
+        first_images,
+        tmp_path / "project-cache",
+        identity=identity,
+        output_size=(8, 6),
+    )
+    second_plan = tmp_path / "attempt-2" / "plan.json"
+    second_images = tmp_path / "attempt-2" / "images"
+    reused = hydrate_prepared_cache(
+        tmp_path / "project-cache",
+        second_plan,
+        second_images,
+        identity=identity,
+        output_size=(8, 6),
+    )
+
+    assert cache_entry.is_dir()
+    assert reused is not None
+    assert reused["source_frames"] == [0, 3]
+    assert Path(reused["prepared_images_dir"]) == second_images
+    validate_prepared_images(
+        second_images,
+        source_frames=[0, 3],
+        expected_identity=identity,
+        expected_size=(8, 6),
+    )
+    assert hydrate_prepared_cache(
+        tmp_path / "project-cache",
+        tmp_path / "attempt-3" / "plan.json",
+        tmp_path / "attempt-3" / "images",
+        identity={**identity, "output_size": [10, 6]},
+        output_size=(10, 6),
+    ) is None
 
 
 class _SequentialCapture:

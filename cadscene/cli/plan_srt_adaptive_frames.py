@@ -13,8 +13,10 @@ import numpy as np
 from cadscene.dji.metadata import load_dji_pose_priors
 from cadscene.sfm.adaptive_sampling import select_adaptive_ordinals
 from cadscene.sfm.adaptive_frame_preparation import (
+    hydrate_prepared_cache,
     preparation_identity,
     prepare_adaptive_candidates,
+    publish_prepared_cache,
     publish_selected_candidates,
     validate_prepared_images,
 )
@@ -33,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconstruct-width", required=True, type=int)
     parser.add_argument("--reconstruct-height", required=True, type=int)
     parser.add_argument("--progress-file", type=Path)
+    parser.add_argument("--cache-root", type=Path)
     return parser
 
 
@@ -123,6 +126,21 @@ def main(argv: list[str] | None = None) -> int:
         _write_progress(args.progress_file, "prepared_cache", "已复用验证通过的求解帧", 0.1)
         print("adaptive solve-image cache hit", flush=True)
         return 0
+    if args.cache_root is not None and hydrate_prepared_cache(
+        args.cache_root,
+        args.output,
+        args.images_output,
+        identity=identity,
+        output_size=output_size,
+    ) is not None:
+        _write_progress(
+            args.progress_file,
+            "prepared_cache",
+            "已复用项目中验证通过的求解帧",
+            0.1,
+        )
+        print("project adaptive solve-image cache hit", flush=True)
+        return 0
     dji = load_dji_pose_priors(args.video, candidate_frames)
     rotations = (
         dji.world_from_camera
@@ -178,6 +196,14 @@ def main(argv: list[str] | None = None) -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if args.cache_root is not None:
+        publish_prepared_cache(
+            args.output,
+            args.images_output,
+            args.cache_root,
+            identity=identity,
+            output_size=output_size,
+        )
     _write_progress(
         args.progress_file,
         "prepared_frames",

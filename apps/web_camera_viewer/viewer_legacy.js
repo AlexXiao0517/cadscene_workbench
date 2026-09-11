@@ -381,11 +381,36 @@
   function currentFrame() {
     if (frameCoordinator) return frameCoordinator.currentFrame();
     if (manualFrameOverride !== null) return manualFrameOverride;
-    return Math.round((video.currentTime || 0) * cameraTrack.fps);
+    return videoFrameAtCurrentTime();
+  }
+
+  function hasExplicitCfrTiming() {
+    return cameraTrack?.meta?.cfr_confirmed === true;
+  }
+
+  function videoFrameAtTime(timeSec) {
+    const exact = window.CadsceneAnnotationPts?.sourceFrameAtTime?.(Number(timeSec));
+    if (Number.isInteger(exact)) return exact;
+    if (hasExplicitCfrTiming()) return Math.round(Number(timeSec || 0) * cameraTrack.fps);
+    return frameCoordinator?.currentFrame?.() ?? manualFrameOverride ?? 0;
+  }
+
+  function videoFrameAtCurrentTime() {
+    return videoFrameAtTime(video.currentTime || 0);
   }
 
   function frameToTime(frame) {
-    return frame / cameraTrack.fps;
+    const exact = window.CadsceneAnnotationPts?.clipTimeAtSourceFrame?.(Number(frame));
+    if (Number.isFinite(exact)) return exact;
+    if (hasExplicitCfrTiming()) return Number(frame) / cameraTrack.fps;
+    return null;
+  }
+
+  function resolvedFrameTime(frame, fallback = null) {
+    const exact = frameToTime(frame);
+    if (Number.isFinite(exact)) return exact;
+    const candidate = Number(fallback);
+    return Number.isFinite(candidate) ? candidate : Number(video.currentTime || 0);
   }
 
   function clampSelectableFrame(frame) {
@@ -400,7 +425,7 @@
     } else {
       manualFrameOverride = frame;
     }
-    if (cameraTrack && camera && (fixedTrackVisualPoseMode || srtPosePriorMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
+    if (!pureRotationPlaybackActive && cameraTrack && camera && (fixedTrackVisualPoseMode || srtPosePriorMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
       camera = poseForFrame(frame);
       syncControls();
     }
@@ -411,6 +436,7 @@
         followCamera: origin === "video_playback" && followOnPlay,
       });
     }
+    if (pureRotationPlaybackActive) window.cadsceneRefreshPureRotationPose?.();
   }
 
   function ensureFrameCoordinator() {
@@ -419,7 +445,7 @@
       throw new Error("frame_sync.js 未加载");
     }
     frameCoordinator = window.CadsceneFrameSync.createCoordinator({
-      initialFrame: manualFrameOverride ?? Math.round((video.currentTime || 0) * (cameraTrack?.fps || DEFAULT_FPS)),
+      initialFrame: manualFrameOverride ?? videoFrameAtCurrentTime(),
       clampFrame: clampSelectableFrame,
       onLogicalFrame: applyLogicalSourceFrame,
       seekVideo: (frame) => {
@@ -444,7 +470,11 @@
   }
 
   function makeKeyframe(frame, pose, source) {
-    const entry = { frame: Number(frame), time: frameToTime(Number(frame)), camera: cloneCameraPose(pose) };
+    const entry = {
+      frame: Number(frame),
+      time: resolvedFrameTime(Number(frame)),
+      camera: cloneCameraPose(pose),
+    };
     if (source) entry.source = source;
     return entry;
   }
@@ -453,13 +483,13 @@
     const frame = Number(entry.frame);
     const existing = findKeyframe(frame);
     if (existing) {
-      existing.time = Number(entry.time ?? frameToTime(frame));
+      existing.time = resolvedFrameTime(frame, entry.time ?? existing.time);
       existing.camera = cloneCameraPose(entry.camera);
       if (entry.source) existing.source = entry.source;
     } else {
       cameraTrack.keyframes.push({
         frame,
-        time: Number(entry.time ?? frameToTime(frame)),
+        time: resolvedFrameTime(frame, entry.time),
         source: entry.source,
         camera: cloneCameraPose(entry.camera),
       });
@@ -663,6 +693,7 @@
       version: 1,
       video: VIDEO_PATH,
       fps: DEFAULT_FPS,
+      meta: { cfr_confirmed: true },
       keyframes: [{ frame: 0, time: 0, camera: cloneCameraPose(initialPose) }],
     };
   }
@@ -895,7 +926,7 @@
       ? "当前：有人工关键帧"
       : "当前：无人工关键帧";
     if (qualitySummary && isSrtTimelineMode()) {
-      qualitySummary.textContent = `${frameToTime(frame).toFixed(3)} 秒 · 源帧 ${frame} · 人工关键帧 ${manualKeyframes().length}`;
+      qualitySummary.textContent = `${resolvedFrameTime(frame).toFixed(3)} 秒 · 源帧 ${frame} · 人工关键帧 ${manualKeyframes().length}`;
     }
     updateSrtPoseCurrentFrameInfo(frame);
     renderQualityTimeline();
@@ -1819,18 +1850,20 @@
 
     function pickSrtTrackRoute(event) {
       if (!(srtPosePriorMode || fixedTrackVisualPoseMode)) return null;
-      const useAnchored = Boolean(
-        anchoredTrackLine?.visible && sfmAnchoredTrack.length > 1,
-      );
-      const line = useAnchored ? anchoredTrackLine : globalTrackLine;
-      const track = useAnchored ? sfmAnchoredTrack : sfmGlobalTrack;
-      if (!line || !line.visible || track.length < 2) return null;
+      const candidates = [
+        { line: anchoredTrackLine, track: sfmAnchoredTrack },
+        { line: globalTrackLine, track: sfmGlobalTrack },
+      ].filter((candidate) => candidate.line?.visible && candidate.track.length > 1);
+      if (candidates.length === 0) return null;
       const rect = renderer.domElement.getBoundingClientRect();
       sfmPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       sfmPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       sfmRaycaster.setFromCamera(sfmPointer, inspectCamera);
-      const hit = sfmRaycaster.intersectObject(line, false)[0];
+      const hit = sfmRaycaster.intersectObjects(candidates.map((candidate) => candidate.line), false)[0];
       if (!hit) return null;
+      const candidate = candidates.find((candidate) => candidate.line === hit.object);
+      if (!candidate) return null;
+      const track = candidate.track;
       const index = Math.max(
         0,
         Math.min(track.length - 2, Number.isInteger(hit.index) ? hit.index : 0),
@@ -2012,7 +2045,7 @@
       return;
     }
     if (!video.paused) {
-      const frame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      const frame = videoFrameAtCurrentTime();
       selectSourceFrame(frame, "video_playback", { media: "none" });
       return;
     }
@@ -2075,7 +2108,7 @@
 
   function applyFramePreview(targetFrame) {
     manualFrameOverride = targetFrame;
-    if (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0) {
+    if (!pureRotationPlaybackActive && (fixedTrackVisualPoseMode || sfmFollowMode || cameraTrack.keyframes.length > 0)) {
       camera = poseForFrame(targetFrame);
       syncControls();
     }
@@ -2086,6 +2119,10 @@
   async function seekVideoToFrame(targetFrame) {
     const generation = ++mediaSeekGeneration;
     const targetTime = frameToTime(targetFrame);
+    if (!Number.isFinite(targetTime)) {
+      setStatus("精确帧时间映射尚未就绪，请稍候再试");
+      return;
+    }
     const duration = Number.isFinite(video.duration) ? video.duration : targetTime;
     const clampedTime = clamp(targetTime, 0, Math.max(duration, 0));
     requestedMediaFrame = targetFrame;
@@ -2108,7 +2145,7 @@
     await waitForVideoSeek();
     if (generation !== mediaSeekGeneration) return;
 
-    let actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+    let actualFrame = videoFrameAtCurrentTime();
     if (Math.abs(actualFrame - targetFrame) > 2) {
       const base = videoBaseUrl();
       video.src = `${base}#t=${clampedTime.toFixed(3)}`;
@@ -2118,13 +2155,13 @@
         video.addEventListener("error", resolve, { once: true });
       });
       if (generation !== mediaSeekGeneration) return;
-      actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      actualFrame = videoFrameAtCurrentTime();
       if (Math.abs(actualFrame - targetFrame) > 2) {
         video.src = base;
         assignCurrentTime();
         await waitForVideoSeek();
         if (generation !== mediaSeekGeneration) return;
-        actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+        actualFrame = videoFrameAtCurrentTime();
       }
     }
 
@@ -2245,7 +2282,8 @@
     if (cameraTrack && Number.isFinite(fps) && fps > 0) {
       cameraTrack.fps = fps;
       for (const keyframe of cameraTrack.keyframes) {
-        keyframe.time = frameToTime(Number(keyframe.frame));
+        const exactTime = frameToTime(Number(keyframe.frame));
+        if (Number.isFinite(exactTime)) keyframe.time = exactTime;
       }
       appliedFields.push("fps");
     }
@@ -3381,12 +3419,15 @@
       const code = video.error?.code ?? "?";
       videoInfo.textContent = `视频加载失败（code ${code}），需 H.264 编码的 MP4`;
     });
+    window.addEventListener("cadscenePtsAuthorityReady", () => {
+      selectSourceFrame(videoFrameAtCurrentTime(), "video_seek", { media: "none" });
+    });
     video.addEventListener("play", () => {
       mediaSeekGeneration += 1;
       manualFrameOverride = null;
       requestedMediaFrame = null;
       selectSourceFrame(
-        Math.round((video.currentTime || 0) * cameraTrack.fps),
+        videoFrameAtCurrentTime(),
         "video_playback",
         { media: "none" },
       );
@@ -3394,25 +3435,25 @@
     });
     video.addEventListener("pause", () => updateViews({ forceOverlay: true }));
     video.addEventListener("timeupdate", () => {
-      if (video.paused || pureRotationPlaybackActive) return;
+      if (video.paused) return;
       selectSourceFrame(
-        Math.round((video.currentTime || 0) * cameraTrack.fps),
+        videoFrameAtCurrentTime(),
         "video_playback",
         { media: "none" },
       );
     }, { passive: true });
     video.addEventListener("seeking", () => {
-      if (pureRotationPlaybackActive) return;
-      const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      const actualFrame = videoFrameAtCurrentTime();
       const frame = requestedMediaFrame ?? actualFrame;
       selectSourceFrame(frame, "video_seek", { media: "none" });
     });
     video.addEventListener("seeked", () => {
       if (pureRotationPlaybackActive) {
+        selectSourceFrame(videoFrameAtCurrentTime(), "video_seek", { media: "none" });
         window.cadsceneRefreshPureRotationPose?.();
         return;
       }
-      const actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
+      const actualFrame = videoFrameAtCurrentTime();
       const targetFrame = manualFrameOverride ?? actualFrame;
       selectSourceFrame(targetFrame, "video_seek", { media: "none" });
     });

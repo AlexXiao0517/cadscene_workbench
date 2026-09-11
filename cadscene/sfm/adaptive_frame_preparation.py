@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -244,3 +245,150 @@ def validate_prepared_images(
             if image is None or (image.shape[1], image.shape[0]) != expected_size:
                 raise ValueError(f"prepared image dimensions mismatch for frame {expected_frame}")
     return rows
+
+
+def _cache_key(identity: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        dict(identity), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_cache_plan(
+    cache_entry: Path,
+    *,
+    identity: Mapping[str, object],
+    output_size: tuple[int, int],
+) -> dict[str, object] | None:
+    plan_path = cache_entry / "adaptive_frame_plan.json"
+    try:
+        payload = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict):
+            return None
+        source_frames = payload.get("source_frames")
+        if (
+            payload.get("preparation_identity") != dict(identity)
+            or not isinstance(source_frames, list)
+        ):
+            return None
+        validate_prepared_images(
+            cache_entry / "images",
+            source_frames=[int(frame) for frame in source_frames],
+            expected_identity=identity,
+            expected_size=output_size,
+        )
+        return payload
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def publish_prepared_cache(
+    plan_path: str | Path,
+    images_dir: str | Path,
+    cache_root: str | Path,
+    *,
+    identity: Mapping[str, object],
+    output_size: tuple[int, int],
+) -> Path:
+    """Publish one verified plan as an immutable project-level cache entry."""
+
+    source_plan = Path(plan_path)
+    source_images = Path(images_dir)
+    payload = json.loads(source_plan.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("adaptive frame plan must be an object")
+    source_frames = payload.get("source_frames")
+    if (
+        payload.get("preparation_identity") != dict(identity)
+        or not isinstance(source_frames, list)
+    ):
+        raise ValueError("adaptive frame plan does not match the cache identity")
+    validate_prepared_images(
+        source_images,
+        source_frames=[int(frame) for frame in source_frames],
+        expected_identity=identity,
+        expected_size=output_size,
+    )
+
+    root = Path(cache_root)
+    root.mkdir(parents=True, exist_ok=True)
+    entry = root / _cache_key(identity)
+    if _load_cache_plan(entry, identity=identity, output_size=output_size) is not None:
+        return entry
+
+    temporary = root / f".{entry.name}.{uuid4().hex}.tmp"
+    temporary_images = temporary / "images"
+    temporary_images.mkdir(parents=True)
+    try:
+        for source in source_images.glob("frame_*.png"):
+            shutil.copy2(source, temporary_images / source.name)
+        shutil.copy2(source_images / MANIFEST_NAME, temporary_images / MANIFEST_NAME)
+        cached_payload = {
+            **payload,
+            "prepared_images_dir": str(temporary_images),
+            "prepared_images_manifest": str(temporary_images / MANIFEST_NAME),
+        }
+        _write_json_atomic(temporary / "adaptive_frame_plan.json", cached_payload)
+        if _load_cache_plan(
+            temporary, identity=identity, output_size=output_size
+        ) is None:
+            raise ValueError("new adaptive frame cache entry failed validation")
+        if entry.exists():
+            quarantine = root / f".{entry.name}.invalid.{uuid4().hex}"
+            os.replace(entry, quarantine)
+        os.replace(temporary, entry)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return entry
+
+
+def hydrate_prepared_cache(
+    cache_root: str | Path,
+    plan_path: str | Path,
+    images_dir: str | Path,
+    *,
+    identity: Mapping[str, object],
+    output_size: tuple[int, int],
+) -> dict[str, object] | None:
+    """Copy a verified cache entry into a new attempt and rewrite local paths."""
+
+    entry = Path(cache_root) / _cache_key(identity)
+    cached = _load_cache_plan(entry, identity=identity, output_size=output_size)
+    if cached is None:
+        return None
+    source_frames = [int(frame) for frame in cached["source_frames"]]
+    output = Path(images_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    for stale in output.glob("frame_*.png"):
+        stale.unlink()
+    (output / MANIFEST_NAME).unlink(missing_ok=True)
+    for source in (entry / "images").glob("frame_*.png"):
+        shutil.copy2(source, output / source.name)
+    shutil.copy2(entry / "images" / MANIFEST_NAME, output / MANIFEST_NAME)
+    validate_prepared_images(
+        output,
+        source_frames=source_frames,
+        expected_identity=identity,
+        expected_size=output_size,
+    )
+    hydrated = {
+        **cached,
+        "prepared_images_dir": str(output),
+        "prepared_images_manifest": str(output / MANIFEST_NAME),
+    }
+    _write_json_atomic(Path(plan_path), hydrated)
+    return hydrated

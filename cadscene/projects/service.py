@@ -525,6 +525,7 @@ class ProjectService:
             },
             "frames": [
                 {
+                    "source_frame_index": frame.ordinal,
                     "source_pts": frame.pts,
                     "clip_time_sec": float((frame.pts - first_pts) * time_base),
                 }
@@ -3287,7 +3288,7 @@ class ProjectService:
             adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
             physical_clip = _clip_output_path(clip)
             use_source_asset = _uses_whole_source_srt_media(
-                clip, clips_manifest.clips
+                clip, clips_manifest.clips, project.source_assets
             )
             dependency_ids = (
                 *(
@@ -3324,6 +3325,7 @@ class ProjectService:
                 clips_revision=clips_manifest.revision,
                 reconstruction_identity=reconstruction_identity,
                 reconstruction_reuse=reconstruction_reuse,
+                whole_source_media=use_source_asset,
             )
             submitted_solve = self.queue.submit(solve)
             if submitted_solve.job_id == solve.job_id:
@@ -5102,7 +5104,7 @@ class ProjectService:
             item for item in clips_manifest.clips if item.clip_id == job.clip_id
         )
         adapter = self.adapters.for_workflow(str(clip.resolved_workflow))
-        if _uses_whole_source_srt_media(clip, clips_manifest.clips):
+        if job.request_parameters.get("whole_source_media") is True:
             video_path, frame_map_path = _prepare_whole_source_srt_media(
                 clip,
                 project.source_assets,
@@ -5165,6 +5167,16 @@ class ProjectService:
         reconstruction_reuse = job.request_parameters.get(
             "reconstruction_reuse"
         )
+        if adapter.name == "srt_fixed_track_visual_pose":
+            adapter_parameters = {
+                **adapter_parameters,
+                "prepared_frame_cache_root": str(
+                    self.projects_root
+                    / project_id
+                    / "cache"
+                    / "adaptive_sfm_frames"
+                ),
+            }
         if (
             adapter.name == "srt_fixed_track_visual_pose"
             and isinstance(reconstruction_reuse, Mapping)
@@ -6543,6 +6555,7 @@ class ProjectService:
         clips_revision: int,
         reconstruction_identity: str | None = None,
         reconstruction_reuse: Mapping[str, str] | None = None,
+        whole_source_media: bool = False,
     ) -> QueueJob:
         identity_payload = _job_identity_payload(
             job_type=job_type,
@@ -6559,6 +6572,8 @@ class ProjectService:
         operation_id = self._identity()
         attempt_dir = self._attempt_directory(project_id, job_id, 1)
         request_parameters: dict[str, object] = {}
+        if whole_source_media:
+            request_parameters["whole_source_media"] = True
         if adapter_name == "srt_fixed_track_visual_pose":
             request_parameters["terrain_sources"] = list(
                 _terrain_source_snapshot(project_assets)
@@ -7654,8 +7669,98 @@ def _clip_frame_map_path(clip: ClipDefinition) -> Path | None:
     return None if value in (None, "") else Path(str(value))
 
 
+_WHOLE_SOURCE_FRAME_INDEX_CACHE: dict[tuple[object, ...], DecodedFrameIndex] = {}
+_WHOLE_SOURCE_FRAME_INDEX_CACHE_LOCK = threading.Lock()
+
+
+def _clip_asset_descriptor(
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object],
+    name: str,
+) -> Mapping[str, object] | None:
+    snapshot = _clip_input_snapshot(clip)
+    value = snapshot.get(name) if snapshot is not None else project_assets.get(name)
+    return value if isinstance(value, Mapping) else None
+
+
+def _validated_whole_source_frame_index(
+    clip: ClipDefinition,
+    project_assets: Mapping[str, object],
+) -> DecodedFrameIndex | None:
+    descriptor = _clip_asset_descriptor(clip, project_assets, "video")
+    source = _clip_asset_path(clip, project_assets, "video")
+    expected_digest = descriptor.get("sha256") if descriptor is not None else None
+    if (
+        source is None
+        or not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest) is None
+    ):
+        return None
+    try:
+        if source.is_symlink():
+            return None
+        resolved = source.resolve(strict=True)
+        if not resolved.is_file():
+            return None
+        stat = resolved.stat()
+    except OSError:
+        return None
+    expected_size = descriptor.get("size_bytes") if descriptor is not None else None
+    try:
+        if expected_size is not None and int(expected_size) != stat.st_size:
+            return None
+        time_base = _fraction_time_base(clip)
+        start_pts = int(clip.analysis["source_start_pts"])
+        end_pts = int(clip.analysis["source_end_pts_exclusive"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    cache_key = (
+        str(resolved),
+        stat.st_size,
+        stat.st_mtime_ns,
+        expected_digest.lower(),
+        time_base.numerator,
+        time_base.denominator,
+        start_pts,
+        end_pts,
+    )
+    with _WHOLE_SOURCE_FRAME_INDEX_CACHE_LOCK:
+        cached = _WHOLE_SOURCE_FRAME_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    digest = sha256()
+    try:
+        _update_digest_from_file(digest, resolved)
+    except OSError:
+        return None
+    if digest.hexdigest() != expected_digest.lower():
+        return None
+    try:
+        frame_index = probe_fast_frame_index(resolved)
+        if frame_index is None:
+            frame_index = probe_decoded_frame_index(resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if (
+        frame_index.time_base != time_base
+        or frame_index.source_start_pts != start_pts
+        or frame_index.source_end_pts_exclusive != end_pts
+    ):
+        return None
+    with _WHOLE_SOURCE_FRAME_INDEX_CACHE_LOCK:
+        if len(_WHOLE_SOURCE_FRAME_INDEX_CACHE) >= 16:
+            _WHOLE_SOURCE_FRAME_INDEX_CACHE.pop(
+                next(iter(_WHOLE_SOURCE_FRAME_INDEX_CACHE))
+            )
+        _WHOLE_SOURCE_FRAME_INDEX_CACHE[cache_key] = frame_index
+    return frame_index
+
+
 def _uses_whole_source_srt_media(
-    clip: ClipDefinition, clips: Sequence[ClipDefinition]
+    clip: ClipDefinition,
+    clips: Sequence[ClipDefinition],
+    project_assets: Mapping[str, object],
 ) -> bool:
     if clip.resolved_workflow not in {
         "srt_full_pose",
@@ -7668,13 +7773,16 @@ def _uses_whole_source_srt_media(
     end = clip.analysis.get("end_boundary")
     start_reasons = start.get("reasons") if isinstance(start, Mapping) else None
     end_reasons = end.get("reasons") if isinstance(end, Mapping) else None
-    return (
+    boundary_matches = (
         clip.analysis.get("interval_semantics") == "half_open"
         and isinstance(start_reasons, list)
         and "source_start" in start_reasons
         and isinstance(end_reasons, list)
         and "source_end" in end_reasons
     )
+    return boundary_matches and _validated_whole_source_frame_index(
+        clip, project_assets
+    ) is not None
 
 
 def _prepare_whole_source_srt_media(
@@ -7683,22 +7791,14 @@ def _prepare_whole_source_srt_media(
     attempt_directory: Path,
 ) -> tuple[Path, Path]:
     source = _clip_asset_path(clip, project_assets, "video")
-    if source is None or not source.is_file():
-        raise FileNotFoundError("whole-source SRT video asset is unavailable")
-    frame_index = probe_fast_frame_index(source)
-    if frame_index is None:
-        frame_index = probe_decoded_frame_index(source)
+    frame_index = _validated_whole_source_frame_index(clip, project_assets)
+    if source is None or frame_index is None:
+        raise ValueError(
+            "whole-source SRT video fingerprint or exact frame interval is invalid"
+        )
     time_base = _fraction_time_base(clip)
     start_pts = int(clip.analysis["source_start_pts"])
     end_pts = int(clip.analysis["source_end_pts_exclusive"])
-    if (
-        frame_index.time_base != time_base
-        or frame_index.source_start_pts != start_pts
-        or frame_index.source_end_pts_exclusive != end_pts
-    ):
-        raise ValueError(
-            "whole-source SRT clip does not exactly match the source video frame interval"
-        )
     frame_map = build_clip_frame_map(
         frame_index,
         [

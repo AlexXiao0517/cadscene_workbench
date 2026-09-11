@@ -549,6 +549,9 @@ def _fixed_track_inputs(
         settings.pop("horizontal_fov_deg")
     parameters.pop("srt_full_pose")
     parameters["srt_fixed_track_visual_pose"] = settings
+    parameters["prepared_frame_cache_root"] = str(
+        tmp_path / "project-cache" / "adaptive-sfm"
+    )
     return AdapterInputs(
         inputs.project_id,
         inputs.clip_id,
@@ -573,7 +576,7 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "6"
+    assert adapter.version == "7"
     assert len(commands) == 3
     planner, sfm, transfer = commands
     assert planner[1:3] == ("-m", "cadscene.cli.plan_srt_adaptive_frames")
@@ -584,6 +587,9 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
     assert planner[planner.index("--reconstruct-height") + 1] == "1080"
     assert planner[planner.index("--progress-file") + 1].endswith(
         "adapter_progress.json"
+    )
+    assert planner[planner.index("--cache-root") + 1].endswith(
+        "project-cache\\adaptive-sfm"
     )
     assert sfm[1:3] == ("-m", "cadscene.cli.run_sfm")
     assert sfm[sfm.index("--backend") + 1] == "colmap_cli"

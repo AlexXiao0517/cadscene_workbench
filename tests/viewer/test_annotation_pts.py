@@ -44,6 +44,19 @@ def test_source_pts_seek_uses_nearest_authoritative_irregular_frame() -> None:
     assert _node(f"m.clipTimeAtSourcePts({json.dumps(frames)}, 200)") == 0.11
 
 
+def test_source_frame_lookup_uses_authoritative_irregular_timestamps() -> None:
+    frames = [
+        {"source_frame_index": 20, "source_pts": 100, "clip_time_sec": 0.0},
+        {"source_frame_index": 21, "source_pts": 104, "clip_time_sec": 0.04},
+        {"source_frame_index": 22, "source_pts": 111, "clip_time_sec": 0.11},
+    ]
+
+    assert _node(f"m.sourceFrameAtTime({json.dumps(frames)}, 0.019)") == 20
+    assert _node(f"m.sourceFrameAtTime({json.dumps(frames)}, 0.08)") == 22
+    assert _node(f"m.clipTimeAtSourceFrame({json.dumps(frames)}, 21)") == 0.04
+    assert _node(f"m.clipTimeAtSourceFrame({json.dumps(frames)}, 200)") == 0.11
+
+
 def test_video_tracking_visual_never_freezes_or_interpolates_across_lost() -> None:
     results = [
         {

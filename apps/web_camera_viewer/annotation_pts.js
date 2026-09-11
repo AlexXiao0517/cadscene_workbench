@@ -41,6 +41,44 @@
     return Number.isFinite(clipTime) ? clipTime : null;
   }
 
+  function sourceFrameAtTime(frames, clipTimeSec) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const target = Number(clipTimeSec);
+    if (!Number.isFinite(target)) return null;
+    let low = 0;
+    let high = frames.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(frames[middle].clip_time_sec) < target) low = middle + 1;
+      else high = middle;
+    }
+    const after = frames[low];
+    const before = low > 0 ? frames[low - 1] : after;
+    const selected = Math.abs(Number(before.clip_time_sec) - target)
+      <= Math.abs(Number(after.clip_time_sec) - target) ? before : after;
+    return Number.isInteger(selected.source_frame_index)
+      ? selected.source_frame_index : null;
+  }
+
+  function clipTimeAtSourceFrame(frames, sourceFrameIndex) {
+    if (!Array.isArray(frames) || frames.length === 0) return null;
+    const target = Number(sourceFrameIndex);
+    if (!Number.isFinite(target)) return null;
+    let low = 0;
+    let high = frames.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(frames[middle].source_frame_index) < target) low = middle + 1;
+      else high = middle;
+    }
+    const after = frames[low];
+    const before = low > 0 ? frames[low - 1] : after;
+    const selected = Math.abs(Number(before.source_frame_index) - target)
+      <= Math.abs(Number(after.source_frame_index) - target) ? before : after;
+    const clipTime = Number(selected.clip_time_sec);
+    return Number.isFinite(clipTime) ? clipTime : null;
+  }
+
   function hidden(reason, extra = {}) {
     return { visible: false, reason, ...extra };
   }
@@ -217,6 +255,18 @@
         return sourcePtsAtTime(frames, Number(video?.currentTime || 0));
       },
 
+      sourceFrameAtTime(clipTimeSec) {
+        return sourceFrameAtTime(frames, clipTimeSec);
+      },
+
+      clipTimeAtSourceFrame(sourceFrameIndex) {
+        return clipTimeAtSourceFrame(frames, sourceFrameIndex);
+      },
+
+      hasFrameMap() {
+        return frames.length > 0;
+      },
+
       sourceTimeBase() {
         return sourceTimeBase ? { ...sourceTimeBase } : null;
       },
@@ -298,6 +348,8 @@
   return {
     sourcePtsAtTime,
     clipTimeAtSourcePts,
+    sourceFrameAtTime,
+    clipTimeAtSourceFrame,
     videoTrackVisual,
     cadAnchorVisual,
     cadAnchorCreationDecision,

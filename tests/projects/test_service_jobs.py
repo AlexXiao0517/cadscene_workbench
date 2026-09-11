@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from fractions import Fraction
+from hashlib import sha256
 from pathlib import Path
 import threading
 
@@ -249,7 +250,6 @@ def test_fixed_track_srt_does_not_require_legacy_clip_analysis_confirmation(
         "_confirmed_cad_georeference",
         lambda _assets: {"confirmed": True},
     )
-
     result = service.preflight_trajectory_jobs("p1")
 
     assert result.eligible == ("srt-track",)
@@ -341,12 +341,18 @@ def test_whole_source_srt_solve_runs_independently_from_preview_export(
         "_confirmed_cad_georeference",
         lambda _assets: {"confirmed": True},
     )
+    monkeypatch.setattr(
+        service_module,
+        "_validated_whole_source_frame_index",
+        lambda _clip, _assets: object(),
+    )
 
     result = service.enqueue_trajectory_jobs("p1")
 
     trajectory = queue.get(result.job_ids[0])
     preview_export = next(job for job in queue.jobs() if job.job_type == "clip_export")
     assert trajectory.depends_on_job_ids == ()
+    assert trajectory.request_parameters["whole_source_media"] is True
     assert preview_export.clip_id == trajectory.clip_id
     assert {trajectory.status, preview_export.status} == {"running"}
 
@@ -380,7 +386,12 @@ def test_whole_source_srt_media_builds_exact_attempt_local_frame_map(
 
     video, frame_map = service_module._prepare_whole_source_srt_media(
         selected,
-        {"video_path": str(source)},
+        {
+            "video": {
+                "path": str(source),
+                "sha256": sha256(source.read_bytes()).hexdigest(),
+            }
+        },
         tmp_path / "attempt",
     )
 
@@ -389,6 +400,55 @@ def test_whole_source_srt_media_builds_exact_attempt_local_frame_map(
     assert payload["full_source_partition"] is True
     assert payload["clips"][0]["clip_id"] == "whole"
     assert len(payload["clips"][0]["frames"]) == 25
+
+
+def test_whole_source_srt_decoupling_requires_matching_asset_digest_and_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = replace(
+        clip("whole", workflow="srt_full_pose"),
+        analysis={
+            **clip("whole", workflow="srt_full_pose").analysis,
+            "start_boundary": {"reasons": ["source_start"]},
+            "end_boundary": {"reasons": ["source_end"]},
+        },
+    )
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"verified-video")
+    exact_index = DecodedFrameIndex(
+        Fraction(1, 25),
+        tuple(
+            DecodedFrameTimestamp(
+                ordinal=ordinal,
+                pts=ordinal,
+                duration_pts=1,
+                timestamp_source="pts",
+            )
+            for ordinal in range(100)
+        ),
+    )
+    monkeypatch.setattr(
+        service_module, "probe_fast_frame_index", lambda _path: exact_index
+    )
+    valid_assets = {
+        "video": {
+            "path": str(source),
+            "sha256": sha256(source.read_bytes()).hexdigest(),
+            "size_bytes": source.stat().st_size,
+        }
+    }
+
+    assert service_module._uses_whole_source_srt_media(
+        selected, (selected,), valid_assets
+    ) is True
+    assert service_module._uses_whole_source_srt_media(
+        selected,
+        (selected,),
+        {"video": {**valid_assets["video"], "sha256": "0" * 64}},
+    ) is False
+    assert service_module._uses_whole_source_srt_media(
+        selected, (selected,), {"video_path": str(source)}
+    ) is False
 
 
 def test_project_package_exports_task3_public_interfaces() -> None:

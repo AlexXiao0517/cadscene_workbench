@@ -21,12 +21,14 @@ def test_planner_accepts_solve_image_output_and_dimensions() -> None:
             "--reconstruct-width", "1920",
             "--reconstruct-height", "1080",
             "--progress-file", "adapter_progress.json",
+            "--cache-root", "project-cache/adaptive-sfm",
         ]
     )
 
     assert args.images_output.name == "images"
     assert (args.reconstruct_width, args.reconstruct_height) == (1920, 1080)
     assert args.progress_file.name == "adapter_progress.json"
+    assert args.cache_root == Path("project-cache/adaptive-sfm")
 
 
 def test_matching_complete_plan_reuses_prepared_images(
