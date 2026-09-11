@@ -258,6 +258,18 @@ def test_srt_timeline_uses_one_bidirectional_source_frame_authority() -> None:
     assert "srtPosePriorMode || fixedTrackVisualPoseMode" in viewer
 
 
+def test_timeline_seek_drops_stale_async_fallbacks() -> None:
+    viewer = _read("viewer_legacy.js")
+    seek = viewer[
+        viewer.index("async function seekVideoToFrame") : viewer.index(
+            "function goToFrame", viewer.index("async function seekVideoToFrame")
+        )
+    ]
+
+    assert "const generation = ++mediaSeekGeneration;" in seek
+    assert seek.count("if (generation !== mediaSeekGeneration) return;") >= 2
+
+
 def test_fixed_track_workbench_shows_terrain_calibration_and_render_resolution() -> None:
     html = _read("index.html")
     workflow = _read("workflow.js")

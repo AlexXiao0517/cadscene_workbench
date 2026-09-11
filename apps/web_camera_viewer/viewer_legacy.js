@@ -98,6 +98,7 @@
   let frameCoordinator = null;
   let lastMediaSeekPromise = Promise.resolve();
   let requestedMediaFrame = null;
+  let mediaSeekGeneration = 0;
   let timelinePointerId = null;
   let lastOverlayDrawAt = 0;
   let videoRangeSupported = null;
@@ -2083,6 +2084,7 @@
   }
 
   async function seekVideoToFrame(targetFrame) {
+    const generation = ++mediaSeekGeneration;
     const targetTime = frameToTime(targetFrame);
     const duration = Number.isFinite(video.duration) ? video.duration : targetTime;
     const clampedTime = clamp(targetTime, 0, Math.max(duration, 0));
@@ -2104,6 +2106,7 @@
       setStatus(`视频跳转失败：${error.message}`);
     }
     await waitForVideoSeek();
+    if (generation !== mediaSeekGeneration) return;
 
     let actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
     if (Math.abs(actualFrame - targetFrame) > 2) {
@@ -2114,11 +2117,13 @@
         video.addEventListener("loadeddata", resolve, { once: true });
         video.addEventListener("error", resolve, { once: true });
       });
+      if (generation !== mediaSeekGeneration) return;
       actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       if (Math.abs(actualFrame - targetFrame) > 2) {
         video.src = base;
         assignCurrentTime();
         await waitForVideoSeek();
+        if (generation !== mediaSeekGeneration) return;
         actualFrame = Math.round((video.currentTime || 0) * cameraTrack.fps);
       }
     }
@@ -3377,6 +3382,7 @@
       videoInfo.textContent = `视频加载失败（code ${code}），需 H.264 编码的 MP4`;
     });
     video.addEventListener("play", () => {
+      mediaSeekGeneration += 1;
       manualFrameOverride = null;
       requestedMediaFrame = null;
       selectSourceFrame(
