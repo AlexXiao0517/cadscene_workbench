@@ -84,6 +84,57 @@ def _synthetic_case() -> tuple[SfmTrajectory, list[FixedTrackPosition], Sim3, di
     return trajectory, positions, mapping, source_world_from_camera
 
 
+def _long_route_case(
+    *, deformation_m: float,
+) -> tuple[SfmTrajectory, list[FixedTrackPosition]]:
+    frames = np.arange(101, dtype=np.int64) * 10
+    progress = np.linspace(0.0, 1.0, len(frames))
+    source_centers = np.column_stack(
+        (
+            12.0 * progress,
+            0.4 * np.sin(2.0 * np.pi * progress),
+            0.05 * np.sin(4.0 * np.pi * progress),
+        )
+    )
+    mapping = Sim3(
+        scale=250.0,
+        rotation=Rotation.from_euler("z", 18.0, degrees=True).as_matrix(),
+        translation=np.asarray([500.0, 800.0, 90.0]),
+    )
+    target_centers = mapping.apply(source_centers)
+    target_centers[:, 1] += deformation_m * np.sin(6.0 * np.pi * progress)
+    world_from_camera = Rotation.from_euler(
+        "zyx",
+        np.column_stack(
+            (
+                30.0 * progress,
+                np.full(len(frames), -25.0),
+                np.zeros(len(frames)),
+            )
+        ),
+        degrees=True,
+    ).as_matrix()
+    trajectory = SfmTrajectory(
+        frames=frames,
+        centers=source_centers,
+        quats_c2w_wxyz=np.asarray(
+            [
+                rotation_matrix_to_quaternion_wxyz(rotation.T)
+                for rotation in world_from_camera
+            ],
+            dtype=np.float64,
+        ),
+        fps=10.0,
+        width=1920,
+        height=1080,
+        intrinsics={"model": "PINHOLE", "width": 1920, "params": [1000.0]},
+    )
+    return trajectory, [
+        _position(int(frame), center)
+        for frame, center in zip(frames, target_centers)
+    ]
+
+
 def test_transfer_uses_colmap_rotation_but_exact_srt_centers() -> None:
     trajectory, positions, mapping, source_rotations = _synthetic_case()
 
@@ -105,6 +156,32 @@ def test_transfer_uses_colmap_rotation_but_exact_srt_centers() -> None:
             expected_world_from_camera,
             atol=1e-8,
         )
+
+
+def test_transfer_scales_default_threshold_for_long_routes() -> None:
+    trajectory, positions = _long_route_case(deformation_m=12.0)
+
+    result = transfer_colmap_pose_to_srt(trajectory, positions)
+
+    route_span_m = float(
+        np.linalg.norm(
+            np.ptp(np.asarray([position.center for position in positions]), axis=0)
+        )
+    )
+    assert result.alignment_threshold_m == pytest.approx(route_span_m * 0.01)
+    assert len(result.inlier_frames) >= len(positions) // 2
+    for position in positions:
+        np.testing.assert_array_equal(
+            result.centers[position.frame_index],
+            np.asarray(position.center, dtype=np.float64),
+        )
+
+
+def test_transfer_rejects_long_route_deformation_above_relative_threshold() -> None:
+    trajectory, positions = _long_route_case(deformation_m=120.0)
+
+    with pytest.raises(ColmapPoseTransferError, match="内点不足|残差超过门槛"):
+        transfer_colmap_pose_to_srt(trajectory, positions)
 
 
 def test_transfer_rejects_degenerate_center_geometry() -> None:
@@ -145,3 +222,4 @@ def test_orientation_solution_interpolates_short_registered_gaps() -> None:
         actual_world_from_camera, expected_world_from_camera, atol=1e-8
     )
     assert solution.component_ids[5] == 0
+    assert solution.diagnostics[0]["alignment_threshold_m"] == pytest.approx(5.0)

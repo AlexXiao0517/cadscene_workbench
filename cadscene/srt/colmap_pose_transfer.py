@@ -29,16 +29,20 @@ class ColmapPoseTransfer:
     unregistered_frames: tuple[int, ...]
     inlier_frames: tuple[int, ...]
     alignment_residuals_m: dict[int, float]
+    alignment_threshold_m: float
 
 
 def transfer_colmap_pose_to_srt(
     reconstruction: SfmTrajectory,
     positions: Sequence[FixedTrackPosition],
     *,
-    max_alignment_residual_m: float = 5.0,
+    max_alignment_residual_m: float | None = None,
     ransac_iterations: int = 256,
 ) -> ColmapPoseTransfer:
-    if not np.isfinite(max_alignment_residual_m) or max_alignment_residual_m <= 0.0:
+    if max_alignment_residual_m is not None and (
+        not np.isfinite(max_alignment_residual_m)
+        or max_alignment_residual_m <= 0.0
+    ):
         raise ValueError("max_alignment_residual_m must be positive and finite")
     by_frame = {int(item.frame_index): item for item in positions}
     paired_frames = [
@@ -54,12 +58,17 @@ def transfer_colmap_pose_to_srt(
         [by_frame[frame].center for frame in paired_frames],
         dtype=np.float64,
     )
+    alignment_threshold_m = (
+        max(5.0, 0.01 * float(np.linalg.norm(np.ptp(target, axis=0))))
+        if max_alignment_residual_m is None
+        else float(max_alignment_residual_m)
+    )
     if _geometry_rank(source) < 2 or _geometry_rank(target) < 2:
         raise ColmapPoseTransferError("COLMAP 与 SRT 相机中心几何退化，无法确定三维朝向")
     sim3, inlier_mask = _robust_sim3(
         source,
         target,
-        threshold=max_alignment_residual_m,
+        threshold=alignment_threshold_m,
         iterations=ransac_iterations,
     )
     transformed = sim3.apply(source)
@@ -86,6 +95,7 @@ def transfer_colmap_pose_to_srt(
         alignment_residuals_m={
             frame: float(error) for frame, error in zip(paired_frames, errors)
         },
+        alignment_threshold_m=alignment_threshold_m,
     )
 
 
@@ -155,6 +165,7 @@ def orientation_solution_from_colmap_transfer(
             "alignment_residual_m_max": (
                 float(np.max(residuals)) if residuals else None
             ),
+            "alignment_threshold_m": transfer.alignment_threshold_m,
             "sim3": transfer.sim3.to_dict(),
         },
     )
