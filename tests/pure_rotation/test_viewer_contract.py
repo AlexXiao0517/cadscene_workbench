@@ -113,7 +113,16 @@ def test_pure_rotation_playback_owns_the_animation_loop_without_sfm_pose_writes(
     )[0]
     assert "pureRotationPlaybackActive" in track_apply
     assert "cadsceneRefreshPureRotationPose" in track_apply
-    assert track_apply.index("pureRotationPlaybackActive") < track_apply.index("poseForFrame(")
+    assert track_apply.index("pureRotationPlaybackActive") < track_apply.index(
+        "selectSourceFrame("
+    )
+
+    logical_apply = legacy.split("function applyLogicalSourceFrame(", 1)[1].split(
+        "function ensureFrameCoordinator()", 1
+    )[0]
+    assert logical_apply.index("!pureRotationPlaybackActive") < logical_apply.index(
+        "poseForFrame("
+    )
 
 
 def test_pure_rotation_euler_display_does_not_show_false_360_degree_wrap() -> None:
