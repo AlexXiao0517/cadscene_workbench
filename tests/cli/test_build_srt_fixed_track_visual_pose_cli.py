@@ -76,7 +76,7 @@ def _position(frame: int, x: float, *, rel_alt: float = 80.0) -> FixedTrackPosit
     )
 
 
-def test_first_uncovered_route_point_downgrades_terrain_datum_to_partial() -> None:
+def test_absolute_height_does_not_require_first_route_point_to_be_takeoff() -> None:
     summary = TerrainSourceSummary(
         source_id="a" * 64,
         path="terrain.tpkg",
@@ -117,10 +117,11 @@ def test_first_uncovered_route_point_downgrades_terrain_datum_to_partial() -> No
         (_position(0, 0.0), _position(1, 500.0)), controls, context
     )
 
-    assert downgraded.mode == "partial"
+    assert downgraded.mode == "terrain"
     assert downgraded.reference_ground_m is None
     assert downgraded.camera_height_datum_valid is False
-    assert positions[0].center[2] == 80.0
+    assert positions[0].center[2] == 230.0
+    assert positions[0].height_source == "abs_alt"
 
 
 def test_in_flight_recording_does_not_treat_first_terrain_height_as_home_datum() -> None:
@@ -164,13 +165,13 @@ def test_in_flight_recording_does_not_treat_first_terrain_height_as_home_datum()
         (_position(0, 0.0), _position(1, 10.0, rel_alt=81.0)), controls, context
     )
 
-    assert downgraded.mode == "partial"
+    assert downgraded.mode == "terrain"
     assert downgraded.camera_height_datum_valid is False
     assert downgraded.cad_fallback_ground_m == pytest.approx(130.5)
-    assert [item.center[2] for item in positions] == [80.0, 81.0]
+    assert [item.center[2] for item in positions] == [230.0, 231.0]
 
 
-def test_near_zero_sample_without_verified_home_still_requires_vertical_calibration() -> None:
+def test_near_zero_relative_sample_does_not_override_absolute_height() -> None:
     summary = TerrainSourceSummary(
         source_id="a" * 64,
         path="terrain.tpkg",
@@ -213,10 +214,10 @@ def test_near_zero_sample_without_verified_home_still_requires_vertical_calibrat
         context,
     )
 
-    assert aligned.mode == "partial"
+    assert aligned.mode == "terrain"
     assert aligned.camera_height_datum_valid is False
     assert aligned.reference_ground_m is None
-    assert [item.center[2] for item in positions] == pytest.approx([0.5, 80.0])
+    assert [item.center[2] for item in positions] == pytest.approx([150.5, 230.0])
 
 
 def test_render_path_requires_a_pose_for_every_authoritative_frame() -> None:

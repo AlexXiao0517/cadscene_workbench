@@ -6,7 +6,7 @@ import csv
 from dataclasses import dataclass
 from fractions import Fraction
 import json
-from math import hypot, isfinite, radians, tan
+from math import isfinite, radians, tan
 import os
 from pathlib import Path
 import tempfile
@@ -16,7 +16,10 @@ from cadscene.core.camera import (
     CameraState,
     camera_to_world_rotation,
     rotation_matrix_to_quaternion_wxyz,
+    quaternion_wxyz_to_rotation_matrix,
+    decompose_world_from_camera_rotation,
 )
+from cadscene.srt.pose_smoothing import smooth_pose_samples
 from cadscene.srt.georeference import (
     CadGeoreference,
     cad_raw_to_local_m,
@@ -26,6 +29,7 @@ from cadscene.srt.schema import SrtRecord
 from cadscene.srt.synchronization import (
     FrameSrtSample,
     FrameTimestamp,
+    maximum_windowed_horizontal_speed,
     sample_srt_at_frames,
 )
 
@@ -449,6 +453,8 @@ def build_full_pose_trajectory(
                 "latitude": sample.latitude,
                 "longitude": sample.longitude,
                 "height_source": height_source,
+                "rel_alt": sample.rel_alt,
+                "abs_alt": sample.abs_alt,
                 "projected_easting": projected_easting,
                 "projected_northing": projected_northing,
                 "cad_raw_x": cad_raw_x,
@@ -477,20 +483,12 @@ def build_full_pose_trajectory(
             "full-pose registered coverage is below the configured minimum: "
             f"{coverage:.3f} < {config.minimum_registered_coverage:.3f}"
         )
-    speeds: list[float] = []
-    for first, second, first_time, second_time in zip(
-        registered_points,
-        registered_points[1:],
-        registered_times,
-        registered_times[1:],
-    ):
-        elapsed = second_time - first_time
-        if elapsed <= 0.0:
-            raise ValueError("registered frame timestamps must be increasing")
-        speeds.append(
-            hypot(second[0] - first[0], second[1] - first[1]) / elapsed
+    max_speed = maximum_windowed_horizontal_speed(
+        tuple(
+            (point[0], point[1], timestamp)
+            for point, timestamp in zip(registered_points, registered_times)
         )
-    max_speed = max(speeds, default=0.0)
+    )
     if max_speed > config.max_horizontal_speed_mps:
         raise ValueError(
             "SRT horizontal speed exceeds the configured safety limit: "
@@ -516,6 +514,13 @@ def build_full_pose_trajectory(
         "height_source_counts": height_sources,
         "warnings": vertical_warnings,
     }
+    poses, smoothing = smooth_pose_samples(poses, time_base_seconds=float(config.source_time_base))
+    for pose, row in zip(poses, path_rows):
+        if not pose['registered']:
+            continue
+        row['camera_x'], row['camera_y'], row['camera_z'] = pose['center']
+        row['yaw'], row['pitch'], row['roll'] = decompose_world_from_camera_rotation(
+            quaternion_wxyz_to_rotation_matrix(pose['cam_from_world_quat_wxyz']).T)
     trajectory = {
         "fps": fps,
         "width": width,
@@ -526,6 +531,7 @@ def build_full_pose_trajectory(
         "poses": poses,
         "meta": {
             "trajectory_mode": "srt_full_pose",
+            "telemetry_smoothing": smoothing,
             "coordinate_system": "cad_local_m",
             "metric_scale_locked": True,
             "pose_prior_schema": "srt_pose_prior_v1",
@@ -551,6 +557,7 @@ def build_full_pose_trajectory(
         },
     }
     diagnostics = {
+        "telemetry_smoothing": smoothing,
         "schema_version": 1,
         "clip_id": config.clip_id,
         "frame_count": len(poses),

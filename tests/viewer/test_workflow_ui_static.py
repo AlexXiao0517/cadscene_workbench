@@ -965,7 +965,7 @@ def test_sfm_fov_waits_for_viewer_ready_before_marking_initialization() -> None:
 def test_viewer_cache_busts_the_sfm_fov_initialization_script() -> None:
     index = _read("index.html")
 
-    assert 'viewer_legacy.js?v=20260911-terrain-render-v1' in index
+    assert 'viewer_legacy.js?v=20260914-terrain-preview-v4' in index
     assert 'workflow.js?v=20260911-terrain-render-v1' in index
 
 

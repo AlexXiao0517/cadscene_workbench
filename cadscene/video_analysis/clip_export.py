@@ -16,9 +16,11 @@ from typing import Any, Callable
 
 from cadscene.video_analysis.pts import (
     DecodedFrameIndex,
+    SourceVideoStreamMetadata,
     probe_declared_video_frame_count,
     probe_decoded_frame_index,
     probe_fast_frame_index,
+    probe_source_video_stream_metadata,
     resolve_ffmpeg_executable,
 )
 
@@ -66,15 +68,19 @@ class ExportClip:
 
 
 def load_export_clips(
-    manifest_path: Path, *, max_duration_seconds: int = 60
+    manifest_path: Path, *, max_duration_seconds: int | None = 60
 ) -> list[ExportClip]:
-    if (
+    if max_duration_seconds is not None and (
         isinstance(max_duration_seconds, bool)
         or not isinstance(max_duration_seconds, int)
         or max_duration_seconds <= 0
     ):
         raise ValueError("max_duration_seconds must be a positive integer")
-    max_duration = Fraction(max_duration_seconds, 1)
+    max_duration = (
+        None
+        if max_duration_seconds is None
+        else Fraction(max_duration_seconds, 1)
+    )
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("clip manifest must be a JSON object")
@@ -126,7 +132,7 @@ def load_export_clips(
         )
         if duration <= 0:
             raise ValueError(f"clip {clip_id} must have a positive duration")
-        if duration >= max_duration:
+        if max_duration is not None and duration >= max_duration:
             raise ValueError(
                 f"clip {clip_id} must be shorter than "
                 f"{max_duration_seconds} seconds"
@@ -148,7 +154,8 @@ def export_video_clips(
     preset: str = "fast",
     crf: int = 18,
     require_full_source_partition: bool = True,
-    max_duration_seconds: int = 60,
+    max_duration_seconds: int | None = 60,
+    reuse_source_if_full_span: bool = False,
     progress_callback: Callable[[str, str, float], None] | None = None,
 ) -> list[Path]:
     source = Path(video_path)
@@ -184,6 +191,21 @@ def export_video_clips(
         require_full_source_partition=require_full_source_partition,
     )
     total_frames = sum(len(item["frames"]) for item in frame_map["clips"])
+    reusable_full_span = False
+    if reuse_source_if_full_span and source.suffix.casefold() == ".mp4":
+        try:
+            reusable_full_span = probe_source_video_stream_metadata(
+                source
+            ).browser_reusable_mp4
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            reusable_full_span = False
+    reusable_full_span = (
+        reusable_full_span
+        and len(clips) == 1
+        and clips[0].source_start_pts == frame_index.source_start_pts
+        and clips[0].source_end_pts_exclusive
+        == frame_index.source_end_pts_exclusive
+    )
     completed_frames = 0
     report("preparing_export", "已建立源视频帧映射", 0.1)
     reservation = _reserve_output_directory(output)
@@ -201,6 +223,15 @@ def export_video_clips(
                 for item in frame_map["clips"]
                 if item["clip_id"] == clip.clip_id
             )
+            if reusable_full_span:
+                report(
+                    "reusing_source",
+                    "正在复用 SRT 整段源视频，无需重新编码",
+                    0.9,
+                )
+                _link_or_copy(source, clip_path)
+                completed_frames += expected_count
+                continue
             command = _build_ffmpeg_clip_command(
                 ffmpeg=ffmpeg,
                 source=source,
@@ -260,6 +291,13 @@ def export_video_clips(
                 shutil.rmtree(temporary_dir)
         finally:
             reservation.rmdir()
+
+
+def _link_or_copy(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
 
 
 def _run_ffmpeg_with_progress(

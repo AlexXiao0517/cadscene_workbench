@@ -260,25 +260,19 @@ def _align_relative_height_datum(
     controls,
     terrain_context,
 ) -> tuple[tuple[FixedTrackPosition, ...], object]:
-    if not positions or controls is None or terrain_context.mode == "relative":
-        return tuple(positions), terrain_context
-    samples, _source_ids = sampled_control_points(controls, step_m=2.0)
-    if not len(samples):
-        return tuple(positions), terrain_context
-    fallback_ground = float(np.median(samples[:, 2]))
-    warning = (
-        "当前平台输入没有可验证的 home/takeoff 坐标；高程仅用于 CAD 贴地，"
-        "必须通过至少 2 个关键帧校准垂直基准"
-    )
-    return tuple(positions), replace(
-        terrain_context,
-        mode="partial",
-        reference_ground_m=None,
-        cad_fallback_ground_m=fallback_ground,
-        camera_height_datum_valid=False,
-        camera_height_datum_source="unresolved",
-        warnings=(*terrain_context.warnings, warning),
-    )
+    from cadscene.terrain.height_reference import select_height_reference
+
+    context = select_height_reference(terrain_context, controls, [p.abs_alt for p in positions])
+    if context.camera_height_datum_source != "srt_abs_alt_unverified":
+        return tuple(positions), context
+    return tuple(
+        replace(
+            p,
+            canonical_center=(*p.canonical_center[:2], float(p.abs_alt)),
+            center=(*p.center[:2], float(p.abs_alt) + p.center[2] - p.canonical_center[2]),
+            height_source="abs_alt",
+        ) for p in positions
+    ), context
 
 
 def _require_complete_render_path(
@@ -518,7 +512,7 @@ def _build_payloads(
             "cad_scale": config.cad_scale,
             "route_offset_xyz_m": list(config.route_offset_xyz_m),
             "height_source": height_source,
-            "absolute_height_usage": "diagnostic_only",
+            "absolute_height_usage": "camera_z" if height_source == "abs_alt" else "diagnostic_only",
             "horizontal_fov_deg": config.horizontal_fov_deg,
             "fov_source": "user",
             "source_time_base": {
@@ -627,7 +621,7 @@ def _build_payloads(
         **terrain_context,
         "route_offset_xyz_m": list(config.route_offset_xyz_m),
         "height_source": height_source,
-        "abs_alt_usage": "diagnostic_only",
+        "abs_alt_usage": "camera_z" if height_source == "abs_alt" else "diagnostic_only",
         "reconstruction_alignment": [dict(item) for item in solution.diagnostics],
         "warnings": list(solution.warnings),
         "georeference": config.georeference.to_dict(),
@@ -653,7 +647,7 @@ def _build_payloads(
         f"- 整条路线统一偏移：{list(config.route_offset_xyz_m)} 米\n"
         "- 姿态来源：COLMAP 稀疏三维重建配准到 SRT/CAD 坐标。\n"
         "- 位置来源：SRT 经已确认的 CGCS2000 参数投影到 CAD；最终相机中心逐帧强制采用 SRT。\n"
-        f"- 高度来源：{height_source}；SRT 绝对高度只用于诊断。\n"
+        f"- 高度来源：{height_source}；有可用地形及完整绝对高度时，以 abs_alt 约束相机 Z。\n"
         f"- 诊断点云：{int((diagnostic_points or {}).get('count_exported', 0))} 点，可关闭且不参与渲染门禁。\n"
         "- 性能说明：缺失姿态路线运行真实稀疏重建，耗时可能接近普通 SfM；跳过稠密重建和独立质量检测。\n"
         "- 阶段耗时：\n"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -132,6 +133,7 @@ def test_builder_emits_local_cad_metric_centers_and_user_fov(
     )
 
     payload = json.loads(result.trajectory_path.read_text(encoding="utf-8"))
+    assert payload['meta']['telemetry_smoothing']['applied_before_keyframe_fitting'] is True
     assert payload["meta"]["trajectory_mode"] == "srt_full_pose"
     assert payload["meta"]["coordinate_system"] == "cad_local_m"
     assert payload["meta"]["metric_scale_locked"] is True
@@ -163,6 +165,17 @@ def test_builder_emits_local_cad_metric_centers_and_user_fov(
         "height_source_counts": {"rel_alt": 3},
         "warnings": [],
     }
+
+
+def test_builder_keeps_absolute_altitude_for_terrain_height_selection(tmp_path):
+    records = [replace(record, abs_alt=194.174) for record in load_srt_records(_write_srt(tmp_path / "flight.srt"))]
+    result = build_full_pose_trajectory(
+        records, _frame_map(), {"width": 1920, "height": 1080, "fps": 1.0},
+        _config(), tmp_path / "output",
+    )
+    payload = json.loads(result.trajectory_path.read_text(encoding="utf-8"))
+    assert all(pose["abs_alt"] == 194.174 for pose in payload["poses"])
+    assert payload["poses"][0]["rel_alt"] == 10
 
 
 def test_builder_report_names_custom_projection_without_fake_epsg(
@@ -273,6 +286,13 @@ def test_cli_publishes_complete_artifact_directory(tmp_path: Path) -> None:
     assert (output / "camera_path_full_pose.csv").is_file()
     assert (output / "georeference_diagnostics.json").is_file()
     assert (output / "full_pose_report.md").is_file()
+    calibration = json.loads((output / "camera_calibration.json").read_text())
+    assert calibration["intrinsics_source"] == "user_horizontal_fov"
+    assert calibration["distortion_source"] == "unknown_assumed_zero"
+    assert calibration["k1"] == calibration["k2"] == 0
+    context = json.loads((output / "terrain_context.json").read_text())
+    assert context["terrain_mode"] == "relative"
+    assert (output / "terrain_controls.npz").is_file()
     track = output.parent / "03_alignment" / "camera_track_pred.json"
     scene = output.parent / "05_viewer_scene" / "sfm_viewer_scene.json"
     assert track.is_file()

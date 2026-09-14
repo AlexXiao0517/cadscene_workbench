@@ -20,7 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ffmpeg", type=Path)
     parser.add_argument("--preset", choices=X264_PRESETS, default="fast")
     parser.add_argument("--crf", type=int, default=18)
-    parser.add_argument("--max-duration-seconds", type=int, default=60)
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument("--max-duration-seconds", type=int, default=60)
+    duration.add_argument(
+        "--no-duration-limit",
+        action="store_true",
+        help="allow an unsegmented source-length clip",
+    )
+    parser.add_argument(
+        "--reuse-source-full-span",
+        action="store_true",
+        help="reuse a browser-compatible full-span MP4 instead of re-encoding it",
+    )
     parser.add_argument("--progress-file", type=Path)
     parser.add_argument(
         "--allow-subset",
@@ -37,8 +48,12 @@ def main(argv: list[str] | None = None) -> int:
         "preset": args.preset,
         "crf": args.crf,
         "require_full_source_partition": not args.allow_subset,
-        "max_duration_seconds": args.max_duration_seconds,
+        "max_duration_seconds": (
+            None if args.no_duration_limit else args.max_duration_seconds
+        ),
     }
+    if args.reuse_source_full_span:
+        options["reuse_source_if_full_span"] = True
     if args.progress_file is not None:
         options["progress_callback"] = lambda stage, message, fraction: (
             _write_progress(args.progress_file, stage, message, fraction)

@@ -36,6 +36,19 @@ _LOCKS_GUARD = Lock()
 _RECORD_LOCKS: dict[str, RLock] = {}
 
 
+def _identical_media(source: Path, destination: Path) -> bool:
+    """Compare contents without replacing a file a browser may be streaming."""
+    if not destination.is_file() or source.stat().st_size != destination.stat().st_size:
+        return False
+    with source.open("rb") as original, destination.open("rb") as published:
+        while True:
+            block = original.read(1024 * 1024)
+            if block != published.read(1024 * 1024):
+                return False
+            if not block:
+                return True
+
+
 class WorkbenchSessionError(RuntimeError):
     pass
 
@@ -1026,6 +1039,7 @@ class ProjectWorkbenchService:
                     self._restore_scene_bridge_to_run(project_id, clip)
                 else:
                     self._restore_workbench_seed_to_run(project_id, clip)
+            self._publish_terrain_workbench_cad(project_id, clip, context.trajectory_job_id)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -2294,6 +2308,8 @@ class ProjectWorkbenchService:
         cad_target = target / "cad" / "design.json"
         for source, destination in ((video, video_target), (cad, cad_target)):
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if _identical_media(source, destination):
+                continue
             temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
             try:
                 shutil.copy2(source, temporary)
@@ -2344,6 +2360,44 @@ class ProjectWorkbenchService:
         finally:
             if temporary_manifest.exists():
                 temporary_manifest.unlink()
+
+    def _publish_terrain_workbench_cad(
+        self, project_id: str, clip: ClipDefinition, job_id: str
+    ) -> None:
+        if not job_id or clip.resolved_workflow not in TRAJECTORY_REQUIRED_WORKBENCH_WORKFLOWS:
+            return
+        jobs = self.repositories.jobs.load(project_id)
+        payload = next((item for item in jobs.jobs if item.get('job_id') == job_id), None)
+        if payload is None:
+            raise WorkbenchPermissionDenied('找不到工作台绑定的轨迹任务')
+        job = QueueJob.from_dict(payload)
+        context_path = job.published_outputs.get('terrain_context')
+        if not context_path:
+            return  # Historical/relative-only trajectory, with no terrain contract.
+        context = json.loads(Path(context_path).read_text(encoding='utf-8-sig'))
+        if context.get('terrain_mode') == 'relative':
+            return
+        from cadscene.terrain.viewer_cad import build_terrain_cad_preview
+        import numpy as np
+
+        controls = job.published_outputs.get('terrain_controls')
+        if not controls or not Path(controls).is_file():
+            raise WorkbenchPermissionDenied('地形预览缺少绑定的高程控制数据，不能按零高程显示')
+        trajectory = json.loads(Path(job.published_outputs['trajectory']).read_text(encoding='utf-8-sig'))
+        meta = trajectory.get('meta', {})
+        route = np.asarray([pose['center'][:2] for pose in trajectory.get('poses', [])
+                            if pose.get('registered') and 'center' in pose], dtype=float)
+        cad = self._cad_design_for_context(project_id, clip)
+        design = json.loads(cad.read_text(encoding='utf-8-sig'))
+        preview = build_terrain_cad_preview(
+            design, controls_path=Path(controls), origin_xy=tuple(meta['cad_origin_xy']),
+            cad_scale=float(meta['cad_scale']), route_xy=route,
+        )
+        preview['meta']['terrain_preview']['trajectory_output_revision'] = job.output_revision
+        preview['meta']['terrain_preview']['terrain_controls_fingerprint'] = context.get('terrain_controls_fingerprint')
+        dataset = self._workbench_dataset_id(project_id, clip.clip_id)
+        target = self.viewer_runs_root.parent / 'data' / dataset / 'cad' / 'design.json'
+        _atomic_write_bytes(target, json.dumps(preview, ensure_ascii=False, allow_nan=False).encode('utf-8'))
 
     def _materialize_trajectory_run(
         self, project_id: str, clip: ClipDefinition, job_id: str

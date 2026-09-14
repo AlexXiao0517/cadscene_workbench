@@ -36,11 +36,100 @@ class VideoPtsIndex:
 
 
 @dataclass(frozen=True)
+class SourceVideoStreamMetadata:
+    codec_name: str
+    pixel_format: str
+    display_rotation_deg: int
+
+    @property
+    def browser_reusable_mp4(self) -> bool:
+        return (
+            self.codec_name.casefold() == "h264"
+            and self.pixel_format.casefold() in {"yuv420p", "yuvj420p"}
+            and self.display_rotation_deg == 0
+        )
+
+
+@dataclass(frozen=True)
 class DecodedFrameTimestamp:
     ordinal: int
     pts: int
     duration_pts: int | None
     timestamp_source: str
+
+
+def probe_source_video_stream_metadata(
+    video_path: Path, *, ffprobe_executable: str | Path | None = None
+) -> SourceVideoStreamMetadata:
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"video not found: {source}")
+    ffprobe = _resolve_ffprobe_executable(ffprobe_executable)
+    process = subprocess.run(
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_streams",
+            "-of",
+            "json",
+            str(source),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"FFprobe source stream probe failed: {process.stderr[-1000:]}")
+    return parse_source_video_stream_metadata(json.loads(process.stdout))
+
+
+def parse_source_video_stream_metadata(
+    document: Mapping[str, Any],
+) -> SourceVideoStreamMetadata:
+    streams = document.get("streams")
+    if not isinstance(streams, list):
+        raise ValueError("FFprobe source stream response requires streams")
+    stream = next(
+        (
+            item
+            for item in streams
+            if isinstance(item, Mapping)
+            and item.get("codec_type", "video") == "video"
+        ),
+        None,
+    )
+    if stream is None:
+        raise ValueError("FFprobe source stream response has no video stream")
+    codec_name = stream.get("codec_name")
+    pixel_format = stream.get("pix_fmt")
+    if not isinstance(codec_name, str) or not codec_name.strip():
+        raise ValueError("source video codec_name is missing")
+    if not isinstance(pixel_format, str) or not pixel_format.strip():
+        raise ValueError("source video pixel format is missing")
+    rotations: list[int] = []
+    tags = stream.get("tags")
+    if isinstance(tags, Mapping) and tags.get("rotate") not in (None, ""):
+        rotations.append(int(tags["rotate"]) % 360)
+    side_data = stream.get("side_data_list")
+    if isinstance(side_data, list):
+        rotations.extend(
+            int(item["rotation"]) % 360
+            for item in side_data
+            if isinstance(item, Mapping) and item.get("rotation") is not None
+        )
+    if len(set(rotations)) > 1:
+        raise ValueError("source video has conflicting display rotation metadata")
+    return SourceVideoStreamMetadata(
+        codec_name=codec_name.strip(),
+        pixel_format=pixel_format.strip(),
+        display_rotation_deg=rotations[0] if rotations else 0,
+    )
 
 
 @dataclass(frozen=True)

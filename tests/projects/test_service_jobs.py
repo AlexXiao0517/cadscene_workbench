@@ -489,13 +489,14 @@ def test_current_fingerprint_accepts_only_exact_pre_mode_identity(
     project = repositories.project.load("p1")
     clips_manifest = repositories.clips.load("p1")
     selected = clips_manifest.clips[0]
+    version = service.adapters.for_workflow("srt_full_pose").version
     current = service._new_job(
         "p1",
         selected,
         job_type="trajectory",
         resource_class="heavy_compute",
         adapter_name="srt_full_pose",
-        adapter_version="2",
+        adapter_version=version,
         exclusive_key="trajectory:p1:whole",
         dependency_ids=(),
         project_assets=project.source_assets,
@@ -510,7 +511,7 @@ def test_current_fingerprint_accepts_only_exact_pre_mode_identity(
         project_revision=project.revision,
         clips_revision=clips_manifest.revision,
         adapter_name="srt_full_pose",
-        adapter_version="2",
+        adapter_version=version,
     )
     legacy = replace(
         current,

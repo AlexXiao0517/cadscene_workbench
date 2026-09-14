@@ -14,10 +14,11 @@ from scipy.spatial import cKDTree
 
 from cadscene.cad.loader import load_cad_bundle
 from cadscene.cad.projection import world_from_camera_rotation
-from cadscene.cad.text_annotations import load_design_text_annotations
+from cadscene.cad.text_annotations import load_design_text_annotations, load_dxf_text_annotations
 from cadscene.core.camera import CameraState
 from cadscene.rendering.calibration import CalibratedCameraModel, output_dimensions
-from cadscene.rendering.overlay import RenderOverlayResult
+from cadscene.rendering.cad_region import CadRenderRegion, SegmentVisibilityIndex, region_from_track
+from cadscene.rendering.overlay import RenderOverlayResult, _cad_lines, _densify_points_for_projection, style_for_kind
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,20 @@ class CalibratedRenderConfig:
     output_resolution: str = "1080p"
     overlay_linewidth: int = 2
     overlay_alpha: float = 0.92
-    max_distance_m: float = 350.0
-    fade_start_m: float = 260.0
+    max_distance_m: float | None = None
+    fade_start_m: float | None = None
     output_fps: float = 30.0
     ffmpeg_executable: str = "ffmpeg"
+    cad_region_bounds: tuple[float, float, float, float] | None = None
+    cad_region_margin_m: float = 100.0
+    cad_region_lookahead_m: float = 1000.0
+
+    def __post_init__(self):
+        if self.cad_region_bounds is not None:
+            CadRenderRegion(self.cad_region_bounds)
+        if (not np.isfinite([self.cad_region_margin_m, self.cad_region_lookahead_m]).all()
+                or self.cad_region_margin_m < 0 or self.cad_region_lookahead_m <= 0):
+            raise ValueError("CAD region margin/lookahead must be finite and nonnegative/positive")
 
 
 def project_world_points(
@@ -73,8 +84,9 @@ def render_calibrated_frame(
     linewidths: np.ndarray,
     camera: CalibratedCameraModel,
     *, overlay_alpha: float = 0.92,
-    max_distance_m: float = 350.0,
-    fade_start_m: float = 260.0,
+    max_distance_m: float | None = None,
+    fade_start_m: float | None = None,
+    visibility_index: SegmentVisibilityIndex | None = None,
 ) -> np.ndarray:
     if frame.shape[1::-1] != (camera.width, camera.height):
         raise ValueError("frame size must match calibrated camera size")
@@ -84,12 +96,19 @@ def render_calibrated_frame(
     widths = np.asarray(linewidths, dtype=np.int32).reshape(-1)
     if not (len(starts) == len(ends) == len(colors) == len(widths)):
         raise ValueError("calibrated segment arrays must have matching lengths")
+    padding = float(np.max(widths, initial=0)) / 2 + 3
+    if visibility_index is not None:
+        if visibility_index.count != len(starts):
+            raise ValueError("visibility index must match the segment arrays")
+        selected = visibility_index.query(state, camera, padding_px=padding)
+        starts, ends, colors, widths = starts[selected], ends[selected], colors[selected], widths[selected]
     center = np.asarray([state.camera_x, state.camera_y, state.camera_z], dtype=np.float64)
+    distance = float('inf') if max_distance_m is None else max_distance_m
     spatial = (
-        (np.maximum(starts[:, 0], ends[:, 0]) >= center[0] - max_distance_m)
-        & (np.minimum(starts[:, 0], ends[:, 0]) <= center[0] + max_distance_m)
-        & (np.maximum(starts[:, 1], ends[:, 1]) >= center[1] - max_distance_m)
-        & (np.minimum(starts[:, 1], ends[:, 1]) <= center[1] + max_distance_m)
+        (np.maximum(starts[:, 0], ends[:, 0]) >= center[0] - distance)
+        & (np.minimum(starts[:, 0], ends[:, 0]) <= center[0] + distance)
+        & (np.maximum(starts[:, 1], ends[:, 1]) >= center[1] - distance)
+        & (np.minimum(starts[:, 1], ends[:, 1]) <= center[1] + distance)
     )
     starts, ends, colors, widths = starts[spatial], ends[spatial], colors[spatial], widths[spatial]
     if not len(starts):
@@ -97,32 +116,48 @@ def render_calibrated_frame(
     rotation = world_from_camera_rotation(state)
     uv0, depth0 = project_world_points(starts, center=center, world_from_camera=rotation, camera=camera)
     uv1, depth1 = project_world_points(ends, center=center, world_from_camera=rotation, camera=camera)
-    valid = (depth0 > 0.05) & (depth1 > 0.05) & (depth0 <= max_distance_m) & (depth1 <= max_distance_m)
+    valid = (depth0 > 0.05) & (depth1 > 0.05) & (depth0 <= distance) & (depth1 <= distance)
     valid &= np.isfinite(uv0).all(axis=1) & np.isfinite(uv1).all(axis=1)
-    valid &= np.linalg.norm(uv1 - uv0, axis=1) <= max(camera.width, camera.height) * 0.5
-    indices = np.flatnonzero(valid)
+    limit = float(max(camera.width, camera.height) * 8)
+    valid &= (np.abs(uv0) <= limit).all(axis=1) & (np.abs(uv1) <= limit).all(axis=1)
+    valid &= (
+        (np.maximum(uv0[:, 0], uv1[:, 0]) >= -padding)
+        & (np.minimum(uv0[:, 0], uv1[:, 0]) <= camera.width + padding)
+        & (np.maximum(uv0[:, 1], uv1[:, 1]) >= -padding)
+        & (np.minimum(uv0[:, 1], uv1[:, 1]) <= camera.height + padding)
+    )
+    if max_distance_m is not None and fade_start_m is not None and max_distance_m > fade_start_m:
+        fade0 = np.clip((max_distance_m - depth0) / (max_distance_m - fade_start_m), 0., 1.)
+        fade1 = np.clip((max_distance_m - depth1) / (max_distance_m - fade_start_m), 0., 1.)
+        weights = 0.5 * (fade0 + fade1)
+    else:
+        weights = np.ones(len(depth0))
+    indices = np.flatnonzero(valid & (weights > 0))
     if not len(indices):
         return frame.copy()
-    if max_distance_m > fade_start_m:
-        weights = np.clip(
-            (max_distance_m - 0.5 * (depth0[indices] + depth1[indices]))
-            / (max_distance_m - fade_start_m), 0.0, 1.0
-        )
-    else:
-        weights = np.ones(len(indices))
+    segments = np.rint(np.stack((uv0[indices], uv1[indices]), axis=1)).astype(np.int32).reshape(-1, 2, 1, 2)
+    selected_widths = widths[indices]
     layer = frame.copy()
-    mask = np.zeros(frame.shape[:2], dtype=np.float32)
-    for selected, weight in zip(indices, weights):
-        if weight <= 0:
-            continue
-        first = tuple(np.rint(uv0[selected]).astype(int))
-        second = tuple(np.rint(uv1[selected]).astype(int))
-        color = tuple(int(value) for value in colors[selected])
-        width = max(1, int(widths[selected]))
-        cv2.line(layer, first, second, color, width, cv2.LINE_AA)
-        cv2.line(mask, first, second, float(weight), width, cv2.LINE_AA)
-    alpha = np.clip(mask * float(overlay_alpha), 0.0, 1.0)[..., None]
-    return np.rint(frame.astype(np.float32) * (1 - alpha) + layer.astype(np.float32) * alpha).astype(np.uint8)
+    styles, style_ids = np.unique(np.column_stack((colors[indices], selected_widths)), axis=0, return_inverse=True)
+    for style_id, style in enumerate(styles):
+        cv2.polylines(layer, segments[style_ids == style_id], False,
+                      tuple(int(v) for v in style[:3]), int(style[3]), lineType=cv2.LINE_AA)
+    # Preserve the accepted backend's anti-aliased 12-band distance mask.
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    bands = np.clip((weights[indices] * 12 - 1e-9).astype(np.int32), 0, 11)
+    for band in range(12):
+        band_indices = np.flatnonzero(bands == band)
+        band_widths = selected_widths[band_indices]
+        for line_width in np.unique(band_widths):
+            cv2.polylines(mask, segments[band_indices[band_widths == line_width]], False,
+                          int(round((band + 1) / 12 * 255.)), int(line_width), lineType=cv2.LINE_AA)
+    active = mask > 0
+    alpha = mask[active].astype(np.float32)[:, None] / 255.
+    alpha *= float(np.clip(overlay_alpha, 0., 1.))
+    result = frame.copy()
+    result[active] = (frame[active].astype(np.float32) * (1 - alpha)
+                      + layer[active].astype(np.float32) * alpha).astype(np.uint8)
+    return result
 
 
 def _load_exact_cameras(path: Path) -> dict[int, CameraState]:
@@ -205,18 +240,17 @@ def _flatten_cad(
     cad_dir: Path,
     origin_xy: tuple[float, float],
     cad_scale: float,
+    route_xy: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    design = _flatten_design(
-        cad_dir / "design.json", origin_xy=origin_xy, cad_scale=cad_scale
-    )
-    if len(design[0]):
-        return design
     starts, ends, colors = [], [], []
-    for line in (*cad.refs, *cad.edges, *cad.centers):
-        for first, second in zip(line.points[:-1], line.points[1:]):
+    for line in _cad_lines(cad):
+        if not len(line.points):
+            continue
+        points = _densify_points_for_projection(line.points, 20.0)
+        for first, second in zip(points[:-1], points[1:]):
             starts.append(first[:2])
             ends.append(second[:2])
-            colors.append(line.color_bgr or (255, 255, 255))
+            colors.append(line.color_bgr or style_for_kind(line.kind).color_bgr)
     return (
         np.asarray(starts, dtype=np.float64).reshape(-1, 2),
         np.asarray(ends, dtype=np.float64).reshape(-1, 2),
@@ -235,7 +269,7 @@ def _draw_text_annotations(
     labels: Sequence[str],
     heights_m: np.ndarray,
     camera: CalibratedCameraModel,
-    max_distance_m: float,
+    max_distance_m: float | None,
 ) -> np.ndarray:
     if not len(points_xyz):
         return frame
@@ -246,19 +280,39 @@ def _draw_text_annotations(
         world_from_camera=world_from_camera_rotation(state),
         camera=camera,
     )
+    distance = float('inf') if max_distance_m is None else max_distance_m
     valid = (
         (depth > 0.05)
-        & (depth <= max_distance_m)
+        & (depth <= distance)
+        & (np.linalg.norm(points_xyz[:, :2] - center[:2], axis=1) <= distance)
         & np.isfinite(uv).all(axis=1)
-        & (uv[:, 0] >= -80)
-        & (uv[:, 0] <= camera.width + 80)
-        & (uv[:, 1] >= -40)
-        & (uv[:, 1] <= camera.height + 40)
+        & (uv[:, 0] >= 8)
+        & (uv[:, 0] < camera.width - 8)
+        & (uv[:, 1] >= 8)
+        & (uv[:, 1] < camera.height - 8)
     )
     indices = np.flatnonzero(valid)
     if not len(indices):
         return frame
-    indices = indices[np.argsort(depth[indices])[:240]]
+    indices = sorted(indices, key=lambda index: depth[index])
+    accepted, boxes = [], []
+    for index in indices:
+        label = str(labels[index]).strip()
+        if not label or "\ufffd" in label:
+            continue
+        label = label[:80]
+        size = int(np.clip(camera.focal_px * heights_m[index] / depth[index] * 0.28, 12, 30))
+        x, y = (int(round(value)) for value in uv[index])
+        x += 5
+        estimated_width = min(camera.width, max(size, int(len(label) * size * 0.78)))
+        box = (x - 3, y - size, x + estimated_width + 3, y + size)
+        if any(min(box[2], other[2]) > max(box[0], other[0])
+               and min(box[3], other[3]) > max(box[1], other[1]) for other in boxes):
+            continue
+        accepted.append((x, y, label, size))
+        boxes.append(box)
+        if len(accepted) >= 24:
+            break
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
@@ -266,12 +320,11 @@ def _draw_text_annotations(
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
     windows_fonts = (
-        Path("C:/Windows/Fonts/msyh.ttc"),
         Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/msyh.ttc"),
     )
     font_path = next((path for path in windows_fonts if path.is_file()), None)
-    for index in indices:
-        size = int(np.clip(round(camera.focal_px * heights_m[index] / depth[index]), 11, 36))
+    for x, y, label, size in accepted:
         if size not in _FONT_CACHE:
             _FONT_CACHE[size] = (
                 ImageFont.truetype(str(font_path), size)
@@ -279,13 +332,13 @@ def _draw_text_annotations(
                 else ImageFont.load_default()
             )
         draw.text(
-            (float(uv[index, 0]), float(uv[index, 1])),
-            str(labels[index]),
+            (x, y),
+            label,
             font=_FONT_CACHE[size],
             fill=(255, 255, 255),
-            stroke_width=1,
-            stroke_fill=(0, 0, 0),
-            anchor="mm",
+            stroke_width=2,
+            stroke_fill=(15, 15, 15),
+            anchor="lm",
         )
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
@@ -301,12 +354,14 @@ def _drape(
     if mode == "relative":
         return np.column_stack((starts, np.full(len(starts), fallback_z))), np.column_stack((ends, np.full(len(ends), fallback_z))), np.ones(len(starts), dtype=bool)
     arrays = np.load(controls_path)
-    samples = [arrays["points_xyz"]]
+    samples = []
     segment_starts = arrays["segment_starts_xyz"]
     segment_ends = arrays["segment_ends_xyz"]
     for first, second in zip(segment_starts, segment_ends):
         count = max(1, int(np.ceil(np.linalg.norm(second[:2] - first[:2]) / 2.0)))
         samples.append(first[None, :] + (second - first)[None, :] * np.linspace(0, 1, count + 1)[:, None])
+    if not samples:
+        samples.append(arrays["points_xyz"])
     points = np.vstack([item for item in samples if len(item)]) if any(len(item) for item in samples) else np.empty((0, 3))
     if not len(points):
         return np.column_stack((starts, np.full(len(starts), fallback_z))), np.column_stack((ends, np.full(len(ends), fallback_z))), np.ones(len(starts), dtype=bool)
@@ -315,8 +370,36 @@ def _drape(
     d1, i1 = tree.query(ends)
     z0 = np.where(d0 <= 160.0, points[i0, 2], fallback_z)
     z1 = np.where(d1 <= 160.0, points[i1, 2], fallback_z)
-    keep = np.ones(len(starts), dtype=bool)
+    keep = (d0 <= 160.0) & (d1 <= 160.0)
     return np.column_stack((starts, z0)), np.column_stack((ends, z1)), keep
+
+
+def _drape_region(starts, ends, colors, controls_path, mode, *, fallback_z, region):
+    # Preserve the original terrain slope before introducing boundary vertices.
+    starts3, ends3, keep = _drape(starts, ends, controls_path, mode, fallback_z=fallback_z)
+    starts3, ends3, colors = starts3[keep], ends3[keep], colors[keep]
+    starts3, ends3, keep = region.clip_segments(starts3, ends3)
+    return starts3, ends3, colors[keep]
+
+
+def _prepare_text_annotations(
+    cad_dir: Path, *, origin_xy: tuple[float, float], cad_scale: float,
+    route_xy: np.ndarray, controls_path: Path, mode: str, fallback_z: float,
+) -> tuple[np.ndarray, tuple[str, ...], np.ndarray]:
+    raw_files = sorted((cad_dir / "raw_cad").glob("*.dxf"))
+    if raw_files:
+        annotations = load_dxf_text_annotations(raw_files[0], origin_xy=origin_xy, cad_scale=cad_scale)
+    elif (cad_dir / "design.json").is_file():
+        annotations = load_design_text_annotations(cad_dir / "design.json", origin_xy=origin_xy, cad_scale=cad_scale)
+    else:
+        return np.empty((0, 3)), (), np.empty(0)
+    selected = np.arange(len(annotations.points_xy))
+    points = annotations.points_xy[selected]
+    points3, _, keep = _drape(points, points, controls_path, mode, fallback_z=fallback_z)
+    points3 = points3[keep]
+    points3[:, 2] += 0.3
+    selected = selected[keep]
+    return points3, tuple(annotations.labels[i] for i in selected), annotations.heights_m[selected]
 
 
 def _ffmpeg_command(executable: str, width: int, height: int, fps: float, output: Path) -> list[str]:
@@ -349,46 +432,39 @@ def render_calibrated_overlay_video(
         or 0.0
     )
     warnings = [str(item) for item in context.get("terrain_warnings", ())]
+    region = region_from_track(cameras.values(), camera, ground_z=fallback_z,
+                               bounds=config.cad_region_bounds, margin_m=config.cad_region_margin_m,
+                               lookahead_m=config.cad_region_lookahead_m)
     cad_dir = Path(config.cad_dir)
     cad = load_cad_bundle(cad_dir, origin_xy=config.origin_xy, cad_scale=config.cad_scale)
+    route_xy = np.asarray([[state.camera_x, state.camera_y] for state in cameras.values()])
     starts, ends, colors = _flatten_cad(
         cad,
         cad_dir=cad_dir,
         origin_xy=config.origin_xy,
         cad_scale=config.cad_scale,
+        route_xy=route_xy,
     )
-    starts3, ends3, keep = _drape(
+    source_segment_count = len(starts)
+    starts3, ends3, colors = _drape_region(
         starts,
         ends,
+        colors,
         Path(config.terrain_controls),
         mode,
         fallback_z=fallback_z,
+        region=region,
     )
-    starts3, ends3, colors = starts3[keep], ends3[keep], colors[keep]
     widths = np.full(len(starts3), max(1, int(config.overlay_linewidth)), dtype=np.int32)
-    design_path = cad_dir / "design.json"
-    if design_path.is_file():
-        text_annotations = load_design_text_annotations(
-            design_path,
-            origin_xy=config.origin_xy,
-            cad_scale=config.cad_scale,
-        )
-        text_points3, _, text_keep = _drape(
-            text_annotations.points_xy,
-            text_annotations.points_xy,
-            Path(config.terrain_controls),
-            mode,
-            fallback_z=fallback_z,
-        )
-        text_points3 = text_points3[text_keep]
-        text_labels = tuple(
-            label for label, selected in zip(text_annotations.labels, text_keep) if selected
-        )
-        text_heights = text_annotations.heights_m[text_keep]
-    else:
-        text_points3 = np.empty((0, 3), dtype=np.float64)
-        text_labels = ()
-        text_heights = np.empty(0, dtype=np.float64)
+    visibility_index = SegmentVisibilityIndex(starts3, ends3)
+    text_points3, text_labels, text_heights = _prepare_text_annotations(
+        cad_dir, origin_xy=config.origin_xy, cad_scale=config.cad_scale,
+        route_xy=route_xy, controls_path=Path(config.terrain_controls),
+        mode=mode, fallback_z=fallback_z,
+    )
+    text_keep = region.contains_points(text_points3)
+    text_points3, text_heights = text_points3[text_keep], text_heights[text_keep]
+    text_labels = tuple(label for label, keep in zip(text_labels, text_keep) if keep)
     source = cv2.VideoCapture(str(config.video_path))
     if not source.isOpened():
         raise RuntimeError(f"video cannot be opened: {config.video_path}")
@@ -411,6 +487,7 @@ def render_calibrated_overlay_video(
                 overlay_alpha=config.overlay_alpha,
                 max_distance_m=config.max_distance_m,
                 fade_start_m=config.fade_start_m,
+                visibility_index=visibility_index,
             )
             overlaid = _draw_text_annotations(
                 overlaid,
@@ -455,5 +532,16 @@ def render_calibrated_overlay_video(
         "cad_polyline_count": len(starts3), "elapsed_sec": perf_counter() - started,
         "cad_text_count": len(text_points3),
         "output_resolution": config.output_resolution,
+        "renderer_profile": "accepted_backend_at_v3_fixed_region",
+        "source_segment_count": source_segment_count,
+        "cad_region_bounds": region.bounds,
+        "cad_region_method": "explicit" if config.cad_region_bounds is not None else "whole_track_envelope",
+        "cad_region_margin_m": config.cad_region_margin_m,
+        "cad_region_lookahead_m": config.cad_region_lookahead_m,
+        "overlay_linewidth": config.overlay_linewidth,
+        "overlay_alpha": config.overlay_alpha,
+        "max_distance_m": config.max_distance_m,
+        "fade_start_m": config.fade_start_m,
+        "max_cad_labels": 24,
     }
     return RenderOverlayResult(output_video=output, stats=stats, warnings=warnings)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite
+from math import cos, isfinite, radians, sin
 from statistics import median
 from typing import Mapping, Sequence
 
@@ -11,7 +11,7 @@ import numpy as np
 from pyproj import Transformer
 from scipy.spatial.transform import Rotation, Slerp
 
-from cadscene.core.camera import CameraState
+from cadscene.core.camera import CameraState, decompose_world_from_camera_rotation
 from cadscene.srt.bentley_pose_merge import BentleyCameraModel, BentleyPoseSample
 from cadscene.srt.georeference import (
     CadGeoreference,
@@ -97,13 +97,41 @@ def _interpolated_centers_ecef(
     return np.column_stack((longitude, latitude, altitude))
 
 
+def bentley_ypr_world_to_camera_rotation(
+    *, yaw_deg: float, pitch_deg: float, roll_deg: float
+) -> np.ndarray:
+    """Build Bentley's XRightYDown world-to-camera rotation matrix."""
+
+    yaw = radians(float(yaw_deg))
+    pitch = radians(float(pitch_deg))
+    roll = radians(float(roll_deg))
+    cy, sy = cos(yaw), sin(yaw)
+    cp, sp = cos(pitch), sin(pitch)
+    cr, sr = cos(roll), sin(roll)
+    return np.asarray(
+        [
+            [cr * cy - sr * sp * sy, -cr * sy - cy * sr * sp, cp * sr],
+            [cy * sr + cr * sp * sy, cr * cy * sp - sr * sy, -cr * cp],
+            [cp * sy, cp * cy, sp],
+        ],
+        dtype=np.float64,
+    )
+
+
 def _interpolated_rotations(
     samples: Sequence[BentleyPoseSample], frame_indices: np.ndarray
 ) -> Rotation:
-    rotations = Rotation.from_euler(
-        "ZYX",
-        [[sample.yaw_deg, sample.pitch_deg, sample.roll_deg] for sample in samples],
-        degrees=True,
+    rotations = Rotation.from_matrix(
+        np.stack(
+            [
+                bentley_ypr_world_to_camera_rotation(
+                    yaw_deg=sample.yaw_deg,
+                    pitch_deg=sample.pitch_deg,
+                    roll_deg=sample.roll_deg,
+                )
+                for sample in samples
+            ]
+        )
     )
     if len(samples) == 1:
         return Rotation.from_matrix(
@@ -136,13 +164,15 @@ def build_adjusted_at_track(
         raise ValueError("fov_deg must be finite and inside (1, 179)")
 
     centers = _interpolated_centers_ecef(ordered, requested)
-    eulers = _interpolated_rotations(ordered, requested).as_euler("ZYX", degrees=True)
+    world_to_camera_rotations = _interpolated_rotations(ordered, requested).as_matrix()
     result: list[AtFramePose] = []
-    for frame_value, center, euler in zip(requested, centers, eulers):
+    for frame_value, center, world_to_camera in zip(
+        requested, centers, world_to_camera_rotations
+    ):
         longitude, latitude, altitude = (float(value) for value in center)
         cad_raw = project_wgs84_to_cad_raw(longitude, latitude, georeference)
         camera_x, camera_y = cad_raw_to_local_m(cad_raw, cad_origin_xy, cad_scale)
-        yaw, xml_pitch, roll = (float(value) for value in euler)
+        yaw, pitch, roll = decompose_world_from_camera_rotation(world_to_camera.T)
         result.append(
             AtFramePose(
                 frame_index=int(frame_value),
@@ -151,7 +181,7 @@ def build_adjusted_at_track(
                     camera_y=camera_y,
                     camera_z=altitude - float(vertical_reference_m),
                     yaw_deg=yaw,
-                    pitch_deg=-xml_pitch,
+                    pitch_deg=pitch,
                     roll_deg=roll,
                     fov_deg=float(fov_deg),
                     cad_scale=float(cad_scale),

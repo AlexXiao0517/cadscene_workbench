@@ -149,6 +149,13 @@ def build_full_pose_workbench_payloads(
         },
         "warnings": list(meta.get("warnings", [])),
     }
+    render_metadata = {
+        key: value for key, value in meta.items()
+        if key.startswith(("terrain_", "camera_"))
+        or key in {"intrinsics_source", "distortion_source", "cad_fallback_ground_m", "height_source_counts", "cad_z_offset_m"}
+    }
+    camera_track["meta"].update(render_metadata)
+    viewer_scene["meta"].update(render_metadata)
     return FullPoseWorkbenchPayloads(
         camera_track=camera_track,
         viewer_scene=viewer_scene,

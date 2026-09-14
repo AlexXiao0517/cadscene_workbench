@@ -262,7 +262,7 @@ def test_default_workbench_render_adapters_cover_every_project_workflow(
 
     adapter = registry.for_workflow(workflow)
     assert adapter.workflow == workflow
-    assert adapter.version == "6"
+    assert adapter.version == ("11" if workflow in {"srt_full_pose", "srt_fixed_track_visual_pose"} else "6")
 
 
 def test_pure_rotation_render_uses_immutable_workbench_track_and_attempt_output(
@@ -373,8 +373,9 @@ def test_full_pose_render_uses_metric_pipeline_without_sparse_point_cloud(
     assert "02_sfm" not in " ".join(command)
 
 
+@pytest.mark.parametrize("workflow", ["srt_fixed_track_visual_pose", "srt_full_pose"])
 def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
-    tmp_path: Path,
+    tmp_path: Path, workflow: str,
 ) -> None:
     inputs = _render_inputs(tmp_path)
     cad = (tmp_path / "cad").resolve()
@@ -400,7 +401,7 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
     inputs = RenderInputs(
         **{
             **inputs.__dict__,
-            "workflow": "srt_fixed_track_visual_pose",
+            "workflow": workflow,
             "parameters": {
                 "cad_dataset_path": str(cad),
                 "cad_scale": 1.0,
@@ -416,13 +417,13 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
 
     plan = default_workbench_render_adapters(
         application_root=tmp_path
-    ).for_workflow("srt_fixed_track_visual_pose").prepare(inputs)
+    ).for_workflow(workflow).prepare(inputs)
     alignment_command, command, _package_command = plan.commands
     joined = " ".join((*alignment_command, *command))
 
     assert "cadscene.cli.run_pipeline" in alignment_command
     assert alignment_command[alignment_command.index("--config") + 1].endswith(
-        "configs\\pipelines\\srt_fixed_track_visual_pose_overlay.yaml"
+        f"configs\\pipelines\\{workflow}_overlay.yaml"
     )
     assert alignment_command[alignment_command.index("--stages") + 1] == "alignment"
     assert "cadscene.cli.render_overlay" in command
@@ -430,6 +431,11 @@ def test_fixed_track_render_has_no_sparse_point_cloud_or_quality_stage(
     assert command[command.index("--terrain-context") + 1] == str(terrain_context.resolve())
     assert command[command.index("--terrain-controls") + 1] == str(terrain_controls.resolve())
     assert command[command.index("--output-resolution") + 1] == "720p"
+    assert "--max-distance-m" not in command
+    assert "--faded-overlay" not in command
+    assert "--fade-start-m" not in command
+    assert command[command.index("--overlay-linewidth") + 1] == "2"
+    assert command[command.index("--overlay-alpha") + 1] == "0.92"
     assert "--sparse-ply" not in command
     assert "quality" not in joined
     assert "road_surface" not in joined

@@ -136,7 +136,7 @@ class ExistingWorkbenchRenderAdapter:
                     "--sparse-ply",
                     str(sparse_ply),
                 ]
-            if self.workflow == "srt_fixed_track_visual_pose":
+            if self.workflow in {"srt_fixed_track_visual_pose", "srt_full_pose"}:
                 calibrated_keys = (
                     "camera_calibration_path",
                     "terrain_context_path",
@@ -194,11 +194,10 @@ class ExistingWorkbenchRenderAdapter:
                         str(terrain_controls),
                         "--output-resolution",
                         output_resolution,
-                        "--faded-overlay",
-                        "--max-distance-m",
-                        "900",
-                        "--fade-start-m",
-                        "250",
+                        "--overlay-linewidth",
+                        "2",
+                        "--overlay-alpha",
+                        "0.92",
                         "--progress-file",
                         str(progress_path),
                     )
@@ -273,7 +272,7 @@ def default_workbench_render_adapters(
             ExistingWorkbenchRenderAdapter(
                 workflow=workflow,
                 application_root=root,
-                version="6",
+                version="11" if workflow in {"srt_full_pose", "srt_fixed_track_visual_pose"} else "6",
             )
             for workflow in (
                 "sfm_only",

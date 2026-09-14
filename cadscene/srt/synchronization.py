@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from math import isfinite
+from math import hypot, isfinite
 from typing import Mapping, Sequence
 
 from .schema import SrtRecord
@@ -40,6 +40,52 @@ class FrameSrtSample:
     drone_yaw: float | None = None
     drone_pitch: float | None = None
     drone_roll: float | None = None
+
+
+def maximum_windowed_horizontal_speed(
+    points: Sequence[tuple[float, float, float]],
+    *,
+    minimum_interval_sec: float = 0.1,
+) -> float:
+    """Measure motion over a GPS-stable window instead of adjacent video frames."""
+
+    if not isfinite(float(minimum_interval_sec)) or minimum_interval_sec <= 0.0:
+        raise ValueError("minimum speed interval must be finite and positive")
+    if len(points) < 2:
+        return 0.0
+    for first, second in zip(points, points[1:]):
+        if second[2] <= first[2]:
+            raise ValueError("horizontal speed sample timestamps must be increasing")
+
+    maximum = 0.0
+    measured = False
+    start = 0
+    for end in range(1, len(points)):
+        end_time = points[end][2]
+        while (
+            start + 1 < end
+            and end_time - points[start + 1][2] >= minimum_interval_sec
+        ):
+            start += 1
+        elapsed = end_time - points[start][2]
+        if elapsed < minimum_interval_sec:
+            continue
+        maximum = max(
+            maximum,
+            hypot(
+                points[end][0] - points[start][0],
+                points[end][1] - points[start][1],
+            )
+            / elapsed,
+        )
+        measured = True
+    if measured:
+        return maximum
+    elapsed = points[-1][2] - points[0][2]
+    return hypot(
+        points[-1][0] - points[0][0],
+        points[-1][1] - points[0][1],
+    ) / elapsed
 
 
 def load_frame_timestamps(path: str) -> list[FrameTimestamp]:
@@ -175,6 +221,12 @@ def sample_srt_at_frames(
         time = float(frame.pts_time_sec) * float(time_scale) + float(time_offset_sec)
         before = next(((index, row) for index, row in reversed(ordered) if float(row.start_sec) <= time), None)
         after = next(((index, row) for index, row in ordered if float(row.start_sec) >= time), None)
+        # The final telemetry cue remains valid until its exclusive subtitle end.
+        # Do not extrapolate beyond the cue or hold unusually stale telemetry.
+        if after is None and before is not None:
+            last = before[1]
+            if time < float(last.end_sec) and time - float(last.start_sec) <= max_interpolation_gap_sec:
+                after = before
         if before is None or after is None:
             out.append(FrameSrtSample(frame, time, None, None, None, False, False, False, None, None))
             continue

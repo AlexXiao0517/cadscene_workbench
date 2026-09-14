@@ -57,6 +57,20 @@ def test_pts_by_source_frame_has_priority_over_cfr_fallback() -> None:
     assert rows[1] == FrameTimestamp(10, 1, "frame_000010.png", 0.401, "pts_csv", False)
 
 
+@pytest.mark.parametrize("time,valid", [(1.001, True), (1.099, True), (1.1, False), (1.2, False)])
+def test_last_cue_is_valid_through_its_half_open_duration(time, valid):
+    sample = sample_srt_at_frames(
+        _attitude_records(),
+        frame_timestamps=[FrameTimestamp(30, 30, "last.png", time, "pts_csv", False)],
+        max_interpolation_gap_sec=1.5,
+    )[0]
+    assert sample.gps_valid is valid
+    if valid:
+        assert sample.rel_alt == 12
+        assert sample.gimbal_yaw == 20
+        assert sample.interpolated is False
+
+
 def test_cfr_fallback_requires_explicit_confirmation() -> None:
     with pytest.raises(ValueError, match="cfr_confirmed"):
         resolve_frame_timestamps(source_frame_indices=[0], fps=25.0, cfr_confirmed=False)

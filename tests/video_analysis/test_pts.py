@@ -30,6 +30,42 @@ FRAME_JSON = {
 }
 
 
+def test_source_video_stream_metadata_preserves_actual_codec_and_pixel_format() -> None:
+    metadata = pts.parse_source_video_stream_metadata(
+        {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "pix_fmt": "yuv420p",
+                    "side_data_list": [{"rotation": -90}],
+                }
+            ]
+        }
+    )
+
+    assert metadata.codec_name == "hevc"
+    assert metadata.pixel_format == "yuv420p"
+    assert metadata.display_rotation_deg == 270
+    assert metadata.browser_reusable_mp4 is False
+
+
+def test_source_video_stream_metadata_accepts_unrotated_h264_yuv420p() -> None:
+    metadata = pts.parse_source_video_stream_metadata(
+        {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "pix_fmt": "yuv420p",
+                }
+            ]
+        }
+    )
+
+    assert metadata.browser_reusable_mp4 is True
+
+
 def test_frame_index_prefers_pts_then_best_effort_in_presentation_order() -> None:
     frames = pts.parse_decoded_frame_records(
         FRAME_JSON, time_base=Fraction(1, 1000)

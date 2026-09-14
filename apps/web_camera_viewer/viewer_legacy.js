@@ -318,12 +318,26 @@
 
   function getWorldPoints(entity) {
     if (Array.isArray(entity.world_points)) {
-      return entity.world_points.map((point) => [point[0], point[1], 0]);
+      return entity.world_points.map((point) => [point[0], point[1], Number(point[2]) || 0]);
     }
     if (Array.isArray(entity.world_position)) {
-      return [[entity.world_position[0], entity.world_position[1], 0]];
+      return [[entity.world_position[0], entity.world_position[1], Number(entity.world_position[2]) || 0]];
     }
     return [];
+  }
+
+  function terrainGroundZ(params, data) {
+    const route = data?.meta?.terrain_preview?.ground_route || [];
+    let best = Infinity;
+    let ground = 0;
+    for (const point of route) {
+      const distance = (point[0] - params.x) ** 2 + (point[1] - params.y) ** 2;
+      if (distance < best) {
+        best = distance;
+        ground = Number(point[2]) || 0;
+      }
+    }
+    return ground;
   }
 
   function colorFor(entity, layer) {
@@ -1121,7 +1135,7 @@
     // 旧界面按 cad_scale=0.06 设计相机模型；换成毫米图纸后仍保持相同物理尺寸。
     const cameraMarkerScale = 0.06 / cadScale;
     // 二维 CAD 与地面近乎共面时，大场景深度精度会把线条遮掉，视觉上轻微抬高即可。
-    const cadVisualLift = Math.max(maxSize * 1e-5, 0.01 / cadScale);
+    const cadVisualLift = data.meta.terrain_preview ? 0 : Math.max(maxSize * 1e-5, 0.01 / cadScale);
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x07090d);
 
@@ -1276,7 +1290,7 @@
       const visibleEntries = cadTextSpatialIndex.collect((cell) => {
         projectedCadTextCell.set(
           cell.center[0] - origin.x,
-          cadVisualLift + 0.45,
+          terrainGroundZ({ x: cell.center[0], y: cell.center[1] }, data) + cadVisualLift + 0.45,
           -(cell.center[1] - origin.y),
         ).project(inspectCamera);
         const margin = 0.5;
@@ -1363,10 +1377,11 @@
     // 否则初始视角会落在路的另一端、相机又超出可视范围。
     function focusInspectOnCamera(params) {
       const rigScene = worldToScene([params.x, params.y, params.z || 0], origin);
-      const groundScene = worldToScene([params.x, params.y, 0], origin);
+      const groundZ = terrainGroundZ(params, data);
+      const groundScene = worldToScene([params.x, params.y, groundZ], origin);
       const axes = getCameraAxes(params);
       const forwardScene = directionToScene(axes.forward);
-      const distance = Math.max((params.z || 120) * 2.5, 400);
+      const distance = Math.max(Math.abs((params.z || 120) - groundZ) * 2.5, 400);
       inspectCamera.position.set(
         rigScene.x - forwardScene.x * distance,
         (params.z || 120) + distance * 0.7,
@@ -3123,17 +3138,6 @@
     const sug = sfmScene.suggestions || [];
     const workflow = sfmScene.meta?.workflow || "";
     const isSrtPosePriorScene = ["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow);
-    if (isSrtPosePriorScene && workflow === "srt_full_pose") {
-      const attitudeCount = g.filter(
-        (entry) => entry.orientation_available !== false,
-      ).length;
-      info.textContent = [
-        `SRT 原始轨迹：${g.length} 帧`,
-        `当前微调轨迹：${a.length} 帧`,
-        `SRT 姿态帧：${attitudeCount}　点云：此工作流不生成`,
-      ].join("\n");
-      return;
-    }
     const solveSize = Array.isArray(sfmScene.meta?.reconstruction_image_size)
       ? sfmScene.meta.reconstruction_image_size
       : null;
@@ -3159,12 +3163,33 @@
     const radial = Array.isArray(sfmScene.meta?.camera_radial_distortion)
       ? sfmScene.meta.camera_radial_distortion.map((value) => Number(value).toFixed(6)).join(",")
       : "-";
-    const heightDatum = sfmScene.meta?.camera_height_datum_valid === true
+    const heightDatum = sfmScene.meta?.camera_height_datum_source === "srt_abs_alt_unverified"
+      ? "SRT 绝对高度 − TPKG 地面高程（沿用实验策略，基准未验证）"
+      : sfmScene.meta?.camera_height_datum_source === "relative_fallback_missing_abs_alt"
+      ? "绝对高度缺失，已回退相对高度 / CAD Z=0"
+      : sfmScene.meta?.terrain_mode === "relative"
+      ? "相对高度 / CAD Z=0"
+      : sfmScene.meta?.camera_height_datum_valid === true
       ? "已由起飞/归零样本绑定高程"
-      : "待至少 2 个关键帧校准";
-    const calibratedCameraInfo = workflow === "srt_fixed_track_visual_pose"
-      ? `相机：${sfmScene.meta?.camera_model || "RADIAL"} f=${Number(sfmScene.meta?.camera_focal_px || 0).toFixed(2)}px c=(${principalPoint}) k=(${radial})；高程：${terrainMode} / ${terrainSources} 文件 / 覆盖 ${terrainCoverage}% / Z ${terrainHeightRange}；垂直基准：${heightDatum}`
+      : workflow === "srt_full_pose" ? "待高程偏移或关键帧校准" : "待至少 2 个关键帧校准";
+    const calibrationSource = sfmScene.meta?.intrinsics_source === "user_horizontal_fov"
+      ? "；内参来源：用户水平 FOV；畸变未知，暂按零处理"
       : "";
+    const calibratedCameraInfo = ["srt_fixed_track_visual_pose", "srt_full_pose"].includes(workflow)
+      ? `相机：${sfmScene.meta?.camera_model || "RADIAL"} f=${Number(sfmScene.meta?.camera_focal_px || 0).toFixed(2)}px c=(${principalPoint}) k=(${radial})${calibrationSource}；高程：${terrainMode} / ${terrainSources} 文件 / 覆盖 ${terrainCoverage}% / Z ${terrainHeightRange}；垂直基准：${heightDatum}`
+      : "";
+    if (workflow === "srt_full_pose") {
+      const attitudeCount = g.filter(
+        (entry) => entry.orientation_available !== false,
+      ).length;
+      info.textContent = [
+        `SRT 原始轨迹：${g.length} 帧`,
+        `当前微调轨迹：${a.length} 帧`,
+        `SRT 姿态帧：${attitudeCount}　点云：此工作流不生成`,
+        calibratedCameraInfo,
+      ].join("\n");
+      return;
+    }
     const globalTrackName = isSrtPosePriorScene ? "SRT基准轨迹帧" : "原始SfM轨迹帧";
     const anchoredTrackName = isSrtPosePriorScene ? "六自由度拟合轨迹帧" : "锚定轨迹帧";
     const sceneWarnings = sfmSceneWarnings();

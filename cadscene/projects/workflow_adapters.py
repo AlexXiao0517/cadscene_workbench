@@ -216,6 +216,12 @@ class ExistingWorkflowAdapter:
                 "viewer_scene": run_root
                 / "05_viewer_scene/sfm_viewer_scene.json",
             }
+            if int(self.version) >= 3:
+                artifacts.update({
+                    "calibration": root / "camera_calibration.json",
+                    "terrain_context": root / "terrain_context.json",
+                    "terrain_controls": root / "terrain_controls.npz",
+                })
             missing = [key for key, path in artifacts.items() if not path.is_file()]
             if missing:
                 return AdapterResult.failed(
@@ -250,6 +256,9 @@ class ExistingWorkflowAdapter:
                 "configuration_sha256": sha256(config_path.read_bytes()).hexdigest(),
                 "metric_scale_locked": True,
             }
+            for key in ("calibration", "terrain_context", "terrain_controls"):
+                if key in artifacts:
+                    validation_proof[f"{key}_sha256"] = sha256(artifacts[key].read_bytes()).hexdigest()
         elif self.name == "srt_fixed_track_visual_pose":
             root = output.parent
             run_root = root.parent
@@ -682,14 +691,14 @@ def default_workflow_adapters(
             ),
             ExistingWorkflowAdapter(
                 name="srt_full_pose",
-                version="2",
+                version="6",
                 srt_requirement="full_pose",
                 modules=("cadscene.cli.build_srt_full_pose",),
                 output_relative_path="02_srt_full_pose/camera_trajectory_full_pose.json",
             ),
             ExistingWorkflowAdapter(
                 name="srt_fixed_track_visual_pose",
-                version="7",
+                version="8",
                 srt_requirement="fixed_track",
                 modules=(
                     "cadscene.cli.plan_srt_adaptive_frames",
@@ -878,7 +887,12 @@ def _full_pose_config_payload(inputs: AdapterInputs) -> dict[str, object]:
             ),
         }
     )
-    return {"video_metadata": dict(video_metadata), "build": build.to_dict()}
+    return {
+        "video_metadata": dict(video_metadata), "build": build.to_dict(),
+        "terrain_source_paths": list(parameters.get("terrain_source_paths", ())),
+        "terrain_source_fingerprints": list(parameters.get("terrain_source_fingerprints", ())),
+        "cad_asset_fingerprint": parameters.get("cad_asset_fingerprint"),
+    }
 
 
 def _write_full_pose_config(inputs: AdapterInputs) -> Path:

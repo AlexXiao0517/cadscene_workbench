@@ -873,6 +873,39 @@ def test_full_pose_resume_has_only_adjustment_and_render_stages(
     assert api.workbench._validated_resume_stage(saved, "render") == "render"
 
 
+@pytest.mark.parametrize('workflow', ['srt_full_pose', 'srt_fixed_track_visual_pose'])
+def test_terrain_cad_is_published_when_opening_srt_workbench(tmp_path, workflow):
+    import numpy as np
+    api, repositories, runs_root, job = _project_api_with_workbench(tmp_path, workflow=workflow)
+    clip = repositories.clips.load('project-1').clips[0]
+    cad = api.workbench._cad_design_for_context('project-1', clip)
+    cad.write_text(json.dumps({'meta': {}, 'layers': [{'name': 'road', 'entities': [
+        {'type': 'line', 'entity_id': 'a', 'world_points': [[1000,2000],[1020,2000]]}]}]}))
+    original = cad.read_bytes()
+    trajectory = Path(job.published_outputs['trajectory'])
+    payload = json.loads(trajectory.read_text())
+    payload['meta'] = {**payload.get('meta', {}), 'cad_origin_xy': [1000,2000], 'cad_scale': 1}
+    payload['poses'] = [{'frame_index': 0, 'registered': True, 'center': [0,0,194.174]}]
+    trajectory.write_text(json.dumps(payload))
+    context = trajectory.parent / 'terrain_context.json'
+    context.write_text('{"terrain_mode":"terrain"}')
+    controls = trajectory.parent / 'terrain_controls.npz'
+    np.savez(controls, points_xyz=np.empty((0,3)), segment_starts_xyz=[[0,0,138]], segment_ends_xyz=[[20,0,138]])
+    updated = replace(job, published_outputs={**job.published_outputs, 'terrain_context': str(context), 'terrain_controls': str(controls)},
+                      output_fingerprint=sha256(trajectory.read_bytes()).hexdigest())
+    jobs = repositories.jobs.load('project-1')
+    repositories.jobs.update('project-1', expected_revision=jobs.revision,
+                             mutate=lambda value: replace(value, jobs=(updated.to_dict(),)))
+    opened = api.handle('POST', '/api/projects/project-1/clips/clip-1/workbench-sessions', json_body={
+        'expected_revision': repositories.clips.load('project-1').revision,
+        'return_to': '/apps/project_workspace/?projectId=project-1'})
+    assert opened.status == 201, opened.body
+    preview = json.loads((tmp_path / 'data/project-1-clip-1/cad/design.json').read_text())
+    assert preview['layers'][0]['entities'][0]['world_points'] == [[1000,2000,138],[1020,2000,138]]
+    assert cad.read_bytes() == original
+    assert json.loads(trajectory.read_text())['poses'][0]['center'][2] == 194.174
+
+
 def _fixed_track_api_with_workbench(
     tmp_path: Path, *, with_trajectory: bool
 ) -> tuple[ProjectApi, object]:
@@ -3089,6 +3122,32 @@ def test_ready_clip_can_open_workbench_before_trajectory_is_solved(
         (tmp_path / "data/project-1-clip-1/dataset_manifest.json").read_text(encoding="utf-8")
     )
     assert bridge["workflow"]["trajectory_mode"] == "sfm_only"
+
+
+def test_same_size_media_changes_are_not_reused(tmp_path):
+    from cadscene.projects.workbench_sessions import _identical_media
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"old")
+    destination.write_bytes(b"old")
+    assert _identical_media(source, destination)
+    source.write_bytes(b"new")
+    assert not _identical_media(source, destination)
+
+
+def test_reopening_workbench_does_not_replace_identical_streamed_media(tmp_path, monkeypatch):
+    import cadscene.projects.workbench_sessions as subject
+    api, repositories, _, _ = _project_api_with_workbench(tmp_path)
+    clip = repositories.clips.load("project-1").clips[0]
+    api.workbench._publish_workbench_inputs("project-1", clip)
+    real_replace = subject.os.replace
+
+    def replace_unless_streamed(source, destination):
+        if Path(destination).name == "design.json" or Path(destination).suffix == ".mp4":
+            raise PermissionError("browser is streaming this existing media")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(subject.os, "replace", replace_unless_streamed)
+    api.workbench._publish_workbench_inputs("project-1", clip)
 
 
 def test_full_pose_clip_cannot_open_workbench_before_trajectory_is_solved(

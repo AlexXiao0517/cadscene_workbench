@@ -11,6 +11,7 @@ from cadscene.rendering.calibrated_overlay import (
     render_calibrated_overlay_video,
 )
 from cadscene.rendering.overlay import RenderOverlayConfig, render_overlay_video, write_render_outputs
+from cadscene.video_analysis.pts import resolve_ffmpeg_executable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,13 +33,26 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("720p", "1080p", "source", "4k"),
         default="1080p",
     )
-    parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--ffmpeg")
     parser.add_argument("--debug-scale", type=float, default=1.0)
-    parser.add_argument("--overlay-linewidth", type=int, default=3)
-    parser.add_argument("--overlay-alpha", type=float, default=0.88)
+    parser.add_argument("--overlay-linewidth", type=int, default=None)
+    parser.add_argument("--overlay-alpha", type=float, default=None)
     parser.add_argument("--faded-overlay", action="store_true")
-    parser.add_argument("--max-distance-m", type=float, default=900.0)
-    parser.add_argument("--fade-start-m", type=float, default=250.0)
+    parser.add_argument("--max-distance-m", type=float, default=None)
+    parser.add_argument("--fade-start-m", type=float, default=None)
+    parser.add_argument(
+        "--cad-region-bounds",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+        help=(
+            "Fixed CAD construction region bounds in CAD-local meters after "
+            "origin/scale (not longitude/latitude or raw CAD world coordinates)."
+        ),
+    )
+    parser.add_argument("--cad-region-margin-m", type=float, default=100.0)
+    parser.add_argument("--cad-region-lookahead-m", type=float, default=1000.0)
     parser.add_argument("--start-frame", type=int)
     parser.add_argument("--end-frame", type=int)
     parser.add_argument("--sample-every", type=int, default=1)
@@ -74,6 +88,10 @@ def _validate_inputs(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    defaults = (2, 0.92, None, None) if args.camera_calibration else (3, 0.88, 900.0, 250.0)
+    for name, value in zip(("overlay_linewidth", "overlay_alpha", "max_distance_m", "fade_start_m"), defaults):
+        if getattr(args, name) is None:
+            setattr(args, name, value)
     try:
         _validate_inputs(args)
         artifacts = ArtifactManager(output_root=args.output_root, dataset=args.dataset, run_id=args.run_id)
@@ -105,8 +123,15 @@ def main(argv: list[str] | None = None) -> int:
                 overlay_alpha=args.overlay_alpha,
                 max_distance_m=args.max_distance_m,
                 fade_start_m=args.fade_start_m,
+                cad_region_bounds=(
+                    tuple(args.cad_region_bounds)
+                    if args.cad_region_bounds is not None
+                    else None
+                ),
+                cad_region_margin_m=args.cad_region_margin_m,
+                cad_region_lookahead_m=args.cad_region_lookahead_m,
                 output_fps=30.0,
-                ffmpeg_executable=args.ffmpeg,
+                ffmpeg_executable=str(resolve_ffmpeg_executable(args.ffmpeg)),
             )
             result = render_calibrated_overlay_video(
                 config, progress_callback=progress_callback

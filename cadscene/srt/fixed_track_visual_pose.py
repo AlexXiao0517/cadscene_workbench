@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fractions import Fraction
-from math import acos, degrees, hypot, isfinite
+from math import acos, degrees, isfinite
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -19,7 +19,10 @@ from cadscene.srt.georeference import (
     project_wgs84_to_cad_raw,
 )
 from cadscene.srt.schema import SrtRecord
-from cadscene.srt.synchronization import sample_srt_at_frames
+from cadscene.srt.synchronization import (
+    maximum_windowed_horizontal_speed,
+    sample_srt_at_frames,
+)
 
 
 WORKFLOW_NAME = "srt_fixed_track_visual_pose"
@@ -899,16 +902,16 @@ def build_fixed_track_positions(
             "fixed-track position coverage is below the configured minimum: "
             f"{coverage:.3f} < {config.minimum_position_coverage:.3f}"
         )
-    max_speed = 0.0
-    for first, second in zip(positions, positions[1:]):
-        elapsed = second.pts_time_sec - first.pts_time_sec
-        if elapsed <= 0.0:
-            raise ValueError("fixed-track frame timestamps must be increasing")
-        speed = hypot(
-            second.canonical_center[0] - first.canonical_center[0],
-            second.canonical_center[1] - first.canonical_center[1],
-        ) / elapsed
-        max_speed = max(max_speed, speed)
+    max_speed = maximum_windowed_horizontal_speed(
+        tuple(
+            (
+                position.canonical_center[0],
+                position.canonical_center[1],
+                position.pts_time_sec,
+            )
+            for position in positions
+        )
+    )
     if max_speed > config.max_horizontal_speed_mps:
         raise ValueError(
             "SRT horizontal speed exceeds the configured safety limit: "

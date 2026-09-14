@@ -107,6 +107,73 @@ def test_absolute_height_without_relative_height_is_rejected() -> None:
         build_fixed_track_positions(_records(relative=False), _frame_map(), _config())
 
 
+def test_high_rate_quantized_gps_does_not_trigger_instantaneous_speed_limit() -> None:
+    frame_count = 61
+    records = [
+        SrtRecord(
+            start_sec=index / 60.0,
+            end_sec=(index + 1) / 60.0,
+            latitude=30.0,
+            longitude=120.0 + (index // 5) * 0.00002,
+            rel_alt=80.0,
+        )
+        for index in range(frame_count)
+    ]
+    frame_map = {
+        "source_time_base": {"numerator": 1, "denominator": 60},
+        "clips": [
+            {
+                "clip_id": "clip-1",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": frame_count,
+                "frames": [{"pts": index} for index in range(frame_count)],
+            }
+        ],
+    }
+    config = _config(
+        source_end_pts_exclusive=frame_count,
+        source_time_base=Fraction(1, 60),
+        max_horizontal_speed_mps=100.0,
+    )
+
+    positions = build_fixed_track_positions(records, frame_map, config)
+
+    assert len(positions) == frame_count
+
+
+def test_high_rate_persistent_gps_jump_still_triggers_speed_limit() -> None:
+    frame_count = 61
+    records = [
+        SrtRecord(
+            start_sec=index / 60.0,
+            end_sec=(index + 1) / 60.0,
+            latitude=30.0,
+            longitude=120.0 + (0.001 if index >= 30 else 0.0),
+            rel_alt=80.0,
+        )
+        for index in range(frame_count)
+    ]
+    frame_map = {
+        "source_time_base": {"numerator": 1, "denominator": 60},
+        "clips": [
+            {
+                "clip_id": "clip-1",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": frame_count,
+                "frames": [{"pts": index} for index in range(frame_count)],
+            }
+        ],
+    }
+    config = _config(
+        source_end_pts_exclusive=frame_count,
+        source_time_base=Fraction(1, 60),
+        max_horizontal_speed_mps=100.0,
+    )
+
+    with pytest.raises(ValueError, match="horizontal speed"):
+        build_fixed_track_positions(records, frame_map, config)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

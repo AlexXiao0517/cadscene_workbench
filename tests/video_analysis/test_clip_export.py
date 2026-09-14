@@ -792,6 +792,156 @@ def test_load_export_clips_allows_explicit_bounded_solve_duration(
     ]
 
 
+def test_load_export_clips_can_disable_duration_limit_for_whole_srt_video(
+    tmp_path: Path,
+) -> None:
+    manifest = _write_manifest(
+        tmp_path,
+        [_integer_pts_clip("whole-srt-video", 0, 200_000)],
+    )
+
+    clips = load_export_clips(manifest, max_duration_seconds=None)
+
+    assert [(item.clip_id, item.duration_sec) for item in clips] == [
+        ("whole-srt-video", 200.0)
+    ]
+
+
+def test_export_video_clips_reuses_full_span_mp4_without_reencoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"original-mp4")
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": "whole-srt-video",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": 4,
+                "source_time_base": {"numerator": 1, "denominator": 1},
+            }
+        ],
+    )
+    frame_index = DecodedFrameIndex(
+        time_base=Fraction(1, 1),
+        frames=tuple(
+            DecodedFrameTimestamp(
+                ordinal=index,
+                pts=index,
+                duration_pts=1,
+                timestamp_source="pts",
+            )
+            for index in range(4)
+        ),
+    )
+    monkeypatch.setattr(
+        clip_export, "_probe_source_frame_index", lambda _source, _ffmpeg: frame_index
+    )
+    monkeypatch.setattr(
+        clip_export, "resolve_ffmpeg_executable", lambda _explicit=None: Path("ffmpeg")
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_source_video_stream_metadata",
+        lambda _source: clip_export.SourceVideoStreamMetadata(
+            codec_name="h264", pixel_format="yuv420p", display_rotation_deg=0
+        ),
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "_build_ffmpeg_clip_command",
+        lambda **_kwargs: pytest.fail("full-span MP4 must not be re-encoded"),
+    )
+
+    paths = export_video_clips(
+        video,
+        manifest,
+        tmp_path / "clips-whole",
+        require_full_source_partition=False,
+        max_duration_seconds=None,
+        reuse_source_if_full_span=True,
+    )
+
+    assert paths[0].read_bytes() == b"original-mp4"
+    frame_map = json.loads(
+        (tmp_path / "clips-whole/clip_frame_map.json").read_text(encoding="utf-8")
+    )
+    assert len(frame_map["clips"][0]["frames"]) == 4
+
+
+def test_export_video_clips_transcodes_full_span_hevc_for_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"original-hevc")
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "clip_id": "whole-srt-video",
+                "source_start_pts": 0,
+                "source_end_pts_exclusive": 4,
+                "source_time_base": {"numerator": 1, "denominator": 1},
+            }
+        ],
+    )
+    frame_index = DecodedFrameIndex(
+        time_base=Fraction(1, 1),
+        frames=tuple(
+            DecodedFrameTimestamp(
+                ordinal=index,
+                pts=index,
+                duration_pts=1,
+                timestamp_source="pts",
+            )
+            for index in range(4)
+        ),
+    )
+    monkeypatch.setattr(
+        clip_export, "_probe_source_frame_index", lambda _source, _ffmpeg: frame_index
+    )
+    monkeypatch.setattr(
+        clip_export, "resolve_ffmpeg_executable", lambda _explicit=None: Path("ffmpeg")
+    )
+    monkeypatch.setattr(
+        clip_export,
+        "probe_source_video_stream_metadata",
+        lambda _source: clip_export.SourceVideoStreamMetadata(
+            codec_name="hevc", pixel_format="yuv420p", display_rotation_deg=0
+        ),
+    )
+    encoded: list[Path] = []
+
+    def build_command(**options):
+        clip_path = options["clip_path"]
+        clip_path.write_bytes(b"browser-h264")
+        encoded.append(clip_path)
+        return ["ffmpeg", str(clip_path)]
+
+    monkeypatch.setattr(clip_export, "_build_ffmpeg_clip_command", build_command)
+    monkeypatch.setattr(
+        clip_export.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, b"", b""),
+    )
+    monkeypatch.setattr(
+        clip_export, "_probe_output_frame_count", lambda _path, _ffmpeg: 4
+    )
+
+    paths = export_video_clips(
+        video,
+        manifest,
+        tmp_path / "clips-hevc",
+        require_full_source_partition=False,
+        max_duration_seconds=None,
+        reuse_source_if_full_span=True,
+    )
+
+    assert encoded
+    assert paths[0].read_bytes() == b"browser-h264"
+
+
 def test_load_export_clips_rejects_casefold_colliding_ids(tmp_path: Path) -> None:
     manifest = _write_manifest(
         tmp_path,

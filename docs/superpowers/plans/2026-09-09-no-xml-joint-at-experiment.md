@@ -4,7 +4,7 @@
 
 **Goal:** Produce three renderer-ready probe frames from a jointly aligned COLMAP/SRT/DJI trajectory without allowing Bentley XML into the solver or renderer.
 
-**Architecture:** Keep the existing COLMAP sparse model fixed and solve a compact robust least-squares problem for one shared world Sim3, one bounded DJI-to-camera installation rotation, and low-frequency XYZ correction knots. Emit the existing `camera_trajectory.json` and `camera_calibration.json` contracts so the existing experimental CAD/TPKG renderer can consume the result unchanged; run XML only afterward in a separate comparison command.
+**Architecture:** Keep the existing COLMAP sparse model fixed and solve a compact robust least-squares problem for one shared world Sim3 and low-frequency XYZ correction knots. Use the confirmed horizontal DJI installation assumption because a free installation rotation and world rotation are not separately observable on a near-linear route. Emit the existing `camera_trajectory.json` and `camera_calibration.json` contracts so the existing experimental CAD/TPKG renderer can consume the result unchanged; run XML only afterward in a separate comparison command.
 
 **Tech Stack:** Python 3.11, NumPy, SciPy `least_squares`/`Rotation`/`Slerp`, existing CADScene SRT/georeference helpers, pytest, OpenCV probe renderer.
 
@@ -13,7 +13,7 @@
 - Solver and renderer command-line interfaces must not accept an XML path.
 - COLMAP centers and rotations must share one global rotation `G`.
 - DJI attitude must use Bentley `XRightYDown` matrix composition.
-- Installation correction is constant for the whole video and bounded to ±6° per rotation-vector component.
+- Automatic alignment fixes installation correction to identity; fixed installation bias remains a later user global-attitude adjustment.
 - Low-frequency XYZ knots are spaced every 20 seconds and regularized by their second difference and endpoints.
 - SRT absolute height is preserved; no fixed vertical offset is invented.
 - Probe confirmation is experimental only and must not become a formal product task state.
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: `frames: ndarray[N]`, COLMAP `centers: ndarray[N,3]`, COLMAP `world_from_camera: ndarray[N,3,3]`, projected SRT centers, and DJI aircraft/gimbal values.
-- Produces: `bentley_world_from_camera(yaw_deg, pitch_deg, roll_deg) -> ndarray[3,3]` and `solve_joint_alignment(...) -> JointAlignmentResult` with one `world_rotation`, `scale`, `translation`, `installation_rotation`, corrected sparse centers/rotations, diagnostics, and convergence status.
+- Produces: `bentley_world_from_camera(yaw_deg, pitch_deg, roll_deg) -> ndarray[3,3]` and `solve_joint_alignment(...) -> JointAlignmentResult` with one `world_rotation`, `scale`, `translation`, identity `installation_rotation`, corrected sparse centers/rotations, diagnostics, and convergence status.
 
 - [ ] **Step 1: Write failing Bentley-matrix tests**
 
@@ -86,7 +86,7 @@ def test_joint_solver_recovers_shared_world_rotation_and_rejects_split_gauge():
     )
     assert result.success
     np.testing.assert_allclose(result.world_rotation, expected.world_rotation, atol=2e-3)
-    np.testing.assert_allclose(result.installation_rotation, expected.installation_rotation, atol=2e-3)
+    np.testing.assert_allclose(result.installation_rotation, np.eye(3), atol=1e-12)
     for source, solved in zip(visual_rotations, result.world_from_camera):
         np.testing.assert_allclose(solved, result.world_rotation @ source, atol=1e-10)
 ```
@@ -99,7 +99,7 @@ Expected: FAIL because `solve_joint_alignment` is not implemented.
 
 - [ ] **Step 7: Implement robust joint least squares**
 
-Implement a `JointAlignmentResult` dataclass and solve variables `[log_scale, world_rotvec(3), translation(3), install_rotvec(3), knots(K,3)]` with `scipy.optimize.least_squares(loss="soft_l1")`. Position residuals use `(s * G @ C_i + t + d_i - S_i) / 3.0`; orientation residuals use `Rotation.from_matrix((T_i @ B).T @ (G @ R_i)).as_rotvec() / radians(2.0)`; installation regularization uses `install_rotvec / radians(2.0)`; second differences use `(d[k-1] - 2*d[k] + d[k+1]) / 1.0`; endpoint knots use `d[[0,-1]] / 2.0`. Bound installation components to `±radians(6)` and reject results that finish within `0.05°` of a bound.
+Implement a `JointAlignmentResult` dataclass and solve variables `[log_scale, world_rotvec(3), translation(3), knots(K,3)]` with `scipy.optimize.least_squares(loss="soft_l1")`. Position residuals use `(s * G @ C_i + t + d_i - S_i) / 3.0`; orientation residuals use `Rotation.from_matrix(T_i.T @ (G @ R_i)).as_rotvec() / radians(2.0)`; every knot has a `0.5 m` magnitude regularizer; second differences use `(d[k-1] - 2*d[k] + d[k+1]) / 1.0`; endpoint knots use `d[[0,-1]] / 2.0`. Initialize with a trimmed robust Umeyama fit so isolated GPS gross errors do not set the starting world rotation.
 
 - [ ] **Step 8: Run all joint solver tests**
 

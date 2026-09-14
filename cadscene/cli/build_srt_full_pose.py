@@ -14,6 +14,7 @@ from cadscene.srt.full_pose import (
     build_full_pose_trajectory,
 )
 from cadscene.srt.parser import load_srt_records
+from cadscene.srt.full_pose_render_assets import publish_full_pose_render_assets
 from cadscene.srt.full_pose_workbench import (
     build_full_pose_workbench_payloads,
     publish_full_pose_workbench_payloads,
@@ -104,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8-sig"
             )
         )
+        _write_progress(args.progress_file, "compiling_terrain", 0.6)
+        publish_full_pose_render_assets(staged_output, trajectory, config, payload)
         workbench_payloads = build_full_pose_workbench_payloads(trajectory)
         publish_full_pose_workbench_payloads(staging_root, workbench_payloads)
         _write_progress(args.progress_file, "publishing_full_pose", 0.95)

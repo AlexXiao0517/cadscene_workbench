@@ -5149,6 +5149,7 @@ class ProjectService:
                 project,
                 clip,
                 frame_map_path=frame_map_path,
+                terrain_sources=job.request_parameters.get("terrain_sources"),
             )
             if adapter.name == "srt_full_pose"
             else (
@@ -5286,7 +5287,7 @@ class ProjectService:
                 media_spec=media_spec,
             ),
         }
-        if clip.resolved_workflow == "srt_fixed_track_visual_pose":
+        if clip.resolved_workflow in {"srt_fixed_track_visual_pose", "srt_full_pose"}:
             required_fixed_artifacts = {
                 "camera_calibration_path": "calibration",
                 "terrain_context_path": "terrain_context",
@@ -6580,10 +6581,10 @@ class ProjectService:
         request_parameters: dict[str, object] = {}
         if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
             request_parameters["whole_source_media"] = bool(whole_source_media)
-        if adapter_name == "srt_fixed_track_visual_pose":
             request_parameters["terrain_sources"] = list(
                 _terrain_source_snapshot(project_assets)
             )
+        if adapter_name == "srt_fixed_track_visual_pose":
             request_parameters["reconstruction_identity"] = (
                 reconstruction_identity
                 or _fixed_track_reconstruction_identity(
@@ -9123,6 +9124,7 @@ def _srt_full_pose_adapter_parameters(
     clip: ClipDefinition,
     *,
     frame_map_path: Path | None = None,
+    terrain_sources: object = None,
 ) -> dict[str, object]:
     georeference = _confirmed_cad_georeference(project.source_assets)
     settings = clip.manual_definition.get("srt_full_pose")
@@ -9137,9 +9139,16 @@ def _srt_full_pose_adapter_parameters(
     render = _workbench_render_parameters(
         storage_root, project.project_id, clip, project.source_assets
     )
+    sources = (
+        terrain_sources if isinstance(terrain_sources, (list, tuple))
+        else _terrain_source_snapshot(project.source_assets)
+    )
     return {
         "cad_georeference": dict(georeference),
         "srt_full_pose": dict(settings),
+        "terrain_source_paths": [str(item["path"]) for item in sources],
+        "terrain_source_fingerprints": [str(item["sha256"]) for item in sources],
+        "cad_asset_fingerprint": _active_cad_asset_fingerprint(project.source_assets),
         "cad_origin_xy": list(render["origin_xy"]),
         "cad_scale": render["cad_scale"],
         "video_metadata": {
@@ -9254,7 +9263,9 @@ def _job_identity_payload(
     }
     if adapter_name in {"srt_full_pose", "srt_fixed_track_visual_pose"}:
         payload["cad_georeference"] = _cad_georeference_snapshot(project_assets)
-    if adapter_name == "srt_fixed_track_visual_pose" and include_fixed_track_terrain:
+    if (adapter_name == "srt_full_pose" and int(adapter_version) >= 3) or (
+        adapter_name == "srt_fixed_track_visual_pose" and include_fixed_track_terrain
+    ):
         payload["terrain_sources"] = list(_terrain_source_identity(project_assets))
     if _clip_input_snapshot(clip) is None:
         payload.update(

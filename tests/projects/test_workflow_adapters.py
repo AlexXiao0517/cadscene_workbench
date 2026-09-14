@@ -398,7 +398,7 @@ def test_full_pose_adapter_is_available_and_runs_no_sfm(
 
     assert adapter.available is True
     assert adapter.unavailable_reason is None
-    assert adapter.version == "2"
+    assert adapter.version == "6"
     assert len(commands) == 1
     command = commands[0]
     assert command[1:3] == ("-m", "cadscene.cli.build_srt_full_pose")
@@ -408,6 +408,21 @@ def test_full_pose_adapter_is_available_and_runs_no_sfm(
     assert json.loads(config.read_text(encoding="utf-8"))["build"][
         "horizontal_fov_deg"
     ] == 82.0
+
+
+def test_full_pose_freezes_terrain_inputs_in_cli_configuration(tmp_path: Path) -> None:
+    inputs = _full_pose_inputs(tmp_path)
+    terrain = {
+        "terrain_source_paths": ["a.tpkg", "b.tpkg"],
+        "terrain_source_fingerprints": ["a" * 64, "b" * 64],
+        "cad_asset_fingerprint": "cad-sha",
+    }
+    inputs = replace(inputs, parameters={**inputs.parameters, **terrain})
+    adapter = default_workflow_adapters().for_workflow("srt_full_pose")
+    command = adapter.build_commands(adapter.prepare_inputs(inputs))[0]
+    config = json.loads(Path(command[command.index("--config") + 1]).read_text(encoding="utf-8"))
+    for key, value in terrain.items():
+        assert config[key] == value
 
 
 def test_full_pose_prepare_requires_horizontal_fov(tmp_path: Path) -> None:
@@ -452,6 +467,8 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     camera_path.write_text("frame_index,camera_x\n0,0\n", encoding="utf-8")
     report = output.with_name("full_pose_report.md")
     report.write_text("# report\n", encoding="utf-8")
+    for name in ("camera_calibration.json", "terrain_context.json", "terrain_controls.npz"):
+        output.with_name(name).write_bytes(b"{}")
     initial_track = output.parent.parent / "03_alignment/camera_track_pred.json"
     initial_track.parent.mkdir(parents=True, exist_ok=True)
     initial_track.write_text(
@@ -478,6 +495,9 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     assert result.validation_proof["metric_scale_locked"] is True
     assert result.validation_proof["initial_camera_track_sha256"]
     assert result.validation_proof["viewer_scene_sha256"]
+    assert result.validation_proof["calibration_sha256"]
+    assert result.validation_proof["terrain_context_sha256"]
+    assert result.validation_proof["terrain_controls_sha256"]
 
 
 @pytest.mark.parametrize(
@@ -485,6 +505,9 @@ def test_full_pose_adapter_validates_trajectory_and_diagnostics(
     (
         "03_alignment/camera_track_pred.json",
         "05_viewer_scene/sfm_viewer_scene.json",
+        "02_srt_full_pose/camera_calibration.json",
+        "02_srt_full_pose/terrain_context.json",
+        "02_srt_full_pose/terrain_controls.npz",
     ),
 )
 def test_full_pose_adapter_rejects_missing_initial_workbench_artifact(
@@ -517,6 +540,9 @@ def test_full_pose_adapter_rejects_missing_initial_workbench_artifact(
         "02_srt_full_pose/georeference_diagnostics.json": "{}",
         "02_srt_full_pose/camera_path_full_pose.csv": "frame_index\n0\n",
         "02_srt_full_pose/full_pose_report.md": "# report\n",
+        "02_srt_full_pose/camera_calibration.json": "{}",
+        "02_srt_full_pose/terrain_context.json": "{}",
+        "02_srt_full_pose/terrain_controls.npz": "npz",
         "03_alignment/camera_track_pred.json": "{}",
         "05_viewer_scene/sfm_viewer_scene.json": "{}",
     }.items():
@@ -576,7 +602,7 @@ def test_fixed_track_adapter_runs_colmap_before_pose_transfer(
 
     commands = adapter.build_commands(adapter.prepare_inputs(inputs))
 
-    assert adapter.version == "7"
+    assert adapter.version == "8"
     assert len(commands) == 3
     planner, sfm, transfer = commands
     assert planner[1:3] == ("-m", "cadscene.cli.plan_srt_adaptive_frames")

@@ -5,6 +5,7 @@ import pytest
 from pyproj import Transformer
 
 from cadscene.diagnostics.xml_at_reference import (
+    bentley_ypr_world_to_camera_rotation,
     build_adjusted_at_track,
     project_distorted_segments,
     srt_vertical_reference_m,
@@ -85,11 +86,31 @@ def test_build_adjusted_track_interpolates_ecef_and_shortest_arc_rotation() -> N
     assert poses[0].camera.camera_y == pytest.approx(0.0, abs=1e-6)
     assert poses[0].camera.camera_z == pytest.approx(85.0)
     assert poses[0].camera.pitch_deg == pytest.approx(45.0)
+    assert poses[0].camera.roll_deg == pytest.approx(-1.0)
     assert abs(abs(poses[1].camera.yaw_deg) - 180.0) < 1e-6
     assert poses[1].camera.pitch_deg == pytest.approx(45.0)
     assert poses[1].longitude == pytest.approx(expected_midpoint[0], abs=1e-10)
     assert poses[1].latitude == pytest.approx(expected_midpoint[1], abs=1e-10)
     assert poses[1].adjusted_altitude_m == pytest.approx(expected_midpoint[2], abs=1e-6)
+
+
+def test_bentley_ypr_rotation_matches_x_right_y_down_manual_formula() -> None:
+    rotation = bentley_ypr_world_to_camera_rotation(
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+        roll_deg=30.0,
+    )
+
+    root_three_over_two = np.sqrt(3.0) / 2.0
+    assert rotation == pytest.approx(
+        np.asarray(
+            [
+                [root_three_over_two, 0.0, 0.5],
+                [0.5, 0.0, -root_three_over_two],
+                [0.0, 1.0, 0.0],
+            ]
+        )
+    )
 
 
 def test_build_adjusted_track_requires_adjusted_xml_centers() -> None:

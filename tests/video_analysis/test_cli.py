@@ -227,6 +227,33 @@ def test_export_video_clips_cli_forwards_typed_explicit_options(
     ]
 
 
+def test_export_video_clips_cli_forwards_whole_source_reuse_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, object] = {}
+
+    def export(video_path, manifest_path, output_dir, **options):
+        received.update(options)
+        return [output_dir / "clip-0001.mp4"]
+
+    monkeypatch.setattr(export_video_clips_cli, "export_video_clips", export)
+
+    assert export_video_clips_cli.main(
+        [
+            "--video",
+            "source.mp4",
+            "--manifest",
+            "manifest.json",
+            "--output-dir",
+            "clips",
+            "--no-duration-limit",
+            "--reuse-source-full-span",
+        ]
+    ) == 0
+    assert received["max_duration_seconds"] is None
+    assert received["reuse_source_if_full_span"] is True
+
+
 def test_export_video_clips_cli_publishes_structured_progress_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
