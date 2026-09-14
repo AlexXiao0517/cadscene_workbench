@@ -16,7 +16,7 @@ _TIMECODE = re.compile(
 _BRACKET_VALUE = re.compile(r"\[\s*(?P<key>[^:\]]+)\s*:\s*(?P<value>[^\]]+)\]")
 _TEXT_VALUE = re.compile(
     r"(?P<key>latitude|longitude|longtitude|altitude|height|relative[_ ]?altitude|absolute[_ ]?altitude|rel[_ ]?alt|abs[_ ]?alt|"
-    r"gimbal[_ ]?(?:yaw|pitch|roll)|drone[_ ]?(?:yaw|pitch|roll)|"
+    r"gimbal[_ ]?(?:yaw|pitch|roll)|gb[_ ]?(?:yaw|pitch|roll)|drone[_ ]?(?:yaw|pitch|roll)|"
     r"aircraft[_ ]?(?:yaw|pitch|roll))\s*[:=]\s*(?P<value>[-+]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
