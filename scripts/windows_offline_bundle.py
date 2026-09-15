@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -63,6 +65,8 @@ class ReleaseConfig:
 
 _FORBIDDEN_TOP_LEVEL = {".git", "projects", "data", "runs", "tests"}
 _NATIVE_RUNTIME_NAMES = ("libc++.dll", "libunwind.dll")
+_CONDA_FFMPEG_SHA256 = "7571dc78b6bb6ff8687549673783f0aecfe9fe1866c185f2ce94678c7dffaf2c"
+_IMAGEIO_FFMPEG_SHA256 = "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3"
 
 
 def validate_staging_tree(root: str | Path) -> None:
@@ -119,7 +123,9 @@ def backend_runtime_files(root: str | Path) -> tuple[Path, ...]:
     return tuple(sorted(selected, key=lambda value: value.as_posix()))
 
 
-def write_zip64(source: str | Path, output: str | Path) -> Path:
+def write_zip64(
+    source: str | Path, output: str | Path, *, exclusive: bool = False
+) -> Path:
     """以稳定成员顺序写入含单一顶层目录的 ZIP64 文件。"""
 
     root = Path(source)
@@ -127,7 +133,7 @@ def write_zip64(source: str | Path, output: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(
         destination,
-        mode="w",
+        mode="x" if exclusive else "w",
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=6,
         allowZip64=True,
@@ -217,12 +223,16 @@ def prepare_runtime_commands(
     )
 
 
-def _safe_extract_tar(archive_path: Path, destination: Path) -> None:
+def _safe_extract_tar(
+    archive_path: Path, destination: Path, *, reject_links: bool = False
+) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     resolved_destination = destination.resolve()
     with tarfile.open(archive_path, "r:*") as archive:
         members = archive.getmembers()
         for member in members:
+            if reject_links and (member.issym() or member.islnk()):
+                raise ValueError(f"runtime archive contains a link: {member.name}")
             target = (destination / member.name).resolve()
             if target != resolved_destination and resolved_destination not in target.parents:
                 raise ValueError(f"runtime archive escapes destination: {member.name}")
@@ -237,6 +247,121 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _guard_runtime_file(runtime: Path, relative: Path) -> Path:
+    """Return a regular runtime file without following links or junctions outside it."""
+
+    runtime_resolved = runtime.resolve()
+    candidate = runtime / relative
+    current = runtime
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(current)):
+            raise ValueError(f"runtime profile path is a link: {relative.as_posix()}")
+    resolved = candidate.resolve()
+    if resolved == runtime_resolved or runtime_resolved not in resolved.parents:
+        raise ValueError(f"runtime profile path escapes runtime: {relative.as_posix()}")
+    return candidate
+
+
+def _remove_conda_prefix_record(script: Path, duplicate_relative: Path) -> tuple[str, str]:
+    """Remove only the audited duplicate's literal conda-pack prefix record."""
+
+    source = script.read_text(encoding="utf-8")
+    before = _sha256(script)
+    try:
+        tree = ast.parse(source, filename=str(script))
+    except SyntaxError as error:
+        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure") from error
+    assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "_prefix_records"
+    ]
+    if len(assignments) != 1:
+        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
+    assignment = assignments[0]
+    try:
+        records = ast.literal_eval(assignment.value)
+    except (ValueError, TypeError, SyntaxError) as error:
+        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure") from error
+    if not isinstance(records, (list, tuple)):
+        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
+
+    expected = duplicate_relative.as_posix().casefold()
+
+    def record_path(record: object) -> str | None:
+        if isinstance(record, str):
+            return record
+        if isinstance(record, (list, tuple)) and record and isinstance(record[0], str):
+            return record[0]
+        return None
+
+    for record in records:
+        if record_path(record) is None:
+            raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
+    filtered = [
+        record
+        for record in records
+        if record_path(record).replace("\\", "/").casefold() != expected
+    ]
+    if filtered != list(records):
+        lines = source.splitlines(keepends=True)
+        start = sum(len(line.encode("utf-8")) for line in lines[: assignment.lineno - 1]) + assignment.col_offset
+        end = sum(len(line.encode("utf-8")) for line in lines[: assignment.end_lineno - 1]) + assignment.end_col_offset
+        source_bytes = source.encode("utf-8")
+        replacement = f"_prefix_records = {filtered!r}".encode("utf-8")
+        script.write_bytes(source_bytes[:start] + replacement + source_bytes[end:])
+    return before, _sha256(script)
+
+
+def _apply_runtime_profile(runtime: Path, runtime_profile: str) -> dict[str, object]:
+    """Apply the audited, opt-in FFmpeg deduplication profile."""
+
+    if runtime_profile != "conda-ffmpeg-only":
+        raise ValueError(f"unsupported runtime profile: {runtime_profile}")
+    replacement_relative = Path("Library/bin/ffmpeg.exe")
+    duplicate_relative = Path(
+        "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    )
+    replacement = _guard_runtime_file(runtime, replacement_relative)
+    duplicate = _guard_runtime_file(runtime, duplicate_relative)
+    script_relative = Path("Scripts/conda-unpack-script.py")
+    script = _guard_runtime_file(runtime, script_relative)
+    if not replacement.is_file() or _sha256(replacement) != _CONDA_FFMPEG_SHA256:
+        raise ValueError("replacement FFmpeg is missing or has an unaudited SHA256")
+
+    excluded: dict[str, str] | None = None
+    if duplicate.exists():
+        if not duplicate.is_file() or _sha256(duplicate) != _IMAGEIO_FFMPEG_SHA256:
+            raise ValueError("imageio-ffmpeg duplicate has an unaudited SHA256")
+    if not script.is_file():
+        raise ValueError("conda-unpack-script.py is missing")
+    script_before, script_after = _remove_conda_prefix_record(script, duplicate_relative)
+    if duplicate.exists():
+        duplicate.unlink()
+        excluded = {
+            "path": f"runtime/{duplicate_relative.as_posix()}",
+            "sha256": _IMAGEIO_FFMPEG_SHA256,
+        }
+    return {
+        "runtime_profile": runtime_profile,
+        "replacement": {
+            "path": f"runtime/{replacement_relative.as_posix()}",
+            "sha256": _CONDA_FFMPEG_SHA256,
+        },
+        "excluded": excluded,
+        "redistribution_status": "pending",
+        "conda_unpack_script": {
+            "path": f"runtime/{script_relative.as_posix()}",
+            "sha256_before": script_before,
+            "sha256_after": script_after,
+        },
+    }
+
+
 def assemble_bundle(
     *,
     config: ReleaseConfig,
@@ -247,16 +372,29 @@ def assemble_bundle(
     source_commit: str,
     colmap_root: str | Path | None = None,
     documentation_root: str | Path | None = None,
+    runtime_profile: str | None = None,
 ) -> Path:
     """从运行环境归档和后端白名单组装未压缩交付目录。"""
 
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     layout = BundleLayout(output / config.bundle_name)
+    if runtime_profile is not None and layout.root.exists():
+        raise ValueError(f"bundle destination already exists: {layout.root}")
     if layout.root.exists():
         shutil.rmtree(layout.root)
     layout.root.mkdir(parents=True)
-    _safe_extract_tar(Path(runtime_archive), layout.runtime)
+    _safe_extract_tar(
+        Path(runtime_archive),
+        layout.runtime,
+        reject_links=runtime_profile is not None,
+    )
+    if runtime_profile is not None:
+        profile_manifest = _apply_runtime_profile(layout.runtime, runtime_profile)
+        (layout.root / "runtime-profile.json").write_text(
+            json.dumps(profile_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     if colmap_root is not None:
         colmap = Path(colmap_root)
         for relative in ("COLMAP.bat", "bin/colmap.exe"):
@@ -420,6 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--colmap-root", type=Path)
     assemble.add_argument("--documentation-root", default=repository_root, type=Path)
     assemble.add_argument("--zip", action="store_true")
+    assemble.add_argument("--runtime-profile", choices=("conda-ffmpeg-only",))
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--config", default=default_config, type=Path)
@@ -444,6 +583,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "verify":
         verify_bundle(args.bundle_root, config=config)
         return 0
+    if args.runtime_profile is not None and args.zip:
+        archive = Path(args.output_dir).resolve() / f"{config.bundle_name}.zip"
+        if archive.exists():
+            raise ValueError(f"bundle archive already exists: {archive}")
     bundle = assemble_bundle(
         config=config,
         runtime_archive=args.runtime_archive,
@@ -453,9 +596,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_commit=args.source_commit,
         colmap_root=args.colmap_root,
         documentation_root=args.documentation_root,
+        runtime_profile=args.runtime_profile,
     )
     if args.zip:
-        write_zip64(bundle, bundle.parent / f"{bundle.name}.zip")
+        write_zip64(
+            bundle,
+            bundle.parent / f"{bundle.name}.zip",
+            exclusive=args.runtime_profile is not None,
+        )
     print(bundle)
     return 0
 

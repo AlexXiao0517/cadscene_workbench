@@ -50,3 +50,21 @@ See [third-party notices](../../THIRD_PARTY_NOTICES.md) and
 
 The existing local tester ZIP is not the final public artifact. Do not overwrite
 it or describe a build verification result as redistribution approval.
+
+## Isolated public-runtime preparation
+
+`assemble --runtime-profile conda-ffmpeg-only` opts into the audited 0.1.5
+FFmpeg deduplication profile. It verifies the replacement and duplicate hashes,
+removes only the known imageio FFmpeg executable, repairs its relocation record,
+and writes `runtime-profile.json`. An existing staging directory or ZIP is
+rejected; ZIP creation is exclusive, including collisions during assembly.
+Omitting the profile preserves the original builder behavior. This profile is
+version-specific and must not be reused with an unaudited runtime.
+
+The profile is not a license-completeness assertion: its manifest deliberately
+keeps `redistribution_status` as `pending`. Source and notice delivery, final
+dependency inventory, startup and rendering tests remain separate release gates.
+Legacy toolchain exclusions and the optional ONNX CUDA provider exclusion are
+separate archive-preparation steps, not implicit effects of this FFmpeg option.
+Keep their file/hash manifests with the final release materials. Supported
+COLMAP GPU SIFT must remain available and be tested after those changes.

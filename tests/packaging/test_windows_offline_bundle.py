@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import io
 import json
 import subprocess
+import sys
 import tarfile
 import zipfile
 
 import pytest
+import scripts.windows_offline_bundle as offline_bundle
 
 from scripts.windows_offline_bundle import (
     BundleLayout,
@@ -399,11 +402,11 @@ def test_proj_runtime_smoke_resolves_epsg4549_away_from_checkout(
 
 def _write_fake_runtime_archive(path: Path) -> None:
     source = path.parent / "fake-runtime"
-    (source / "Scripts").mkdir(parents=True)
+    (source / "Scripts").mkdir(parents=True, exist_ok=True)
     (source / "python.exe").write_bytes(b"python")
     (source / "Scripts" / "conda-unpack.exe").write_bytes(b"unpack")
     (source / "Scripts" / "conda-unpack-script.py").write_text(
-        "# fake unpack script\n", encoding="utf-8"
+        "_prefix_records = []\n", encoding="utf-8"
     )
     with tarfile.open(path, "w:gz") as archive:
         for item in sorted(source.rglob("*")):
@@ -517,3 +520,376 @@ def test_builder_cli_lists_prepare_assemble_and_verify_commands() -> None:
     assert "prepare-runtime" in completed.stdout
     assert "assemble" in completed.stdout
     assert "verify" in completed.stdout
+
+
+def _write_profile_runtime(runtime: Path, *, replacement: bytes, duplicate: bytes | None) -> None:
+    replacement_path = runtime / "Library" / "bin" / "ffmpeg.exe"
+    replacement_path.parent.mkdir(parents=True)
+    replacement_path.write_bytes(replacement)
+    scripts = runtime / "Scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "conda-unpack-script.py").write_text(
+        "_prefix_records = []\n", encoding="utf-8"
+    )
+    if duplicate is not None:
+        duplicate_path = (
+            runtime
+            / "Lib"
+            / "site-packages"
+            / "imageio_ffmpeg"
+            / "binaries"
+            / "ffmpeg-win-x86_64-v7.1.exe"
+        )
+        duplicate_path.parent.mkdir(parents=True)
+        duplicate_path.write_bytes(duplicate)
+
+
+def test_conda_ffmpeg_profile_removes_only_audited_duplicate_and_writes_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"replacement", duplicate=b"duplicate")
+    keep = runtime / "Lib" / "site-packages" / "imageio_ffmpeg" / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(runtime / "Library/bin/ffmpeg.exe"))
+    duplicate_path = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", offline_bundle._sha256(duplicate_path))
+
+    profile = offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    assert (runtime / "Library/bin/ffmpeg.exe").read_bytes() == b"replacement"
+    assert not duplicate_path.exists()
+    assert keep.read_text(encoding="utf-8") == "keep"
+    assert profile == {
+        "runtime_profile": "conda-ffmpeg-only",
+        "replacement": {
+            "path": "runtime/Library/bin/ffmpeg.exe",
+            "sha256": offline_bundle._CONDA_FFMPEG_SHA256,
+        },
+        "excluded": {
+            "path": "runtime/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe",
+            "sha256": offline_bundle._IMAGEIO_FFMPEG_SHA256,
+        },
+        "redistribution_status": "pending",
+        "conda_unpack_script": {
+            "path": "runtime/Scripts/conda-unpack-script.py",
+            "sha256_before": offline_bundle._sha256(runtime / "Scripts/conda-unpack-script.py"),
+            "sha256_after": offline_bundle._sha256(runtime / "Scripts/conda-unpack-script.py"),
+        },
+    }
+
+
+@pytest.mark.parametrize("duplicate", (b"duplicate", None))
+def test_conda_ffmpeg_profile_requires_audited_replacement_without_removing_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duplicate: bytes | None
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"wrong", duplicate=duplicate)
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", "0" * 64)
+    duplicate_path = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+
+    with pytest.raises(ValueError, match="replacement FFmpeg"):
+        offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    if duplicate is not None:
+        assert duplicate_path.read_bytes() == duplicate
+
+
+def test_conda_ffmpeg_profile_rejects_unknown_duplicate_without_removing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"replacement", duplicate=b"unknown")
+    replacement_path = runtime / "Library/bin/ffmpeg.exe"
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(replacement_path))
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", "0" * 64)
+    duplicate_path = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+
+    with pytest.raises(ValueError, match="imageio-ffmpeg duplicate"):
+        offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    assert duplicate_path.read_bytes() == b"unknown"
+
+
+def test_conda_ffmpeg_profile_rejects_missing_replacement_without_removing_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"temporary", duplicate=b"duplicate")
+    (runtime / "Library/bin/ffmpeg.exe").unlink()
+    duplicate_path = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", offline_bundle._sha256(duplicate_path))
+
+    with pytest.raises(ValueError, match="replacement FFmpeg"):
+        offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    assert duplicate_path.read_bytes() == b"duplicate"
+
+
+def test_safe_runtime_extraction_preserves_default_in_tree_links(tmp_path: Path) -> None:
+    archive_path = tmp_path / "linked-runtime.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        payload = tarfile.TarInfo("Library/bin/ffmpeg.exe")
+        payload.size = len(b"ffmpeg")
+        archive.addfile(payload, io.BytesIO(b"ffmpeg"))
+        member = tarfile.TarInfo("Library/bin/ffmpeg-copy.exe")
+        member.type = tarfile.LNKTYPE
+        member.linkname = "Library/bin/ffmpeg.exe"
+        archive.addfile(member)
+
+    offline_bundle._safe_extract_tar(archive_path, tmp_path / "runtime")
+
+    assert (tmp_path / "runtime/Library/bin/ffmpeg-copy.exe").read_bytes() == b"ffmpeg"
+
+
+def test_profile_runtime_extraction_rejects_archive_links(tmp_path: Path) -> None:
+    archive_path = tmp_path / "linked-runtime.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        member = tarfile.TarInfo("Library/bin/ffmpeg.exe")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "../../outside.exe"
+        archive.addfile(member)
+
+    with pytest.raises(ValueError, match="contains a link"):
+        offline_bundle._safe_extract_tar(
+            archive_path, tmp_path / "runtime", reject_links=True
+        )
+
+
+def test_conda_ffmpeg_profile_accepts_an_already_absent_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"replacement", duplicate=None)
+    replacement = runtime / "Library/bin/ffmpeg.exe"
+    monkeypatch.setattr(
+        offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(replacement)
+    )
+
+    profile = offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    assert replacement.read_bytes() == b"replacement"
+    assert profile["excluded"] is None
+
+
+def test_assemble_conda_ffmpeg_profile_writes_runtime_trace_at_bundle_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "runtime-source"
+    _write_profile_runtime(source, replacement=b"replacement", duplicate=b"duplicate")
+    (source / "Scripts").mkdir(parents=True, exist_ok=True)
+    (source / "python.exe").write_bytes(b"python")
+    (source / "Scripts/conda-unpack-script.py").write_text(
+        "_prefix_records = ['Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe']\n",
+        encoding="utf-8",
+    )
+    archive_path = tmp_path / "runtime.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for item in sorted(source.rglob("*")):
+            archive.add(item, arcname=item.relative_to(source).as_posix())
+    replacement = source / "Library/bin/ffmpeg.exe"
+    duplicate = source / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(replacement))
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", offline_bundle._sha256(duplicate))
+    monkeypatch.setattr(offline_bundle, "verify_bundle", lambda *args, **kwargs: None)
+    templates = tmp_path / "templates"
+    backend = tmp_path / "backend"
+    templates.mkdir()
+    backend.mkdir()
+    config = ReleaseConfig("bundle", "1", "poc", "opengv")
+
+    bundle = assemble_bundle(
+        config=config,
+        runtime_archive=archive_path,
+        backend_root=backend,
+        templates_root=templates,
+        output_dir=tmp_path / "dist",
+        source_commit="commit",
+        documentation_root=None,
+        runtime_profile="conda-ffmpeg-only",
+    )
+
+    trace = json.loads((bundle / "runtime-profile.json").read_text(encoding="utf-8"))
+    assert trace["runtime_profile"] == "conda-ffmpeg-only"
+    assert trace["redistribution_status"] == "pending"
+    assert trace["replacement"]["path"] == "runtime/Library/bin/ffmpeg.exe"
+    assert trace["excluded"]["path"].endswith("ffmpeg-win-x86_64-v7.1.exe")
+    assert trace["conda_unpack_script"]["path"] == "runtime/Scripts/conda-unpack-script.py"
+    assert trace["conda_unpack_script"]["sha256_before"] != trace["conda_unpack_script"]["sha256_after"]
+    assert (bundle / "runtime/Library/bin/ffmpeg.exe").is_file()
+    assert not (bundle / "runtime/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe").exists()
+
+
+@pytest.mark.parametrize(
+    "duplicate_record",
+    (
+        "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe",
+        r"Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe",
+    ),
+)
+def test_profile_removes_only_duplicate_prefix_record_and_unpack_script_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate_record: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"replacement", duplicate=b"duplicate")
+    keep_relative = "Lib/site-packages/keep.txt"
+    keep = runtime / keep_relative
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text("keep", encoding="utf-8")
+    script = runtime / "Scripts/conda-unpack-script.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"_prefix_records = {[duplicate_record, keep_relative]!r}\n"
+        "for record in _prefix_records:\n"
+        "    with (Path(__file__).parents[1] / record).open('rb'):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    replacement = runtime / "Library/bin/ffmpeg.exe"
+    duplicate = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(replacement))
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", offline_bundle._sha256(duplicate))
+
+    profile = offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+    completed = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert keep_relative in script.read_text(encoding="utf-8")
+    assert "ffmpeg-win-x86_64-v7.1.exe" not in script.read_text(encoding="utf-8")
+    assert profile["conda_unpack_script"]["sha256_before"] != profile["conda_unpack_script"]["sha256_after"]
+
+
+def test_profile_rejects_unknown_unpack_script_before_removing_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_profile_runtime(runtime, replacement=b"replacement", duplicate=b"duplicate")
+    script = runtime / "Scripts/conda-unpack-script.py"
+    script.write_text("def records():\n    return []\n", encoding="utf-8")
+    replacement = runtime / "Library/bin/ffmpeg.exe"
+    duplicate = runtime / "Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe"
+    monkeypatch.setattr(offline_bundle, "_CONDA_FFMPEG_SHA256", offline_bundle._sha256(replacement))
+    monkeypatch.setattr(offline_bundle, "_IMAGEIO_FFMPEG_SHA256", offline_bundle._sha256(duplicate))
+
+    with pytest.raises(ValueError, match="_prefix_records"):
+        offline_bundle._apply_runtime_profile(runtime, "conda-ffmpeg-only")
+
+    assert duplicate.read_bytes() == b"duplicate"
+    assert script.read_text(encoding="utf-8") == "def records():\n    return []\n"
+
+
+def test_conda_ffmpeg_profile_preserves_existing_bundle_target(tmp_path: Path) -> None:
+    config = ReleaseConfig("existing", "1", "poc", "opengv")
+    target = tmp_path / "existing"
+    target.mkdir()
+    sentinel = target / "sentinel.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        assemble_bundle(
+            config=config,
+            runtime_archive=tmp_path / "unused.tar.gz",
+            backend_root=tmp_path / "backend",
+            templates_root=tmp_path / "templates",
+            output_dir=tmp_path,
+            source_commit="commit",
+            runtime_profile="conda-ffmpeg-only",
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_runtime_profile_cli_is_opt_in_and_rejects_unknown_values() -> None:
+    parser = offline_bundle.build_parser()
+    common = [
+        "assemble", "--runtime-archive", "runtime.tar.gz", "--backend-root", "backend",
+        "--output-dir", "dist", "--source-commit", "commit",
+    ]
+
+    assert parser.parse_args(common).runtime_profile is None
+    assert parser.parse_args([*common, "--runtime-profile", "conda-ffmpeg-only"]).runtime_profile == "conda-ffmpeg-only"
+    with pytest.raises(SystemExit):
+        parser.parse_args([*common, "--runtime-profile", "unknown"])
+
+
+def test_profile_cli_rejects_existing_zip_before_creating_staging(tmp_path: Path) -> None:
+    config_path = tmp_path / "release-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "bundle_name": "bundle",
+                "application_version": "1",
+                "poc_commit": "poc",
+                "opengv_commit": "opengv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "dist"
+    output.mkdir()
+    archive = output / "bundle.zip"
+    archive.write_bytes(b"existing archive")
+
+    with pytest.raises(ValueError, match="archive already exists"):
+        offline_bundle.main(
+            [
+                "assemble",
+                "--config", str(config_path),
+                "--runtime-archive", str(tmp_path / "must-not-be-opened.tar.gz"),
+                "--backend-root", str(tmp_path / "backend"),
+                "--templates-root", str(tmp_path / "templates"),
+                "--output-dir", str(output),
+                "--source-commit", "commit",
+                "--runtime-profile", "conda-ffmpeg-only",
+                "--zip",
+            ]
+        )
+
+    assert archive.read_bytes() == b"existing archive"
+    assert not (output / "bundle").exists()
+
+
+def test_profile_cli_exclusively_creates_zip_if_it_appears_during_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "release-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "bundle_name": "bundle",
+                "application_version": "1",
+                "poc_commit": "poc",
+                "opengv_commit": "opengv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "dist"
+
+    def assemble_with_racing_archive(**kwargs: object) -> Path:
+        bundle = output / "bundle"
+        bundle.mkdir(parents=True)
+        (bundle / "payload.txt").write_text("new payload", encoding="utf-8")
+        (output / "bundle.zip").write_bytes(b"racing archive")
+        return bundle
+
+    monkeypatch.setattr(offline_bundle, "assemble_bundle", assemble_with_racing_archive)
+
+    with pytest.raises(FileExistsError):
+        offline_bundle.main(
+            [
+                "assemble",
+                "--config", str(config_path),
+                "--runtime-archive", str(tmp_path / "runtime.tar.gz"),
+                "--backend-root", str(tmp_path / "backend"),
+                "--templates-root", str(tmp_path / "templates"),
+                "--output-dir", str(output),
+                "--source-commit", "commit",
+                "--runtime-profile", "conda-ffmpeg-only",
+                "--zip",
+            ]
+        )
+
+    assert (output / "bundle.zip").read_bytes() == b"racing archive"
