@@ -28,7 +28,7 @@ This document separates delivered behavior from future work. It is not a release
 - `pure_rotation` is Supported. It runs a pinned external OpenGV backend followed by fixed-center global placement, local pose corrections, and rendering. Translation and scale are not recovered. The automatic motion classifier remains immature, so Project Clip Management retains human review and a final workflow override.
 - The partial-SRT core is Experimental CLI functionality: PTS timing, local ENU conversion, robust Sim3 estimation, and fusion helpers exist outside the formal project queue.
 - `srt_full_pose` is executable behind explicit per-project georeference and horizontal-FOV confirmation. It uses exact source PTS, emits a metric CAD-local trajectory, locks scale to 1.0, and does not require SfM or sparse points. Real-project surveying and height-datum validation remain necessary.
-- `srt_sfm_fused` remains Interface only. Upload and capability detection work, but the service blocks formal stage execution.
+- `srt_sfm_fused` is Legacy read-only. Historical manifests and artifacts remain readable, but new projects no longer recommend, create, or enqueue it.
 - SfM CUDA is Optional and limited to supported feature extraction and matching. Mapping and global bundle adjustment are not advertised as GPU processing.
 - The video-target tracking annotation backend and immutable tracking revisions remain for automated tests and historical-data compatibility, but the creation UI is hidden and this is not a supported deliverable.
 

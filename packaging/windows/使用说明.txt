@@ -20,3 +20,7 @@ CADScene Workbench Windows 离线测试包
 如启动失败，请保留整个目录，并将 logs 文件夹中的 doctor.txt、service-stdout.log 和
 service-stderr.log 一并反馈。请勿同时启动本包的多个副本访问同一个 workspace。
 
+项目自有代码采用 MIT License。分发前请同时阅读程序目录中的 LICENSE、
+THIRD_PARTY_NOTICES.md 与第三方许可材料。公开 v0.1.5 的源码、Python 包和便携包仅在材料
+全部验证后一起发布；附件及 checksum 以 GitHub Release 页面实际显示为准。
+

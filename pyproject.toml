@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "cadscene-workbench"
 version = "0.1.5"
 description = "SfM-CAD video registration workbench"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party_licenses/*.txt"]
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",

@@ -81,7 +81,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 | `run_pipeline` | 读取流水线配置并串行执行；`--config`、`--stages`、`--skip-render`、`--skip-road-surface`、`--skip-viewer-scene` |
 | `fuse_srt_sfm` | 实验性 partial-SRT CLI；需要轨迹和 SRT，支持 `--frame-timestamps`、时间偏移、ENU/融合质量参数 |
 | `build_srt_full_pose` | 用精确 frame map、完整 DJI SRT、已确认 georeference 和用户水平 FOV 构建 `02_srt_full_pose` 米制轨迹；不调用 SfM |
-| `build_srt_fixed_track_visual_pose` | 用精确 frame map、SRT GPS/`rel_alt`、已确认 georeference 和用户水平 FOV 锁定每帧位置，仅从视频估计姿态并构建 `02_srt_visual_pose`；不调用 SfM 或输出点云 |
+| `build_srt_fixed_track_visual_pose` | 用精确 frame map、SRT GPS/`rel_alt`、已确认 georeference 和用户水平 FOV 自适应抽帧调用 COLMAP 稀疏重建/RADIAL 标定，把旋转注册到锁定位置并构建 `02_srt_visual_pose`；点云仅供诊断 |
 | `build_cad_georeference_candidates` | 从不可变候选请求读取 SRT/CAD bbox，按可选中央经线筛选 CGCS2000 EPSG，原子输出候选与 `adapter_progress.json` |
 | `run_pure_rotation` | 调用外部 OpenGV 纯旋转后端；需要 `--video`、`--output-root`，可提供后端目录/命令 |
 | `render_pure_rotation` | 用已校正的固定中心轨迹渲染；需要视频、CAD 和 `--track` |
@@ -151,7 +151,7 @@ python -m pytest -p no:cacheprovider
 python scripts/check_no_project_dependency.py
 ```
 
-项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。`cad_georeference_candidates` 是不绑定 clip 的 `light_compute` 项目任务，输入指纹绑定 CAD、SRT、中央经线、候选上限和算法版本；成功产物只有当前指纹仍有效时才能确认。`tests/integration/test_srt_full_pose_workflow.py` 覆盖完整姿态的 metric-direct 对齐，`tests/integration/test_srt_fixed_track_visual_pose_workflow.py` 覆盖位置硬锁、姿态可缺失和无点云输出；packaging 测试在源码目录外解析 EPSG:4549。当前测试仍不代替真实 GPU、外部 OpenGV、长 MP4、DXF、现场 DJI 镜头或独立测量高程验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
+项目队列与恢复契约在 `tests/projects/`，标牌在 `tests/annotations/`，静态前端在 `tests/viewer/`，命令行在 `tests/cli/`，跨领域 smoke 在 `tests/integration/`。`cad_georeference_candidates` 是不绑定 clip 的 `light_compute` 项目任务，输入指纹绑定 CAD、SRT、中央经线、候选上限和算法版本；成功产物只有当前指纹仍有效时才能确认。`tests/integration/test_srt_full_pose_workflow.py` 覆盖完整姿态的 metric-direct 对齐；固定轨迹相关集成测试覆盖 SRT Base 位置、COLMAP 姿态注册、可选诊断点云和六自由度残差拟合。packaging 测试在源码目录外解析 EPSG:4549。当前测试仍不代替真实 GPU、外部 OpenGV、长 MP4、DXF、现场 DJI 镜头或独立测量高程验收。提交前先跑聚焦测试；涉及行为、持久化或依赖边界时必须跑完整套件及依赖扫描。
 
 现行文档契约测试同时读取上传页、自动分析与项目页源码，锁定“正式界面只支持
 MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project 与兼容 dataset/run 存储
@@ -161,7 +161,7 @@ MP4/DXF”“纯旋转由分析自动推荐、项目页可覆盖”“Project �
 ## 开发边界
 
 - `sfm_only` 与 `pure_rotation` 都是正式可执行路线；后者固定相机中心且不恢复平移或尺度，依赖固定版本 OpenGV 后端。当前仍不成熟的是自动视频分析和路线推荐精度，项目页允许人工覆盖。
-- partial-SRT core 是 Experimental CLI，`srt_sfm_fused` 只兼容读取历史 manifest/产物，新项目不再推荐或创建它。`srt_full_pose` 与 `srt_fixed_track_visual_pose` 都必须绑定当前 CAD 指纹确认 CGCS2000 投影，并由用户输入单一水平 FOV；固定轨迹分支用 SRT GPS/`rel_alt` 锁定每帧 XYZ，视觉只估计姿态，二者都锁定米制尺度并禁止稀疏点云依赖。
+- partial-SRT core 是 Experimental CLI，`srt_sfm_fused` 只兼容读取历史 manifest/产物，新项目不再推荐或创建它。`srt_full_pose` 与 `srt_fixed_track_visual_pose` 都必须绑定当前 CAD 指纹确认 CGCS2000 投影，并由用户输入单一水平 FOV。完整姿态分支跳过 SfM；固定轨迹分支用 SRT GPS/`rel_alt` 提供位置，运行 COLMAP 稀疏重建/RADIAL 标定并注册旋转，但不让 SfM 改写最终逐帧位置。诊断点云不是下游强依赖。
 - CAD 锚定工程标牌已经接入预览和正式片段渲染；视频目标跟踪标牌创建入口当前隐藏，不能作为正式功能宣传。
 - 全局 CAD 替换只适用于坐标系、单位和原点不变且已有有效工作台输出的项目；成功后保留轨迹，只让渲染和合并 stale。
 - 相机轨迹、annotation、渲染和合并必须保持 source PTS/frame-map 契约；禁止用固定 FPS frame index 替代。

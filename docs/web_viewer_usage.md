@@ -111,11 +111,15 @@ cad=/legacy/out/...
 - 点云和 global track 只使用 global sim3；anchored path 来自分段锚定结果，二者不完全重合是正常现象。
 - 已确认且一致的人工关键帧 FOV 优先于不可靠的上游 SfM 重建 FOV；Viewer 的提示会说明
   该人工覆盖，不能据此推断 SRT 或 SfM 的绝对精度。
+- SRT 工作台播放/seek 时，视频、当前相机视锥、Base/Corrected 路线和对应姿态使用同一
+  source PTS 映射同步。保存关键帧先写兼容草稿；路线拟合与渲染是两个独立动作。任务失败
+  回项目页重试，不要手工拼接 attempt 或 revision。
 - `pure_rotation` 是 Supported 工作流：它固定相机中心，只恢复旋转，随后由人工全局
   放置和局部姿态校正进入渲染；不恢复平移或尺度。自动路线推荐仍需人工复核。
-- `srt_fixed_track_visual_pose` 工作台只显示“视觉姿态 → 微调与渲染”。右侧路线包含
-  所有 SRT 位置，即使某些帧没有姿态；此时保留轨迹线并隐藏相机视锥。X/Y/Z 和平移
-  Gizmo 被锁定，偏航/俯仰/滚转可调整，质量时间轴和点云控件隐藏。
+- `srt_fixed_track_visual_pose` 工作台显示 SRT→CAD Base 路线和拟合后的 Corrected 路线。
+  某帧有位置但没有有效姿态时仍保留轨迹线并隐藏相机视锥。人工关键帧允许调整 XYZ、
+  yaw/pitch/roll 和 FOV，保存草稿后由 `six_dof_keyframe_residuals` 平滑拟合；COLMAP
+  中心不会替换 Base 位置。普通 quality 阶段被跳过，稀疏点云仅作可选诊断。
 
 ## 常见问题
 

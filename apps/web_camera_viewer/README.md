@@ -1,6 +1,6 @@
 # 虚拟相机 CAD 叠加查看器
 
-浏览器端虚拟相机调试工具（legacy script 版本）。详细操作见 **[docs/web_camera_viewer_使用说明.md](../docs/web_camera_viewer_使用说明.md)**。
+浏览器端虚拟相机调试工具（legacy script 版本）。正式项目操作见[当前 Viewer/工作台说明](../../docs/web_viewer_usage.md)。
 
 > 默认运行的是 legacy 版本：`index.html` + `paths.js` + `fallback.js` + `viewer_legacy.js` + `vendor/`。
 > 早期 ES module 版本（`viewer.js / projection.js / cad_scene.js`）当前仓库未包含，不作为默认入口。
@@ -118,7 +118,7 @@ http://127.0.0.1:8300/web_camera_viewer/?dataset=hygs
 
 ## 关键帧轨迹
 
-详见 [使用说明](../docs/web_camera_viewer_使用说明.md) 第 4、5 节。简要：**添加/更新关键帧** 写入浏览器内存；**导出相机轨迹** 下载到本机下载目录；需手动复制到 `data/hygs/camera_track.json` 才能下次自动加载。
+正式项目请使用[当前 Viewer/工作台说明](../../docs/web_viewer_usage.md)。项目工作台通过 API 保存兼容草稿与已发布 revision；不要再按旧的浏览器下载文件流程手工复制活动项目轨迹。下文独立静态 Viewer 的查询参数仅用于兼容 dataset/run 调试。
 
 页面会把 `algorithm_prediction` 视为预测帧，不作为人工关键帧；上一/下一关键帧只在人工确认帧之间跳转。
 

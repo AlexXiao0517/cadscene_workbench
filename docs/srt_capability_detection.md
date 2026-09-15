@@ -38,13 +38,14 @@ SRT 是可选输入。系统解析 DJI 风格字幕中的位置、高度和姿�
 | --- | --- | --- |
 | `sfm_only` | **Stable** | 唯一稳定的端到端正式工作流。 |
 | partial-SRT core | **Experimental CLI** | 历史 ENU/稳健 Sim3 融合核心仍可独立使用，但不是新项目路线。 |
-| `srt_fixed_track_visual_pose` | **Supported with guard** | GPS、`rel_alt`、精确 frame map、当前 CAD 投影和水平 FOV 均确认后，锁定 SRT→CAD 位置并仅从视频估计姿态。 |
+| `srt_fixed_track_visual_pose` | **Supported with guard** | GPS、`rel_alt`、精确 frame map、当前 CAD 投影和水平 FOV 均确认后，自适应抽帧运行 COLMAP，恢复旋转/RADIAL 标定并配准到 SRT→CAD 位置。 |
 | `srt_sfm_fused` | **Legacy read-only** | 新项目不再推荐或创建，只读取历史 manifest/产物。 |
 | `srt_full_pose` | **Supported with guard** | 完整云台姿态、精确 frame map、当前 CAD 投影和水平 FOV 均确认后，可直接生成尺度锁定的 CAD 米制轨迹并跳过 SfM。 |
 
-固定轨迹路线不运行旧的 SRT+SfM 融合。它按精确 source PTS 采样 SRT，经已确认的
-CGCS2000 参数进入 CAD local metres，Z 使用 `rel_alt`；视觉算法只估计姿态。视觉失败
-不会把位置改成 SfM 结果，缺姿态帧仍保留可见位置轨迹。
+固定轨迹路线不运行旧的 SRT+SfM 自由位置融合，但会运行 COLMAP 稀疏重建和标定。
+它按精确 source PTS 采样 SRT，经已确认的 CGCS2000 参数进入 CAD local metres，Z 使用
+`rel_alt`；COLMAP 旋转配准到 SRT 位置，不能把中心改成 SfM 结果。缺姿态帧仍保留位置
+轨迹，诊断点云不是后续 Viewer 或渲染的必需输入；不会回退旧 OpenCV 姿态估计。
 
 全姿态执行前还会检查候选投影的轨迹落图比例。中央经线（例如当前项目可能推荐的
 120°）是绑定 CAD 指纹的显式确认项，不能跨图纸复用。FOV 只接受用户输入的单一水平

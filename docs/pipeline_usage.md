@@ -29,6 +29,11 @@ http://127.0.0.1:8300/apps/workflow_portal/index.html
   `02_srt_visual_pose/camera_trajectory_visual_pose.json`，只运行 `alignment,render`；
   不接收 sparse PLY，也没有 SfM、quality、viewer_scene 或 road-surface 阶段。
 
+这里列的是“消费已生成轨迹”的兼容 YAML 阶段，不是 Project API 的轨迹构建步骤。
+正式 `srt_fixed_track_visual_pose` 项目在产生上述轨迹之前会自适应抽帧运行 COLMAP 稀疏
+重建、三角化/BA 与 RADIAL 标定，并保留可选诊断点云；不能据此处 YAML 的阶段列表推断
+该项目路线不运行 SfM。`srt_full_pose` 才是直接读取完整 SRT 姿态并跳过 SfM 的分支。
+
 ## 准备输入
 
 完整流程需要原始视频、web viewer keyframe track、CAD assets、`cad_scale` 和

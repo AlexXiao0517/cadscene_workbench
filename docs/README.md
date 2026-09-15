@@ -10,12 +10,13 @@
 - [SRT 能力检测](srt_capability_detection.md)：普通 SRT 的字段、路由和精度边界。
 - [Pipeline 使用说明](pipeline_usage.md)：维护人员的兼容命令行批处理入口。
 
-当前主界面由两个入口组成：
+当前主界面有项目库、直接上传和项目片段管理三个入口：
 
+    /apps/project_library/
     /apps/workflow_portal/
     /apps/project_workspace/?projectId=<project_id>
 
-上传门户创建项目并异步分析视频/CAD；项目片段管理负责片段工作流选择、批量轨迹、批量渲染、工作台进入和最终合并。刷新或重启后必须使用创建项目时相同的 `--storage-root`，项目主数据位于 `<storage-root>/projects/<project_id>/`。
+默认从 `http://127.0.0.1:8300/apps/project_library/` 打开或恢复项目；上传门户创建项目并异步分析视频/CAD；项目片段管理负责片段工作流选择、批量轨迹、批量渲染、工作台进入和最终合并。刷新或重启后必须使用创建项目时相同的 `--storage-root`，项目主数据位于 `<storage-root>/projects/<project_id>/`。
 
 必须区分两套入口：正式项目流程使用 `/apps/workflow_portal/`、Project API 和 `projects/`，当前上传界面只开放 MP4、DXF 和可选 SRT；兼容 dataset/run 工作流使用 `/api/workflow/*`、`data/` 和 `runs/`，用于既有单片段工件和维护接口。兼容后端接受某个扩展名，不代表正式项目界面支持该格式。
 
@@ -31,7 +32,7 @@
 | 全局 CAD 替换 | Supported with guard | 仅坐标系已打通的项目可用；要求确认新版 CAD 坐标系相同，保留轨迹并使渲染/合并 stale。 |
 | partial-SRT core | Experimental CLI | PTS、ENU 与稳健 Sim3 核心可通过命令行使用，尚未进入正式项目队列。 |
 | `srt_full_pose` | Supported with guard | 完整 DJI 云台姿态、精确 frame map、当前 CAD 的 CGCS2000 投影和用户水平 FOV 均确认后，直接生成尺度锁定的米制轨迹并跳过 SfM。 |
-| `srt_fixed_track_visual_pose` | Supported with guard | SRT GPS/相对高度经确认投影后锁定逐帧位置，视频只估计姿态；不运行 SfM、质量检测或点云。 |
+| `srt_fixed_track_visual_pose` | Supported with guard | SRT GPS/相对高度形成逐帧基准位置；自适应抽帧运行 COLMAP 稀疏重建、三角化/BA 与 RADIAL 标定并注册旋转，点云仅供诊断；跳过的是普通质量检测阶段。 |
 | `srt_sfm_fused` | Legacy read-only | 只读取历史 manifest/产物，新项目不再推荐或排队。 |
 | SfM CUDA | Optional | 只在受支持的特征提取和匹配范围内加速；不能确认时回退 CPU。 |
 
@@ -54,6 +55,6 @@
 
 `--storage-root` 必须存在并保持不变。省略它会让 `projects/` 写到代码根；旧版 `data/`、`runs/` 仍可能被兼容流程读取，但不应再作为当前项目领域的默认人工测试目录。
 
-## 历史设计记录
+## 历史档案（非现行说明）
 
-`stage4c_*`、`stage4d_*`、`stage5b_*`、`v0.1.0_baseline_report.md` 和 [SOP](SOP/) 是历史或过程材料。`superpowers/plans/` 与 `superpowers/specs/` 保存各阶段的设计与实施证据。它们用于解释决策，不能替代 README、系统架构、开发者指南、API 参考和故障排查这些现行文档。
+`stage4c_*`、`stage4d_*`、`stage5b_*`、`v0.1.0_baseline_report.md` 以及其他 stage/refactor 报告是历史或过程材料。`superpowers/plans/` 与 `superpowers/specs/` 保存各阶段的设计与实施证据。旧文档可能描述当时的接口、时间预算或未落地意图，只用于追溯决策，不能替代 README、系统架构、开发者指南、API 参考和故障排查这些现行文档。

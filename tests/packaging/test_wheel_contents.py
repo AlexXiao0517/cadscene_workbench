@@ -88,6 +88,18 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
     assert not any("web_camera_viewer_broken_stage3f" in item for item in members)
 
 
+def test_wheel_includes_project_and_vendored_licenses_without_native_runtime(tmp_path: Path) -> None:
+    wheel = _build_wheel(tmp_path)
+    with ZipFile(wheel) as archive:
+        members = set(archive.namelist())
+        license_prefix = "cadscene_workbench-0.1.5.dist-info/licenses/"
+        for required in ("LICENSE", "THIRD_PARTY_NOTICES.md", "third_party_licenses/threejs-MIT.txt"):
+            assert license_prefix + required in members
+        metadata = archive.read("cadscene_workbench-0.1.5.dist-info/METADATA").decode("utf-8")
+        assert "License-Expression: MIT" in metadata
+        assert not any(name.lower().endswith((".exe", ".dll", ".mp4", ".tpkg")) for name in members)
+
+
 def test_extracted_wheel_finds_resources_away_from_the_checkout(tmp_path: Path) -> None:
     wheel = _build_wheel(tmp_path)
     installed = tmp_path / "installed"

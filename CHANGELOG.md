@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Prepared the public v0.1.5 documentation and MIT project license. Public source, Python package and portable archive remain gated together on verified third-party redistribution materials; the Release page is authoritative for actual assets.
+
 ### Added
 
 - Added a local project library with fixed-width folder cards, a detailed list view, durable view preference, safe project summaries, project reopening, optimistic renaming, and navigation back to the existing upload flow.

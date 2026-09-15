@@ -37,10 +37,12 @@ p_cad = scale × R × p_sfm + t
 
 全局 Sim3 是基线，不是对每一帧的强制替换。系统计算每个锚点相对全局结果的位置和角度残差，并按帧号在相邻锚点间插值，形成分段锚定路径。查看器的点云/全局轨迹只使用 global Sim3，而相机路径可使用分段残差，因此两者不完全重合是预期现象。
 
-`srt_full_pose` 不使用上述自由 Sim3。投影后的轨迹已经位于 CAD local metres，因而
-对齐固定单位旋转和 `scale=1.0`；无人工修正时直接发布，存在人工锚点时只稳健估计一个
-固定 XYZ 平移以及独立的 wrapped yaw/pitch/roll 零偏。彼此矛盾的修正会被拒绝。该路线
-允许 viewer scene 没有 sparse PLY，且不运行依赖点云的道路表面诊断。
+`srt_full_pose` 不使用上述自由 Sim3。投影后的 Base 轨迹已经位于 CAD local metres，
+因而保持 `scale=1.0`；无人工修正时可直接发布。工作台的
+`edit_policy=six_dof_keyframe_residuals` 可在人工关键帧编辑 XYZ、yaw/pitch/roll 和 FOV，
+再沿时间拟合位置与旋转残差形成 Corrected 轨迹，而不是把修正压缩成全程固定平移/零偏。
+彼此矛盾或无效的修正会被拒绝。该路线允许 viewer scene 没有 sparse PLY，且不运行依赖
+点云的道路表面诊断。
 
 中央经线输入先统一为十进制度。`120` 等能精确匹配 PROJ 数据库 CGCS2000
 高斯—克吕格定义的值继续保存 EPSG 编号；`118°50′` 等非标准值则保存
@@ -69,7 +71,8 @@ FOV（视场角）影响相机内参解释，但不是 SfM 一定准确的保证
 
 独立的 partial-SRT core（Experimental CLI）可把 SfM 中心与 SRT 的局部 ENU 做稳健 Sim3，采用 PTS 优先的时间同步和 RANSAC/Umeyama 拟合。至少需要三个空间上独立的约束；质量门控、约束不足、RANSAC 内点不足或无效尺度都会拒绝融合并要求回退 `sfm_only`。
 
-该 partial-SRT 核心尚未接入正式 JobRunner，`srt_sfm_fused` 仍为 Interface only。
+该 partial-SRT 核心尚未接入新项目任务队列，`srt_sfm_fused` 为 **Legacy read-only**：
+历史 manifest/产物仍可读取，新项目不再推荐、创建或排队该路线。
 `srt_full_pose` 是另一条已接通的 metric-direct 路线，只在完整云台姿态、精确 frame map、
 当前 CAD 投影和水平 FOV 均明确时执行；它不使用 ENU/自由 Sim3，也不使未确认的普通
 SRT 成为精确位置或 CAD 高程真值。

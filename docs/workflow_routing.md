@@ -70,7 +70,8 @@ SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹�
   逐帧变焦或鱼眼内参。
 - 姿态固定采用 DJI absolute-NED 云台 yaw/pitch/roll 约定，不运行自由姿态/尺度反算。
 - 轨迹进入 CAD 本地米制坐标后标记 `metric_scale_locked=true`；对齐保持单位旋转和
-  `scale=1.0`，人工锚点只允许估计固定 XYZ 平移和 yaw/pitch/roll 零偏。
+  `scale=1.0`；人工关键帧通过 `six_dof_keyframe_residuals` 拟合 XYZ 与
+  yaw/pitch/roll 残差，生成独立于 Base 的 Corrected 轨迹。
 - 水平坐标确认不等于高程基准确认。优先使用相对高度并叠加用户 `cad_z_offset_m`；
   绝对高度未经测量基准验证时只产生警告；诊断分别输出 `horizontal_validation`
   与 `vertical_validation`，不能用水平投影置信度替代高程结论。
@@ -98,6 +99,29 @@ SRT 检测异常会回退 `sfm_only`，并把解析警告（例如时长不匹�
   不是完全省略三维几何。
 
 ## 稳定路径中的关键帧
+
+完整姿态路线跳过 SfM；缺失姿态路线运行自适应抽帧的 COLMAP 稀疏重建，恢复旋转与
+RADIAL 标定后配准到逐帧 SRT 位置，不使用旧 OpenCV 姿态估计后备。重建分辨率影响缺
+姿态求解，输出分辨率只影响渲染。中央经线可输入度或度分（例如 118°50′），与镜头的
+整数水平 FOV 是两个不同参数。
+
+SRT 工作台同步显示视频、当前姿态相机视锥、Base 轨迹与 Corrected 轨迹。关键帧可调
+XYZ、yaw、pitch、roll 与水平 FOV，先保存草稿，再执行路线拟合；渲染是独立操作。
+`srt_full_pose` 可以零个人工关键帧确认基线；`srt_fixed_track_visual_pose` 在 `terrain`
+模式允许零个或至少两个，`partial`、`relative` 模式至少两个，任何模式都拒绝恰好一个。
+自动预测帧不是人工关键帧。
+
+高度语义只有 `terrain`、`partial`、`relative`：相对高度与用户校准共同建立 CAD Z；
+绝对高度在未验证共同基准时仅作诊断，系统不执行椭球高到正常高的自动转换。多个 TPKG
+可提供覆盖范围内的地形控制，缺口仍保留并警告，而不是虚构高程。
+
+最新渲染器先确定固定施工区域，再逐帧按相机视锥筛选；区域内默认不施加移动距离 cutoff/
+fade。它尽量保留 DXF/TPKG 原色与中文工程文字，但受导入、字形、线段和标签预算限制，
+不承诺所有文字或全部 CAD 实体都绘出。输出依 source decoded-frame 的精确 source PTS 与
+time base，不用名义 FPS 反推帧号。失败任务可从项目页重试；不可变 attempt/revision、兼容
+草稿与保留策略用于恢复，但用户仍应保留项目目录和日志。
+
+Bentley XML 只用于诊断或离线参考比较，不是生产工作流必需输入。
 
 对 `sfm_only`，先完成至少两个已确认的人工关键帧并运行初步路线拟合。随后使用
 “生成关键帧计划”按间隔创建待标定帧；待标定帧不会自动成为人工锚点。逐帧保存计划

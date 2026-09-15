@@ -246,6 +246,7 @@ def assemble_bundle(
     output_dir: str | Path,
     source_commit: str,
     colmap_root: str | Path | None = None,
+    documentation_root: str | Path | None = None,
 ) -> Path:
     """从运行环境归档和后端白名单组装未压缩交付目录。"""
 
@@ -268,10 +269,24 @@ def assemble_bundle(
         if item.name == "release-config.json":
             continue
         destination = layout.root / item.name
+        if item.name == "PUBLIC_RELEASE_CHECKLIST.md":
+            destination = layout.root / "packaging" / "windows" / item.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
         if item.is_dir():
             shutil.copytree(item, destination)
         elif item.is_file():
             shutil.copy2(item, destination)
+
+    if documentation_root is not None:
+        documents = Path(documentation_root)
+        for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "README_EN.md", "CHANGELOG.md"):
+            shutil.copy2(documents / name, layout.root / name)
+        for name in ("docs", "third_party_licenses"):
+            shutil.copytree(
+                documents / name,
+                layout.root / name,
+                ignore=shutil.ignore_patterns("SOP", "__pycache__"),
+            )
 
     backend = Path(backend_root)
     for relative in backend_runtime_files(backend):
@@ -403,6 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--output-dir", required=True, type=Path)
     assemble.add_argument("--source-commit", required=True)
     assemble.add_argument("--colmap-root", type=Path)
+    assemble.add_argument("--documentation-root", default=repository_root, type=Path)
     assemble.add_argument("--zip", action="store_true")
 
     verify = subparsers.add_parser("verify")
@@ -436,6 +452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         source_commit=args.source_commit,
         colmap_root=args.colmap_root,
+        documentation_root=args.documentation_root,
     )
     if args.zip:
         write_zip64(bundle, bundle.parent / f"{bundle.name}.zip")

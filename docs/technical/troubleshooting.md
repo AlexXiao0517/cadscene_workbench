@@ -140,7 +140,7 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 **检查：** 查看 `03_alignment/alignment.json` 的 `alignment_mode`、`position_mode`、`scale_observable`、Sim3、残差、FOV 来源和 warnings，以及 `keyframe_correspondences.csv`。确认人工关键帧不是 `algorithm_prediction`，并核对 `cad_scale`、`origin_xy`。常规对齐至少需要两个位置可区分的人工锚点；历史 partial-SRT 融合需要至少三个空间独立约束。full-pose 应显示 `metric_direct`，固定轨迹应显示 `position_mode=srt_fixed_track` 与 `position_source=srt_cad_locked`；两者都应有 `metric_scale_locked=true`、`scale=1.0` 和绑定当前 CAD 指纹的 confirmed georeference。
 
-**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。两个 SRT 分支都应先回到项目页比较 CAD bbox/轨迹预览并重新确认候选，不要靠放开自由 Sim3 尺度掩盖选错投影。固定轨迹只允许调整整条路线共同的 XYZ 偏移，不能逐帧移动位置。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退；两个已投影米制分支的 1.0 是强制单位尺度。
+**处理：** 在 CAD 已核实的位置补充分散的人工关键帧，避免重复标记相邻画面；统一 Web→CAD 换算和前后端 pitch 符号。两个 SRT 分支都应先回到项目页比较 CAD bbox/轨迹预览并重新确认候选，不要靠放开自由 Sim3 尺度掩盖选错投影。固定轨迹配置可先调整整条 SRT 基准路线的共同 XYZ 偏移；工作台随后用 `six_dof_keyframe_residuals` 对人工关键帧的 XYZ 和旋转残差拟合 Corrected 路线，不能把 COLMAP 相机中心误当作 Base 位置。不要把普通 SRT 高程当作 CAD 高程。`rotation_only` 中 `scale = 1.0` 只是协议回退；两个已投影米制分支的 1.0 是强制单位尺度。
 
 ### FOV 约为 29°、内参异常或对齐拒绝
 
@@ -166,7 +166,13 @@ python -m cadscene.cli.check_sfm_environment --device cuda --json
 
 **检查：** 查看 `02_srt_visual_pose/orientation_diagnostics.json` 的状态、覆盖率、pair diagnostics 和 warnings。查看器中的路线应继续存在；只有 `orientation_available=true` 的帧才显示视锥。
 
-**处理：** 这不是位置丢失，也不会回退到 SfM。沿 SRT→CAD 轨迹补充或微调姿态关键帧；位置只能通过一个统一 XYZ 偏移移动整条路线。该路线跳过位置注册、三角化、BA 和点云维护，所以通常比完整 SfM 快；加速并不只是因为没有写出 PLY 文件。
+**处理：** 这不是 Base 位置丢失，也不会回退到旧 OpenCV 姿态路线。先检查自适应抽帧计划、
+COLMAP 注册覆盖、三角化/BA 日志、RADIAL calibration 与姿态注册诊断；必要时调整重建
+分辨率后重试。进入工作台后可用人工关键帧编辑 XYZ、yaw/pitch/roll 和 FOV，
+`six_dof_keyframe_residuals` 会沿 Base 路线拟合 Corrected 位置与旋转；项目配置中的
+`route_offset_xyz_m` 只是求解前的整条 Base 路线偏移，不是唯一位置编辑能力。点云保留为
+诊断产物但不是 Viewer/渲染必需输入。耗时取决于视频、抽帧、设备和重建收敛，不能保证
+必然快于普通 SfM。
 
 ### pure-rotation 后无法放置、没有轨迹或渲染位置不对
 

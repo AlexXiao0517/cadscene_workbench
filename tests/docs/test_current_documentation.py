@@ -27,7 +27,80 @@ CURRENT_DOCUMENTS = (
     "docs/technical/api-and-artifacts.md",
     "docs/technical/developer-guide.md",
     "docs/technical/troubleshooting.md",
+    "apps/web_camera_viewer/README.md",
+    "scripts/README.md",
 )
+
+
+def test_public_docs_cover_the_current_srt_workflows_and_release() -> None:
+    zh = _read("README.md")
+    en = _read("README_EN.md")
+    routing = _read("docs/workflow_routing.md")
+    viewer = _read("docs/web_viewer_usage.md")
+    joined = "\n".join((zh, en, routing, viewer))
+
+    assert "https://github.com/AlexXiao0517/cadscene_workbench/releases/tag/v0.1.5" in zh
+    assert "CADScene-0.1.5.zip" in zh
+    assert "CADScene-0.1.5.zip" in en
+    assert "118°50′" in zh
+    assert "integer horizontal FOV" in en
+    assert "adaptive sampled COLMAP sparse reconstruction" in en
+    assert "完整姿态路线跳过 SfM" in routing
+    assert "缺失姿态路线运行自适应抽帧的 COLMAP 稀疏重建" in routing
+    assert "XYZ、yaw、pitch、roll 与水平 FOV" in routing
+    assert "terrain`、`partial`、`relative" in routing
+    assert "不执行椭球高到正常高的自动转换" in routing
+    assert "Base/Corrected" in viewer
+    assert "相机视锥" in viewer
+    assert "精确 source PTS" in joined
+    assert "草稿" in joined
+    assert "重试" in joined
+
+    stale = (
+        "普通或不完整 SRT 仍只是元数据线索",
+        "Neither SRT route runs SfM",
+        "工作台锁定 XYZ，只允许姿态微调",
+    )
+    for claim in stale:
+        assert claim not in joined
+
+
+def test_sop_is_removed_and_archival_groups_are_labeled() -> None:
+    assert not any(path.is_file() for path in (ROOT / "docs/SOP").rglob("*"))
+    current = "\n".join(_read(path) for path in CURRENT_DOCUMENTS)
+    assert "docs/SOP" not in current
+    assert "SOP/" not in current
+    index = _read("docs/README.md")
+    assert "历史档案（非现行说明）" in index
+    assert "superpowers/plans/" in index
+    assert "superpowers/specs/" in index
+    assert "stage4c_" in index
+
+
+def test_current_docs_do_not_retain_pre_colmap_or_pre_six_dof_srt_constraints() -> None:
+    current = "\n".join(_read(path) for path in CURRENT_DOCUMENTS)
+    stale = (
+        "不运行 SfM、BA、三角化或点云",
+        "a single whole-route XYZ offset is allowed",
+        "不运行 SfM、质量检测或点云",
+        "固定轨迹只允许调整整条路线共同的 XYZ 偏移",
+        "只稳健估计一个固定 XYZ 平移以及独立的 wrapped yaw/pitch/roll 零偏",
+        "`srt_sfm_fused` 仍为 Interface only",
+        "`srt_sfm_fused` remains Interface only",
+        "`srt_sfm_fused` 仍是 Interface only",
+        "人工锚点只允许估计固定 XYZ 平移和 yaw/pitch/roll 零偏",
+        "位置只能通过一个统一 XYZ 偏移移动整条路线",
+        "该路线跳过位置注册、三角化、BA 和点云维护",
+        "X/Y/Z Gizmo 被锁定",
+        "fixed-track route uses one `route_offset_xyz_m`",
+    )
+    for claim in stale:
+        assert claim not in current
+
+    assert "/apps/project_library/" in _read("docs/README.md")
+    assert "COLMAP 稀疏重建" in _read("README.md")
+    assert "six_dof_keyframe_residuals" in _read("docs/design/coordinates-and-alignment.md")
+    assert "Legacy read-only" in _read("docs/design/coordinates-and-alignment.md")
 
 
 def test_official_upload_formats_match_the_current_portal() -> None:

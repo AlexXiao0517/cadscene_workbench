@@ -142,4 +142,4 @@ CAD 替换只有在至少一个片段存在可校验的保存工作台输出时�
 
 ## 运行依赖边界
 
-默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV。`srt_fixed_track_visual_pose` 依赖已确认的 CAD 投影、SRT GPS/`rel_alt` 和用户水平 FOV，位置由 SRT 锁定，OpenCV 视觉只估计姿态，不生成点云。正式上传界面的 CAD 输入是 DXF；兼容后端中的 DWG 转换能力不等于正式界面已支持 DWG。
+默认 SfM 是 `pycolmap + cpu`。CUDA 只覆盖已确认支持的特征提取和匹配，无法确认时回退 CPU；mapper 和 global BA 不宣传为 GPU。`pure_rotation` 依赖外部 OpenGV。`srt_fixed_track_visual_pose` 依赖已确认的 CAD 投影、SRT GPS/`rel_alt` 和用户水平 FOV，先自适应抽帧运行 COLMAP 稀疏重建/RADIAL 标定，再把视觉旋转配准到 SRT 锁定的位置；点云仅供诊断。`srt_full_pose` 使用完整 SRT 姿态并跳过 SfM。正式上传界面的 CAD 输入是 DXF；兼容后端中的 DWG 转换能力不等于正式界面已支持 DWG。

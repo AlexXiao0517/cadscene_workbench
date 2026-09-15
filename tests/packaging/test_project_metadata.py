@@ -27,6 +27,21 @@ def test_distribution_and_runtime_versions_match_release_0_1_5() -> None:
     assert __version__ == project["version"]
 
 
+def test_distribution_declares_mit_and_preserves_third_party_notices() -> None:
+    project = _project_metadata()
+    assert project["license"] == "MIT"
+    assert set(project["license-files"]) == {
+        "LICENSE", "THIRD_PARTY_NOTICES.md", "third_party_licenses/*.txt"
+    }
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert "Copyright (c) 2026 CADScene Workbench contributors" in license_text
+    assert "Permission is hereby granted, free of charge" in license_text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in license_text
+    third_party = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert "FFmpeg" in third_party and "GPL" in third_party
+    assert "Three.js" in third_party
+
+
 def test_default_install_declares_supported_runtime_dependencies() -> None:
     project = _project_metadata()
 

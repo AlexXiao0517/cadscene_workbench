@@ -441,9 +441,19 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
         output_dir=output,
         source_commit="52c605f",
         colmap_root=colmap,
+        documentation_root=REPOSITORY_ROOT,
     )
 
     assert (bundle / "runtime" / "python.exe").is_file()
+    assert (bundle / "LICENSE").read_bytes() == (REPOSITORY_ROOT / "LICENSE").read_bytes()
+    assert (bundle / "THIRD_PARTY_NOTICES.md").is_file()
+    assert (bundle / "third_party_licenses" / "threejs-MIT.txt").is_file()
+    assert (bundle / "docs" / "technical" / "developer-guide.md").is_file()
+    checklist = bundle / "packaging" / "windows" / "PUBLIC_RELEASE_CHECKLIST.md"
+    assert checklist.is_file()
+    assert (checklist.parent / "../../THIRD_PARTY_NOTICES.md").resolve().is_file()
+    assert not (bundle / "PUBLIC_RELEASE_CHECKLIST.md").exists()
+    assert not (bundle / "docs" / "SOP").exists()
     assert (bundle / "colmap" / "bin" / "colmap.exe").read_bytes() == b"colmap"
     assert (bundle / "启动CAD视频工作台.cmd").is_file()
     assert (bundle / "pure_rotation_backend" / "src" / "pair_estimation.py").is_file()

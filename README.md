@@ -14,7 +14,7 @@ CADScene Workbench 是面向建筑、道路等工程场景的本地视频与 CAD
 
 - 一段清晰、连续的 MP4 现场视频。
 - 与项目对应的 DXF 图纸。正式上传界面目前仅支持 MP4 视频和 DXF 图纸；后端兼容接口能接收的其他扩展名不等于当前界面已支持或已完成端到端验收。
-- 可选的 DJI 风格 SRT。只有 GPS、高度和云台 yaw/pitch/roll 覆盖完整时，才能进入全姿态路线；普通或不完整 SRT 仍只是元数据线索，不是高精度位置、姿态或 CAD 高程真值。
+- 可选的 DJI 风格 SRT。GPS 与相对高度可进入固定轨迹视觉姿态路线；云台 yaw/pitch/roll 也完整时可进入全姿态路线。能力检测不是精度证明。
 - 熟悉现场和图纸的人员，用于确认关键画面、CAD 坐标系和水平视场角（horizontal FOV）。
 
 DXF 中的 `TEXT`、`MTEXT` 和块属性文字会随图层、位置、旋转和字号导入 CAD 视图；桩号和其他工程标注可以直接用于关键帧对齐参考。
@@ -61,7 +61,7 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 | `pure_rotation` | Supported（正式支持） | 固定相机中心的旋转恢复、全局放置、局部校正和渲染已进入正式流程；依赖固定版本外部 OpenGV 后端。自动场景判断仍需人工复核。 |
 | partial-SRT core | Experimental CLI | 提供 PTS、ENU 和稳健 Sim3 融合核心，尚未接入正式项目任务队列。 |
 | `srt_full_pose` | Supported with guard | 完整 DJI SRT、已确认 CGCS2000 投影和用户水平 FOV 可直接生成米制相机轨迹，跳过 SfM；高度基准仍需单独复核。 |
-| `srt_fixed_track_visual_pose` | Supported with guard | SRT 有 GPS 与相对高度但缺少完整云台姿态时，严格使用 SRT→CAD 位置，只从视频估计姿态；不运行 SfM、BA、三角化或点云。 |
+| `srt_fixed_track_visual_pose` | Supported with guard | SRT 有 GPS 与相对高度但缺少完整云台姿态时，自适应抽帧运行 COLMAP 稀疏重建、BA/三角化与 RADIAL 标定，再把视觉旋转配准到 SRT→CAD 基准位置；点云仅供诊断。 |
 | `srt_sfm_fused` | Legacy read-only | 只为旧 manifest/产物保留；新项目不再推荐或创建该工作流。 |
 | SfM CUDA | Optional（可选） | 只确认受支持的特征提取和匹配；建图与全局 BA 不应描述为 GPU 处理。 |
 | CAD 锚定工程标牌 | Supported | 在 CAD 中选择世界坐标，预览和正式渲染按当前有效相机轨迹投影。 |
@@ -74,7 +74,7 @@ http://127.0.0.1:8300/apps/project_workspace/?projectId=<project_id>
 1. 在上传门户创建项目，选择视频、CAD 和可选 SRT。服务先保存不可变输入，再异步完成 CAD、视频和条件 SRT 解析；进度窗口只展示后台真实阶段。
 2. 进入“项目片段管理”，检查系统自动检测的运动模式、SRT 覆盖率和推荐工作流。最终工作流可选择 SfM、OpenGV 或两条 SRT 路线；通常保留推荐值，现场信息不符时再人工覆盖。批量轨迹反算和批量渲染至少需要勾选一个片段，也可逐片段进入工作台。
 3. 对两条 SRT 路线，填写镜头水平 FOV（例如 72°）和当前 CAD 的 CGCS2000 中央经线（可留空自动推荐，也可填 `118°50′`），观察候选任务真实进度，再检查 CAD 包围盒与 SRT 轨迹预览并显式确认。
-4. `sfm_only` 片段先运行 SfM；在关键帧标定中至少保存两个有效人工关键帧并执行路线拟合，再生成关键帧计划、补充标定和完成最终拟合。`srt_full_pose` 直接使用 DJI 云台姿态；`srt_fixed_track_visual_pose` 严格使用 SRT→CAD 的逐帧 XYZ，并只用视频估计姿态，工作台锁定 XYZ，只允许姿态微调和配置阶段的整条路线统一 XYZ 偏移。
+4. `sfm_only` 片段先运行 SfM；在关键帧标定中至少保存两个有效人工关键帧并执行路线拟合，再生成关键帧计划、补充标定和完成最终拟合。`srt_full_pose` 直接使用 DJI 云台姿态并跳过 SfM；`srt_fixed_track_visual_pose` 运行自适应抽帧的 COLMAP 稀疏重建和标定，把视觉旋转配准到 SRT 位置。两条路线的工作台均可按分支规则微调 XYZ、旋转和 FOV，然后“路线拟合”并单独“渲染”。
 5. `sfm_only` 运行质量检测，通过后点击“完成质量检测”进入渲染导出；若需要补帧，返回关键帧标定继续处理。两条 SRT 路线跳过质量检测并直接进入渲染。
 6. 在渲染导出阶段可添加 CAD 锚定工程标牌，也可直接无标牌渲染。点击“渲染视频”后，当前标签状态会随输入指纹进入不可变渲染 revision。
 7. 返回项目片段管理，确认所有需要交付的片段已有当前有效渲染，再执行“合并输出”。合并严格使用每段 `render_frame_map.json` 的 source PTS 分区，不能重复或遗漏帧。
@@ -132,7 +132,7 @@ CAD 原图文字和用户创建的工程标牌是两类不同内容：
 
 ## 能力边界
 
-- `sfm_only` 是稳定主路径；`srt_full_pose` 和 `srt_fixed_track_visual_pose` 都要求精确 frame map、有效水平 FOV 和经人工确认的 CGCS2000 投影。固定轨迹路线还要求 SRT GPS 与 `rel_alt`，视觉算法不得移动逐帧相机中心。
+- `sfm_only` 是稳定主路径；`srt_full_pose` 和 `srt_fixed_track_visual_pose` 都要求精确 frame map、有效水平 FOV 和经人工确认的 CGCS2000 投影。固定轨迹路线还要求 SRT GPS 与 `rel_alt`；COLMAP 中心不得替换 SRT→CAD Base 位置，但人工六自由度关键帧可拟合独立的 Corrected 路线。
 - `pure_rotation` 是正式支持的固定相机中心路线；自动视频分析与路线推荐仍需人工复核。旧 `srt_sfm_fused` 只读兼容，视频目标跟踪标牌仍是隐藏能力。
 - 全姿态路线解决的是水平坐标投影，不自动解决 CAD 高程基准。相对高度需要 `cad_z_offset_m`，绝对高度未经测量基准验证时只作为警告信息。
 - CAD 锚定标牌不承诺真实视频中的物体遮挡推理；当前只处理相机前后、画面范围和时间范围。
@@ -154,4 +154,6 @@ CAD 原图文字和用户创建的工程标牌是两类不同内容：
 - 后续能力和优先级见[路线图](docs/roadmap.md)。
 - 已交付与未发布变化见[CHANGELOG](CHANGELOG.md)。
 - 感谢三维重建、CAD 协同、视频处理与开源依赖生态的社区和维护者。
-- 本仓库尚未声明开源许可证；在获得明确许可前，请不要将其视为已授予开源使用权。
+- 项目自有代码采用 [MIT License](LICENSE)；重新分发前同时阅读 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- v0.1.5 的公开发布须等待第三方分发材料验证完成；届时以 [Release 页面](https://github.com/AlexXiao0517/cadscene_workbench/releases/tag/v0.1.5)实际附件为准。计划中的便携包为 `CADScene-0.1.5.zip` 并应配套 checksum；当前不要据此推断附件已经可下载。
+- Windows 离线版升级仅支持同一台电脑保留旧目录后的迁移，不支持跨电脑迁移。
