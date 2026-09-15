@@ -1,5 +1,13 @@
 CADScene Workbench Windows 离线测试包
 
+公开的运行库前置条件包不会分发 Microsoft Visual C++ 运行库。首次启动前，请从微软官方页面
+安装最新的 Microsoft Visual C++ x64 Redistributable（最低版本 14.51.36231.0）：
+https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
+启动器只检查 System32 中由 Microsoft 签名的 x64 文件，并在当前程序目录创建 Python 扩展所需的
+本地别名；不会下载、安装或提升权限。这些本地别名不得重新分发或重新打包。
+
+旧的 Windows 离线包仍自带其原有运行环境，不使用 external-msvc.json，启动行为不变。
+
 1. 请先完整解压 ZIP，不要直接在压缩软件中运行。建议解压到 D:\CADScene 等较短目录，
    不要在下载目录中重复嵌套同名文件夹。
 2. 双击“启动CAD视频工作台.cmd”。首次启动会整理包内环境，通常需要几十秒。

@@ -68,3 +68,12 @@ Legacy toolchain exclusions and the optional ONNX CUDA provider exclusion are
 separate archive-preparation steps, not implicit effects of this FFmpeg option.
 Keep their file/hash manifests with the final release materials. Supported
 COLMAP GPU SIFT must remain available and be tested after those changes.
+
+The user approved an external Microsoft prerequisite on 2026-09-15. Public
+bundles must also use `--external-msvc-manifest` with the audited exclusion
+input. Windows 10/11 supplies UCRT/API sets; recipients install the x64 Visual
+C++ runtime from Microsoft. The public launcher checks signed installed DLLs
+before Python starts and creates four local wheel-loader aliases. Never ship
+those generated aliases or repackage a launched directory. A pristine ZIP and
+a separate extracted validation copy are required. The old local offline ZIP
+remains untouched and must not be substituted for this public artifact.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from dataclasses import dataclass
 import hashlib
 import json
@@ -14,6 +13,19 @@ import subprocess
 import tarfile
 from typing import Sequence
 import zipfile
+
+try:
+    from external_msvc import (
+        apply_external_msvc_manifest,
+        filtered_conda_prefix_script,
+        validate_external_msvc_archive_root,
+    )
+except ImportError:  # pragma: no cover - package-style invocation
+    from scripts.external_msvc import (
+        apply_external_msvc_manifest,
+        filtered_conda_prefix_script,
+        validate_external_msvc_archive_root,
+    )
 
 
 @dataclass(frozen=True)
@@ -130,6 +142,7 @@ def write_zip64(
 
     root = Path(source)
     destination = Path(output)
+    validate_external_msvc_archive_root(root)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(
         destination,
@@ -266,54 +279,10 @@ def _guard_runtime_file(runtime: Path, relative: Path) -> Path:
 def _remove_conda_prefix_record(script: Path, duplicate_relative: Path) -> tuple[str, str]:
     """Remove only the audited duplicate's literal conda-pack prefix record."""
 
-    source = script.read_text(encoding="utf-8")
     before = _sha256(script)
-    try:
-        tree = ast.parse(source, filename=str(script))
-    except SyntaxError as error:
-        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure") from error
-    assignments = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "_prefix_records"
-    ]
-    if len(assignments) != 1:
-        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
-    assignment = assignments[0]
-    try:
-        records = ast.literal_eval(assignment.value)
-    except (ValueError, TypeError, SyntaxError) as error:
-        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure") from error
-    if not isinstance(records, (list, tuple)):
-        raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
-
-    expected = duplicate_relative.as_posix().casefold()
-
-    def record_path(record: object) -> str | None:
-        if isinstance(record, str):
-            return record
-        if isinstance(record, (list, tuple)) and record and isinstance(record[0], str):
-            return record[0]
-        return None
-
-    for record in records:
-        if record_path(record) is None:
-            raise ValueError("conda-unpack-script.py has unknown _prefix_records structure")
-    filtered = [
-        record
-        for record in records
-        if record_path(record).replace("\\", "/").casefold() != expected
-    ]
-    if filtered != list(records):
-        lines = source.splitlines(keepends=True)
-        start = sum(len(line.encode("utf-8")) for line in lines[: assignment.lineno - 1]) + assignment.col_offset
-        end = sum(len(line.encode("utf-8")) for line in lines[: assignment.end_lineno - 1]) + assignment.end_col_offset
-        source_bytes = source.encode("utf-8")
-        replacement = f"_prefix_records = {filtered!r}".encode("utf-8")
-        script.write_bytes(source_bytes[:start] + replacement + source_bytes[end:])
+    updated = filtered_conda_prefix_script(script, (duplicate_relative.as_posix(),))
+    if updated != script.read_bytes():
+        script.write_bytes(updated)
     return before, _sha256(script)
 
 
@@ -373,9 +342,12 @@ def assemble_bundle(
     colmap_root: str | Path | None = None,
     documentation_root: str | Path | None = None,
     runtime_profile: str | None = None,
+    external_msvc_manifest: str | Path | None = None,
 ) -> Path:
     """从运行环境归档和后端白名单组装未压缩交付目录。"""
 
+    if external_msvc_manifest is not None and runtime_profile != "conda-ffmpeg-only":
+        raise ValueError("external MSVC manifest requires the conda-ffmpeg-only runtime profile")
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     layout = BundleLayout(output / config.bundle_name)
@@ -451,6 +423,9 @@ def assemble_bundle(
         ),
         encoding="utf-8",
     )
+
+    if external_msvc_manifest is not None:
+        apply_external_msvc_manifest(layout.root, external_msvc_manifest)
 
     layout.launcher.mkdir(parents=True, exist_ok=True)
     native_runtime = tuple(
@@ -559,6 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--documentation-root", default=repository_root, type=Path)
     assemble.add_argument("--zip", action="store_true")
     assemble.add_argument("--runtime-profile", choices=("conda-ffmpeg-only",))
+    assemble.add_argument("--external-msvc-manifest", type=Path)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--config", default=default_config, type=Path)
@@ -583,6 +559,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "verify":
         verify_bundle(args.bundle_root, config=config)
         return 0
+    if args.external_msvc_manifest is not None and args.runtime_profile != "conda-ffmpeg-only":
+        raise ValueError("external MSVC manifest requires the conda-ffmpeg-only runtime profile")
     if args.runtime_profile is not None and args.zip:
         archive = Path(args.output_dir).resolve() / f"{config.bundle_name}.zip"
         if archive.exists():
@@ -597,6 +575,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         colmap_root=args.colmap_root,
         documentation_root=args.documentation_root,
         runtime_profile=args.runtime_profile,
+        external_msvc_manifest=args.external_msvc_manifest,
     )
     if args.zip:
         write_zip64(

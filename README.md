@@ -21,6 +21,13 @@ DXF 中的 `TEXT`、`MTEXT` 和块属性文字会随图层、位置、旋转和�
 
 ## 快速开始
 
+公开 Windows 便携包面向 Windows 10/11 x64，不内置微软运行库。首次使用前，
+请从[微软官方下载页面](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+安装最新的 x64 Visual C++ Redistributable（运行库文件版本至少 `14.51.36231.0`），
+然后完整解压 ZIP 并双击启动脚本。启动器会检查依赖，不会自动下载、安装或代替用户接受许可。
+启动时从本机已安装运行库生成的兼容副本仅供本机使用；请分发原始 Release ZIP，
+不要重新压缩已经启动过的程序目录。此前本地离线测试包保持不变。
+
 建议始终显式指定可写存储根，避免把人工项目和渲染产物写入代码目录。PowerShell 示例：
 
 ```powershell

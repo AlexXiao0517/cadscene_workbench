@@ -7,10 +7,13 @@
 - Preserved main-system project retention, workspace migration, crash-safe keyframe drafts and scene-bridge state fixes.
 - Relative-height mode uses SRT rel_alt with flat CAD Z=0. Terrain mode uses available absolute altitude and CAD terrain elevation; vertical datum compatibility is not automatically guaranteed.
 - Portable Windows release includes PROJ data and keeps user workspace separate from application files. Existing projects and prior releases are not bundled or overwritten.
+- Public Windows packages require the Microsoft x64 VC runtime to be installed separately. No automatic download or installation occurs; locally generated loader aliases must not be repacked. Original code uses MIT, and third-party source/notice materials accompany the public binary release.
 
-## Unreleased
+## Earlier development history (before 0.1.5)
 
-- Prepared the public v0.1.5 documentation and MIT project license. Public source, Python package and portable archive remain gated together on verified third-party redistribution materials; the Release page is authoritative for actual assets.
+The entries below record earlier development states, not the current 0.1.5
+support matrix. See the 0.1.5 section and current usage documentation above;
+the GitHub Release page is authoritative for published assets.
 
 ### Added
 

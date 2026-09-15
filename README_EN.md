@@ -21,6 +21,16 @@ DXF `TEXT`, `MTEXT`, and block-attribute text are imported into the CAD view wit
 
 ## Quick start
 
+The public Windows portable bundle targets Windows 10/11 x64 and does not ship
+Microsoft runtime binaries. Before first use, install the latest x64 Visual C++
+Redistributable from [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+(runtime file version at least `14.51.36231.0`), extract the ZIP fully, and run
+the launcher. It checks prerequisites but never downloads, installs, or accepts
+license terms automatically. Compatibility copies created from the installed
+runtime are for local use only: redistribute the original Release ZIP, not a
+directory that has already been launched. Existing local offline tester bundles
+are unchanged.
+
 Always specify a writable storage root for normal testing and long-lived projects so that project data and render outputs are not written into the source tree. PowerShell example:
 
 ```powershell

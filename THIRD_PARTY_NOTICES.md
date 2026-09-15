@@ -71,6 +71,22 @@ local file or a build command.
 The source repository records outstanding checks in
 `packaging/windows/PUBLIC_RELEASE_CHECKLIST.md`.
 
+### Public Windows prerequisite policy
+
+The public package uses an audited exclusion manifest to omit Microsoft VC
+runtime and Windows UCRT/API-set DLLs. These are not relicensed under MIT.
+Recipients use Windows 10/11 x64 and install the current x64 Visual C++ runtime
+directly from [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+The launcher validates installed files before creating four local compatibility
+copies required by wheel-specific DLL names. It does not download, install, or
+accept terms for the user. Those locally created copies are not public release
+assets; the packaging guard rejects a directory containing them.
+
+ONNX Runtime is a separately licensed open-source component and is not removed
+merely because Microsoft appears in its publisher metadata. The optional ONNX
+CUDA provider is omitted from the public COLMAP payload for its separate
+dependency closure; supported GPU SIFT extraction and matching remain tested.
+
 ## User inputs
 
 Uploaded video, CAD, telemetry, terrain and annotations remain outside the source

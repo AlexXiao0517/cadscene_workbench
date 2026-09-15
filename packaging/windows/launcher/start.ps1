@@ -12,6 +12,7 @@ $backend = Join-Path $bundleRoot "pure_rotation_backend"
 $logs = Join-Path $bundleRoot "logs"
 $statePath = Join-Path $PSScriptRoot "service-state.json"
 $relocatedMarker = Join-Path $runtime ".cadscene-relocated"
+. (Join-Path $PSScriptRoot "external-msvc.ps1")
 
 function Assert-PathBudget() {
     # Windows 部分原生工具仍受旧式路径上限影响，按视频分析发布阶段的真实最长路径预留空间。
@@ -247,6 +248,7 @@ function Invoke-WorkspaceMigration() {
 }
 
 try {
+    Initialize-ExternalMsvc -BundleRoot $bundleRoot
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Bundled Python runtime is missing: $python"
     }
