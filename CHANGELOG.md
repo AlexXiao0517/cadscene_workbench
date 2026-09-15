@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5 — 2026-09-15
+
+- Integrated complete-pose SRT trajectories without reconstruction, missing-pose COLMAP workflows, CAD coordinate confirmation including fractional central meridians, optional terrain, keyframe refinement and resolution-selectable rendering.
+- Added full-pose position/rotation smoothing, exact frame mapping, original CAD colors and Chinese labels, and fixed whole-clip construction-region rendering without moving distance fade/cutoff inside the region.
+- Preserved main-system project retention, workspace migration, crash-safe keyframe drafts and scene-bridge state fixes.
+- Relative-height mode uses SRT rel_alt with flat CAD Z=0. Terrain mode uses available absolute altitude and CAD terrain elevation; vertical datum compatibility is not automatically guaranteed.
+- Portable Windows release includes PROJ data and keeps user workspace separate from application files. Existing projects and prior releases are not bundled or overwritten.
+
 ## Unreleased
 
 ### Added

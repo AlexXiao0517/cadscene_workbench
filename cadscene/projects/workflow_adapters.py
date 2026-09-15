@@ -388,6 +388,7 @@ class ExistingWorkflowAdapter:
             "--init-min-tri-angle",
             "2",
             "--no-mask",
+            "--cleanup-workspace",
         ]
         if self.name == "srt_fixed_track_visual_pose":
             settings = inputs.parameters.get("srt_fixed_track_visual_pose")

@@ -66,6 +66,13 @@ def test_wheel_contains_official_applications_and_pinned_configs(tmp_path: Path)
     for required in (
         "cadscene/cli/build_srt_fixed_track_visual_pose.py",
         "cadscene/cli/build_srt_full_pose.py",
+        "cadscene/rendering/cad_region.py",
+        "cadscene/rendering/calibrated_overlay.py",
+        "cadscene/srt/pose_smoothing.py",
+        "cadscene/srt/full_pose_render_assets.py",
+        "cadscene/terrain/height_reference.py",
+        "cadscene/projects/workbench_drafts.py",
+        "cadscene/cli/workspace_migration.py",
         "apps/workflow_portal/index.html",
         "apps/project_workspace/index.html",
         "apps/project_library/index.html",

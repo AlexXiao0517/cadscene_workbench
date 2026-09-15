@@ -1560,13 +1560,43 @@
     if (typeof window.cadsceneGetCameraTrack !== "function") {
       throw new Error("当前相机轨迹尚未初始化");
     }
+    const currentTrack = cameraTrack || window.cadsceneGetCameraTrack();
     const result = await apiPost("/api/workflow/save-camera-track", {
       dataset,
       runId,
-      cameraTrack: cameraTrack || window.cadsceneGetCameraTrack(),
+      cameraTrack: currentTrack,
     });
+    if (projectWorkbenchToken) {
+      await ensureProjectWorkbenchSession();
+      await saveProjectCameraDraft(currentTrack);
+    }
     await loadKeyframePlan();
     return result;
+  }
+
+  async function saveProjectCameraDraft(cameraTrack, { retryConflict = true } = {}) {
+    try {
+      const draftPayload = await projectWorkbenchRequest(
+        `/workbench-sessions/${encodeURIComponent(projectWorkbenchToken)}/draft`,
+        {
+          expected_draft_revision: projectWorkbenchSession?.draft_state?.revision ?? null,
+          operation_id: resumeOperationId(),
+          camera_track: cameraTrack,
+        },
+      );
+      projectWorkbenchSession = { ...projectWorkbenchSession, ...draftPayload };
+      return draftPayload.draft_state;
+    } catch (error) {
+      if (
+        retryConflict
+        && error.status === 409
+        && error.payload?.error === "revision_conflict"
+      ) {
+        await refreshProjectWorkbenchSession();
+        return saveProjectCameraDraft(cameraTrack, { retryConflict: false });
+      }
+      throw error;
+    }
   }
 
   async function recoverStaleProjectWorkbenchSession() {
@@ -1653,9 +1683,19 @@
   }
 
   function projectWorkbenchTrajectoryOwnsStatus() {
+    const activeStatuses = new Set([
+      "queued",
+      "preparing",
+      "running",
+      "validating",
+      "cancel_requested",
+    ]);
     return Boolean(
       projectWorkbenchToken
-      && (projectWorkbenchTrajectoryStatus || projectWorkbenchRenderStatus),
+      && (
+        activeStatuses.has(projectWorkbenchTrajectoryStatus)
+        || activeStatuses.has(projectWorkbenchRenderStatus)
+      ),
     );
   }
 
@@ -2116,7 +2156,14 @@
       return { ok: true, kind: "pure_rotation_draft" };
     }
     if (typeof window.cadsceneGetCameraTrack === "function") {
-      return saveCurrentCameraTrack();
+      const result = await saveCurrentCameraTrack();
+      if (
+        projectWorkbenchSession.state === "editing"
+        || projectWorkbenchSession.state === "pending_save"
+      ) {
+        await finalizeProjectWorkbenchSave(result, { navigate: false });
+      }
+      return result;
     }
     return null;
   }
@@ -2339,6 +2386,7 @@
     try {
       await saveCurrentCameraTrack();
       window.cadsceneClearUnsavedCameraDraft?.();
+      message.textContent = "微调已保存到服务器；刷新或服务重启后仍会恢复。";
       const plannedFrame = (keyframePlan?.frames || []).find(
         (item) => Number(item.frame_index) === editedFrame,
       );
@@ -2801,6 +2849,8 @@
   }
   document.querySelector("#addKeyframe")?.addEventListener("click", () => persistEditedCameraTrack({ advancePlan: true }));
   document.querySelector("#deleteKeyframe")?.addEventListener("click", () => persistEditedCameraTrack());
+  document.querySelector("#saveAdjustedKeyframe")?.addEventListener("click", () => persistEditedCameraTrack());
+  document.querySelector("#acceptPrediction")?.addEventListener("click", () => persistEditedCameraTrack({ advancePlan: true }));
   document.querySelector("#workflowGenerateKeyframes")?.addEventListener("click", () => runWithMessage(generateKeyframePlan));
   document.querySelector("#workflowContinueKeyframes")?.addEventListener("click", jumpToNextPendingKeyframe);
   document.querySelector("#viewCurrentSuggestion")?.addEventListener("click", jumpToCurrentSuggestion);

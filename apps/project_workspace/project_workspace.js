@@ -23,6 +23,7 @@
     georeferenceCandidates: [],
     georeferenceOperation: null,
     georeferencePollGeneration: 0,
+    preparationDialogDismissed: false,
   };
   const dirtyEdits = state.dirtyEdits;
   const selectedClipIds = state.selectedClipIds;
@@ -45,6 +46,12 @@
     srt_fixed_track_visual_pose: "SRT 轨迹 + 稀疏重建姿态",
     srt_full_pose: "SRT 全姿态（跳过三维重建）",
     pure_rotation: "旋转估计",
+  };
+  const JOB_TYPE_LABELS = {
+    trajectory: "轨迹反算",
+    scene_bridge: "路线打通",
+    clip_render: "视频渲染",
+    clip_export: "工作台准备",
   };
   const MOTION_LABELS = {
     general_motion: "一般运动",
@@ -104,7 +111,34 @@
   }
 
   function trajectoryDisplayStatus(clip) {
-    return clip.status === "cancelled" ? "ready" : clip.status;
+    return clip.job_type === "trajectory" && clip.status === "cancelled"
+      ? "ready"
+      : clip.status;
+  }
+
+  function jobStatusLabel(clip) {
+    const status = trajectoryDisplayStatus(clip);
+    const statusLabel = STATUS_LABELS[trajectoryDisplayStatus(clip)]
+      || status
+      || STATUS_LABELS.ready;
+    const taskLabel = JOB_TYPE_LABELS[clip.job_type];
+    const taskScopedStatuses = [
+      "queued", "preparing", "running", "validating",
+      "failed", "interrupted", "cancelled",
+    ];
+    return taskLabel && taskScopedStatuses.includes(status)
+      ? `${taskLabel}${statusLabel}`
+      : statusLabel;
+  }
+
+  function jobActionLabel(jobType, action) {
+    const actionLabels = {
+      trajectory: action === "cancel" ? "取消反算" : "重试反算",
+      scene_bridge: action === "cancel" ? "取消打通" : "重试打通",
+      clip_render: action === "cancel" ? "取消渲染" : "重试渲染",
+      clip_export: action === "cancel" ? "取消准备" : "重试准备",
+    };
+    return actionLabels[jobType] || (action === "cancel" ? "取消" : "重试");
   }
 
   function formatSrtCoverage(coverage) {
@@ -136,8 +170,12 @@
     bridgeDown.title = capabilities.can_bridge_down
       ? `用重叠帧打通 ${capabilities.bridge_down_target_clip_id} 的路线，完成后进入微调`
       : (capabilities.bridge_down_reason || "没有可安全打通的同场景下一片段");
-    $(".retry-job", row).disabled = !capabilities.can_retry;
-    $(".cancel-job", row).disabled = !capabilities.can_cancel;
+    const retry = $(".retry-job", row);
+    const cancel = $(".cancel-job", row);
+    retry.disabled = !capabilities.can_retry;
+    cancel.disabled = !capabilities.can_cancel;
+    retry.textContent = jobActionLabel(clip.job_type, "retry");
+    cancel.textContent = jobActionLabel(clip.job_type, "cancel");
     $(".workflow-select", row).title = capabilities.reason || "";
   }
 
@@ -150,6 +188,7 @@
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) selectedClipIds.add(clip.clip_id);
       else selectedClipIds.delete(clip.clip_id);
+      updateBatchSelectionControls();
     });
     const nameButton = $(".clip-name", row);
     nameButton.textContent = effectiveDisplayName(clip);
@@ -165,10 +204,7 @@
     workflow.value = visibleWorkflowChoice(clip, edit);
     workflow.classList.toggle("local-dirty", dirtyEdits.has(clip.clip_id));
     workflow.addEventListener("change", () => saveWorkflow(clip, workflow, row));
-    const displayStatus = trajectoryDisplayStatus(clip);
-    $(".status-pill", row).textContent = STATUS_LABELS[trajectoryDisplayStatus(clip)]
-      || displayStatus
-      || STATUS_LABELS.ready;
+    $(".status-pill", row).textContent = jobStatusLabel(clip);
     const thumbnail = $(".clip-thumbnail img", row);
     thumbnail.src = clip.thumbnail_url || "";
     thumbnail.hidden = !clip.thumbnail_url;
@@ -197,12 +233,18 @@
     configureFullPose.addEventListener("click", () => openFullPoseDialog(clip));
     const bridgeStatus = clip.scene_bridge?.status;
     const hasSavedWorkbench = clip.workbench?.state === "saved";
-    const bridgeReason = clip.capabilities?.bridge_up_reason
-      || clip.capabilities?.bridge_down_reason;
+    const capabilities = clip.capabilities || {};
+    const bridgeReasons = [];
+    if (capabilities.bridge_up_reason) {
+      bridgeReasons.push(`向上：${capabilities.bridge_up_reason}`);
+    }
+    if (capabilities.bridge_down_reason) {
+      bridgeReasons.push(`向下：${capabilities.bridge_down_reason}`);
+    }
     if (!hasSavedWorkbench && ["stale_input", "superseded"].includes(bridgeStatus)) {
       $(".row-error", row).textContent = "旧打通结果已失效，可重新打通";
-    } else if (bridgeReason) {
-      $(".row-error", row).textContent = bridgeReason;
+    } else if (bridgeReasons.length) {
+      $(".row-error", row).textContent = bridgeReasons.join("；");
     } else if (["srt_full_pose", "srt_fixed_track_visual_pose"].includes(workflow.value)) {
       const srtConfigurationReason = srtConfigurationBlockReason(clip);
       $(".row-error", row).textContent = srtConfigurationReason || clip.capabilities?.reason || "";
@@ -213,6 +255,23 @@
     $(".retry-job", row).addEventListener("click", () => runJobAction(clip, "retry"));
     $(".cancel-job", row).addEventListener("click", () => runJobAction(clip, "cancel"));
     return row;
+  }
+
+  function updateBatchSelectionControls() {
+    const available = new Set((state.snapshot?.clips || []).map((clip) => clip.clip_id));
+    for (const clipId of selectedClipIds) {
+      if (!available.has(clipId)) selectedClipIds.delete(clipId);
+    }
+    const noSelection = selectedClipIds.size === 0;
+    const selectAll = $("#selectAll");
+    selectAll.checked = available.size > 0 && selectedClipIds.size === available.size;
+    selectAll.indeterminate = selectedClipIds.size > 0 && selectedClipIds.size < available.size;
+    const canStartTrajectory = state.snapshot
+      ? state.snapshot.capabilities.can_start_trajectory
+      : false;
+    const canRender = state.snapshot ? state.snapshot.capabilities.can_render : false;
+    $("#batchTrajectoryButton").disabled = noSelection || !canStartTrajectory;
+    $("#batchRenderButton").disabled = noSelection || !canRender;
   }
 
   function renderSnapshot(snapshot) {
@@ -256,8 +315,6 @@
       reanalyzeButton.textContent = "重新分析";
       reanalyzeButton.disabled = !snapshot.capabilities.can_reanalyze;
     }
-    $("#batchTrajectoryButton").disabled = !snapshot.capabilities.can_start_trajectory;
-    $("#batchRenderButton").disabled = !snapshot.capabilities.can_render;
     const mergeButton = $("#mergeProjectButton");
     const mergeStatus = snapshot.merge?.status || "not_started";
     const mergeActive = ["queued", "preparing", "running", "validating"].includes(mergeStatus);
@@ -284,6 +341,7 @@
     }
     const rows = $("#clipRows");
     rows.replaceChildren(...snapshot.clips.map(renderRow));
+    updateBatchSelectionControls();
     if (focusClipId) {
       const focused = rows.querySelector(`[data-clip-id="${CSS.escape(focusClipId)}"]`);
       if (focused) {
@@ -1020,49 +1078,48 @@
   }
 
   async function preflightBatch(kind = "trajectory") {
-    const clipIds = selectedClipIds.size ? [...selectedClipIds] : state.snapshot.clips.map((clip) => clip.clip_id);
+    const clipIds = [...selectedClipIds];
+    if (!clipIds.length) {
+      setMessage("请至少选择一个片段后再执行批量操作", true);
+      updateBatchSelectionControls();
+      return;
+    }
     const endpoint = kind === "render" ? "render-jobs" : "trajectory-jobs";
     try {
       const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.jobs, clip_ids: clipIds, enqueue: false }),
+        body: JSON.stringify({ clip_ids: clipIds, enqueue: false }),
       });
       const needsConfirmation = body.needs_confirmation || body.confirmation_required || [];
-      state.pendingPreflight = { clipIds, result: body, endpoint, needsConfirmation };
+      state.pendingPreflight = { clipIds, endpoint, needsConfirmation };
       $("#preflightResult").innerHTML = `<p>可入队：${body.eligible.length} 个</p><p>需确认：${needsConfirmation.length} 个</p><p>已跳过：${body.skipped.length} 个</p>`;
       const items = $("#preflightItems");
       items.replaceChildren(...clipIds.map((clipId) => {
         const label = document.createElement("label");
-        const category = body.eligible.includes(clipId) ? "可入队" : (needsConfirmation.includes(clipId) ? "需确认" : "已跳过");
+        const category = body.eligible.includes(clipId)
+          ? "可入队"
+          : (needsConfirmation.includes(clipId) ? "将按当前工作流入队" : "已跳过");
         const reason = body.reasons[clipId] || "检查通过";
-        if (needsConfirmation.includes(clipId)) {
-          const checkbox = document.createElement("input");
-          checkbox.type = "checkbox";
-          checkbox.dataset.confirmClipId = clipId;
-          label.append(checkbox);
-        }
         label.append(document.createTextNode(`${clipId} · ${category} · ${reason}`));
         return label;
       }));
       $("#preflightDialog").showModal();
-    } catch (error) { setMessage(error.message, true); }
+    } catch (error) {
+      setMessage(error.message, true);
+    }
   }
 
-  async function enqueuePreflight(event) {
-    event.preventDefault();
+  async function enqueuePreflight() {
     const pending = state.pendingPreflight;
     if (!pending) return;
-    const confirmedClipIds = [...document.querySelectorAll("[data-confirm-clip-id]:checked")]
-      .map((item) => item.dataset.confirmClipId);
     try {
       const { body } = await request(`/api/projects/${encodeURIComponent(projectId)}/${pending.endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          expected_revision: state.snapshot.component_revisions.jobs,
           clip_ids: pending.clipIds,
-          confirmed_clip_ids: confirmedClipIds,
+          confirmed_clip_ids: pending.needsConfirmation,
           enqueue: true,
         }),
       });
@@ -1070,11 +1127,17 @@
       $("#preflightDialog").close();
       state.snapshot.component_revisions.jobs = body.jobs_revision;
       state.etag = null;
-      setMessage(`已将 ${body.enqueued_clip_ids.length} 个片段加入资源队列`);
+      const skipped = body.skipped?.length || 0;
+      setMessage(`已将 ${body.enqueued_clip_ids.length} 个片段加入资源队列${skipped ? `，跳过 ${skipped} 个未就绪片段` : ""}`);
       await pollSnapshot();
     } catch (error) {
       setMessage(error.message, true);
     }
+  }
+
+  function cancelPreflight() {
+    state.pendingPreflight = null;
+    $("#preflightDialog").close();
   }
 
   async function reanalyzeProject() {
@@ -1149,7 +1212,7 @@
       const { body } = await request(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_revision: state.snapshot.component_revisions.jobs }),
+        body: JSON.stringify({}),
       });
       state.snapshot.component_revisions.jobs = body.jobs_revision;
       state.etag = null;
@@ -1278,6 +1341,7 @@
       : capability.bridge_down_target_clip_id;
     if (!targetClipId) return;
     const dialog = $("#workbenchPreparationDialog");
+    state.preparationDialogDismissed = false;
     const directionLabel = direction === "up" ? "向上" : "向下";
     $("#workbenchPreparationTitle").textContent = "正在提交路线打通任务";
     $("#workbenchPreparationMessage").textContent = `正在提交${directionLabel}打通任务…`;
@@ -1314,7 +1378,7 @@
   async function waitForSceneBridge(jobId, targetClipId) {
     const dialog = $("#workbenchPreparationDialog");
     $("#workbenchPreparationTitle").textContent = "正在打通相邻片段路线";
-    if (!dialog.open) dialog.showModal();
+    if (!state.preparationDialogDismissed && !dialog.open) dialog.showModal();
     while (true) {
       state.etag = null;
       await pollSnapshot();
@@ -1338,9 +1402,14 @@
         throw new Error(bridge?.error || "相邻片段路线打通失败，请重试");
       }
       if (bridge?.status === "success") {
-        dialog.close();
-        const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
-        await openWorkbench(target, targetRow);
+        const shouldOpenWorkbench = !state.preparationDialogDismissed;
+        if (dialog.open) dialog.close();
+        if (shouldOpenWorkbench) {
+          const targetRow = document.querySelector(`[data-clip-id="${CSS.escape(targetClipId)}"]`);
+          await openWorkbench(target, targetRow);
+        } else {
+          setMessage("路线打通已完成，可进入目标片段工作台继续微调");
+        }
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
@@ -1351,6 +1420,12 @@
     return clip?.resolved_workflow === "srt_full_pose"
       ? "SRT 全姿态轨迹"
       : "SRT 轨迹与稀疏重建姿态";
+  }
+
+  function closeWorkbenchPreparationDialog() {
+    state.preparationDialogDismissed = true;
+    const dialog = $("#workbenchPreparationDialog");
+    if (dialog.open) dialog.close();
   }
 
   async function waitForWorkbenchPreparation(clipId, initialState = "preparing_clip") {
@@ -1445,6 +1520,14 @@
   $("#batchRenderButton").addEventListener("click", () => preflightBatch("render"));
   $("#mergeProjectButton").addEventListener("click", mergeProject);
   $("#closeMergeResult").addEventListener("click", () => $("#mergeResultDialog").close());
+  $("#closeWorkbenchPreparation").addEventListener("click", closeWorkbenchPreparationDialog);
+  {
+    const dialog = $("#workbenchPreparationDialog");
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeWorkbenchPreparationDialog();
+    });
+  }
   $("#mergeResultDialog").addEventListener("close", resetMergeResult);
   $("#reanalyzeButton").addEventListener("click", reanalyzeProject);
   $("#cadReplacementTrigger").addEventListener("click", openCadReplacementDialog);
@@ -1465,6 +1548,7 @@
     state.dismissedCandidateRevision = state.snapshot?.candidate_analysis_revision || null;
   });
   $("#confirmPreflight").addEventListener("click", enqueuePreflight);
+  $("#cancelPreflight").addEventListener("click", cancelPreflight);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSnapshot(); });
   initializeTheme();
   if (!projectId) setMessage("缺少项目标识，无法载入工作区。", true);

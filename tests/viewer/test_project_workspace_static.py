@@ -104,14 +104,13 @@ def test_workspace_uses_friendly_clip_columns_and_only_one_merge_action() -> Non
     assert 'clip.recommended_workflow || "需人工确认"' not in script
 
 
-def test_polling_uses_etag_and_preserves_dirty_edits_and_selection() -> None:
+def test_polling_uses_etag_and_preserves_dirty_edits() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert "const POLL_INTERVAL_MS = 1500" in script
     assert '"If-None-Match"' in script
     assert "response.status === 304" in script
     assert "dirtyEdits" in script
-    assert "selectedClipIds" in script
     assert "capabilities" in script
     assert "workflow_override: null" in script
     assert "dirtyEdits.has(clip.clip_id)" in script
@@ -228,15 +227,27 @@ def test_upload_workspace_and_workbench_share_the_product_favicon() -> None:
         assert favicon in page.read_text(encoding="utf-8")
 
 
-def test_preflight_shows_per_clip_reasons_and_confirms_only_checked_subset() -> None:
+def test_batch_actions_keep_selection_and_cancel_without_second_clip_confirmation() -> None:
     html = (WORKSPACE / "index.html").read_text(encoding="utf-8")
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
-    assert 'id="preflightItems"' in html
+    assert 'id="selectAll"' in html
+    assert 'class="clip-select"' in html
+    assert 'id="preflightDialog"' in html
+    assert 'id="cancelPreflight"' in html
+    assert "selectedClipIds" in script
+    assert "function updateBatchSelectionControls" in script
+    assert "const clipIds = [...selectedClipIds]" in script
+    assert "if (!clipIds.length)" in script
+    assert "至少选择一个片段" in script
+    assert "selectedClipIds.size === 0" in script
+    assert ": state.snapshot.clips.map((clip) => clip.clip_id)" not in script
+    assert "async function preflightBatch" in script
+    assert "async function enqueuePreflight" in script
     assert "body.reasons[clipId]" in script
-    assert 'data-confirm-clip-id' in script
-    assert "confirmedClipIds" in script
-    assert "confirmed_clip_ids: confirmedClipIds" in script
+    assert 'data-confirm-clip-id' not in script
+    assert "confirmed_clip_ids: pending.needsConfirmation" in script
+    assert '#cancelPreflight").addEventListener' in script
 
 
 def test_final_workflow_selector_preserves_all_four_workflows() -> None:
@@ -432,8 +443,9 @@ def test_cancelled_trajectory_returns_to_pending_presentation() -> None:
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert "function trajectoryDisplayStatus(clip)" in script
-    assert 'clip.status === "cancelled" ? "ready" : clip.status' in script
+    assert 'clip.job_type === "trajectory" && clip.status === "cancelled"' in script
     assert "STATUS_LABELS[trajectoryDisplayStatus(clip)]" in script
+    assert '"failed", "interrupted", "cancelled"' in script
     assert '["ready", "queued"].includes(trajectoryDisplayStatus(clip))' in script
 
 
@@ -538,6 +550,14 @@ def test_completed_route_can_bridge_previous_or_next_clip_from_source_row() -> N
     assert "bridge_up_target_clip_id" in script
     assert "bridge_down_target_clip_id" in script
     assert "bridge_down_reason" in script
+    assert "function jobStatusLabel" in script
+    assert 'scene_bridge: "路线打通"' in script
+    assert 'trajectory: "轨迹反算"' in script
+    assert 'cancel.textContent = jobActionLabel(clip.job_type, "cancel")' in script
+    assert 'retry.textContent = jobActionLabel(clip.job_type, "retry")' in script
+    assert '`向上：${capabilities.bridge_up_reason}`' in script
+    assert '`向下：${capabilities.bridge_down_reason}`' in script
+    assert "capabilities.bridge_up_reason\n      || capabilities.bridge_down_reason" not in script
     assert "旧打通结果已失效，可重新打通" in script
     assert 'const hasSavedWorkbench = clip.workbench?.state === "saved";' in script
     assert (
@@ -562,6 +582,8 @@ def test_ready_clip_prepares_inputs_then_opens_workbench_with_chinese_status() -
     script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
 
     assert 'id="workbenchPreparationDialog"' in html
+    assert 'id="closeWorkbenchPreparation"' in html
+    assert 'aria-label="关闭进度窗口"' in html
     assert "can_prepare_workbench" in script
     assert "expected_jobs_revision: state.snapshot.component_revisions.jobs" in script
     assert "response.status === 202" in script
@@ -584,3 +606,19 @@ def test_full_pose_workbench_preparation_has_workflow_specific_progress_copy() -
     assert 'clip?.resolved_workflow === "srt_full_pose"' in script
     assert '"SRT 全姿态轨迹"' in script
     assert '"SRT 轨迹与稀疏重建姿态"' in script
+
+
+def test_workbench_preparation_dialog_can_close_without_cancelling_background_job() -> None:
+    script = (WORKSPACE / "project_workspace.js").read_text(encoding="utf-8")
+    css = (WORKSPACE / "style.css").read_text(encoding="utf-8")
+
+    assert "preparationDialogDismissed: false" in script
+    assert "function closeWorkbenchPreparationDialog" in script
+    assert '$("#closeWorkbenchPreparation").addEventListener("click"' in script
+    assert 'dialog.addEventListener("cancel", (event) =>' in script
+    assert "event.preventDefault()" in script
+    assert "state.preparationDialogDismissed = true" in script
+    assert "const shouldOpenWorkbench = !state.preparationDialogDismissed" in script
+    assert "if (shouldOpenWorkbench)" in script
+    assert "路线打通已完成，可进入目标片段工作台继续微调" in script
+    assert "preparation-dialog-close" in css

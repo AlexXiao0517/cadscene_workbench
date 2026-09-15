@@ -671,6 +671,7 @@ def test_sfm_command_requires_video_but_not_cad(tmp_path: Path) -> None:
 
     assert "cad-dir" not in " ".join(command)
     assert str(video) in command
+    assert "--cleanup-workspace" in command
 
 
 def test_stage_inputs_prefer_url_options_then_dataset_manifest_then_config(tmp_path: Path) -> None:

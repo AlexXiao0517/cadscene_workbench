@@ -74,6 +74,18 @@ def test_empty_runtime_workspace_and_log_directories_are_allowed(tmp_path: Path)
     validate_staging_tree(layout.root)
 
 
+def test_validate_staging_tree_rejects_a_runtime_already_relocated_in_staging(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    marker = root / "runtime" / ".cadscene-relocated"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    with pytest.raises(ValueError, match="cadscene-relocated"):
+        validate_staging_tree(root)
+
+
 def test_backend_runtime_files_are_an_explicit_allowlist(tmp_path: Path) -> None:
     backend = tmp_path / "backend"
     wanted = (
@@ -144,6 +156,15 @@ def test_cmd_entry_points_are_bundle_relative_and_keep_errors_visible() -> None:
     assert "if errorlevel 1 pause" in stop
 
 
+def test_tester_instructions_explain_same_machine_workspace_upgrade() -> None:
+    instructions = (WINDOWS_PACKAGING / "使用说明.txt").read_text(encoding="utf-8")
+
+    assert "同一台电脑从旧版升级" in instructions
+    assert "完整复制旧版的 workspace" in instructions
+    assert "请勿删除旧版原位置自动建立的 workspace Junction" in instructions
+    assert "workspace.pre-0.1.3-" in instructions
+
+
 def test_start_launcher_uses_only_bundle_local_runtime_and_storage() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
@@ -202,6 +223,42 @@ def test_start_launcher_forces_utf8_and_bundle_working_directory_before_doctor()
     assert source.index("Set-Location -LiteralPath $bundleRoot") < source.index("$doctorArguments")
 
 
+def test_start_launcher_repairs_opencv_paths_on_every_start_before_doctor() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    repair_command = '"-m", "cadscene.cli.runtime_relocation", "--runtime", $runtime'
+    assert repair_command in source
+    assert source.index(repair_command) < source.index("$doctorArguments")
+
+
+def test_start_launcher_migrates_copied_workspace_with_a_recoverable_junction() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert "function Invoke-WorkspaceMigration" in source
+    assert '"-m", "cadscene.cli.workspace_migration", "plan"' in source
+    assert '"-m", "cadscene.cli.workspace_migration", "record"' in source
+    assert "Get-CimInstance Win32_Process" in source
+    assert "$candidate.CommandLine.Contains($oldWorkspace)" in source
+    assert 'Split-Path -Leaf $oldWorkspace) -ine "workspace"' in source
+    assert "Move-Item -LiteralPath $oldWorkspace -Destination $backupWorkspace" in source
+    assert "New-Item -ItemType Junction -Path $oldWorkspace -Target $workspace" in source
+    assert "Move-Item -LiteralPath $backupWorkspace -Destination $oldWorkspace" in source
+    assert "旧版 CADScene 服务仍在使用" in source
+    assert "创建兼容 Junction 失败" in source
+    assert source.index("Invoke-WorkspaceMigration\n\n    $doctorArguments") > source.index(
+        "conda-unpack-script.py"
+    )
+
+
+def test_start_launcher_recovers_an_interrupted_workspace_migration() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
+
+    assert '$migrationAction -eq "recover"' in source
+    assert "$plan.displaced_workspace" in source
+    assert '"projects\\.serve_viewer.lease"' in source
+    assert "旧 workspace 空壳已恢复为兼容 Junction" in source
+
+
 def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
 
@@ -215,6 +272,41 @@ def test_stop_launcher_validates_process_identity_before_stopping() -> None:
     assert source.index("ExecutablePath") < source.index("Stop-Process")
 
 
+def test_stop_launcher_warns_before_interrupting_active_workbench_editing() -> None:
+    source = (WINDOWS_PACKAGING / "launcher" / "stop.ps1").read_text(encoding="utf-8")
+
+    assert "param([switch]$Force)" in source
+    assert 'Join-Path $workspace "projects"' in source
+    assert 'Join-Path $_.FullName "workbench_sessions"' in source
+    assert '$session.state -eq "editing"' in source
+    assert "expires_at" in source
+    assert "Read-Host" in source
+    assert "Stop-Process" in source
+
+
+def test_small_hotfix_script_backs_up_files_and_repairs_opencv_without_workspace_writes() -> None:
+    source = (WINDOWS_PACKAGING / "hotfix" / "apply-hotfix.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'Join-Path $bundleRoot "runtime\\python.exe"' in source
+    assert 'Join-Path $bundleRoot "launcher\\start.ps1"' in source
+    assert "hotfix-backup-" in source
+    assert "Copy-Item -LiteralPath $sourceFile -Destination $destinationFile" in source
+    assert '"-m", "cadscene.cli.runtime_relocation", "--runtime", $runtime' in source
+    assert 'Join-Path $bundleRoot "workspace"' not in source
+    assert "Remove-Item" not in source
+
+
+def test_small_hotfix_cmd_runs_the_powershell_installer() -> None:
+    source = (WINDOWS_PACKAGING / "hotfix" / "应用0.1.3修复.cmd").read_text(
+        encoding="utf-8"
+    )
+
+    assert "%~dp0hotfix\\apply-hotfix.ps1" in source
+    assert "if errorlevel 1 pause" in source
+
+
 def test_start_launcher_persists_process_start_time_for_pid_reuse_protection() -> None:
     source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8")
 
@@ -223,7 +315,10 @@ def test_start_launcher_persists_process_start_time_for_pid_reuse_protection() -
     assert "ToUniversalTime().ToString(\"o\")" in source
 
 
-@pytest.mark.parametrize("script_name", ("start.ps1", "stop.ps1"))
+@pytest.mark.parametrize(
+    "script_name",
+    ("start.ps1", "stop.ps1", "../hotfix/apply-hotfix.ps1"),
+)
 def test_powershell_launchers_parse_without_errors(script_name: str) -> None:
     script = WINDOWS_PACKAGING / "launcher" / script_name
     command = (
@@ -246,8 +341,8 @@ def test_powershell_launchers_parse_without_errors(script_name: str) -> None:
 def test_release_config_pins_bundle_and_backend_versions() -> None:
     config = ReleaseConfig.load(WINDOWS_PACKAGING / "release-config.json")
 
-    assert config.bundle_name == "CADScene-0.1.3"
-    assert config.application_version == "0.1.3"
+    assert config.bundle_name == "CADScene-0.1.5"
+    assert config.application_version == "0.1.5"
     assert config.poc_commit == "85ab6404bfb5a07da8cdaaba0a1e5c4da10dc250"
     assert config.opengv_commit == "91f4b19c73450833a40e463ad3648aae80b3a7f3"
 
@@ -333,6 +428,10 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
         item.parent.mkdir(parents=True, exist_ok=True)
         item.write_text("x", encoding="utf-8")
     output = tmp_path / "dist"
+    colmap = tmp_path / "colmap"
+    (colmap / "bin").mkdir(parents=True)
+    (colmap / "COLMAP.bat").write_text("@echo off")
+    (colmap / "bin" / "colmap.exe").write_bytes(b"colmap")
 
     bundle = assemble_bundle(
         config=config,
@@ -341,9 +440,11 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
         templates_root=WINDOWS_PACKAGING,
         output_dir=output,
         source_commit="52c605f",
+        colmap_root=colmap,
     )
 
     assert (bundle / "runtime" / "python.exe").is_file()
+    assert (bundle / "colmap" / "bin" / "colmap.exe").read_bytes() == b"colmap"
     assert (bundle / "启动CAD视频工作台.cmd").is_file()
     assert (bundle / "pure_rotation_backend" / "src" / "pair_estimation.py").is_file()
     assert (
@@ -375,6 +476,13 @@ def test_assemble_bundle_uses_runtime_archive_and_pruned_backend(tmp_path: Path)
     assert any(path.endswith("/libc++.dll") for path in release["critical_sha256"])
     assert any(path.endswith("/libunwind.dll") for path in release["critical_sha256"])
     verify_bundle(bundle, config=config)
+
+
+def test_launcher_selects_bundled_colmap_when_present():
+    source = (WINDOWS_PACKAGING / "launcher" / "start.ps1").read_text(encoding="utf-8-sig")
+    assert '"colmap\\COLMAP.bat"' in source
+    assert '$env:COLMAP_EXE = $bundledColmap' in source
+    assert 'Test-Path -LiteralPath $bundledColmap -PathType Leaf' in source
 
 
 def test_verify_bundle_rejects_missing_runtime_tool(tmp_path: Path) -> None:

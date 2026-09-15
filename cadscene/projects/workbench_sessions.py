@@ -20,9 +20,14 @@ from .json_repositories import ProjectRepositories
 from .models import ClipDefinition, StateReference
 from .queue import QueueJob
 from .repositories import RevisionConflict
+from .workbench_drafts import AtomicWorkbenchDraftStore, WorkbenchDraft
 from .workbench_resume import AtomicWorkbenchResumeStore, WorkbenchResumeState
 from .scene_bridge_runner import validate_scene_bridge_candidate
-from .service import ProjectService
+from .service import (
+    ProjectService,
+    _validate_complete_sfm_route_output,
+    _validate_workbench_immutable_output,
+)
 from cadscene.alignment.keyframes import confirmed_keyframes
 from cadscene.pure_rotation.artifact_lock import pure_rotation_run_lock
 from cadscene.workflow.data_import import slugify_dataset_name
@@ -876,6 +881,7 @@ class ProjectWorkbenchService:
         self.projects_root = projects_root
         self.viewer_runs_root = viewer_runs_root.resolve(strict=False)
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.draft_store = AtomicWorkbenchDraftStore(projects_root, now=self.now)
         self.resume_store = AtomicWorkbenchResumeStore(projects_root, now=self.now)
         self.coordinator = WorkbenchSessionCoordinator(
             store=session_store,
@@ -1017,6 +1023,14 @@ class ProjectWorkbenchService:
             self._publish_workbench_inputs(project_id, clip)
             context = self.resolve_context(project_id, clip_id)
             resume_baseline = self._saved_resume_baseline(context)
+            scene_bridge = self._scene_bridge_reference(clip)
+            workbench_seed = self._workbench_seed_reference(clip)
+            if (
+                resume_baseline is not None
+                and (scene_bridge is not None or workbench_seed is not None)
+                and not self._saved_session_has_complete_route(resume_baseline)
+            ):
+                resume_baseline = None
             if (
                 context.trajectory_job_id
                 and context.trajectory_run_id
@@ -1035,11 +1049,12 @@ class ProjectWorkbenchService:
                         resume_baseline, clip, context.trajectory_job_id
                     )
             if resume_baseline is None:
-                if self._scene_bridge_reference(clip) is not None:
+                if scene_bridge is not None:
                     self._restore_scene_bridge_to_run(project_id, clip)
                 else:
                     self._restore_workbench_seed_to_run(project_id, clip)
             self._publish_terrain_workbench_cad(project_id, clip, context.trajectory_job_id)
+            self._restore_compatible_draft_to_run(context)
             session = self.coordinator.create(
                 project_id, clip_id, return_to=return_to
             )
@@ -1093,6 +1108,13 @@ class ProjectWorkbenchService:
             or not reference.value.get("workbench_output_revision")
         ):
             return result
+        if not _validate_complete_sfm_route_output(
+            self.projects_root, project_id, source, reference
+        ):
+            message = "源片段尚未完成路线拟合并保存"
+            result["locate_up_reason"] = message
+            result["locate_down_reason"] = message
+            return result
         jobs = tuple(
             QueueJob.from_dict(item)
             for item in self.repositories.jobs.load(project_id).jobs
@@ -1115,9 +1137,26 @@ class ProjectWorkbenchService:
                 target, jobs
             )
             if not _precomputed_scene_solve_ready(target_trajectory):
-                result[f"locate_{direction}_reason"] = (
-                    "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                active_target_trajectory = next(
+                    (
+                        job
+                        for job in reversed(jobs)
+                        if job.job_type == "trajectory"
+                        and job.clip_id == target.clip_id
+                        and job.adapter_name == target.resolved_workflow
+                        and job.input_revision == target.analysis_revision
+                        and job.status
+                        in {"queued", "preparing", "running", "validating"}
+                    ),
+                    None,
                 )
+                if active_target_trajectory is None:
+                    reason = "目标片段需重新轨迹反算以生成同场景重叠 SfM"
+                elif active_target_trajectory.status == "queued":
+                    reason = "目标片段轨迹反算已排队，完成后可打通"
+                else:
+                    reason = "目标片段轨迹反算中，完成后可打通"
+                result[f"locate_{direction}_reason"] = reason
                 continue
             result[f"can_locate_{direction}"] = True
             result[f"locate_{direction}_target_clip_id"] = target.clip_id
@@ -1277,14 +1316,14 @@ class ProjectWorkbenchService:
                 raise StaleWorkbenchSession(
                     "clip has no matching workbench session"
                 )
-            self.coordinator._validate_binding(
-                session, self.resolve_context(project_id, session.clip_id)
-            )
+            context = self.resolve_context(project_id, session.clip_id)
+            self.coordinator._validate_binding(session, context)
             self._require_session_reference(
                 session,
                 reference,
                 allow_saved_repair=session.state == "saved",
             )
+            self._restore_compatible_draft_to_run(context)
             return self.coordinator.inspect(project_id, token)
 
     def update_resume(
@@ -1516,7 +1555,19 @@ class ProjectWorkbenchService:
                     )
                 saved = existing_session
             else:
+                self._restore_compatible_draft_to_run(
+                    self.resolve_context(project_id, existing_session.clip_id)
+                )
                 saved = self.coordinator.save(project_id, token, receipt)
+                draft = self._compatible_draft_for_session(saved)
+                if draft is not None and saved.workbench_output_revision:
+                    self.draft_store.mark_promoted(
+                        project_id,
+                        saved.clip_id,
+                        expected_revision=draft.revision,
+                        operation_id=uuid4().hex,
+                        workbench_output_revision=saved.workbench_output_revision,
+                    )
             self._publish_clip_state(
                 current,
                 saved,
@@ -1524,6 +1575,47 @@ class ProjectWorkbenchService:
                 expected_revision=expected_clips_revision,
             )
             return saved
+
+    def save_draft(
+        self,
+        project_id: str,
+        token: str,
+        *,
+        expected_draft_revision: int | None,
+        operation_id: str,
+        camera_track: Mapping[str, object],
+    ) -> WorkbenchDraft:
+        """原子保存用户已经通过按钮确认的关键帧，不改变正式片段状态。"""
+
+        with self.project_service._state_guard(project_id):
+            session = self.coordinator.inspect(project_id, token)
+            if session.state != "editing":
+                raise StaleWorkbenchSession("workbench session is not editable")
+            current = self.repositories.clips.load(project_id)
+            clip = next(
+                (item for item in current.clips if item.clip_id == session.clip_id),
+                None,
+            )
+            if clip is None:
+                raise StaleWorkbenchSession("workbench session clip no longer exists")
+            self._require_session_reference(
+                session, self._workbench_reference(clip), allow_saved_repair=False
+            )
+            context = self.resolve_context(project_id, session.clip_id)
+            self.coordinator._validate_binding(session, context)
+            _validate_manual_camera_track(camera_track, require_keyframes=False)
+            return self.draft_store.update(
+                project_id,
+                session.clip_id,
+                expected_revision=expected_draft_revision,
+                operation_id=operation_id,
+                workflow=context.workflow,
+                project_input_revision=context.project_input_revision,
+                clip_input_revision=context.clip_input_revision,
+                trajectory_output_revision=context.trajectory_output_revision,
+                trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+                camera_track=camera_track,
+            )
 
     def close(
         self,
@@ -1770,6 +1862,7 @@ class ProjectWorkbenchService:
         return "/apps/web_camera_viewer/?" + urlencode(parameters)
 
     def session_payload(self, session: WorkbenchSession) -> dict[str, object]:
+        draft = self._draft_for_session(session)
         return {
             "token": session.token,
             "project_id": session.project_id,
@@ -1784,8 +1877,76 @@ class ProjectWorkbenchService:
             "save_permissions": list(session.save_permissions),
             "session_revision": session.revision,
             "workbench_output_revision": session.workbench_output_revision,
+            "draft_state": None if draft is None else draft.to_dict(),
             "resume_state": self._resume_payload(session),
         }
+
+    def _draft_for_session(self, session: WorkbenchSession) -> WorkbenchDraft | None:
+        draft = self.draft_store.load_optional(session.project_id, session.clip_id)
+        if draft is None:
+            return None
+        binding = (
+            session.workflow,
+            session.project_input_revision,
+            session.clip_input_revision,
+            session.trajectory_output_revision,
+            session.trajectory_output_fingerprint,
+        )
+        stored = (
+            draft.workflow,
+            draft.project_input_revision,
+            draft.clip_input_revision,
+            draft.trajectory_output_revision,
+            draft.trajectory_output_fingerprint,
+        )
+        return draft if stored == binding else None
+
+    def _compatible_draft_for_session(
+        self, session: WorkbenchSession
+    ) -> WorkbenchDraft | None:
+        draft = self._draft_for_session(session)
+        if draft is None or draft.promoted_to_workbench_output_revision is not None:
+            return None
+        return draft
+
+    def _compatible_draft_for_context(
+        self, context: WorkbenchContext
+    ) -> WorkbenchDraft | None:
+        return self.draft_store.load_compatible(
+            context.project_id,
+            context.clip_id,
+            workflow=context.workflow,
+            project_input_revision=context.project_input_revision,
+            clip_input_revision=context.clip_input_revision,
+            trajectory_output_revision=context.trajectory_output_revision,
+            trajectory_output_fingerprint=context.trajectory_output_fingerprint,
+        )
+
+    def _restore_compatible_draft_to_run(self, context: WorkbenchContext) -> None:
+        draft = self._compatible_draft_for_context(context)
+        if draft is None or context.workflow == "pure_rotation":
+            return
+        _validate_manual_camera_track(draft.camera_track, require_keyframes=False)
+        dataset = self._workbench_dataset_id(context.project_id, context.clip_id)
+        manual = (
+            self.viewer_runs_root
+            / dataset
+            / context.trajectory_run_id
+            / "01_keyframes/camera_track_manual.json"
+        )
+        payload = (
+            json.dumps(
+                draft.camera_track, ensure_ascii=False, indent=2, sort_keys=True
+            )
+            + "\n"
+        ).encode("utf-8")
+        if manual.is_file():
+            try:
+                if manual.read_bytes() == payload:
+                    return
+            except OSError:
+                pass
+        _atomic_write_bytes(manual, payload)
 
     def _resume_payload(self, session: WorkbenchSession) -> dict[str, object] | None:
         state = self.resume_store.load_optional(session.project_id, session.clip_id)
@@ -1912,17 +2073,26 @@ class ProjectWorkbenchService:
         reference = self._workbench_reference(target)
         if reference is not None:
             status = reference.value.get("status")
-            if (
-                status in {"pending_save", "saved"}
-                or reference.value.get("workbench_output_revision")
-            ):
+            if status == "pending_save":
                 return False
+            if status == "saved":
+                if not reference.value.get("workbench_output_revision"):
+                    return False
+                if not _validate_workbench_immutable_output(
+                    self.projects_root, project_id, target, reference
+                ):
+                    return False
+                if _validate_complete_sfm_route_output(
+                    self.projects_root, project_id, target, reference
+                ):
+                    return False
             if status == "editing" and self.snapshot_for_clip(
                 project_id, target
             ).get("state") != "ready":
                 return False
         context = self.resolve_context(project_id, target.clip_id)
-        if self._saved_resume_baseline(context) is not None:
+        baseline = self._saved_resume_baseline(context)
+        if baseline is not None and self._saved_session_has_complete_route(baseline):
             return False
         seed = self._workbench_seed_reference(target)
         if seed is not None:
@@ -2307,20 +2477,7 @@ class ProjectWorkbenchService:
         video_target = target / "video" / f"{dataset}.mp4"
         cad_target = target / "cad" / "design.json"
         for source, destination in ((video, video_target), (cad, cad_target)):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if _identical_media(source, destination):
-                continue
-            temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(source, temporary)
-                with temporary.open("rb+") as stream:
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, destination)
-                _fsync_directory(destination.parent)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
+            _publish_readonly_file(source, destination)
         manifest = {
             "dataset": dataset,
             "status": "ready",
@@ -2430,12 +2587,14 @@ class ProjectWorkbenchService:
         stale = target.parent / f".{target.name}.{uuid4().hex}.stale"
         shutil.copytree(source, temporary)
         moved_old = False
+        committed = False
         try:
             if target.exists():
                 os.replace(target, stale)
                 moved_old = True
             os.replace(temporary, target)
             _fsync_directory(target.parent)
+            committed = True
         except Exception:
             if moved_old and stale.exists() and not target.exists():
                 os.replace(stale, target)
@@ -2443,6 +2602,8 @@ class ProjectWorkbenchService:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+            if committed and stale.exists():
+                shutil.rmtree(stale)
 
     def _saved_resume_baseline(
         self, context: WorkbenchContext
@@ -2460,6 +2621,16 @@ class ProjectWorkbenchService:
                 continue
             return candidate
         return None
+
+    def _saved_session_has_complete_route(
+        self, session: WorkbenchSession
+    ) -> bool:
+        try:
+            _manifest, artifact = self._validated_saved_output(session)
+            track = json.loads(artifact.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+        return isinstance(track, dict) and len(confirmed_keyframes(track)) >= 2
 
     def _validated_saved_output(
         self, session: WorkbenchSession
@@ -2943,12 +3114,13 @@ def _validate_manual_camera_track(
     *,
     workflow: str | None = None,
     terrain_mode: str | None = None,
+    require_keyframes: bool = True,
 ) -> None:
     fps = payload.get("fps")
     keyframes = payload.get("keyframes")
     if not _valid_number(fps) or float(fps) <= 0:
         raise InvalidWorkbenchOutput("camera track fps must be finite and positive")
-    if not isinstance(keyframes, list) or not keyframes:
+    if not isinstance(keyframes, list) or (require_keyframes and not keyframes):
         raise InvalidWorkbenchOutput("camera track must contain keyframes")
     frames: set[int] = set()
     camera_fields = ("x", "y", "z", "yaw", "pitch", "roll", "fov")
@@ -3000,6 +3172,34 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _publish_readonly_file(source: Path, destination: Path) -> None:
+    """优先硬链接不可变输入，跨卷或权限不允许时保持原子复制。"""
+
+    source = source.resolve(strict=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        try:
+            if os.path.samefile(source, destination):
+                return
+        except OSError:
+            pass
+        if _identical_media(source, destination):
+            return
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        try:
+            os.link(source, temporary)
+        except OSError:
+            shutil.copy2(source, temporary)
+            with temporary.open("rb+") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _precomputed_scene_solve_ready(job: QueueJob | None) -> bool:

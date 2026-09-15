@@ -1084,6 +1084,8 @@ def test_adopted_exit_is_published_as_interrupted_by_project_service(
         attempt_number=lease.number,
         claim_token=str(lease.worker_claim_token),
     )
+    attempt = Path(lease.directory)
+    (attempt / "partial.mp4").write_bytes(b"abandoned-video")
     restarted = ProjectService(
         repositories,
         LocalResourceQueue(),
@@ -1103,6 +1105,32 @@ def test_adopted_exit_is_published_as_interrupted_by_project_service(
     )
     assert stored["status"] == "interrupted"
     assert "completion sidecar" in stored["error"]
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "retention_report.json").is_file()
+
+
+def test_restore_jobs_reclaims_attempt_marked_interrupted_during_startup(
+    tmp_path: Path,
+) -> None:
+    service, repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    running = next(job for job in queue.jobs() if job.status == "running")
+    attempt = Path(running.attempts[-1].directory)
+    (attempt / "partial.mp4").write_bytes(b"startup-abandoned-video")
+    restarted = ProjectService(
+        repositories,
+        LocalResourceQueue(),
+        default_workflow_adapters(),
+        projects_root=tmp_path / "projects",
+        now=lambda: "2026-08-03T00:00:02Z",
+    )
+
+    restarted.restore_jobs("p1", process_probe=lambda _pid: None)
+
+    restored = restarted.queue.get(running.job_id)
+    assert restored.status == "interrupted"
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "retention_report.json").is_file()
 
 
 def test_adopted_reap_publishes_cross_project_job_scheduled_by_released_slot(
@@ -1535,3 +1563,70 @@ def test_job_actions_check_expected_revision_inside_service_state_guard(
         )
 
     assert queue.status(job_id) == status_before
+
+
+def test_service_reclaims_failed_attempt_after_validating_attempt_identity(
+    tmp_path: Path,
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    attempt = Path(lease.directory)
+    (attempt / "adapter.log").write_text("failure", encoding="utf-8")
+    (attempt / "partial.mp4").write_bytes(b"partial-video")
+    service.fail_job(
+        "p1",
+        claimed.job_id,
+        "failed on purpose",
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    report = service.reclaim_job_attempt(
+        "p1", claimed.job_id, attempt_number=lease.number
+    )
+
+    assert report is not None
+    assert report.reclaimed_bytes == len(b"partial-video")
+    assert not (attempt / "partial.mp4").exists()
+    assert (attempt / "adapter.log").read_text(encoding="utf-8") == "failure"
+
+
+def test_service_rejects_unknown_attempt_number_before_cleanup(tmp_path: Path) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    job_id = queue.running_ids()[0]
+
+    with pytest.raises(ValueError, match="attempt"):
+        service.reclaim_job_attempt("p1", job_id, attempt_number=2)
+
+
+def test_service_preserves_successful_trajectory_attempt(tmp_path: Path) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    claimed = queue.claim_next_unstarted()
+    assert claimed is not None
+    lease = claimed.attempts[-1]
+    output = Path(lease.directory) / "trajectory.json"
+    output.write_text("{}", encoding="utf-8")
+    service.finish_job(
+        "p1",
+        claimed.job_id,
+        AdapterResult.success(
+            output_revision="trajectory-1",
+            output_fingerprint="trajectory-fingerprint",
+            outputs={"trajectory": str(output)},
+        ),
+        current_fingerprint=claimed.input_fingerprint,
+        attempt_number=lease.number,
+        claim_token=str(lease.worker_claim_token),
+    )
+
+    report = service.reclaim_job_attempt(
+        "p1", claimed.job_id, attempt_number=lease.number
+    )
+
+    assert report is not None and report.reclaimed_bytes == 0
+    assert output.read_text(encoding="utf-8") == "{}"

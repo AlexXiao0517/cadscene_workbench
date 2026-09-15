@@ -70,6 +70,7 @@ from .render_adapters import (
     normalize_render_resolution,
     render_output_media_spec,
 )
+from .retention import RetentionReport, reclaim_terminal_attempt
 from .source_fallback import SourceIntervalRenderAdapter, SourceIntervalRenderInputs
 from .scene_bridge_runner import (
     BRIDGE_ALGORITHM_VERSION,
@@ -85,6 +86,7 @@ from .queue import (
     PreparedSubmissionBatch,
     QueueJob,
     RestoreCleanupReservation,
+    TERMINAL_STATUSES,
 )
 from cadscene.video_analysis.clip_export import ExportClip, build_clip_frame_map
 from cadscene.video_analysis.pts import (
@@ -110,6 +112,7 @@ ANALYSIS_IDENTITY_SCHEMA = 2
 CAD_GEOREFERENCE_CANDIDATE_ADAPTER_NAME = "cad_georeference_candidates"
 CAD_GEOREFERENCE_CANDIDATE_ADAPTER_VERSION = "2"
 CLIP_EXPORT_ADAPTER_VERSION = "2"
+SCENE_BRIDGE_INTERACTIVE_PRIORITY = 20
 
 
 def _has_exact_success_proof(job: QueueJob) -> bool:
@@ -2259,11 +2262,11 @@ class ProjectService:
             if (
                 source_workbench is None
                 or source_workbench.value.get("status") != "saved"
-                or not _validate_workbench_immutable_output(
+                or not _validate_complete_sfm_route_output(
                     self.projects_root, project_id, source, source_workbench
                 )
             ):
-                raise ValueError("source clip has no validated saved route")
+                raise ValueError("source clip has no completed saved route")
             target_workbench = next(
                 (
                     reference
@@ -2275,10 +2278,21 @@ class ProjectService:
                 ),
                 None,
             )
-            if target_workbench is not None and _workbench_reference_blocks_scene_bridge(
-                target_workbench, self.now()
-            ):
-                raise ValueError("target clip already has a workbench result")
+            if target_workbench is not None:
+                target_status = target_workbench.value.get("status")
+                if target_status == "saved":
+                    if not _validate_workbench_immutable_output(
+                        self.projects_root, project_id, target, target_workbench
+                    ):
+                        raise ValueError("target clip has an invalid saved workbench result")
+                    if _validate_complete_sfm_route_output(
+                        self.projects_root, project_id, target, target_workbench
+                    ):
+                        raise ValueError("target clip already has a completed route")
+                elif _workbench_reference_blocks_scene_bridge(
+                    target_workbench, self.now()
+                ):
+                    raise ValueError("target clip already has a workbench result")
             stored_jobs = tuple(
                 QueueJob.from_dict(item)
                 for item in self.repositories.jobs.load(project_id).jobs
@@ -2286,11 +2300,11 @@ class ProjectService:
             target_trajectory = self._current_trajectory_for_render(
                 target, stored_jobs
             )
-            if _has_recoverable_saved_workbench_output(
+            if _has_recoverable_completed_workbench_output(
                 self.projects_root, project_id, target, target_trajectory
             ):
                 raise ValueError(
-                    "target clip has a recoverable saved workbench output"
+                    "target clip has a recoverable completed workbench output"
                 )
             jobs_by_id = {job.job_id: job for job in stored_jobs}
             active_bridge = None
@@ -2438,7 +2452,7 @@ class ProjectService:
                 resource_class="heavy_compute",
                 status="queued",
                 stage="queued",
-                priority=0,
+                priority=SCENE_BRIDGE_INTERACTIVE_PRIORITY,
                 depends_on_job_ids=dependency_ids,
                 exclusive_key=f"scene_bridge:{project_id}:{target.clip_id}",
                 idempotency_key=idempotency_key,
@@ -3192,7 +3206,6 @@ class ProjectService:
         project = self.repositories.project.load(project_id)
         by_id = {clip.clip_id: clip for clip in clips_manifest.clips}
         trajectory_ids: list[str] = []
-
         def submit_dependency(candidate: QueueJob) -> QueueJob:
             submitted = self.queue.submit(candidate)
             if submitted.job_id == candidate.job_id:
@@ -3222,25 +3235,20 @@ class ProjectService:
                 directory.rmdir()
                 raise
 
-        needs_export = [
-            by_id[clip_id]
-            for clip_id in accepted_ids
-            if (
-                _clip_output_path(by_id[clip_id]) is None
-                or not _clip_output_path(by_id[clip_id]).is_file()
-                or (
-                    by_id[clip_id].resolved_workflow
-                    in {
-                        "sfm_only",
-                        "srt_full_pose",
-                        "srt_fixed_track_visual_pose",
-                    }
-                    and (
-                        _clip_frame_map_path(by_id[clip_id]) is None
-                        or not _clip_frame_map_path(by_id[clip_id]).is_file()
+        required_export_ids = set(accepted_ids)
+        for clip_id in accepted_ids:
+            solve_clip = by_id[clip_id]
+            if _uses_scene_solve_export(solve_clip, clips_manifest.clips):
+                required_export_ids.update(
+                    clip.clip_id
+                    for clip in _same_scene_clips(
+                        solve_clip, clips_manifest.clips
                     )
                 )
-            )
+        needs_export = [
+            clip
+            for clip in clips_manifest.clips
+            if clip.clip_id in required_export_ids and _clip_needs_export(clip)
         ]
         export_dependencies: dict[str, tuple[str, ...]] = {}
         for export_clip in needs_export:
@@ -3257,25 +3265,26 @@ class ProjectService:
             QueueJob.from_dict(item)
             for item in self.repositories.jobs.load(project_id).jobs
         )
-        source_frame_index: DecodedFrameIndex | None = None
         solve_export_dependencies: dict[str, tuple[str, ...]] = {}
         for clip_id in accepted_ids:
             solve_clip = by_id[clip_id]
             if not _uses_scene_solve_export(solve_clip, clips_manifest.clips):
                 continue
-            if source_frame_index is None:
-                source_frame_index = _project_source_frame_index(
-                    clips_manifest.clips, stored_jobs
+            scene_clips = _same_scene_clips(
+                solve_clip, clips_manifest.clips
+            )
+            dependency_ids = tuple(
+                dependency_id
+                for scene_clip in scene_clips
+                for dependency_id in export_dependencies.get(
+                    scene_clip.clip_id, ()
                 )
-            solve_interval = derive_scene_solve_interval(
-                clips=clips_manifest.clips,
-                clip_id=solve_clip.clip_id,
-                source_frame_index=source_frame_index,
             )
             export = self._new_solve_export_job(
                 project_id,
                 solve_clip,
-                solve_interval=solve_interval,
+                scene_clips=scene_clips,
+                dependency_ids=dependency_ids,
                 project_assets=project.source_assets,
                 project_revision=project.revision,
                 clips_revision=clips_manifest.revision,
@@ -3619,6 +3628,37 @@ class ProjectService:
                 **kwargs,
             )
             jobs = self.repositories.jobs.load(current.project_id)
+            target_workbench_revision = identity.get(
+                "target_workbench_output_revision"
+            )
+            target_workbench_fingerprint = identity.get(
+                "target_workbench_output_fingerprint"
+            )
+
+            def supersede_incomplete_target_workbench(
+                item: StateReference,
+            ) -> StateReference:
+                if (
+                    isinstance(target_workbench_revision, str)
+                    and isinstance(target_workbench_fingerprint, str)
+                    and item.owner == "clips"
+                    and item.key == f"workbench:{current.clip_id}"
+                    and item.value.get("status") == "saved"
+                    and item.value.get("workbench_output_revision")
+                    == target_workbench_revision
+                    and item.value.get("workbench_output_fingerprint")
+                    == target_workbench_fingerprint
+                ):
+                    return replace(
+                        item,
+                        value={
+                            **item.value,
+                            "status": "stale",
+                            "stale_reason": "superseded_by_scene_bridge",
+                            "superseded_by_bridge_revision": result.output_revision,
+                        },
+                    )
+                return item
 
             def mutate_clips(
                 value: ClipsManifest, _operation_id: str
@@ -3632,7 +3672,7 @@ class ProjectService:
                         replace(
                             clip,
                             references=tuple(
-                                item
+                                supersede_incomplete_target_workbench(item)
                                 for item in clip.references
                                 if not (
                                     item.value.get("reference_type")
@@ -5536,6 +5576,37 @@ class ProjectService:
                 claim_token=claim_token,
             )
 
+    def reclaim_job_attempt(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        attempt_number: int,
+    ) -> RetentionReport:
+        """校验任务目录身份后，按终态策略回收可重建内容。"""
+
+        current = self.queue.get(job_id)
+        if current.project_id != project_id:
+            raise KeyError(f"job {job_id} does not belong to {project_id}")
+        attempt = next(
+            (item for item in current.attempts if item.number == attempt_number),
+            None,
+        )
+        if attempt is None:
+            raise ValueError(f"job attempt {attempt_number} does not exist")
+        expected = self._attempt_directory(
+            project_id, job_id, attempt_number
+        ).resolve(strict=False)
+        observed = Path(attempt.directory).resolve(strict=False)
+        if observed != expected:
+            raise ValueError("job attempt directory does not match its project identity")
+        return reclaim_terminal_attempt(
+            observed,
+            status=current.status,
+            job_type=current.job_type,
+            published_outputs=current.published_outputs,
+        )
+
     def retry_job(
         self,
         project_id: str,
@@ -5641,6 +5712,12 @@ class ProjectService:
                         error=cleanup_error,
                     )
                 self._publish_queue_locked(project_id)
+        terminal_job_ids = tuple(
+            job.job_id
+            for job in self.queue.jobs()
+            if job.project_id == project_id and job.status in TERMINAL_STATUSES
+        )
+        self._reclaim_jobs_best_effort(terminal_job_ids)
         return restored
 
     def _recover_restored_scene_bridge_jobs_locked(
@@ -6185,7 +6262,23 @@ class ProjectService:
                 raise RuntimeError(
                     f"job-state publication failed for one or more projects: {details}"
                 ) from failures[0][1]
-            return reaped
+        self._reclaim_jobs_best_effort(reaped)
+        return reaped
+
+    def _reclaim_jobs_best_effort(self, job_ids: Sequence[str]) -> None:
+        for job_id in job_ids:
+            try:
+                job = self.queue.get(job_id)
+                if not job.attempts:
+                    continue
+                self.reclaim_job_attempt(
+                    job.project_id,
+                    job.job_id,
+                    attempt_number=job.attempts[-1].number,
+                )
+            except Exception:
+                # 恢复流程必须优先保证队列和 manifest 可用，回收失败留待下次。
+                continue
 
     def _prepare_analysis_submission(
         self,
@@ -6665,14 +6758,15 @@ class ProjectService:
         project_id: str,
         clip: ClipDefinition,
         *,
-        solve_interval: SolveInterval,
+        scene_clips: Sequence[ClipDefinition],
+        dependency_ids: tuple[str, ...],
         project_assets: Mapping[str, object],
         project_revision: int,
         clips_revision: int,
     ) -> QueueJob:
-        identity_payload = _solve_export_identity_payload(
+        identity_payload = _deferred_solve_export_identity_payload(
             clip=clip,
-            solve_interval=solve_interval,
+            scene_clips=scene_clips,
             project_assets=project_assets,
             project_revision=project_revision,
             clips_revision=clips_revision,
@@ -6689,7 +6783,7 @@ class ProjectService:
             status="queued",
             stage="queued",
             priority=0,
-            depends_on_job_ids=(),
+            depends_on_job_ids=dependency_ids,
             exclusive_key=f"sfm_solve_export:{project_id}:{clip.clip_id}",
             idempotency_key=_fingerprint(
                 {**identity_payload, "purpose": "idempotency"}
@@ -6697,7 +6791,7 @@ class ProjectService:
             input_revision=clip.analysis_revision,
             input_fingerprint=input_fingerprint,
             adapter_name="sfm_solve_export",
-            adapter_version="1",
+            adapter_version="2",
             output_revision=None,
             operation_id=self._identity(),
             attempts=(AttemptRecord(number=1, directory=str(attempt_dir)),),
@@ -7069,6 +7163,20 @@ class ProjectService:
             if clip is None:
                 return None
             if job.job_type == "sfm_solve_export":
+                if job.adapter_version == "2":
+                    return _fingerprint(
+                        _deferred_solve_export_identity_payload(
+                            clip=clip,
+                            scene_clips=_same_scene_clips(
+                                clip, clips_manifest.clips
+                            ),
+                            project_assets=project.source_assets,
+                            project_revision=project.revision,
+                            clips_revision=clips_manifest.revision,
+                        )
+                    )
+                if job.adapter_version != "1":
+                    return None
                 try:
                     stored_jobs = tuple(
                         QueueJob.from_dict(item)
@@ -7498,8 +7606,8 @@ class ProjectService:
         solve_interval = derive_scene_solve_interval(
             clips=clips_manifest.clips,
             clip_id=clip.clip_id,
-            source_frame_index=_project_source_frame_index(
-                clips_manifest.clips, stored_jobs
+            source_frame_index=_scene_source_frame_index(
+                clips_manifest.clips, clip.clip_id, stored_jobs
             ),
         )
         video_path = _clip_asset_path(clip, project.source_assets, "video")
@@ -7851,6 +7959,20 @@ def _prepare_whole_source_srt_media(
     return source, path
 
 
+def _clip_needs_export(clip: ClipDefinition) -> bool:
+    video = _clip_output_path(clip)
+    if video is None or not video.is_file():
+        return True
+    if clip.resolved_workflow not in {
+        "sfm_only",
+        "srt_full_pose",
+        "srt_fixed_track_visual_pose",
+    }:
+        return False
+    frame_map = _clip_frame_map_path(clip)
+    return frame_map is None or not frame_map.is_file()
+
+
 def _render_physical_inputs(
     clip: ClipDefinition, jobs: Sequence[QueueJob]
 ) -> tuple[Path, Path]:
@@ -7890,11 +8012,57 @@ def _uses_scene_solve_export(
     )
 
 
+def _same_scene_clips(
+    clip: ClipDefinition, clips: Sequence[ClipDefinition]
+) -> tuple[ClipDefinition, ...]:
+    scene_index = clip.analysis.get("scene_index")
+    if not isinstance(scene_index, int) or isinstance(scene_index, bool):
+        return (clip,)
+    return tuple(
+        sorted(
+            (
+                candidate
+                for candidate in clips
+                if candidate.analysis.get("scene_index") == scene_index
+            ),
+            key=lambda candidate: (
+                int(candidate.analysis.get("render_order", 0)),
+                int(candidate.analysis.get("source_start_pts", 0)),
+                candidate.clip_id,
+            ),
+        )
+    )
+
+
 def _project_source_frame_index(
     clips: Sequence[ClipDefinition], jobs: Sequence[QueueJob]
 ) -> DecodedFrameIndex:
     """由核心 frame map 重建整段视频的权威 decoded-frame PTS 索引。"""
 
+    return _source_frame_index_from_clips(
+        clips, jobs, normalize_ordinals=False
+    )
+
+
+def _scene_source_frame_index(
+    clips: Sequence[ClipDefinition],
+    clip_id: str,
+    jobs: Sequence[QueueJob],
+) -> DecodedFrameIndex:
+    clip = next((item for item in clips if item.clip_id == clip_id), None)
+    if clip is None:
+        raise ValueError(f"unknown clip ID: {clip_id}")
+    return _source_frame_index_from_clips(
+        _same_scene_clips(clip, clips), jobs, normalize_ordinals=True
+    )
+
+
+def _source_frame_index_from_clips(
+    clips: Sequence[ClipDefinition],
+    jobs: Sequence[QueueJob],
+    *,
+    normalize_ordinals: bool,
+) -> DecodedFrameIndex:
     if not clips:
         raise ValueError("project has no clips")
     ordered = sorted(
@@ -7916,21 +8084,22 @@ def _project_source_frame_index(
             if previous != frame.pts:
                 raise ValueError("project frame maps disagree on source PTS")
     ordinals = sorted(by_ordinal)
-    if ordinals != list(range(len(ordinals))):
+    expected_start = ordinals[0] if normalize_ordinals else 0
+    if ordinals != list(range(expected_start, expected_start + len(ordinals))):
         raise ValueError("project frame maps do not cover contiguous source ordinals")
     final_end = int(ordered[-1].analysis["source_end_pts_exclusive"])
     frames = tuple(
         DecodedFrameTimestamp(
-            ordinal=ordinal,
+            ordinal=index if normalize_ordinals else ordinal,
             pts=by_ordinal[ordinal],
             duration_pts=(
-                by_ordinal[ordinal + 1] - by_ordinal[ordinal]
-                if ordinal + 1 < len(ordinals)
+                by_ordinal[ordinals[index + 1]] - by_ordinal[ordinal]
+                if index + 1 < len(ordinals)
                 else final_end - by_ordinal[ordinal]
             ),
             timestamp_source="pts",
         )
-        for ordinal in ordinals
+        for index, ordinal in enumerate(ordinals)
     )
     return DecodedFrameIndex(time_base, frames)
 
@@ -8480,7 +8649,7 @@ def _saved_workbench_reference(clip: ClipDefinition) -> StateReference | None:
     return None
 
 
-def _has_recoverable_saved_workbench_output(
+def _has_recoverable_completed_workbench_output(
     projects_root: Path,
     project_id: str,
     clip: ClipDefinition,
@@ -8539,7 +8708,7 @@ def _has_recoverable_saved_workbench_output(
         )
         if _workbench_binds_trajectory(
             clip, trajectory, reference.value
-        ) and _validate_workbench_immutable_output(
+        ) and _validate_complete_sfm_route_output(
             projects_root, project_id, clip, reference
         ):
             return True
@@ -8697,6 +8866,43 @@ def _validate_workbench_immutable_output(
             len(artifact_bytes) == size_bytes
             and sha256(artifact_bytes).hexdigest() == artifact_hash
         )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _validate_complete_sfm_route_output(
+    projects_root: Path,
+    project_id: str,
+    clip: ClipDefinition,
+    workbench: StateReference,
+) -> bool:
+    if clip.resolved_workflow != "sfm_only" or not _validate_workbench_immutable_output(
+        projects_root, project_id, clip, workbench
+    ):
+        return False
+    revision = workbench.value.get("workbench_output_revision")
+    if not isinstance(revision, str):
+        return False
+    try:
+        revision_root = (
+            projects_root / project_id / "workbench_outputs" / revision
+        ).resolve(strict=True)
+        manifest = json.loads(
+            (revision_root / "workbench_output_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        artifacts = manifest.get("artifacts")
+        camera_track = (
+            artifacts.get("camera_track") if isinstance(artifacts, Mapping) else None
+        )
+        relative = camera_track.get("path") if isinstance(camera_track, Mapping) else None
+        if not isinstance(relative, str):
+            return False
+        track_path = (revision_root / relative).resolve(strict=True)
+        track_path.relative_to(revision_root)
+        track = json.loads(track_path.read_text(encoding="utf-8-sig"))
+        return isinstance(track, dict) and len(confirmed_keyframes(track)) >= 2
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
@@ -9319,6 +9525,7 @@ def _scene_bridge_identity_payload(
     source_core_frame_map: Mapping[str, object],
     target_core_frame_map: Mapping[str, object],
 ) -> dict[str, object]:
+    target_workbench = _saved_workbench_reference(target)
     return {
         "identity_schema": 1,
         "algorithm_version": BRIDGE_ALGORITHM_VERSION,
@@ -9341,6 +9548,16 @@ def _scene_bridge_identity_payload(
         ),
         "source_workbench_output_fingerprint": source_workbench.value.get(
             "workbench_output_fingerprint"
+        ),
+        "target_workbench_output_revision": (
+            None
+            if target_workbench is None
+            else target_workbench.value.get("workbench_output_revision")
+        ),
+        "target_workbench_output_fingerprint": (
+            None
+            if target_workbench is None
+            else target_workbench.value.get("workbench_output_fingerprint")
         ),
         "source_trajectory": {
             "job_id": source_trajectory.job_id,
@@ -9592,6 +9809,42 @@ def _solve_export_identity_payload(
         "algorithm_version": "same-scene-overlap-4s-v1",
         "adapter_name": "sfm_solve_export",
         "adapter_version": "1",
+    }
+    if _clip_input_snapshot(clip) is None:
+        payload.update(
+            {
+                "project_manifest_revision": project_revision,
+                "clips_manifest_revision": clips_revision,
+            }
+        )
+    return payload
+
+
+def _deferred_solve_export_identity_payload(
+    *,
+    clip: ClipDefinition,
+    scene_clips: Sequence[ClipDefinition],
+    project_assets: Mapping[str, object],
+    project_revision: int,
+    clips_revision: int,
+) -> Mapping[str, object]:
+    payload: dict[str, object] = {
+        "job_type": "sfm_solve_export",
+        "clip_id": clip.clip_id,
+        "analysis_revision": clip.analysis_revision,
+        "core_interval": _authoritative_interval(clip),
+        "scene_partition": [
+            {
+                "clip_id": candidate.clip_id,
+                "analysis_revision": candidate.analysis_revision,
+                "interval": _authoritative_interval(candidate),
+            }
+            for candidate in scene_clips
+        ],
+        "source_assets": _clip_input_identity(clip, project_assets),
+        "algorithm_version": "same-scene-overlap-4s-v2",
+        "adapter_name": "sfm_solve_export",
+        "adapter_version": "2",
     }
     if _clip_input_snapshot(clip) is None:
         payload.update(

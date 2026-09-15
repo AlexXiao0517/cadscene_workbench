@@ -93,7 +93,7 @@ _SCENE_BRIDGE = re.compile(
     rf"^/api/projects/(?P<project>{_SAFE_ID})/clips/(?P<clip>{_SAFE_ID})/scene-bridges$"
 )
 _WORKBENCH_SESSION = re.compile(
-    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready|resume))?$"
+    rf"^/api/projects/(?P<project>{_SAFE_ID})/workbench-sessions/(?P<token>[A-Za-z0-9_-]+)(?:/(?P<action>save|close|heartbeat|trajectory-ready|resume|draft))?$"
 )
 
 
@@ -298,6 +298,10 @@ class ProjectApi:
                 )
             if match and method == "POST" and match["action"] == "resume":
                 return self._update_workbench_resume(
+                    match["project"], match["token"], payload
+                )
+            if match and method == "POST" and match["action"] == "draft":
+                return self._save_workbench_draft(
                     match["project"], match["token"], payload
                 )
             return ApiResponse(404, {"error": "project_api_not_found"})
@@ -863,15 +867,32 @@ class ProjectApi:
         render_job_by_clip: dict[str, Mapping[str, object]] = {}
         export_job_by_clip: dict[str, Mapping[str, object]] = {}
         scene_bridge_job_by_clip: dict[str, Mapping[str, object]] = {}
+        jobs_by_id = {
+            str(job.get("job_id")): job
+            for job in jobs.jobs
+            if isinstance(job.get("job_id"), str)
+        }
+        clip_analysis_revisions = {
+            clip.clip_id: clip.analysis_revision for clip in clips.clips
+        }
         for job in jobs.jobs:
             clip_id = job.get("clip_id")
-            if isinstance(clip_id, str) and job.get("job_type") == "trajectory":
+            if not isinstance(clip_id, str):
+                continue
+            analysis_revision = clip_analysis_revisions.get(clip_id)
+            if analysis_revision is None or not _job_belongs_to_analysis_revision(
+                job,
+                analysis_revision=analysis_revision,
+                jobs_by_id=jobs_by_id,
+            ):
+                continue
+            if job.get("job_type") == "trajectory":
                 job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "clip_render":
+            elif job.get("job_type") == "clip_render":
                 render_job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "clip_export":
+            elif job.get("job_type") == "clip_export":
                 export_job_by_clip[clip_id] = job
-            elif isinstance(clip_id, str) and job.get("job_type") == "scene_bridge":
+            elif job.get("job_type") == "scene_bridge":
                 scene_bridge_job_by_clip[clip_id] = job
         clip_payloads: list[dict[str, object]] = []
         can_start_any = False
@@ -1526,6 +1547,40 @@ class ProjectApi:
             },
         )
 
+    def _save_workbench_draft(
+        self, project_id: str, token: str, payload: Mapping[str, object]
+    ) -> ApiResponse:
+        if self.workbench is None:
+            raise WorkbenchPermissionDenied(
+                "project workbench sessions are unavailable"
+            )
+        expected = payload.get("expected_draft_revision")
+        if expected is not None and (
+            not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
+        ):
+            raise ValueError("expected_draft_revision must be null or non-negative")
+        operation_id = payload.get("operation_id")
+        camera_track = payload.get("camera_track")
+        if not isinstance(operation_id, str):
+            raise ValueError("operation_id is required")
+        if not isinstance(camera_track, Mapping):
+            raise ValueError("camera_track is required")
+        draft = self.workbench.save_draft(
+            project_id,
+            token,
+            expected_draft_revision=expected,
+            operation_id=operation_id,
+            camera_track=camera_track,
+        )
+        session = self.workbench.inspect(project_id, token)
+        return ApiResponse(
+            200,
+            {
+                **self.workbench.session_payload(session),
+                "draft_state": draft.to_dict(),
+            },
+        )
+
     def _mutate_workbench_session(
         self,
         project_id: str,
@@ -1755,14 +1810,8 @@ class ProjectApi:
     def _trajectory_jobs(
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
-        current = self.repositories.jobs.load(project_id)
-        if current.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=current.revision,
-            )
+        # jobs revision 包含高频进度落盘，不能作为“批量处理当前片段”的提交令牌。
+        # ProjectService 会在项目锁内重新预检，并以幂等键避免重复任务。
         clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
         preflight = self.service.preflight_trajectory_jobs(
             project_id, clip_ids=clip_ids or None
@@ -1776,7 +1825,7 @@ class ProjectApi:
             project_id,
             clip_ids=clip_ids or None,
             confirmed_clip_ids=confirmed,
-            expected_jobs_revision=expected_revision,
+            expected_jobs_revision=None,
         )
         return ApiResponse(
             202,
@@ -1791,14 +1840,7 @@ class ProjectApi:
     def _render_jobs(
         self, project_id: str, payload: Mapping[str, object]
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
-        current = self.repositories.jobs.load(project_id)
-        if current.revision != expected_revision:
-            raise RevisionConflict(
-                project_id=project_id,
-                expected_revision=expected_revision,
-                current_revision=current.revision,
-            )
+        # 与轨迹批量入队相同：以锁内当前状态为准，避免进度更新制造伪冲突。
         clip_ids = _string_sequence(payload.get("clip_ids"), "clip_ids")
         output_resolution = str(payload.get("output_resolution") or "1080p")
         preflight = self.service.preflight_render_jobs(
@@ -1815,8 +1857,8 @@ class ProjectApi:
             project_id,
             clip_ids=clip_ids or None,
             confirmed_clip_ids=confirmed,
-            expected_jobs_revision=expected_revision,
             output_resolution=output_resolution,
+            expected_jobs_revision=None,
         )
         return ApiResponse(
             202,
@@ -1849,18 +1891,18 @@ class ProjectApi:
         action: str,
         payload: Mapping[str, object],
     ) -> ApiResponse:
-        expected_revision = _required_revision(payload)
+        # job_id 已明确标识用户要操作的任务；进度落盘 revision 不应阻断取消或重试。
         job = (
             self.service.cancel_job(
                 project_id,
                 job_id,
-                expected_jobs_revision=expected_revision,
+                expected_jobs_revision=None,
             )
             if action == "cancel"
             else self.service.retry_job(
                 project_id,
                 job_id,
-                expected_jobs_revision=expected_revision,
+                expected_jobs_revision=None,
             )
         )
         return ApiResponse(
@@ -1907,6 +1949,26 @@ def _render_preflight_payload(preflight: RenderPreflight) -> dict[str, object]:
         "skipped": list(preflight.skipped),
         "reasons": dict(preflight.reasons),
     }
+
+
+def _job_belongs_to_analysis_revision(
+    job: Mapping[str, object],
+    *,
+    analysis_revision: str,
+    jobs_by_id: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """只把当前分段 revision 产生的任务关联回片段快照。"""
+
+    if job.get("job_type") != "clip_render":
+        return job.get("input_revision") == analysis_revision
+    if job.get("status") in {"stale_input", "superseded"}:
+        return True
+    return any(
+        dependency.get("job_type") == "trajectory"
+        and dependency.get("input_revision") == analysis_revision
+        for dependency_id in job.get("depends_on_job_ids", ())
+        if (dependency := jobs_by_id.get(str(dependency_id))) is not None
+    )
 
 
 def _visible_job_progress(

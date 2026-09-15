@@ -88,4 +88,3 @@ def test_production_region_preserves_original_terrain_segment_slope(tmp_path):
     np.testing.assert_allclose(a,[[0,5,10]])
     np.testing.assert_allclose(b,[[8,5,18]])
     assert colors.tolist()==[[12,34,56]]
-

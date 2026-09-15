@@ -75,12 +75,13 @@ def _clip(
     *,
     workflow: str = "sfm_only",
     needs_review: bool = False,
+    analysis_revision: str = "analysis-1",
 ) -> ClipDefinition:
     return ClipDefinition.from_analysis(
         {
             "project_id": "p1",
             "clip_id": clip_id,
-            "analysis_revision": "analysis-1",
+            "analysis_revision": analysis_revision,
             "source_start_pts": 2250,
             "source_end_pts_exclusive": 3750,
             "source_start_pts_sec": 90.0,
@@ -117,6 +118,7 @@ def _api(
     clips: tuple[ClipDefinition, ...],
     *,
     identity=None,
+    analysis_revision: str = "analysis-1",
 ):
     repositories = project_repositories(tmp_path / "projects")
     repositories.create_project("p1", updated_at="2026-08-04T00:00:00Z")
@@ -132,7 +134,7 @@ def _api(
         expected_revision=project.revision,
         mutate=lambda current: replace(
             register_analysis_revision(
-                current, "analysis-1", operation_id="analysis-operation"
+                current, analysis_revision, operation_id="analysis-operation"
             ),
             source_assets={"video_path": str(video)},
             project_state="ready",
@@ -143,7 +145,7 @@ def _api(
         "p1",
         expected_revision=current.revision,
         mutate=lambda value: replace(
-            value, analysis_revision="analysis-1", clips=clips
+            value, analysis_revision=analysis_revision, clips=clips
         ),
     )
     queue = LocalResourceQueue()
@@ -596,6 +598,97 @@ def test_snapshot_exposes_server_capabilities_and_product_friendly_clip_fields(
     )
 
 
+def test_snapshot_does_not_attach_old_analysis_trajectory_progress_to_new_clips(
+    tmp_path: Path,
+) -> None:
+    current_clip = _clip("clip-1", analysis_revision="analysis-2")
+    api, repositories, _queue = _api(
+        tmp_path,
+        (current_clip,),
+        analysis_revision="analysis-2",
+    )
+    old_job = QueueJob(
+        job_id="old-trajectory",
+        project_id="p1",
+        clip_id="clip-1",
+        job_type="trajectory",
+        resource_class="heavy_compute",
+        status="interrupted",
+        stage="interrupted",
+        priority=0,
+        depends_on_job_ids=(),
+        exclusive_key="trajectory:p1:clip-1",
+        idempotency_key="old-trajectory",
+        input_revision="analysis-1",
+        input_fingerprint="old-input",
+        adapter_name="sfm_only",
+        adapter_version="1",
+        output_revision=None,
+        operation_id="old-operation",
+        attempts=(),
+        progress={
+            "stage": "feature_matching",
+            "message": "matching",
+            "fraction": 0.52,
+        },
+    )
+    old_export = replace(
+        old_job,
+        job_id="old-export",
+        job_type="clip_export",
+        resource_class="media_io",
+        adapter_name="clip_export",
+        exclusive_key="export:p1",
+        idempotency_key="old-export",
+        operation_id="old-export-operation",
+    )
+    old_bridge = replace(
+        old_job,
+        job_id="old-bridge",
+        job_type="scene_bridge",
+        adapter_name="scene_bridge",
+        exclusive_key="scene-bridge:p1:clip-1",
+        idempotency_key="old-bridge",
+        operation_id="old-bridge-operation",
+    )
+    old_render = replace(
+        old_job,
+        job_id="old-render",
+        job_type="clip_render",
+        resource_class="media_io",
+        status="running",
+        stage="rendering",
+        depends_on_job_ids=(old_job.job_id,),
+        input_revision="old-render-revision",
+        adapter_name="clip_render",
+        exclusive_key="render:p1:clip-1",
+        idempotency_key="old-render",
+        operation_id="old-render-operation",
+    )
+    old_jobs = (old_job, old_export, old_bridge, old_render)
+    jobs = repositories.jobs.load("p1")
+    repositories.jobs.update(
+        "p1",
+        expected_revision=jobs.revision,
+        mutate=lambda value: replace(
+            value,
+            jobs=(*value.jobs, *(job.to_dict() for job in old_jobs)),
+            queue_order=(*value.queue_order, *(job.job_id for job in old_jobs)),
+        ),
+    )
+    response = api.handle("GET", "/api/projects/p1/snapshot")
+
+    clip = response.body["clips"][0]
+    assert clip["job_id"] is None
+    assert clip["status"] == "ready"
+    assert clip["stage"] is None
+    assert clip["progress"] is None
+    assert clip["render"]["status"] == "not_started"
+    assert clip["scene_bridge"]["status"] == "not_started"
+    assert clip["workbench"]["preparation"] is None
+    assert clip["capabilities"]["can_retry"] is False
+
+
 def test_project_can_start_trajectory_when_only_review_confirmation_is_needed(
     tmp_path: Path,
 ) -> None:
@@ -805,6 +898,31 @@ def test_batch_preflight_returns_per_clip_partial_result_without_enqueueing(
     assert response.body["needs_confirmation"] == ["review"]
     assert response.body["skipped"] == ["unsupported"]
     assert queue.jobs() == ()
+
+
+def test_batch_enqueue_uses_current_jobs_state_when_progress_revision_advanced(
+    tmp_path: Path,
+) -> None:
+    api, repositories, _queue = _api(tmp_path, (_clip("ready"),))
+    stale_revision = repositories.jobs.load("p1").revision
+    repositories.jobs.update(
+        "p1",
+        expected_revision=stale_revision,
+        mutate=lambda value: replace(value, updated_at="progress advanced"),
+    )
+
+    response = api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={
+            "expected_revision": stale_revision,
+            "clip_ids": ["ready"],
+            "enqueue": True,
+        },
+    )
+
+    assert response.status == 202
+    assert response.body["enqueued_clip_ids"] == ["ready"]
 
 
 def test_render_preflight_and_enqueue_routes_delegate_to_project_service(
@@ -1035,6 +1153,33 @@ def test_cancel_and_retry_job_routes_delegate_through_project_service(
     )
     assert retried.status == 202
     assert queue.status(job_id) in {"queued", "preparing"}
+
+
+def test_cancel_job_uses_current_state_when_progress_revision_advanced(
+    tmp_path: Path,
+) -> None:
+    api, repositories, queue = _api(tmp_path, (_clip("ready"),))
+    enqueued = api.handle(
+        "POST",
+        "/api/projects/p1/trajectory-jobs",
+        json_body={"clip_ids": ["ready"], "enqueue": True},
+    )
+    job_id = enqueued.body["job_ids"][-1]
+    stale_revision = repositories.jobs.load("p1").revision
+    repositories.jobs.update(
+        "p1",
+        expected_revision=stale_revision,
+        mutate=lambda value: replace(value, updated_at="progress advanced"),
+    )
+
+    response = api.handle(
+        "POST",
+        f"/api/projects/p1/jobs/{job_id}/cancel",
+        json_body={"expected_revision": stale_revision},
+    )
+
+    assert response.status == 202
+    assert queue.status(job_id) == "cancelled"
 
 
 def test_job_runtime_route_delegates_to_project_service(

@@ -159,6 +159,74 @@ def test_executor_runs_commands_sequentially_and_service_publishes_validation(
     assert Path(attempt_state["log_path"]).is_file()
 
 
+def test_executor_requests_retention_after_terminal_state_and_log_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    job_id = queue.running_ids()[0]
+    plan = JobExecutionPlan(
+        commands=((sys.executable, "-c", "print('complete')"),),
+        validate=lambda: AdapterResult.success(
+            output_revision="validated-1",
+            output_fingerprint="validated-fingerprint",
+            outputs={},
+        ),
+    )
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
+    observed: list[tuple[str, bool]] = []
+
+    def observe_cleanup(project_id, current_job_id, *, attempt_number):
+        current = queue.get(current_job_id)
+        log_path = Path(current.attempts[attempt_number - 1].log_path or "")
+        probe = log_path.with_suffix(".closed-probe")
+        os.replace(log_path, probe)
+        os.replace(probe, log_path)
+        observed.append((current.status, log_path.is_file()))
+        return None
+
+    monkeypatch.setattr(service, "reclaim_job_attempt", observe_cleanup, raising=False)
+
+    completed = LocalJobExecutor(service).run_next()
+
+    assert completed is not None and completed.status == "success"
+    assert observed == [("success", True)]
+
+
+def test_executor_cleanup_failure_never_changes_successful_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _repositories, queue = service_with_clips(tmp_path, (clip("one"),))
+    service.enqueue_trajectory_jobs("p1")
+    plan = JobExecutionPlan(
+        commands=((sys.executable, "-c", "pass"),),
+        validate=lambda: AdapterResult.success(
+            output_revision="validated-1",
+            output_fingerprint="validated-fingerprint",
+            outputs={},
+        ),
+    )
+    monkeypatch.setattr(
+        service, "prepare_job_execution", lambda _project, _job, **_lease: plan
+    )
+    monkeypatch.setattr(
+        service,
+        "reclaim_job_attempt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("retention unavailable")
+        ),
+        raising=False,
+    )
+
+    completed = LocalJobExecutor(service).run_next()
+
+    assert completed is not None and completed.status == "success"
+
+
 def test_executor_forwards_structured_adapter_progress_while_process_runs(
     tmp_path: Path, monkeypatch
 ) -> None:

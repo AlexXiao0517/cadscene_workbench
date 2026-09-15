@@ -73,6 +73,8 @@ def validate_staging_tree(root: str | Path) -> None:
         raise ValueError(f"bundle staging root does not exist: {resolved}")
     for path in resolved.rglob("*"):
         relative = path.relative_to(resolved)
+        if relative.as_posix().casefold() == "runtime/.cadscene-relocated":
+            raise ValueError(f"forbidden bundle content: {relative.as_posix()}")
         if relative.parts and relative.parts[0].lower() in _FORBIDDEN_TOP_LEVEL:
             raise ValueError(f"forbidden bundle content: {relative.as_posix()}")
         if ".git" in {part.lower() for part in relative.parts}:
@@ -243,6 +245,7 @@ def assemble_bundle(
     templates_root: str | Path,
     output_dir: str | Path,
     source_commit: str,
+    colmap_root: str | Path | None = None,
 ) -> Path:
     """从运行环境归档和后端白名单组装未压缩交付目录。"""
 
@@ -253,6 +256,12 @@ def assemble_bundle(
         shutil.rmtree(layout.root)
     layout.root.mkdir(parents=True)
     _safe_extract_tar(Path(runtime_archive), layout.runtime)
+    if colmap_root is not None:
+        colmap = Path(colmap_root)
+        for relative in ("COLMAP.bat", "bin/colmap.exe"):
+            if not (colmap / relative).is_file():
+                raise ValueError(f"COLMAP runtime file missing: {relative}")
+        shutil.copytree(colmap, layout.root / "colmap")
 
     templates = Path(templates_root)
     for item in templates.iterdir():
@@ -301,6 +310,7 @@ def assemble_bundle(
         layout.backend / "scripts" / "run_full_video_exploration.py",
         layout.backend / "outputs" / "build_opengv_cli" / "opengv_rotation_cli.exe",
         *native_runtime,
+        *((layout.root / "colmap" / "bin" / "colmap.exe",) if colmap_root is not None else ()),
     )
     manifest = {
         "bundle_name": config.bundle_name,
@@ -356,6 +366,10 @@ def verify_bundle(root: str | Path, *, config: ReleaseConfig) -> None:
     if version != expected:
         raise ValueError("pure rotation backend version does not match release config")
     validate_staging_tree(layout.root)
+    if (layout.root / "colmap").exists():
+        for relative in ("COLMAP.bat", "bin/colmap.exe"):
+            if not (layout.root / "colmap" / relative).is_file():
+                raise ValueError(f"COLMAP runtime file missing: {relative}")
 
 
 def _run_commands(commands: Sequence[Sequence[str]]) -> None:
@@ -388,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--templates-root", default=repository_root / "packaging" / "windows", type=Path)
     assemble.add_argument("--output-dir", required=True, type=Path)
     assemble.add_argument("--source-commit", required=True)
+    assemble.add_argument("--colmap-root", type=Path)
     assemble.add_argument("--zip", action="store_true")
 
     verify = subparsers.add_parser("verify")
@@ -420,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         templates_root=args.templates_root,
         output_dir=args.output_dir,
         source_commit=args.source_commit,
+        colmap_root=args.colmap_root,
     )
     if args.zip:
         write_zip64(bundle, bundle.parent / f"{bundle.name}.zip")
